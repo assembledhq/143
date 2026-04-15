@@ -50,11 +50,20 @@ func WithRollupStore(rs usageRollupReader) UsageHandlerOption {
 	return func(h *UsageHandler) { h.rollupStore = rs }
 }
 
+// maxTimeRange is the maximum allowed duration for usage queries.
+const maxTimeRange = 90 * 24 * time.Hour
+
 // parseTimeRange extracts start/end from query params with defaults and validation.
 func parseTimeRange(w http.ResponseWriter, r *http.Request) (start, end time.Time, ok bool) {
 	now := time.Now().UTC()
-	start = now.AddDate(0, 0, -30)
-	end = now
+	return parseTimeRangeWithDefaults(w, r, now.AddDate(0, 0, -30), now)
+}
+
+// parseTimeRangeWithDefaults extracts start/end from query params, falling back
+// to the provided defaults. Shared by endpoints with different default ranges.
+func parseTimeRangeWithDefaults(w http.ResponseWriter, r *http.Request, defaultStart, defaultEnd time.Time) (start, end time.Time, ok bool) {
+	start = defaultStart
+	end = defaultEnd
 
 	if s := r.URL.Query().Get("start"); s != "" {
 		parsed, err := time.Parse(time.RFC3339, s)
@@ -78,8 +87,7 @@ func parseTimeRange(w http.ResponseWriter, r *http.Request) (start, end time.Tim
 		return time.Time{}, time.Time{}, false
 	}
 
-	const maxRange = 90 * 24 * time.Hour
-	if end.Sub(start) > maxRange {
+	if end.Sub(start) > maxTimeRange {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "time range must not exceed 90 days")
 		return time.Time{}, time.Time{}, false
 	}
@@ -92,40 +100,15 @@ func parseTimeRange(w http.ResponseWriter, r *http.Request) (start, end time.Tim
 //	GET /api/v1/usage?start=2026-04-01T00:00:00Z&end=2026-05-01T00:00:00Z
 //
 // Defaults to the current calendar month if start/end are omitted.
-// NOTE: This intentionally does NOT use parseTimeRange because it defaults to
-// the current calendar month, while parseTimeRange defaults to last 30 days.
 func (h *UsageHandler) GetSummary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	now := time.Now().UTC()
-	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	end := start.AddDate(0, 1, 0)
+	defaultStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	defaultEnd := defaultStart.AddDate(0, 1, 0)
 
-	if s := r.URL.Query().Get("start"); s != "" {
-		parsed, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "start must be RFC3339 format")
-			return
-		}
-		start = parsed
-	}
-	if e := r.URL.Query().Get("end"); e != "" {
-		parsed, err := time.Parse(time.RFC3339, e)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "end must be RFC3339 format")
-			return
-		}
-		end = parsed
-	}
-
-	if !start.Before(end) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "start must be before end")
-		return
-	}
-
-	const maxRange = 90 * 24 * time.Hour
-	if end.Sub(start) > maxRange {
-		writeError(w, r, http.StatusBadRequest, "INVALID_PARAM", "time range must not exceed 90 days")
+	start, end, ok := parseTimeRangeWithDefaults(w, r, defaultStart, defaultEnd)
+	if !ok {
 		return
 	}
 

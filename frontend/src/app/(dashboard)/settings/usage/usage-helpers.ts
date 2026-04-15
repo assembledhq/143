@@ -57,7 +57,6 @@ export function formatTokenCount(count: number): string {
   return String(count);
 }
 
-/** Format a USD cost. Handles negative values (e.g. refunds/credits). */
 export function formatCost(usd: number): string {
   if (Math.abs(usd) < 0.01) return "$0.00";
   if (usd < 0) return `-$${Math.abs(usd).toFixed(2)}`;

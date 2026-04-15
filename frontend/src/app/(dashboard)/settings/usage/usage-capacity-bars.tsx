@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -36,63 +37,45 @@ export function UsageCapacityBars({ start, end }: UsageCapacityBarsProps) {
 
   const rows = data?.data ?? [];
 
+  let content: ReactNode;
   if (isLoading) {
-    return (
-      <Card>
-        <CardContent className="p-4">
-          <h3 className="text-sm font-medium mb-3">Capacity Breakdown</h3>
-          <div className="space-y-3">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="h-6 bg-muted animate-pulse rounded" />
-            ))}
+    content = (
+      <div className="space-y-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <div key={i} className="h-6 bg-muted animate-pulse rounded" />
+        ))}
+      </div>
+    );
+  } else if (isError) {
+    content = <p className="text-sm text-destructive">Failed to load capacity data.</p>;
+  } else if (rows.length === 0) {
+    content = <p className="text-sm text-muted-foreground">No capacity data available</p>;
+  } else {
+    content = (
+      <div className="space-y-3">
+        {rows.map((row, i) => (
+          <div key={row.key} className="space-y-1">
+            <div className="flex items-center justify-between text-[13px]">
+              <span className="font-medium">{formatTierLabel(row.label)}</span>
+              <span className="text-muted-foreground tabular-nums">{row.percentage.toFixed(1)}%</span>
+            </div>
+            <div className="h-2 bg-muted rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${tierColors[i % tierColors.length]}`}
+                style={{ width: `${Math.min(row.percentage, 100)}%` }}
+              />
+            </div>
           </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (isError) {
-    return (
-      <Card>
-        <CardContent className="p-4">
-          <h3 className="text-sm font-medium mb-3">Capacity Breakdown</h3>
-          <p className="text-sm text-destructive">Failed to load capacity data.</p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (rows.length === 0) {
-    return (
-      <Card>
-        <CardContent className="p-4">
-          <h3 className="text-sm font-medium mb-3">Capacity Breakdown</h3>
-          <p className="text-sm text-muted-foreground">No capacity data available</p>
-        </CardContent>
-      </Card>
+        ))}
+      </div>
     );
   }
 
   return (
     <Card>
       <CardContent className="p-4">
-        <h3 className="text-sm font-medium mb-4">Capacity Breakdown</h3>
-        <div className="space-y-3">
-          {rows.map((row, i) => (
-            <div key={row.key} className="space-y-1">
-              <div className="flex items-center justify-between text-[13px]">
-                <span className="font-medium">{formatTierLabel(row.label)}</span>
-                <span className="text-muted-foreground tabular-nums">{row.percentage.toFixed(1)}%</span>
-              </div>
-              <div className="h-2 bg-muted rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all ${tierColors[i % tierColors.length]}`}
-                  style={{ width: `${Math.min(row.percentage, 100)}%` }}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
+        <h3 className="text-sm font-medium mb-3">Capacity Breakdown</h3>
+        {content}
       </CardContent>
     </Card>
   );
