@@ -1298,14 +1298,13 @@ scale. Here's a fleet deployment script that works with any provider.
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploy to all nodes listed in a hosts file.
+# Deploy to all nodes in the fleet.
 # Usage: ./deploy-fleet.sh [image-tag]
 #
-# Reads node IPs from /opt/143/fleet-hosts.txt (one IP per line).
+# Reads node IPs from FLEET_HOSTS env var.
 # Provider-agnostic — just needs SSH access.
 
 TAG="${1:-latest}"
-HOSTS_FILE="${FLEET_HOSTS:-/opt/143/fleet-hosts.txt}"
 SERVER_IMAGE="ghcr.io/assembledhq/143-server:$TAG"
 AGENT_IMAGE="ghcr.io/assembledhq/143-agent:$TAG"
 
