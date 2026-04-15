@@ -805,15 +805,22 @@ func (s *PreviewStore) UpdateAccessSessionActivity(ctx context.Context, orgID, i
 	return nil
 }
 
+// ErrSessionRevoked is returned when an extend operation targets a revoked session.
+var ErrSessionRevoked = fmt.Errorf("access session has been revoked")
+
 // ExtendAccessSessionExpiry extends the expires_at for an active access session.
+// Returns ErrSessionRevoked if the session was revoked (0 rows affected).
 func (s *PreviewStore) ExtendAccessSessionExpiry(ctx context.Context, orgID, id uuid.UUID, newExpiry time.Time) error {
-	_, err := s.db.Exec(ctx,
+	tag, err := s.db.Exec(ctx,
 		`UPDATE preview_access_sessions SET expires_at = @expires_at
 		 WHERE id = @id AND org_id = @org_id AND revoked_at IS NULL`,
 		pgx.NamedArgs{"id": id, "org_id": orgID, "expires_at": newExpiry},
 	)
 	if err != nil {
 		return fmt.Errorf("extend access session expiry: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSessionRevoked
 	}
 	return nil
 }
@@ -830,9 +837,9 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 		) VALUES (
 			@org_id, @repo_id, @snapshot_key, @blob_path, @size_bytes, @worker_node_id
 		)
-		ON CONFLICT (org_id, repo_id, snapshot_key)
+		ON CONFLICT (org_id, repo_id, snapshot_key, worker_node_id)
 		DO UPDATE SET blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
-			worker_node_id = EXCLUDED.worker_node_id, last_used_at = now()
+			last_used_at = now()
 		RETURNING %s`, previewStartupCacheColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -855,12 +862,12 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 }
 
 // FindMatchingCache looks up a startup cache entry by snapshot key.
-func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*models.PreviewStartupCache, error) {
+func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey, workerNodeID string) (*models.PreviewStartupCache, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
-		WHERE org_id = @org_id AND repo_id = @repo_id AND snapshot_key = @key`, previewStartupCacheColumns)
+		WHERE org_id = @org_id AND repo_id = @repo_id AND snapshot_key = @key AND worker_node_id = @worker_node_id`, previewStartupCacheColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id": orgID, "repo_id": repoID, "key": snapshotKey,
+		"org_id": orgID, "repo_id": repoID, "key": snapshotKey, "worker_node_id": workerNodeID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query startup cache: %w", err)

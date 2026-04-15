@@ -4,6 +4,8 @@ go 1.26.0
 
 require (
 	github.com/caarlos0/env/v11 v11.3.1
+	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a
+	github.com/chromedp/chromedp v0.15.1
 	github.com/containerd/errdefs v1.0.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/go-chi/chi/v5 v5.2.5
@@ -22,8 +24,6 @@ require (
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a // indirect
-	github.com/chromedp/chromedp v0.15.1 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -63,12 +64,12 @@ type Gateway struct {
 
 // GatewayConfig holds initialization options.
 type GatewayConfig struct {
-	Store                *db.PreviewStore
-	Manager              *preview.Manager
-	HMRWatcher           *preview.HMRWatcher // optional; enables HMR screenshot capture
-	Logger               zerolog.Logger
-	AppOrigin            string // e.g. "https://app.143.dev"
-	CookieSecret         []byte // HMAC key for signing preview session cookies
+	Store                 *db.PreviewStore
+	Manager               *preview.Manager
+	HMRWatcher            *preview.HMRWatcher // optional; enables HMR screenshot capture
+	Logger                zerolog.Logger
+	AppOrigin             string // e.g. "https://app.143.dev"
+	CookieSecret          []byte // HMAC key for signing preview session cookies
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
 
@@ -86,14 +87,26 @@ func (g *Gateway) cookieName() string {
 }
 
 // getCachedSession returns the cached session entry if it exists and hasn't expired.
+// Expired entries are deleted on read to prevent unbounded memory growth.
 func (g *Gateway) getCachedSession(id uuid.UUID) *sessionCacheEntry {
-	g.sessionCacheMu.RLock()
-	defer g.sessionCacheMu.RUnlock()
+	g.sessionCacheMu.Lock()
+	defer g.sessionCacheMu.Unlock()
 	entry, ok := g.sessionCache[id]
-	if !ok || time.Now().After(entry.validUntil) {
+	if !ok {
+		return nil
+	}
+	if time.Now().After(entry.validUntil) {
+		delete(g.sessionCache, id)
 		return nil
 	}
 	return entry
+}
+
+// evictCachedSession removes a session entry from the cache.
+func (g *Gateway) evictCachedSession(id uuid.UUID) {
+	g.sessionCacheMu.Lock()
+	defer g.sessionCacheMu.Unlock()
+	delete(g.sessionCache, id)
 }
 
 // putCachedSession stores a session entry in the cache.
@@ -283,29 +296,30 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	// Re-check the access session. Use a short-lived local cache to avoid
-	// a DB round-trip on every proxied request (including static assets).
+	// Re-check the access session in the database before honoring the cookie.
+	// The local cache is only a short-lived mirror of the latest DB state; we
+	// do not trust it across requests for revocation decisions.
 	now := time.Now()
-	cached := g.getCachedSession(accessSessionID)
-	if cached == nil {
-		sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
-		if err != nil {
-			http.Error(w, "preview session not found", http.StatusUnauthorized)
-			return
-		}
-		cached = &sessionCacheEntry{
-			validUntil: now.Add(sessionCacheTTL),
-			revokedAt:  sess.RevokedAt,
-			expiresAt:  sess.ExpiresAt,
-		}
-		g.putCachedSession(accessSessionID, cached)
+	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+	if err != nil {
+		g.evictCachedSession(accessSessionID)
+		http.Error(w, "preview session not found", http.StatusUnauthorized)
+		return
 	}
+	cached := &sessionCacheEntry{
+		validUntil: now.Add(sessionCacheTTL),
+		revokedAt:  sess.RevokedAt,
+		expiresAt:  sess.ExpiresAt,
+	}
+	g.putCachedSession(accessSessionID, cached)
 
 	if cached.revokedAt != nil {
+		g.evictCachedSession(accessSessionID)
 		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
 		return
 	}
 	if now.After(cached.expiresAt) {
+		g.evictCachedSession(accessSessionID)
 		http.Error(w, "preview session has expired", http.StatusUnauthorized)
 		return
 	}
@@ -315,6 +329,13 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	if time.Until(cached.expiresAt) < expiryExtendThreshold {
 		newExpiry := now.Add(5 * time.Minute)
 		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
+			if errors.Is(err, db.ErrSessionRevoked) {
+				// Session was revoked between cache fill and extend — evict
+				// the stale cache entry and deny access immediately.
+				g.evictCachedSession(accessSessionID)
+				http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+				return
+			}
 			g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
 		} else {
 			refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
@@ -583,7 +604,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 		if err != nil {
 			return fmt.Errorf("gzip reader: %w", err)
 		}
-		bodyBytes, err = io.ReadAll(gr)
+		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize+1))
 		_ = gr.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -603,7 +624,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	case "deflate":
 		reader := flate.NewReader(resp.Body)
 		var err error
-		bodyBytes, err = io.ReadAll(reader)
+		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize+1))
 		_ = reader.Close()
 		_ = resp.Body.Close()
 		if err != nil {
@@ -624,7 +645,7 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 			return buf.Bytes(), nil
 		}
 	default:
-		return fmt.Errorf("unsupported content encoding %q", contentEncoding)
+		return nil
 	}
 
 	if bodyBytes == nil {
@@ -801,7 +822,7 @@ func previewSessionCookie(value string, expiresAt time.Time, secure bool) *http.
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteStrictMode,
 		Expires:  expiresAt,
 	}
 }

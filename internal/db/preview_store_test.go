@@ -911,6 +911,39 @@ func TestPreviewStore_UpsertStartupCache(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewStore_UpsertStartupCache_PreservesWorkerScopedConflictTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	entry := &models.PreviewStartupCache{
+		OrgID:        orgID,
+		RepoID:       repoID,
+		SnapshotKey:  "key",
+		BlobPath:     "/cache/snap.tar.zst",
+		SizeBytes:    1024,
+		WorkerNodeID: "worker-1",
+	}
+
+	mock.ExpectQuery(`INSERT INTO preview_startup_cache(.|\n)+ON CONFLICT \(org_id, repo_id, snapshot_key, worker_node_id\)`).
+		WithArgs(previewAnyArgs(6)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewStartupCacheTestCols).
+				AddRow(uuid.New(), orgID, repoID, "key", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
+		)
+
+	err = store.UpsertStartupCache(context.Background(), entry)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewStore_FindMatchingCache(t *testing.T) {
 	t.Parallel()
 
@@ -923,8 +956,8 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 			name: "returns cache hit",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
-				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key").
-					WithArgs(previewAnyArgs(3)...).
+				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key.+worker_node_id").
+					WithArgs(previewAnyArgs(4)...).
 					WillReturnRows(
 						pgxmock.NewRows(previewStartupCacheTestCols).
 							AddRow(uuid.New(), uuid.New(), uuid.New(), "key",
@@ -935,8 +968,8 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 		{
 			name: "returns error on cache miss",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key").
-					WithArgs(previewAnyArgs(3)...).
+				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key.+worker_node_id").
+					WithArgs(previewAnyArgs(4)...).
 					WillReturnRows(pgxmock.NewRows(previewStartupCacheTestCols))
 			},
 			expectErr: true,
@@ -954,7 +987,7 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 			store := NewPreviewStore(mock)
 			tt.setupMock(mock)
 
-			entry, err := store.FindMatchingCache(context.Background(), uuid.New(), uuid.New(), "key")
+			entry, err := store.FindMatchingCache(context.Background(), uuid.New(), uuid.New(), "key", "w1")
 			if tt.expectErr {
 				require.Error(t, err)
 				return

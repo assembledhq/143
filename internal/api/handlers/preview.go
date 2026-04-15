@@ -105,6 +105,22 @@ type startPreviewRequest struct {
 	ProfileName   string                `json:"profile_name"`
 }
 
+func defaultPreviewConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Name:    "default",
+		Primary: "app",
+		Services: map[string]models.ServiceConfig{
+			"app": {
+				Command: []string{"npm", "start"},
+				Port:    3000,
+				Ready: models.ReadinessProbe{
+					HTTPPath: "/",
+				},
+			},
+		},
+	}
+}
+
 func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	if !h.requireManager(w, r) {
 		return
@@ -133,16 +149,7 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info().
 			Str("session_id", sessionID.String()).
 			Msg("no preview config provided, using Node.js defaults (npm start, port 3000)")
-		body.Config = &models.PreviewConfig{
-			Name:    "default",
-			Primary: "app",
-			Services: map[string]models.ServiceConfig{
-				"app": {
-					Command: []string{"npm", "start"},
-					Port:    3000,
-				},
-			},
-		}
+		body.Config = defaultPreviewConfig()
 	}
 
 	// Look up the session to get its sandbox container.
@@ -241,8 +248,7 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// For MVP, restart = stop the existing preview. The client should start a new one.
-	if err := h.manager.StopPreview(r.Context(), orgID, instance.ID); err != nil {
+	if err := h.manager.RecyclePreview(r.Context(), orgID, instance.ID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_RESTART_FAILED", "failed to restart preview", err)
 		return
 	}
@@ -410,11 +416,11 @@ type captureScreenshotRequest struct {
 }
 
 type captureScreenshotResponse struct {
-	PageTitle     string                 `json:"page_title"`
+	PageTitle     string                  `json:"page_title"`
 	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
-	URL           string                 `json:"url"`
-	CapturedAt    time.Time              `json:"captured_at"`
-	PNGBase64     string                 `json:"png_base64"`
+	URL           string                  `json:"url"`
+	CapturedAt    time.Time               `json:"captured_at"`
+	PNGBase64     string                  `json:"png_base64"`
 }
 
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
@@ -638,9 +644,9 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 const maxViewportsPerCapture = 5
 
 type captureMultiViewportRequest struct {
-	Path      string               `json:"path"`
+	Path      string                `json:"path"`
 	Viewports []models.ViewportSpec `json:"viewports"`
-	DelayMS   int                  `json:"delay_ms"`
+	DelayMS   int                   `json:"delay_ms"`
 }
 
 func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {

@@ -208,9 +208,13 @@ func (sc *SnapshotCache) CreateSnapshot(
 	// The current ReadFile approach loads the entire tar.gz into memory, which
 	// can be problematic for large workspaces. A streaming CopyFileToPath method
 	// on SnapshotExecutor would avoid this memory pressure.
+	const maxCreateBlobBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GB (matches restore limit)
 	tarData, err := sc.executor.ReadFile(ctx, sb, snapshotTmpFile)
 	if err != nil {
 		return fmt.Errorf("snapshot create: read tar from sandbox: %w", err)
+	}
+	if int64(len(tarData)) > maxCreateBlobBytes {
+		return fmt.Errorf("snapshot create: tar too large (%d bytes, max %d)", len(tarData), maxCreateBlobBytes)
 	}
 
 	// 3. Write to worker local disk.
@@ -281,23 +285,13 @@ func (sc *SnapshotCache) FindSnapshot(
 	orgID, repoID uuid.UUID,
 	snapshotKey string,
 ) (*CacheHit, error) {
-	entry, err := sc.store.FindMatchingCache(ctx, orgID, repoID, snapshotKey)
+	entry, err := sc.store.FindMatchingCache(ctx, orgID, repoID, snapshotKey, sc.workerNodeID)
 	if err != nil {
 		// pgx returns ErrNoRows when no match; treat as cache miss.
 		if strings.Contains(err.Error(), "no rows") {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("snapshot find: query db: %w", err)
-	}
-
-	// Verify the entry belongs to this worker. Snapshots are local files and
-	// are not portable across workers.
-	if entry.WorkerNodeID != sc.workerNodeID {
-		sc.logger.Debug().
-			Str("snapshot_key", snapshotKey).
-			Str("entry_worker", entry.WorkerNodeID).
-			Msg("snapshot exists but on different worker")
-		return nil, nil
 	}
 
 	// Verify the blob still exists on disk. It could have been manually

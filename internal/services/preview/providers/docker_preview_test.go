@@ -5,6 +5,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,6 +21,22 @@ func TestBuildInfraEnv_Postgres(t *testing.T) {
 	require.Contains(t, env, "POSTGRES_USER=preview_db")
 	require.Contains(t, env, "POSTGRES_PASSWORD=secret123")
 	require.Contains(t, env, "POSTGRES_DB=preview_db")
+}
+
+func TestNewDockerPreviewProvider_DefaultNetworkMatchesCompose(t *testing.T) {
+	t.Parallel()
+
+	provider := NewDockerPreviewProvider(nil, nil, zerolog.Nop())
+
+	require.Equal(t, "preview-net", provider.network, "default preview network should match the compose bridge name")
+}
+
+func TestNewDockerPreviewProvider_WithPreviewNetworkOverride(t *testing.T) {
+	t.Parallel()
+
+	provider := NewDockerPreviewProvider(nil, nil, zerolog.Nop(), WithPreviewNetwork("custom-preview-net"))
+
+	require.Equal(t, "custom-preview-net", provider.network, "explicit preview network option should override the default")
 }
 
 func TestBuildInfraEnv_Redis(t *testing.T) {
@@ -121,8 +138,8 @@ func TestBuildServiceEnvs(t *testing.T) {
 		},
 		Infrastructure: map[string]models.InfrastructureConfig{
 			"db": {
-				Template:  "postgres-17",
-				InjectEnv: map[string]string{"DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}"},
+				Template:   "postgres-17",
+				InjectEnv:  map[string]string{"DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}"},
 				InjectInto: []string{"web", "worker"},
 			},
 		},

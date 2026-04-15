@@ -8,9 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -249,7 +253,7 @@ func TestInjectScriptsIntoHTML_GzipResponse(t *testing.T) {
 	require.Contains(t, string(body), preview.ComponentResolverScript, "modified HTML should include the component resolver script")
 }
 
-func TestInjectScriptsIntoHTML_UnsupportedEncodingReturnsErrorWithoutMutatingResponse(t *testing.T) {
+func TestInjectScriptsIntoHTML_UnsupportedEncodingSkipsInjectionWithoutMutatingResponse(t *testing.T) {
 	t.Parallel()
 
 	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
@@ -269,8 +273,7 @@ func TestInjectScriptsIntoHTML_UnsupportedEncodingReturnsErrorWithoutMutatingRes
 	resp.Header.Set("Content-Encoding", "br")
 
 	err = gw.injectScriptsIntoHTML(resp, uuid.New())
-	require.Error(t, err, "injectScriptsIntoHTML should reject unsupported content encodings")
-	require.Contains(t, err.Error(), "unsupported content encoding", "unsupported encodings should return a clear error")
+	require.NoError(t, err, "injectScriptsIntoHTML should pass through unsupported encodings unchanged")
 	require.Equal(t, "br", resp.Header.Get("Content-Encoding"), "unsupported encodings should remain unchanged")
 
 	body, readErr := io.ReadAll(resp.Body)
@@ -371,4 +374,75 @@ func TestGateway_ServeHTTP_Proxy_CookieMismatch(t *testing.T) {
 	gw.ServeHTTP(w, req)
 	require.Equal(t, http.StatusForbidden, w.Code)
 	require.Contains(t, w.Body.String(), "does not match")
+}
+
+func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now()
+	expiresAt := now.Add(10 * time.Minute)
+	secret := []byte("test-secret")
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:  store,
+		Logger: zerolog.Nop(),
+	})
+	gw := NewGateway(GatewayConfig{
+		Store:        store,
+		Manager:      manager,
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+
+	cookieVal := encodeCookieValue(secret, orgID, previewID, accessSessionID)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, nil, now, now),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	firstReq.Host = previewID.String() + ".preview.143.dev"
+	firstReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	firstResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(firstResp, firstReq)
+	require.Equal(t, http.StatusNoContent, firstResp.Code, "first request should succeed and populate the cache")
+
+	revokedAt := now.Add(30 * time.Second)
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, &revokedAt, now, now),
+		)
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	secondReq.Host = previewID.String() + ".preview.143.dev"
+	secondReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	secondResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(secondResp, secondReq)
+	require.Equal(t, http.StatusUnauthorized, secondResp.Code, "gateway should reject a session revoked after it was cached")
+	require.Contains(t, secondResp.Body.String(), "preview session has been revoked", "gateway should return the revoked-session error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

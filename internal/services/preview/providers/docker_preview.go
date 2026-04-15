@@ -110,7 +110,7 @@ func NewDockerPreviewProvider(
 	p := &DockerPreviewProvider{
 		client:   client,
 		executor: executor,
-		network:  "143-preview-net",
+		network:  "preview-net",
 		logger:   logger,
 		previews: make(map[string]*previewState),
 	}

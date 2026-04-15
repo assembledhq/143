@@ -269,23 +269,34 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	instance.PreviewHandle = handle.Handle
 	instance.Port = handle.PrimaryPort
 
-	// Set status based on progressive preview support.
-	if handle.PartiallyReady {
-		instance.Status = models.PreviewStatusPartiallyReady
-		if err := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusPartiallyReady, ""); err != nil {
-			m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to partially_ready")
+	// Persist the handle first — if this fails, the DB row has no route info
+	// and subsequent proxy/status calls will break. Stop the provider and fail.
+	if err := m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort); err != nil {
+		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB, stopping provider")
+		_ = m.provider.StopPreview(ctx, handle.Handle)
+		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, "failed to persist preview handle"); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed after handle error")
 		}
-	} else {
-		instance.Status = models.PreviewStatusReady
-		if err := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusReady, ""); err != nil {
-			m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to ready")
-		}
+		return nil, fmt.Errorf("persist preview handle: %w", err)
 	}
 
-	// Update handle in DB for recycle support.
-	if err := m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort); err != nil {
-		m.logger.Warn().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB")
+	// Set status based on progressive preview support. Use conditional update
+	// so that a concurrent StopPreview cannot be overwritten.
+	nextStatus := models.PreviewStatusReady
+	if handle.PartiallyReady {
+		nextStatus = models.PreviewStatusPartiallyReady
 	}
+	updated, err := m.store.UpdatePreviewStatusIfActive(ctx, input.OrgID, instance.ID, nextStatus, "")
+	if err != nil {
+		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update preview status after start")
+	}
+	if !updated {
+		// Preview was stopped concurrently — clean up the provider.
+		m.logger.Warn().Str("preview_id", instance.ID.String()).Msg("preview was stopped during startup, cleaning up provider")
+		_ = m.provider.StopPreview(ctx, handle.Handle)
+		return nil, fmt.Errorf("preview was stopped concurrently during startup")
+	}
+	instance.Status = nextStatus
 
 	// 11. Update infrastructure records with container details.
 	if statusSnap, err := m.provider.PreviewStatus(ctx, handle.Handle); err == nil {
@@ -404,11 +415,14 @@ func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previe
 			if allSettled {
 				// All services have settled — check if the overall preview
 				// should be promoted from partially_ready to ready.
+				var failedServices []string
 				allReady := true
 				for _, svc := range snap.Services {
-					if svc.Status != models.PreviewServiceStatusReady {
+					if svc.Status == models.PreviewServiceStatusFailed {
+						failedServices = append(failedServices, svc.Name)
 						allReady = false
-						break
+					} else if svc.Status != models.PreviewServiceStatusReady {
+						allReady = false
 					}
 				}
 				if allReady {
@@ -417,6 +431,19 @@ func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previe
 							Str("preview_id", previewID.String()).
 							Msg("failed to promote preview to ready")
 					}
+				} else if len(failedServices) > 0 {
+					// Primary is serving but support services failed — promote
+					// to ready with an error noting the degraded services.
+					errMsg := fmt.Sprintf("support services failed: %s", strings.Join(failedServices, ", "))
+					if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusReady, errMsg); err != nil {
+						m.logger.Warn().Err(err).
+							Str("preview_id", previewID.String()).
+							Msg("failed to promote preview to ready (degraded)")
+					}
+					m.logger.Warn().
+						Str("preview_id", previewID.String()).
+						Strs("failed_services", failedServices).
+						Msg("preview promoted to ready with failed support services")
 				}
 				m.logger.Info().
 					Str("preview_id", previewID.String()).
@@ -689,6 +716,15 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("recycling preview")
 
+	// Stop any running poll goroutine before recycling, so it cannot race
+	// and overwrite the recycled preview's status with stale values.
+	m.pollStopMu.Lock()
+	if ch, ok := m.pollStopChs[previewID]; ok {
+		close(ch)
+		delete(m.pollStopChs, previewID)
+	}
+	m.pollStopMu.Unlock()
+
 	// Atomically transition to starting only if the preview is still active.
 	// This eliminates the TOCTOU window where a concurrent stop could race
 	// between our check above and the status update.
@@ -740,6 +776,21 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, nextStatus, ""); err != nil {
 		m.logger.Error().Err(err).Str("status", string(nextStatus)).Msg("recycle: failed to set preview status")
+	}
+
+	// When the recycled preview started with progressive readiness, restart the
+	// background poll so support services are tracked to completion.
+	if handle.PartiallyReady {
+		stopCh := make(chan struct{})
+		m.pollStopMu.Lock()
+		m.pollStopChs[previewID] = stopCh
+		m.pollStopMu.Unlock()
+		go func() {
+			m.pollSupportServiceStatus(stopCh, orgID, previewID, handle.Handle)
+			m.pollStopMu.Lock()
+			delete(m.pollStopChs, previewID)
+			m.pollStopMu.Unlock()
+		}()
 	}
 
 	// Reset expiry without extending beyond the preview's hard max lifetime.

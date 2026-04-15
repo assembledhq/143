@@ -285,7 +285,9 @@ export const api = {
       return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
     },
     preview: {
-      get: (sessionId: string) => get<import('./preview-types').PreviewStatusResponse>(`/api/v1/sessions/${sessionId}/preview`),
+      get: (sessionId: string) =>
+        get<import('./types').SingleResponse<import('./preview-types').PreviewStatusResponse>>(`/api/v1/sessions/${sessionId}/preview`)
+          .then(r => r.data),
       start: (sessionId: string, config?: Record<string, unknown>) =>
         post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
           .then(r => r.data),
