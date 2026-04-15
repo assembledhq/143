@@ -340,8 +340,8 @@ deploy: deploy-fleet
 
 # Sync SSH public keys from deploy/authorized_keys/*.pub to all fleet nodes.
 # Dry-run by default — shows diff without changing anything.
-# Usage: make sync-keys            (dry run)
-#        make sync-keys APPLY=1    (actually push changes)
+# Usage: make sync-keys              (dry run)
+#        make sync-keys APPLY=true   (actually push changes)
 APPLY ?=
 sync-keys:
 	$(check-ssh-key)

@@ -99,7 +99,7 @@ The frontend proxies `/api/*` to the Go server automatically.
 | `make deploy-db` | Deploy database node(s) |
 | `make deploy-logging` | Deploy logging node(s) |
 | `make sync-keys` | Dry-run: show what keys would change on all servers |
-| `make sync-keys APPLY=1` | Push SSH public keys from `deploy/authorized_keys/` to all servers |
+| `make sync-keys APPLY=true` | Push SSH public keys from `deploy/authorized_keys/` to all servers |
 | `make logs` | Open Grafana via SSH tunnel on localhost:9999 |
 
 After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):
@@ -151,7 +151,7 @@ git commit -m "Add yourname deploy key"
 
 ```bash
 make sync-keys            # dry run — review the diff
-make sync-keys APPLY=1    # push changes to all servers
+make sync-keys APPLY=true    # push changes to all servers
 ```
 
 This replaces `authorized_keys` on every fleet server with exactly the keys in the repo. You'll have deploy access after the apply step completes.

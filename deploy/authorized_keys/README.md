@@ -22,7 +22,7 @@ Drop SSH public key files (`.pub`) into this directory to grant deploy access.
 Delete their `.pub` file, commit, and run:
 ```bash
 make sync-keys          # dry run — verify the diff
-make sync-keys APPLY=1  # push changes to all servers
+make sync-keys APPLY=true  # push changes to all servers
 ```
 
 ## Security
