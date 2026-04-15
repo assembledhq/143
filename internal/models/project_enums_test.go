@@ -15,15 +15,14 @@ func TestProjectStatus_Validate(t *testing.T) {
 		status    ProjectStatus
 		expectErr bool
 	}{
-		{name: "proposed is valid", status: ProjectStatusProposed, expectErr: false},
 		{name: "draft is valid", status: ProjectStatusDraft, expectErr: false},
-		{name: "planning is valid", status: ProjectStatusPlanning, expectErr: false},
 		{name: "active is valid", status: ProjectStatusActive, expectErr: false},
-		{name: "paused is valid", status: ProjectStatusPaused, expectErr: false},
 		{name: "completed is valid", status: ProjectStatusCompleted, expectErr: false},
-		{name: "cancelled is valid", status: ProjectStatusCancelled, expectErr: false},
 		{name: "empty string is invalid", status: "", expectErr: true},
 		{name: "unknown value is invalid", status: "unknown", expectErr: true},
+		{name: "proposed is invalid", status: "proposed", expectErr: true},
+		{name: "paused is invalid", status: "paused", expectErr: true},
+		{name: "cancelled is invalid", status: "cancelled", expectErr: true},
 	}
 
 	for _, tt := range tests {

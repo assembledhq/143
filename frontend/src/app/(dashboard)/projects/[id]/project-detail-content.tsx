@@ -78,16 +78,12 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", project.id] }),
   });
 
-  const lifecycleMutation = useMutation({
-    mutationFn: (action: string) => {
-      switch (action) {
-        case "start": return api.projects.start(project.id);
-        case "pause": return api.projects.pause(project.id);
-        case "resume": return api.projects.resume(project.id);
-        case "cancel": return api.projects.update(project.id, { status: "cancelled" });
-        default: return Promise.resolve();
-      }
-    },
+  const startMutation = useMutation({
+    mutationFn: () => api.projects.start(project.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", project.id] }),
+  });
+  const completeMutation = useMutation({
+    mutationFn: () => api.projects.update(project.id, { status: "completed" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project", project.id] }),
   });
 
@@ -96,19 +92,13 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
       <Card>
         <CardHeader><CardTitle className="text-sm">Lifecycle</CardTitle></CardHeader>
         <CardContent className="flex items-center gap-2">
-          {(project.status === "draft" || project.status === "planning") && (
-            <Button size="sm" onClick={() => lifecycleMutation.mutate("start")} disabled={lifecycleMutation.isPending}>Start project</Button>
+          {project.status === "draft" && (
+            <Button size="sm" onClick={() => startMutation.mutate()} disabled={startMutation.isPending}>Start project</Button>
           )}
-          {project.status === "active" && (
-            <Button size="sm" variant="outline" onClick={() => lifecycleMutation.mutate("pause")} disabled={lifecycleMutation.isPending}>Pause</Button>
+          {project.status !== "completed" && (
+            <Button size="sm" variant="outline" onClick={() => completeMutation.mutate()} disabled={completeMutation.isPending}>Mark done</Button>
           )}
-          {project.status === "paused" && (
-            <Button size="sm" onClick={() => lifecycleMutation.mutate("resume")} disabled={lifecycleMutation.isPending}>Resume</Button>
-          )}
-          {project.status !== "completed" && project.status !== "cancelled" && (
-            <Button size="sm" variant="destructive" onClick={() => lifecycleMutation.mutate("cancel")} disabled={lifecycleMutation.isPending}>Cancel project</Button>
-          )}
-          {lifecycleMutation.isError && <p className="text-xs text-destructive">Action failed.</p>}
+          {(startMutation.isError || completeMutation.isError) && <p className="text-xs text-destructive">Action failed.</p>}
         </CardContent>
       </Card>
 

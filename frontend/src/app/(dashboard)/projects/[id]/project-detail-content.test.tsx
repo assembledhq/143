@@ -229,7 +229,7 @@ describe("ProjectDetailContent", () => {
             project: {
               id: "proj-1", org_id: "org-1", repository_id: "repo-1",
               title: "Paused Settings Project", goal: "Paused goal",
-              status: "paused", priority: 50, execution_mode: "sequential",
+              status: "draft", priority: 50, execution_mode: "sequential",
               max_concurrent: 1, auto_merge: false, base_branch: "main",
               total_tasks: 3, completed_tasks: 1, failed_tasks: 0,
               proposed_by_pm: false, source_issue_ids: [],

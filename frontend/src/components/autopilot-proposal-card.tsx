@@ -20,8 +20,8 @@ export function AutopilotProposalCard() {
   });
 
   const { data: topProposalData } = useQuery({
-    queryKey: ["projects", "proposed", "top"],
-    queryFn: () => api.projects.list({ status: "proposed", limit: 1 }),
+    queryKey: ["projects", "draft", "top"],
+    queryFn: () => api.projects.list({ status: "draft", proposed_by_pm: true, limit: 1 }),
     refetchInterval: 30000,
     enabled: isAuthenticated,
   });
@@ -53,7 +53,7 @@ export function AutopilotProposalCard() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => router.push("/projects?filter=proposed")}
+            onClick={() => router.push("/projects?status=draft")}
             className="shrink-0"
           >
             Review proposals

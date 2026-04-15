@@ -27,6 +27,7 @@ type ProjectFilters struct {
 	Cursor       string
 	RepositoryID uuid.UUID
 	Search       string // When non-empty, filter projects by title or goal (case-insensitive substring match).
+	ProposedByPM *bool  // When non-nil, filter by proposed_by_pm flag.
 }
 
 // projectColumns is the column list shared across all project queries.
@@ -219,6 +220,10 @@ func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters P
 		query += ` AND repository_id = @repository_id`
 		args["repository_id"] = &filters.RepositoryID
 	}
+	if filters.ProposedByPM != nil {
+		query += ` AND proposed_by_pm = @proposed_by_pm`
+		args["proposed_by_pm"] = *filters.ProposedByPM
+	}
 	if filters.Search != "" {
 		query += ` AND (title ILIKE @search OR goal ILIKE @search)`
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
@@ -363,7 +368,7 @@ func (s *ProjectStore) UpdateNextRunAt(ctx context.Context, orgID, projectID uui
 
 func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.UUID, status string) error {
 	query := `UPDATE projects SET status = @status, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	if status == "completed" || status == "cancelled" {
+	if status == "completed" {
 		query = `UPDATE projects SET status = @status, completed_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 
@@ -375,26 +380,26 @@ func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.U
 	return err
 }
 
-// CountByOrgStatus counts projects matching the given org and statuses (across all repos).
-func (s *ProjectStore) CountByOrgStatus(ctx context.Context, orgID uuid.UUID, statuses []string) (int, error) {
-	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND status = ANY(@statuses) AND deleted_at IS NULL`
-	var count int
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":   orgID,
-		"statuses": statuses,
-	}).Scan(&count)
-	return count, err
-}
+// Count returns the number of projects matching the given org and filters.
+func (s *ProjectStore) Count(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) (int, error) {
+	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`
+	args := pgx.NamedArgs{"org_id": orgID}
 
-// CountByOrgRepoStatus counts projects matching the given org, repo, and statuses.
-func (s *ProjectStore) CountByOrgRepoStatus(ctx context.Context, orgID, repoID uuid.UUID, statuses []string) (int, error) {
-	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND repository_id = @repo_id AND status = ANY(@statuses) AND deleted_at IS NULL`
+	if filters.Status != "" {
+		query += ` AND status = @status`
+		args["status"] = filters.Status
+	}
+	if filters.RepositoryID != uuid.Nil {
+		query += ` AND repository_id = @repository_id`
+		args["repository_id"] = &filters.RepositoryID
+	}
+	if filters.ProposedByPM != nil {
+		query += ` AND proposed_by_pm = @proposed_by_pm`
+		args["proposed_by_pm"] = *filters.ProposedByPM
+	}
+
 	var count int
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":   orgID,
-		"repo_id":  repoID,
-		"statuses": statuses,
-	}).Scan(&count)
+	err := s.db.QueryRow(ctx, query, args).Scan(&count)
 	return count, err
 }
 

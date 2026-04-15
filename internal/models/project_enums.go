@@ -9,20 +9,14 @@ import (
 type ProjectStatus string
 
 const (
-	ProjectStatusProposed  ProjectStatus = "proposed"
 	ProjectStatusDraft     ProjectStatus = "draft"
-	ProjectStatusPlanning  ProjectStatus = "planning"
 	ProjectStatusActive    ProjectStatus = "active"
-	ProjectStatusPaused    ProjectStatus = "paused"
 	ProjectStatusCompleted ProjectStatus = "completed"
-	ProjectStatusCancelled ProjectStatus = "cancelled"
 )
 
 func (s ProjectStatus) Validate() error {
 	switch s {
-	case ProjectStatusProposed, ProjectStatusDraft, ProjectStatusPlanning,
-		ProjectStatusActive, ProjectStatusPaused, ProjectStatusCompleted,
-		ProjectStatusCancelled:
+	case ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted:
 		return nil
 	default:
 		return fmt.Errorf("invalid ProjectStatus: %q", s)

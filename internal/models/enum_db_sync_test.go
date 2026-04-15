@@ -77,9 +77,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		),
 		// project_enums.go
 		"projects_status": toStrings(
-			ProjectStatusProposed, ProjectStatusDraft, ProjectStatusPlanning,
-			ProjectStatusActive, ProjectStatusPaused,
-			ProjectStatusCompleted, ProjectStatusCancelled,
+			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,
 		),
 		"projects_execution_mode": toStrings(
 			ProjectExecModeSequential, ProjectExecModeParallel,

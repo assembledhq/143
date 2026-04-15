@@ -62,16 +62,10 @@ type ProjectDetailResponse struct {
 // validStatusTransition checks whether a project status transition is allowed.
 func validStatusTransition(from, to models.ProjectStatus) bool {
 	switch from {
-	case models.ProjectStatusProposed:
-		return to == models.ProjectStatusDraft || to == models.ProjectStatusCancelled
 	case models.ProjectStatusDraft:
-		return to == models.ProjectStatusPlanning || to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
-	case models.ProjectStatusPlanning:
-		return to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
+		return to == models.ProjectStatusActive || to == models.ProjectStatusCompleted
 	case models.ProjectStatusActive:
-		return to == models.ProjectStatusPaused || to == models.ProjectStatusCompleted || to == models.ProjectStatusCancelled
-	case models.ProjectStatusPaused:
-		return to == models.ProjectStatusActive || to == models.ProjectStatusCancelled
+		return to == models.ProjectStatusCompleted
 	default:
 		return false
 	}
@@ -89,6 +83,11 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if search := r.URL.Query().Get("search"); search != "" {
 		filters.Search = search
+	}
+
+	if v := r.URL.Query().Get("proposed_by_pm"); v == "true" || v == "false" {
+		b := v == "true"
+		filters.ProposedByPM = &b
 	}
 
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
@@ -458,8 +457,11 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCancelled)); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to cancel project", err)
+	// With only three statuses (draft, active, completed), "completed" is the sole
+	// terminal state. Deleting a project marks it completed (which also sets
+	// completed_at).
+	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCompleted)); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to mark project as done", err)
 		return
 	}
 
@@ -470,65 +472,6 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandler) Start(w http.ResponseWriter, r *http.Request) {
 	h.transitionStatus(w, r, models.ProjectStatusActive)
-}
-
-func (h *ProjectHandler) Pause(w http.ResponseWriter, r *http.Request) {
-	h.transitionStatus(w, r, models.ProjectStatusPaused)
-}
-
-func (h *ProjectHandler) Resume(w http.ResponseWriter, r *http.Request) {
-	h.transitionStatus(w, r, models.ProjectStatusActive)
-}
-
-func (h *ProjectHandler) Approve(w http.ResponseWriter, r *http.Request) {
-	h.transitionStatus(w, r, models.ProjectStatusDraft)
-}
-
-func (h *ProjectHandler) Dismiss(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
-		return
-	}
-
-	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
-	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
-		return
-	}
-
-	if !validStatusTransition(project.Status, models.ProjectStatusCancelled) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_TRANSITION", "invalid status transition")
-		return
-	}
-
-	// Parse optional reason from body.
-	var req struct {
-		Reason *string `json:"reason,omitempty"`
-	}
-	// Body is optional, but if present it must be valid JSON.
-	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
-			return
-		}
-	}
-
-	if err := h.projectStore.UpdateStatus(r.Context(), orgID, projectID, string(models.ProjectStatusCancelled)); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update project status", err)
-		return
-	}
-
-	dismissProjIDStr := projectID.String()
-	var details json.RawMessage
-	if req.Reason != nil && *req.Reason != "" {
-		details, _ = json.Marshal(map[string]any{"reason": *req.Reason})
-	}
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectDismissed, models.AuditResourceProject, &dismissProjIDStr, nil, &projectID, details)
-
-	project.Status = models.ProjectStatusCancelled
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
 }
 
 // RunNow enqueues an immediate project_cycle job for the project.
@@ -602,19 +545,9 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 	var auditAction models.AuditAction
 	switch target {
 	case models.ProjectStatusActive:
-		if project.Status == models.ProjectStatusPaused {
-			auditAction = models.AuditActionProjectResumed
-		} else {
-			auditAction = models.AuditActionProjectStarted
-		}
-	case models.ProjectStatusPaused:
-		auditAction = models.AuditActionProjectPaused
-	case models.ProjectStatusDraft:
-		auditAction = models.AuditActionProjectUpdated
+		auditAction = models.AuditActionProjectStarted
 	case models.ProjectStatusCompleted:
 		auditAction = models.AuditActionProjectCompleted
-	case models.ProjectStatusCancelled:
-		auditAction = models.AuditActionProjectDismissed
 	}
 	if auditAction != "" {
 		transitionProjIDStr := projectID.String()
@@ -736,9 +669,9 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 			return
 		}
-		if project.Status != models.ProjectStatusProposed && project.Status != models.ProjectStatusDraft {
+		if project.Status != models.ProjectStatusDraft {
 			writeError(w, r, http.StatusConflict, "PROJECT_NOT_EDITABLE",
-				"task metadata can only be edited while the project is in proposed or draft status")
+				"task metadata can only be edited while the project is in draft status")
 			return
 		}
 	}
@@ -913,12 +846,13 @@ func (h *ProjectHandler) GetCycle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ProjectCycle]{Data: cycle})
 }
 
-// ProposalSummary returns a count of open project proposals for the org.
+// ProposalSummary returns a count of PM-proposed draft projects for the org.
 // GET /api/v1/projects/proposals/summary
 func (h *ProjectHandler) ProposalSummary(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	count, err := h.projectStore.CountByOrgStatus(r.Context(), orgID, []string{"proposed"})
+	pmTrue := true
+	count, err := h.projectStore.Count(r.Context(), orgID, db.ProjectFilters{Status: string(models.ProjectStatusDraft), ProposedByPM: &pmTrue})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count proposals", err)
 		return

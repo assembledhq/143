@@ -226,7 +226,8 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	txProjectTaskStore := db.NewProjectTaskStore(tx)
 
 	// 6. Cap: max 3 open proposals per repo.
-	openCount, err := txProjectStore.CountByOrgRepoStatus(ctx, claims.OrgID, repoID, []string{"proposed"})
+	pmTrue := true
+	openCount, err := txProjectStore.Count(ctx, claims.OrgID, db.ProjectFilters{Status: string(models.ProjectStatusDraft), RepositoryID: repoID, ProposedByPM: &pmTrue})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count open proposals", err)
 		return
@@ -238,7 +239,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 7. Run deduplication against existing same-repo projects.
-	dedupStatuses := []string{"proposed", "draft", "planning", "active", "paused"}
+	dedupStatuses := []string{string(models.ProjectStatusDraft), string(models.ProjectStatusActive)}
 	existingProjects, err := txProjectStore.ListByOrgRepoStatuses(ctx, claims.OrgID, repoID, dedupStatuses)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DEDUP_FAILED", "failed to fetch existing projects for dedup", err)
@@ -278,7 +279,7 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 		Goal:               req.Goal,
 		Scope:              req.Scope,
 		CompletionCriteria: req.CompletionCriteria,
-		Status:             models.ProjectStatusProposed,
+		Status:             models.ProjectStatusDraft,
 		Priority:           priority,
 		ExecutionMode:      models.ProjectExecModeSequential,
 		MaxConcurrent:      1,

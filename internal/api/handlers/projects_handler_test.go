@@ -64,25 +64,12 @@ func TestValidStatusTransition(t *testing.T) {
 		to    models.ProjectStatus
 		valid bool
 	}{
-		{models.ProjectStatusProposed, models.ProjectStatusDraft, true},
-		{models.ProjectStatusProposed, models.ProjectStatusCancelled, true},
-		{models.ProjectStatusProposed, models.ProjectStatusActive, false},
-		{models.ProjectStatusDraft, models.ProjectStatusPlanning, true},
 		{models.ProjectStatusDraft, models.ProjectStatusActive, true},
-		{models.ProjectStatusDraft, models.ProjectStatusCancelled, true},
-		{models.ProjectStatusDraft, models.ProjectStatusCompleted, false},
-		{models.ProjectStatusPlanning, models.ProjectStatusActive, true},
-		{models.ProjectStatusPlanning, models.ProjectStatusCancelled, true},
-		{models.ProjectStatusPlanning, models.ProjectStatusPaused, false},
-		{models.ProjectStatusActive, models.ProjectStatusPaused, true},
+		{models.ProjectStatusDraft, models.ProjectStatusCompleted, true},
 		{models.ProjectStatusActive, models.ProjectStatusCompleted, true},
-		{models.ProjectStatusActive, models.ProjectStatusCancelled, true},
 		{models.ProjectStatusActive, models.ProjectStatusDraft, false},
-		{models.ProjectStatusPaused, models.ProjectStatusActive, true},
-		{models.ProjectStatusPaused, models.ProjectStatusCancelled, true},
-		{models.ProjectStatusPaused, models.ProjectStatusCompleted, false},
 		{models.ProjectStatusCompleted, models.ProjectStatusActive, false},
-		{models.ProjectStatusCancelled, models.ProjectStatusActive, false},
+		{models.ProjectStatusCompleted, models.ProjectStatusDraft, false},
 	}
 
 	for _, tt := range tests {
@@ -267,154 +254,6 @@ func TestProjectHandler_Update_InvalidTransition(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "INVALID_TRANSITION")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-// --- Pause handler tests ---
-
-func TestProjectHandler_Pause(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
-	orgID := uuid.New()
-	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns an active project
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
-
-	// UpdateStatus
-	mock.ExpectExec("UPDATE projects SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/pause", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
-	rr := httptest.NewRecorder()
-
-	handler.Pause(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"status":"paused"`)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-// --- Resume handler tests ---
-
-func TestProjectHandler_Resume(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
-	orgID := uuid.New()
-	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns a paused project
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusPaused, now)...))
-
-	// UpdateStatus
-	mock.ExpectExec("UPDATE projects SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/resume", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
-	rr := httptest.NewRecorder()
-
-	handler.Resume(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"status":"active"`)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-// --- Approve handler tests ---
-
-func TestProjectHandler_Approve(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
-	orgID := uuid.New()
-	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns a proposed project
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusProposed, now)...))
-
-	// UpdateStatus
-	mock.ExpectExec("UPDATE projects SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/approve", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
-	rr := httptest.NewRecorder()
-
-	handler.Approve(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"status":"draft"`)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-// --- Dismiss handler tests ---
-
-func TestProjectHandler_Dismiss(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
-	orgID := uuid.New()
-	projectID := uuid.New()
-	repoID := uuid.New()
-	now := time.Now()
-
-	// GetByID returns a proposed project
-	mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusProposed, now)...))
-
-	// UpdateStatus (cancelled triggers completed_at = now() variant)
-	mock.ExpectExec("UPDATE projects SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID.String()+"/dismiss", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
-	rr := httptest.NewRecorder()
-
-	handler.Dismiss(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, rr.Body.String(), `"status":"cancelled"`)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
