@@ -1,22 +1,9 @@
-# Logging node (VictoriaLogs + Grafana + Caddy).
+# Logging node (VictoriaLogs + Grafana).
 # Receives logs from Vector collectors on app/worker nodes via Hetzner private network.
+# Access Grafana via SSH tunnel: make logs SSH_KEY=~/.ssh/143-deploy
 # See docs/design/47-logging-victorialogs.md
 
 services:
-  caddy:
-    image: caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/Caddyfile.logging:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-    environment:
-      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-logs.143.dev}
-    depends_on:
-      - grafana
-    restart: unless-stopped
-
   victorialogs:
     image: victoriametrics/victoria-logs:v1.50.0
     volumes:
@@ -39,10 +26,12 @@ services:
     environment:
       GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:-logs.143.dev}
+      GF_SERVER_ROOT_URL: http://localhost:9999
     volumes:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "127.0.0.1:9999:3000"
     depends_on:
       - victorialogs
     restart: unless-stopped
@@ -72,4 +61,3 @@ services:
 volumes:
   vlogs-data:
   grafana-data:
-  caddy_data:

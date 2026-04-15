@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy-app deploy-worker deploy-db deploy-logging deploy-fleet
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -291,6 +291,24 @@ deploy-logging:
 	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/deploy.sh logging $(HOST) $(SSH_KEY)
+
+# Open Grafana via SSH tunnel.
+# Usage: make logs SSH_KEY=~/.ssh/143-deploy
+# Reads LOGGING_HOST from FLEET_HOSTS in .env.production.enc automatically.
+logs:
+	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required. Usage: make logs SSH_KEY=~/.ssh/143-deploy"; exit 1; }
+	@LOGGING_HOST="$(LOGGING_HOST)"; \
+	if [ -z "$$LOGGING_HOST" ]; then \
+		FLEET="$$(sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc 2>/dev/null | grep '^FLEET_HOSTS=' | cut -d= -f2-)"; \
+		LOGGING_HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^logging:' | cut -d: -f2 | head -1)"; \
+	fi; \
+	if [ -z "$$LOGGING_HOST" ]; then \
+		echo "ERROR: Could not find logging host. Set LOGGING_HOST or add logging:<ip> to FLEET_HOSTS."; \
+		exit 1; \
+	fi; \
+	echo "Opening Grafana tunnel → http://localhost:9999"; \
+	echo "Press Ctrl+C to close."; \
+	ssh -i $(SSH_KEY) -L 9999:localhost:9999 -N deploy@$$LOGGING_HOST
 
 # Deploy all nodes in the fleet.
 # Requires FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
