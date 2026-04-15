@@ -24,11 +24,12 @@ services:
       PORT: "8080"
       ENV: production
       MODE: api
-      NODE_ID: ${HOSTNAME:-app-1}
       BASE_URL: ${BASE_URL:-https://143.dev}
       FRONTEND_URL: ${FRONTEND_URL:-https://143.dev}
     env_file:
       - .env
+    volumes:
+      - .env.production.enc:/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 10s
