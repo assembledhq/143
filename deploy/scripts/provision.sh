@@ -38,45 +38,43 @@ case "$ROLE" in
   *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
 esac
 
-# Logging nodes use only public images and don't need SOPS secrets.
-# Skip SOPS decryption entirely for the logging role.
-if [ "$ROLE" != "logging" ]; then
-  # Read SOPS_AGE_KEY from the default age keyfile if not already set
-  if [ -z "${SOPS_AGE_KEY:-}" ]; then
-    AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
-    if [ -f "$AGE_KEY_FILE" ]; then
-      SOPS_AGE_KEY=$(grep "^AGE-SECRET-KEY-" "$AGE_KEY_FILE" | head -1)
-      export SOPS_AGE_KEY
-      echo "Read SOPS_AGE_KEY from $AGE_KEY_FILE"
-    else
-      echo "ERROR: No SOPS_AGE_KEY set and no keyfile at $AGE_KEY_FILE"
-      echo "Run 'make secrets-setup' first, or export SOPS_AGE_KEY."
-      exit 1
-    fi
-  fi
-
-  # Decrypt .env.production.enc to extract secrets locally.
-  # Values set as env vars already will take precedence (eval won't overwrite).
-  ENC_FILE="$PROJECT_DIR/.env.production.enc"
-  if [ -f "$ENC_FILE" ]; then
-    echo "Reading secrets from .env.production.enc..."
-    DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
-
-    # Source decrypted values, but don't overwrite existing env vars
-    while IFS= read -r line; do
-      # Skip empty lines and comments
-      [[ -z "$line" || "$line" == \#* ]] && continue
-      key="${line%%=*}"
-      value="${line#*=}"
-      # Only set if not already in environment
-      if [ -z "${!key+x}" ]; then
-        export "$key=$value"
-      fi
-    done <<< "$DECRYPTED"
+# Logging nodes use only public runtime images, but they still rely on values
+# that commonly live in the encrypted production env.
+# Read SOPS_AGE_KEY from the default age keyfile if not already set
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
+  if [ -f "$AGE_KEY_FILE" ]; then
+    SOPS_AGE_KEY=$(grep "^AGE-SECRET-KEY-" "$AGE_KEY_FILE" | head -1)
+    export SOPS_AGE_KEY
+    echo "Read SOPS_AGE_KEY from $AGE_KEY_FILE"
   else
-    echo "WARNING: .env.production.enc not found at $ENC_FILE"
-    echo "Falling back to environment variables."
+    echo "ERROR: No SOPS_AGE_KEY set and no keyfile at $AGE_KEY_FILE"
+    echo "Run 'make secrets-setup' first, or export SOPS_AGE_KEY."
+    exit 1
   fi
+fi
+
+# Decrypt .env.production.enc to extract secrets locally.
+# Values set as env vars already will take precedence (eval won't overwrite).
+ENC_FILE="$PROJECT_DIR/.env.production.enc"
+if [ -f "$ENC_FILE" ]; then
+  echo "Reading secrets from .env.production.enc..."
+  DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
+
+  # Source decrypted values, but don't overwrite existing env vars
+  while IFS= read -r line; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    # Only set if not already in environment
+    if [ -z "${!key+x}" ]; then
+      export "$key=$value"
+    fi
+  done <<< "$DECRYPTED"
+else
+  echo "WARNING: .env.production.enc not found at $ENC_FILE"
+  echo "Falling back to environment variables."
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
@@ -89,9 +87,8 @@ if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
 fi
 if [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
-  : "${PRIVATE_IP:?PRIVATE_IP is required for logging role (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+if [ "$ROLE" != "db" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
@@ -168,7 +165,7 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
 echo "--- Step 3/5: Writing secrets ---"
 if [ "$ROLE" = "logging" ]; then
   # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nPRIVATE_IP=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$PRIVATE_IP" \
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \

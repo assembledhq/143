@@ -8,7 +8,7 @@
 # Or manually substitute and pass as user-data:
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
 #   export GRAFANA_ADMIN_PASSWORD="your-grafana-password"
-#   export PRIVATE_IP="10.0.0.5"
+#   export VICTORIALOGS_HOST="10.0.0.5"
 #   envsubst < deploy/cloud-init/logging.yml > /tmp/user-data.yml
 
 users:
@@ -31,7 +31,7 @@ write_files:
     permissions: '0600'
     content: |
       GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      PRIVATE_IP=${PRIVATE_IP}
+      VICTORIALOGS_HOST=${VICTORIALOGS_HOST}
 
 runcmd:
   # Clone repo to get compose files and configs.
