@@ -12,7 +12,9 @@ UPDATE projects SET status = 'active' WHERE status = 'paused' AND deleted_at IS 
 UPDATE projects SET status = 'completed' WHERE status = 'cancelled' AND deleted_at IS NULL;
 
 -- 2. Index for PM-proposal queries (proposal cap, proposal summary).
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_projects_org_proposed_by_pm_status
+-- NOTE: For production, consider creating this index CONCURRENTLY before running
+-- the migration to avoid locking.
+CREATE INDEX IF NOT EXISTS idx_projects_org_proposed_by_pm_status
     ON projects (org_id, status) WHERE proposed_by_pm = true AND deleted_at IS NULL;
 
 -- 3. Replace the CHECK constraint with the simplified set.

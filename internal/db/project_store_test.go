@@ -516,6 +516,7 @@ func TestProjectStore_Count(t *testing.T) {
 	store := NewProjectStore(mock)
 
 	t.Run("count by status", func(t *testing.T) {
+		t.Parallel()
 		mock.ExpectQuery("SELECT count").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
@@ -527,6 +528,7 @@ func TestProjectStore_Count(t *testing.T) {
 	})
 
 	t.Run("count by status and proposed_by_pm", func(t *testing.T) {
+		t.Parallel()
 		mock.ExpectQuery("SELECT count").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
@@ -539,6 +541,7 @@ func TestProjectStore_Count(t *testing.T) {
 	})
 
 	t.Run("count by status, repo, and proposed_by_pm", func(t *testing.T) {
+		t.Parallel()
 		mock.ExpectQuery("SELECT count").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
