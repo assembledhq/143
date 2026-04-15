@@ -65,8 +65,8 @@ export function AutopilotConfigFooter({
   const [isOpen, setIsOpen] = useState(false);
 
   const directionPill = directionSummary
-    ? directionSummary.length > 28
-      ? directionSummary.slice(0, 28) + "\u2026"
+    ? directionSummary.length > 48
+      ? directionSummary.slice(0, 48) + "\u2026"
       : directionSummary
     : "No direction";
 
