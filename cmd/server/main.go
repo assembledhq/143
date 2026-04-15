@@ -42,7 +42,7 @@ import (
 
 func main() {
 	cfg := config.Load()
-	logger := logging.NewLogger(cfg.LogLevel)
+	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
 	cfg.LogStatus(logger)
 
 	if version.IsDev() {

@@ -1,0 +1,60 @@
+#cloud-config
+# Logging node bootstrap (VictoriaLogs + Grafana).
+# Receives logs from Vector collectors on app/worker nodes via Hetzner private network.
+#
+# Provision from your local machine:
+#   make provision-logging HOST=10.0.0.5 SSH_KEY=~/.ssh/143-deploy
+#
+# Or manually substitute and pass as user-data:
+#   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
+#   export GRAFANA_ADMIN_PASSWORD="your-grafana-password"
+#   export PRIVATE_IP="10.0.0.5"
+#   envsubst < deploy/cloud-init/logging.yml > /tmp/user-data.yml
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - git
+  - jq
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      PRIVATE_IP=${PRIVATE_IP}
+
+runcmd:
+  # Clone repo to get compose files and configs.
+  # No GHCR login needed — VictoriaLogs and Grafana are public images.
+  - su - deploy -c 'git clone --depth 1 https://github.com/assembledhq/143.git /tmp/143-repo'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.logging.yml /opt/143/'
+  - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
+  - rm -rf /tmp/143-repo
+
+  # Start the stack and wait for Grafana health
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.logging.yml up -d --remove-orphans'
+  - |
+    echo "Waiting for Grafana health check..."
+    HEALTHY=false
+    for i in $(seq 1 30); do
+      if wget -qO- http://localhost:3000/api/health > /dev/null 2>&1; then
+        echo "Health check passed."
+        HEALTHY=true
+        break
+      fi
+      sleep 2
+    done
+    if [ "$HEALTHY" != "true" ]; then
+      echo "ERROR: Grafana health check timed out after 60s."
+      exit 1
+    fi

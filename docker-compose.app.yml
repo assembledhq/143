@@ -3,6 +3,9 @@
 # No Docker socket mount — sandboxes run on worker nodes only.
 # See docs/design/36-docker-agents-vps-architecture.md
 
+include:
+  - docker-compose.vector.yml
+
 services:
   caddy:
     image: caddy:2-alpine
@@ -19,6 +22,7 @@ services:
     environment:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
       PORT: "8080"
+      ENV: production
       MODE: api
       NODE_ID: ${HOSTNAME:-app-1}
       BASE_URL: ${BASE_URL:-https://143.dev}

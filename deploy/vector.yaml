@@ -1,0 +1,62 @@
+sources:
+  docker_logs:
+    type: docker_logs
+
+transforms:
+  enrich:
+    type: remap
+    inputs: ["docker_logs"]
+    source: |
+      # Extract Docker Compose service name
+      .service = .label."com.docker.compose.service" ?? "unknown"
+
+      # Parse structured JSON logs from our Go services (zerolog output).
+      # Selectively extract known zerolog fields rather than merging the entire parsed
+      # object into root, which would clobber Vector metadata (source_type, container_name, etc.).
+      parsed, err = parse_json(.message)
+      if err == null {
+        .message = string(parsed.message) ?? .message
+        .timestamp = string(parsed.time) ?? .timestamp
+        .level = string(parsed.level) ?? .level
+        .error = parsed.error
+        .caller = parsed.caller
+        .org_id = parsed.org_id
+        .agent_run_id = parsed.agent_run_id
+        .trace_id = parsed.trace_id
+        .request_id = parsed.request_id
+        .path = parsed.path
+        .response_time_ms = parsed.response_time_ms
+      }
+
+      # Add server identity
+      .server = get_env_var("SERVER_ROLE") ?? "unknown"
+      .hostname = get_hostname()
+
+  # Drop health check requests after JSON parsing so we can match on structured fields.
+  # Filtering on .path avoids accidentally dropping app logs that mention health endpoints.
+  filter_noise:
+    type: filter
+    inputs: ["enrich"]
+    condition:
+      type: vrl
+      source: |
+        path = string(.path) ?? ""
+        path != "/healthz" && path != "/readyz"
+
+sinks:
+  victorialogs:
+    type: http
+    inputs: ["filter_noise"]
+    uri: "http://${VICTORIALOGS_HOST}:9428/insert/jsonline"
+    encoding:
+      codec: json
+    query_string_parameters:
+      _stream_fields: "service,server,hostname"
+      _msg_field: "message"
+      _time_field: "timestamp"
+    healthcheck:
+      enabled: false
+    buffer:
+      type: disk
+      max_size: 268435456  # 256 MB disk buffer — survives logging server restarts
+      when_full: drop_newest
