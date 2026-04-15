@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db deploy-app deploy-worker deploy-db deploy-fleet
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy-app deploy-worker deploy-db deploy-logging deploy-fleet
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -261,6 +261,11 @@ provision-db:
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
+provision-logging:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> SSH_KEY=<path>"; exit 1; }
+	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	./deploy/scripts/provision.sh logging $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
 # Deploy (update) an already-provisioned node.
 # Usage:
 #   make deploy-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
@@ -281,6 +286,11 @@ deploy-db:
 	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/deploy.sh db $(HOST) $(SSH_KEY)
+
+deploy-logging:
+	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
+	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	./deploy/scripts/deploy.sh logging $(HOST) $(SSH_KEY)
 
 # Deploy all nodes in the fleet.
 # Requires FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
