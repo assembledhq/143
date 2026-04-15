@@ -101,6 +101,7 @@ fi
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
 fi
 
@@ -159,6 +160,23 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     sleep 2
   done
+
+  # Verify Vector is running on app/worker nodes
+  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+    echo "Checking Vector log collector..."
+    VECTOR_ID="$(docker compose -f "$COMPOSE_FILE" ps -q vector)"
+    if [ -z "$VECTOR_ID" ]; then
+      echo "ERROR: Vector container not found — logs will not be collected"
+      exit 1
+    fi
+    VECTOR_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$VECTOR_ID")"
+    if [ "$VECTOR_STATUS" = "exited" ] || [ "$VECTOR_STATUS" = "dead" ]; then
+      echo "ERROR: Vector is not running (status: $VECTOR_STATUS)"
+      docker compose -f "$COMPOSE_FILE" logs --tail=20 vector 2>&1 || true
+      exit 1
+    fi
+    echo "Vector is running (status: $VECTOR_STATUS)."
+  fi
 
   echo "Deploy complete ($ROLE)."
 REMOTE
