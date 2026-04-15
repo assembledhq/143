@@ -128,7 +128,11 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	if body.Config == nil {
 		// Auto-detect: build a minimal default config when the client sends no
 		// explicit preview config. This lets the frontend start a preview with
-		// a single click.
+		// a single click. NOTE: defaults to Node.js (npm start on port 3000);
+		// non-Node projects should provide an explicit config.
+		h.logger.Info().
+			Str("session_id", sessionID.String()).
+			Msg("no preview config provided, using Node.js defaults (npm start, port 3000)")
 		body.Config = &models.PreviewConfig{
 			Name:    "default",
 			Primary: "app",
@@ -198,7 +202,7 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, status)
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: status})
 }
 
 // =============================================================================

@@ -67,6 +67,12 @@ type Manager struct {
 	// snapshotCache handles filesystem snapshot caching for fast startup.
 	snapshotCache *SnapshotCache
 
+	// pollStopChs tracks stop channels for pollSupportServiceStatus goroutines,
+	// keyed by preview ID. Closing the channel stops the poll goroutine,
+	// preventing it from overwriting a "stopped" status with "ready".
+	pollStopMu  sync.Mutex
+	pollStopChs map[uuid.UUID]chan struct{}
+
 	// Caps (configurable per org in future; hardcoded for MVP).
 	maxPerUser   int
 	maxPerOrg    int
@@ -102,6 +108,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		hmrWatcher:    cfg.HMRWatcher,
 		logger:        cfg.Logger,
 		workerNodeID:  cfg.WorkerNodeID,
+		pollStopChs:   make(map[uuid.UUID]chan struct{}),
 		maxPerUser:    cfg.MaxPerUser,
 		maxPerOrg:     cfg.MaxPerOrg,
 		maxPerWorker:  cfg.MaxPerWorker,
@@ -310,7 +317,16 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	// services leave "starting" status, then persist the final statuses to
 	// the database so the API returns up-to-date information.
 	if handle.PartiallyReady {
-		go m.pollSupportServiceStatus(input.OrgID, instance.ID, handle.Handle)
+		stopCh := make(chan struct{})
+		m.pollStopMu.Lock()
+		m.pollStopChs[instance.ID] = stopCh
+		m.pollStopMu.Unlock()
+		go func() {
+			m.pollSupportServiceStatus(stopCh, input.OrgID, instance.ID, handle.Handle)
+			m.pollStopMu.Lock()
+			delete(m.pollStopChs, instance.ID)
+			m.pollStopMu.Unlock()
+		}()
 	}
 
 	// Start HMR watching now that the preview is up so the gateway can
@@ -325,7 +341,10 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 // pollSupportServiceStatus polls the provider until all support services leave
 // "starting" status, then persists the final statuses to the database. This
 // runs in a background goroutine after a progressive preview start.
-func (m *Manager) pollSupportServiceStatus(orgID, previewID uuid.UUID, handle string) {
+//
+// The stopCh is closed by StopPreview to interrupt the poll early and prevent
+// the goroutine from overwriting the "stopped" status with "ready".
+func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previewID uuid.UUID, handle string) {
 	const (
 		pollInterval = 3 * time.Second
 		maxPollTime  = 5 * time.Minute
@@ -339,12 +358,26 @@ func (m *Manager) pollSupportServiceStatus(orgID, previewID uuid.UUID, handle st
 
 	for {
 		select {
+		case <-stopCh:
+			m.logger.Info().
+				Str("preview_id", previewID.String()).
+				Msg("poll stopped: preview is shutting down")
+			return
 		case <-ctx.Done():
 			m.logger.Warn().
 				Str("preview_id", previewID.String()).
 				Msg("timed out polling support service status")
 			return
 		case <-ticker.C:
+			// Check if the preview is still active before writing status.
+			instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
+			if err != nil || instance.Status.IsTerminal() {
+				m.logger.Info().
+					Str("preview_id", previewID.String()).
+					Msg("poll stopped: preview is no longer active")
+				return
+			}
+
 			snap, err := m.provider.PreviewStatus(ctx, handle)
 			if err != nil {
 				m.logger.Debug().Err(err).
@@ -408,6 +441,15 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	if instance.Status.IsTerminal() {
 		return nil // already stopped — idempotent
 	}
+
+	// Stop any running poll goroutine before changing status, so it cannot
+	// race and overwrite "stopped" with "ready".
+	m.pollStopMu.Lock()
+	if ch, ok := m.pollStopChs[previewID]; ok {
+		close(ch)
+		delete(m.pollStopChs, previewID)
+	}
+	m.pollStopMu.Unlock()
 
 	// Stop via provider.
 	if instance.PreviewHandle != "" && m.provider != nil {
@@ -680,10 +722,18 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("recycle start: %w", err)
 	}
 
-	// Update instance with new handle.
+	// Update instance with new handle. This is critical — if it fails, the DB
+	// still points to the old (dead) handle and all subsequent proxy/status
+	// operations will break. Stop the new preview and fail the recycle.
 	if err := m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort); err != nil {
-		m.logger.Error().Err(err).Msg("recycle: failed to update handle")
+		m.logger.Error().Err(err).Msg("recycle: failed to update handle, stopping new preview")
+		_ = m.provider.StopPreview(ctx, handle.Handle)
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not persist new handle"); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after handle update error")
+		}
+		return fmt.Errorf("recycle: update handle: %w", err)
 	}
+
 	nextStatus := models.PreviewStatusReady
 	if handle.PartiallyReady {
 		nextStatus = models.PreviewStatusPartiallyReady
@@ -700,6 +750,12 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, newExpiry); err != nil {
 		m.logger.Warn().Err(err).Msg("recycle: failed to reset expiry")
+	}
+
+	// Re-register HMR watching so screenshot capture continues after recycle.
+	if m.hmrWatcher != nil {
+		m.hmrWatcher.StopWatching(previewID)
+		m.hmrWatcher.StartWatching(previewID, orgID)
 	}
 
 	m.logger.Info().Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("preview recycled")

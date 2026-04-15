@@ -69,6 +69,7 @@ const STATUS_LABELS: Record<PreviewStatus, string> = {
 
 const STATUS_ORDER: PreviewStatus[] = [
   "starting",
+  "partially_ready",
   "ready",
 ];
 
@@ -222,6 +223,19 @@ export function PreviewPanel({
       return "";
     }
   }, [previewOrigin]);
+
+  // Warn if the preview origin matches the app origin — this would break the
+  // cross-origin isolation that the iframe sandbox relies on for security.
+  useEffect(() => {
+    if (parsedOrigin && parsedOrigin === window.location.origin) {
+      console.warn(
+        "[143 Preview] Preview origin matches app origin (%s). " +
+          "This breaks iframe sandbox isolation. " +
+          "Ensure PREVIEW_ORIGIN_TEMPLATE uses a different domain/port.",
+        parsedOrigin
+      );
+    }
+  }, [parsedOrigin]);
 
   // Reset bootstrapComplete when preview transitions away from ready
   // (e.g., backend restart) so the loading overlay shows for the new iframe.

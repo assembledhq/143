@@ -17,6 +17,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +26,22 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/preview"
 )
+
+// sessionCacheEntry caches access session validation results to avoid
+// hitting the database on every proxied request (including static assets).
+type sessionCacheEntry struct {
+	validUntil time.Time // when this cache entry expires
+	revokedAt  *time.Time
+	expiresAt  time.Time
+}
+
+// sessionCache is a simple TTL cache for access session lookups.
+const sessionCacheTTL = 10 * time.Second
+
+// expiryExtendThreshold controls how often we extend the DB session expiry.
+// We only extend when the remaining time is below this threshold, avoiding
+// a DB write on every single request.
+const expiryExtendThreshold = 2 * time.Minute
 
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
@@ -38,6 +55,10 @@ type Gateway struct {
 	cookieSecret []byte
 	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
+
+	// sessionCache avoids a DB round-trip on every proxied request.
+	sessionCacheMu sync.RWMutex
+	sessionCache   map[uuid.UUID]*sessionCacheEntry
 }
 
 // GatewayConfig holds initialization options.
@@ -64,6 +85,24 @@ func (g *Gateway) cookieName() string {
 	return "preview_session"
 }
 
+// getCachedSession returns the cached session entry if it exists and hasn't expired.
+func (g *Gateway) getCachedSession(id uuid.UUID) *sessionCacheEntry {
+	g.sessionCacheMu.RLock()
+	defer g.sessionCacheMu.RUnlock()
+	entry, ok := g.sessionCache[id]
+	if !ok || time.Now().After(entry.validUntil) {
+		return nil
+	}
+	return entry
+}
+
+// putCachedSession stores a session entry in the cache.
+func (g *Gateway) putCachedSession(id uuid.UUID, entry *sessionCacheEntry) {
+	g.sessionCacheMu.Lock()
+	defer g.sessionCacheMu.Unlock()
+	g.sessionCache[id] = entry
+}
+
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
@@ -74,6 +113,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
 		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
+		sessionCache: make(map[uuid.UUID]*sessionCacheEntry),
 		cspHeader: strings.Join([]string{
 			"default-src 'self' blob: data:",
 			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -243,35 +283,49 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	// Re-check the access session in the database to enforce revocation and
-	// expiry. Without this, a cookie minted before RevokeAllForPreview would
-	// continue to grant access indefinitely.
-	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
-	if err != nil {
-		http.Error(w, "preview session not found", http.StatusUnauthorized)
-		return
+	// Re-check the access session. Use a short-lived local cache to avoid
+	// a DB round-trip on every proxied request (including static assets).
+	now := time.Now()
+	cached := g.getCachedSession(accessSessionID)
+	if cached == nil {
+		sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+		if err != nil {
+			http.Error(w, "preview session not found", http.StatusUnauthorized)
+			return
+		}
+		cached = &sessionCacheEntry{
+			validUntil: now.Add(sessionCacheTTL),
+			revokedAt:  sess.RevokedAt,
+			expiresAt:  sess.ExpiresAt,
+		}
+		g.putCachedSession(accessSessionID, cached)
 	}
-	if sess.RevokedAt != nil {
+
+	if cached.revokedAt != nil {
 		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
 		return
 	}
-	if time.Now().After(sess.ExpiresAt) {
+	if now.After(cached.expiresAt) {
 		http.Error(w, "preview session has expired", http.StatusUnauthorized)
 		return
 	}
 
-	// Extend the DB session expiry first, then refresh the cookie.
-	// This ordering ensures the cookie and DB expiry stay in sync: if the
-	// DB extension fails, the cookie is not refreshed either, preventing a
-	// state where the cookie claims validity but the DB rejects it.
-	newExpiry := time.Now().Add(5 * time.Minute)
-	if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
-		g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
-		// Continue without refreshing the cookie — the existing cookie
-		// and DB expiry are still in sync from the last successful refresh.
-	} else {
-		refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
-		http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
+	// Only extend the DB session expiry when close to expiration, avoiding
+	// a DB write on every single request.
+	if time.Until(cached.expiresAt) < expiryExtendThreshold {
+		newExpiry := now.Add(5 * time.Minute)
+		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
+			g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
+		} else {
+			refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
+			http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
+			// Update the cache with the new expiry.
+			g.putCachedSession(accessSessionID, &sessionCacheEntry{
+				validUntil: now.Add(sessionCacheTTL),
+				revokedAt:  cached.revokedAt,
+				expiresAt:  newExpiry,
+			})
+		}
 	}
 
 	// Intercept heartbeat pings before recording activity so the heartbeat

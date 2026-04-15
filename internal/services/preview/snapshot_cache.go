@@ -345,7 +345,24 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	// 1. Read the blob from worker local disk. The blob may have been evicted
 	//    between FindSnapshot and this call (TOCTOU). Return a descriptive error
 	//    so the caller can fall back to a full build.
-	tarData, err := os.ReadFile(hit.BlobPath)
+	//
+	//    Guard against reading excessively large files into memory by checking
+	//    the file size against the DB-recorded size and a hard cap.
+	const maxRestoreBlobBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GB
+	fi, statErr := os.Stat(hit.BlobPath)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted between find and restore")
+			_ = os.Remove(hit.BlobPath + ".sha256")
+			_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
+			return fmt.Errorf("snapshot restore: blob evicted (key=%s), fall back to full build", hit.Entry.SnapshotKey)
+		}
+		return fmt.Errorf("snapshot restore: stat blob: %w", statErr)
+	}
+	if fi.Size() > maxRestoreBlobBytes {
+		return fmt.Errorf("snapshot restore: blob too large (%d bytes, max %d)", fi.Size(), maxRestoreBlobBytes)
+	}
+	tarData, err := os.ReadFile(hit.BlobPath) // #nosec G304 -- BlobPath validated via blobPath()
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted between find and restore")

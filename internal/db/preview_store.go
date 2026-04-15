@@ -283,6 +283,27 @@ func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID stri
 	return result, nil
 }
 
+// ListActivePreviewsCreatedBefore returns active previews on the given worker
+// that were created before the cutoff time. Used by the recycler to avoid
+// loading all active previews into memory.
+func (s *PreviewStore) ListActivePreviewsCreatedBefore(ctx context.Context, workerNodeID string, createdBefore time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s AND created_at < @created_before
+		ORDER BY created_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"worker_node_id": workerNodeID,
+		"created_before": createdBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list active previews created before: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
+	}
+	return result, nil
+}
+
 // CountActivePreviewsByOrg counts active previews for concurrency cap enforcement.
 func (s *PreviewStore) CountActivePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var count int

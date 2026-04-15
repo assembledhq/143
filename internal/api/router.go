@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -324,8 +325,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
 		logger.Info().Str("addr", addr).Msg("starting preview gateway")
 		gwSrv = &http.Server{Addr: addr, Handler: gw, ReadHeaderTimeout: 10 * time.Second}
+		// Use a listener to detect port-in-use errors synchronously before
+		// returning from NewRouter, rather than silently failing in a goroutine.
+		gwListener, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			return nil, nil, nil, nil, fmt.Errorf("preview gateway listen on %s: %w", addr, listenErr)
+		}
 		go func() {
-			if gwErr := gwSrv.ListenAndServe(); gwErr != nil && gwErr != http.ErrServerClosed {
+			if gwErr := gwSrv.Serve(gwListener); gwErr != nil && gwErr != http.ErrServerClosed {
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
 		}()

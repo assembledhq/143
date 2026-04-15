@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -428,6 +429,14 @@ func (hw *HMRWatcher) enforceSnapshotLimit(ctx context.Context, pw *previewWatch
 
 	// Clean up the corresponding PNG files on disk.
 	for _, ref := range blobRefs {
+		// Validate that the blob ref is under blobDir to prevent deletion
+		// of arbitrary files if the DB contained a bad path.
+		absRef, absErr := filepath.Abs(ref)
+		absDir, dirErr := filepath.Abs(hw.blobDir)
+		if absErr != nil || dirErr != nil || !strings.HasPrefix(absRef, absDir+string(filepath.Separator)) {
+			hw.logger.Warn().Str("blob_ref", ref).Msg("skipping blob removal: path is not under blobDir")
+			continue
+		}
 		if err := os.Remove(ref); err != nil && !os.IsNotExist(err) {
 			hw.logger.Warn().Err(err).Str("blob_ref", ref).Msg("failed to remove evicted snapshot blob")
 		}
