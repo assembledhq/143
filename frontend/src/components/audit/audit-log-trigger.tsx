@@ -67,7 +67,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title }: AuditL
         variant="ghost"
         size="sm"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground/70 hover:text-muted-foreground transition-all duration-150 h-auto px-1.5 py-0.5 -ml-1.5"
+        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground/70 hover:text-muted-foreground transition-all duration-150 h-auto px-1.5 py-0.5 -ml-1.5"
       >
         <Clock className="h-3 w-3" />
         <span>
