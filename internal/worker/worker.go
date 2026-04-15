@@ -55,6 +55,11 @@ type WorkerDB interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
+// maxRetryableDuration is the maximum wall-clock time a retryable job is
+// allowed to keep retrying before being dead-lettered. This prevents jobs
+// from retrying indefinitely (e.g. when stuck behind a concurrency limit).
+const maxRetryableDuration = 8 * time.Minute
+
 type Worker struct {
 	db           WorkerDB
 	logger       zerolog.Logger
@@ -110,15 +115,16 @@ func (w *Worker) poll(ctx context.Context) {
 	var jobType string
 	var payload json.RawMessage
 	var attempts, maxAttempts int
+	var jobCreatedAt time.Time
 
 	err = tx.QueryRow(ctx, `
-		SELECT id, org_id, job_type, payload, attempts, max_attempts
+		SELECT id, org_id, job_type, payload, attempts, max_attempts, created_at
 		FROM jobs
 		WHERE status = 'pending' AND run_at <= now()
 		ORDER BY priority DESC, created_at ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`).Scan(&jobID, &orgID, &jobType, &payload, &attempts, &maxAttempts)
+	`).Scan(&jobID, &orgID, &jobType, &payload, &attempts, &maxAttempts, &jobCreatedAt)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -167,8 +173,18 @@ func (w *Worker) poll(ctx context.Context) {
 		}
 		// RetryableError means we should retry without consuming an attempt
 		// (e.g. concurrency limit reached — the job will succeed once a slot opens).
+		// However, cap retryable retries at maxRetryableDuration to prevent
+		// jobs from retrying indefinitely.
 		var retryable *RetryableError
 		if errors.As(err, &retryable) {
+			if time.Since(jobCreatedAt) > maxRetryableDuration {
+				w.logger.Error().Err(err).
+					Str("job_id", jobID.String()).
+					Dur("age", time.Since(jobCreatedAt)).
+					Msg("retryable job exceeded max duration, dead-lettering")
+				w.deadLetterJob(ctx, jobID, fmt.Sprintf("retryable job timed out after %s: %s", maxRetryableDuration, err.Error()))
+				return
+			}
 			w.logger.Info().Err(err).Str("job_id", jobID.String()).Msg("job deferred (retryable)")
 			w.retryJob(ctx, jobID, err.Error(), attempts) // don't increment attempt count
 			return

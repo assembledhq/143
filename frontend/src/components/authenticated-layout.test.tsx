@@ -86,6 +86,18 @@ describe("AuthenticatedLayout", () => {
     expect(contentWrapper).toHaveClass("py-6");
   });
 
+  it("content wrapper supports full-height children via flex-1 and min-h-0", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const contentWrapper = container.querySelector("main > div:last-child");
+    expect(contentWrapper).toHaveClass("flex-1");
+    expect(contentWrapper).toHaveClass("min-h-0");
+  });
+
   it("shows settings entries in the collapsible sidebar section", async () => {
     const user = userEvent.setup();
 
