@@ -222,26 +222,17 @@ Same as app, with `SERVER_ROLE: worker`. To avoid drift between the two nearly-i
 
 ## Network Security
 
-VictoriaLogs must not be exposed to the public internet.
+VictoriaLogs must not be exposed to the public internet. All inter-server communication uses the Hetzner Cloud private network.
 
-### Option A: Hetzner Private Network (Recommended)
+### Hetzner Private Network
 
 1. Create a Hetzner Cloud Network (e.g., `10.0.0.0/24`)
-2. Attach all three servers (app, worker, logging)
+2. Attach all four servers (app, worker, db, logging)
 3. Bind VictoriaLogs to the private IP only (shown in compose above)
 4. Vector on app/worker connects via private IP
 5. No firewall rules needed — traffic stays on the private network
 
 > **Note:** Hetzner private networks are not encrypted at the network layer. Plain HTTP between Vector and VictoriaLogs is acceptable because our logs do not contain secrets or PII (auth tokens are never logged, and user-facing content stays in the database). If this changes, add mTLS between Vector and VictoriaLogs.
-
-### Option B: WireGuard (If Using Dedicated Servers)
-
-If using Hetzner dedicated servers (not cloud), set up a WireGuard mesh:
-
-```
-app-server    (10.10.0.1) ──┐
-worker-server (10.10.0.2) ──┼── WireGuard mesh ── logging-server (10.10.0.3)
-```
 
 ### Grafana Access
 
@@ -277,7 +268,7 @@ The logging server follows the same provisioning pattern as app, worker, and db 
 - **`deploy/scripts/deploy.sh`**: Add `logging` role with `grafana` as the health service
 - **`deploy/scripts/bootstrap.sh`**: Accept `logging` as a valid role
 - **`deploy/cloud-init/logging.yml`**: Cloud-init template for automated provisioning
-- **`deploy/fleet-hosts.txt.example`**: Add `logging` entry
+- **`.env.production.enc`**: Add logging host to `FLEET_HOSTS`
 
 Key differences from other roles:
 - **No gVisor** — logging server doesn't run sandboxes
@@ -559,11 +550,13 @@ write_files:
     content: ${GHCR_TOKEN}
 ```
 
-### A.5: Fleet Hosts Update (`deploy/fleet-hosts.txt.example`)
+### A.5: Fleet Hosts Update (`.env.production.enc`)
 
+Add the logging server to `FLEET_HOSTS` in `.env.production.enc`:
+
+```bash
+# Existing format (comma-separated role:IP pairs):
+FLEET_HOSTS=db:10.0.0.3,app:10.0.0.2,worker:10.0.0.4,logging:10.0.0.5
 ```
-db      10.0.0.3
-app     10.0.0.2
-worker  10.0.0.4
-logging 10.0.0.5
-```
+
+Update via `sops .env.production.enc` and `deploy-fleet.sh` will pick it up automatically.
