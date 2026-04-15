@@ -304,7 +304,6 @@ func TestProjectStore_UpdateStatus(t *testing.T) {
 	}{
 		{name: "update to active", status: "active"},
 		{name: "update to completed", status: "completed"},
-		{name: "update to cancelled", status: "cancelled"},
 	}
 
 	for _, tt := range tests {
@@ -507,42 +506,61 @@ func TestProjectStore_SoftDelete_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestProjectStore_CountByOrgStatus(t *testing.T) {
+func TestProjectStore_Count(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
+	t.Run("count by status", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		store := NewProjectStore(mock)
 
-	store := NewProjectStore(mock)
+		mock.ExpectQuery("SELECT count").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 
-	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+		count, err := store.Count(context.Background(), uuid.New(), ProjectFilters{Status: "active"})
+		require.NoError(t, err)
+		require.Equal(t, 3, count)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 
-	count, err := store.CountByOrgStatus(context.Background(), uuid.New(), []string{"active", "proposed"})
-	require.NoError(t, err, "CountByOrgStatus should not return an error")
-	require.Equal(t, 3, count, "should return count of 3")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
+	t.Run("count by status and proposed_by_pm", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		store := NewProjectStore(mock)
 
-func TestProjectStore_CountByOrgRepoStatus(t *testing.T) {
-	t.Parallel()
+		mock.ExpectQuery("SELECT count").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
+		pmTrue := true
+		count, err := store.Count(context.Background(), uuid.New(), ProjectFilters{Status: "draft", ProposedByPM: &pmTrue})
+		require.NoError(t, err)
+		require.Equal(t, 2, count)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 
-	store := NewProjectStore(mock)
+	t.Run("count by status, repo, and proposed_by_pm", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		store := NewProjectStore(mock)
 
-	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+		mock.ExpectQuery("SELECT count").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 
-	count, err := store.CountByOrgRepoStatus(context.Background(), uuid.New(), uuid.New(), []string{"active"})
-	require.NoError(t, err, "CountByOrgRepoStatus should not return an error")
-	require.Equal(t, 2, count, "should return count of 2")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		pmTrue := true
+		count, err := store.Count(context.Background(), uuid.New(), ProjectFilters{Status: "draft", RepositoryID: uuid.New(), ProposedByPM: &pmTrue})
+		require.NoError(t, err)
+		require.Equal(t, 1, count)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 func TestProjectStore_ListByOrgRepoStatuses(t *testing.T) {

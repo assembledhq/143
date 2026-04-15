@@ -9,26 +9,16 @@ import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
-import { ProposalInbox } from "@/components/proposal-inbox";
-
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
   { value: "scheduled", label: "Scheduled" },
   { value: "draft", label: "Draft" },
   { value: "completed", label: "Done" },
-  { value: "paused", label: "Paused" },
 ];
-
-const activeStatuses = new Set(["active", "planning"]);
-
-function isActive(p: Project): boolean {
-  return activeStatuses.has(p.status);
-}
 
 function filterProjects(projects: Project[], filter: string | null): Project[] {
   if (!filter || filter === "all") return projects;
@@ -54,19 +44,10 @@ export function ProjectSidebar() {
     refetchInterval: 10000,
   });
 
-  const { proposals, allProjects } = useMemo(() => {
-    const raw = data?.data ?? [];
-    const props: Project[] = [];
-    const rest: Project[] = [];
-    for (const p of raw) {
-      (p.status === "proposed" ? props : rest).push(p);
-    }
-    return { proposals: props, allProjects: rest };
-  }, [data?.data]);
+  const allProjects = data?.data ?? [];
   const currentFilter = activeFilter ?? "all";
 
-  const activeCount = allProjects.filter(isActive).length;
-  const pausedCount = allProjects.filter((p) => p.status === "paused").length;
+  const activeCount = allProjects.filter((p) => p.status === "active").length;
   const scheduledCount = allProjects.filter((p) => p.schedule_enabled).length;
 
   const filteredProjects = useMemo(
@@ -122,7 +103,6 @@ export function ProjectSidebar() {
             {filterTabs.map((tab) => {
               const count =
                 tab.value === "active" ? activeCount
-                : tab.value === "paused" ? pausedCount
                 : tab.value === "scheduled" ? scheduledCount
                 : 0;
               return (
@@ -131,10 +111,7 @@ export function ProjectSidebar() {
                   {count > 0 && (
                     <span className={cn(
                       "rounded-full text-white text-xs leading-none px-1.5 py-0.5",
-                      tab.value === "active" ? "bg-primary"
-                      : tab.value === "scheduled" ? "bg-purple-500"
-                      : tab.value === "paused" ? "bg-orange-500"
-                      : "bg-primary"
+                      tab.value === "scheduled" ? "bg-purple-500" : "bg-primary"
                     )}>{count}</span>
                   )}
                 </TabsTrigger>
@@ -146,16 +123,6 @@ export function ProjectSidebar() {
 
       {/* Project list */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
-        {/* Proposal inbox */}
-        {proposals.length > 0 && (
-          <>
-            <div className="px-1 py-2">
-              <ProposalInbox proposals={proposals} />
-            </div>
-            <Separator className="my-2" />
-          </>
-        )}
-
         {/* Ghost "New project" entry when creating */}
         {isNewProject && (
           <Link
@@ -193,7 +160,7 @@ export function ProjectSidebar() {
         {displayedProjects.map((project) => {
           const isSelected = selectedId === project.id;
           const cfg = projectStatusConfig[project.status] || projectStatusConfig.draft;
-          const isActiveProject = activeStatuses.has(project.status);
+          const isActiveProject = project.status === "active";
           const ts = project.completed_at || project.updated_at;
           const pct = project.total_tasks > 0
             ? Math.round((project.completed_tasks / project.total_tasks) * 100)

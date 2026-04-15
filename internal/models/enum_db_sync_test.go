@@ -2,6 +2,7 @@ package models
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,13 +20,17 @@ import (
 //   - DB: CHECK constraints in migrations/000035_check_constraints.up.sql
 func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 	t.Parallel()
-	migrationPath := "../../migrations/000035_check_constraints.up.sql"
-	sql, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Skipf("migration file not found (expected when running outside repo root): %v", err)
-	}
+	migrationsDir := "../../migrations"
 
-	// Parse CHECK constraint values from the migration SQL.
+	// Read all *.up.sql migration files (sorted by name so later migrations
+	// override earlier constraint definitions).
+	files, err := filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Skipf("migration files not found (expected when running outside repo root): %v", err)
+	}
+	sort.Strings(files)
+
+	// Parse CHECK constraint values from migration SQL.
 	// Matches patterns like: CHECK (column IN ('val1', 'val2', ...))
 	constraintRE := regexp.MustCompile(`chk_(\w+)\s+CHECK\s*\(\s*(\w+)\s+IN\s*\(([\s\S]*?)\)\s*\)`)
 	valueRE := regexp.MustCompile(`'([^']+)'`)
@@ -36,20 +41,32 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		values []string
 	}
 
-	var constraints []dbConstraint
-	for _, m := range constraintRE.FindAllStringSubmatch(string(sql), -1) {
-		// m[1] is constraint name suffix (table_column), m[2] is column name, m[3] is value list
-		valMatches := valueRE.FindAllStringSubmatch(m[3], -1)
-		var vals []string
-		for _, v := range valMatches {
-			vals = append(vals, v[1])
+	// Use a map so later migrations overwrite earlier definitions of the same constraint.
+	constraintMap := map[string]dbConstraint{}
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			continue
 		}
-		sort.Strings(vals)
-		constraints = append(constraints, dbConstraint{
-			table:  strings.TrimSuffix(m[1], "_"+m[2]),
-			column: m[2],
-			values: vals,
-		})
+		for _, m := range constraintRE.FindAllStringSubmatch(string(sql), -1) {
+			valMatches := valueRE.FindAllStringSubmatch(m[3], -1)
+			var vals []string
+			for _, v := range valMatches {
+				vals = append(vals, v[1])
+			}
+			sort.Strings(vals)
+			key := m[1] // constraint name suffix e.g. "projects_status"
+			constraintMap[key] = dbConstraint{
+				table:  strings.TrimSuffix(key, "_"+m[2]),
+				column: m[2],
+				values: vals,
+			}
+		}
+	}
+
+	var constraints []dbConstraint
+	for _, c := range constraintMap {
+		constraints = append(constraints, c)
 	}
 
 	// Map of constraint name -> Go enum values. Only enums with typed
@@ -77,9 +94,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		),
 		// project_enums.go
 		"projects_status": toStrings(
-			ProjectStatusProposed, ProjectStatusDraft, ProjectStatusPlanning,
-			ProjectStatusActive, ProjectStatusPaused,
-			ProjectStatusCompleted, ProjectStatusCancelled,
+			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,
 		),
 		"projects_execution_mode": toStrings(
 			ProjectExecModeSequential, ProjectExecModeParallel,

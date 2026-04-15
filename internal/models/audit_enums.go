@@ -49,11 +49,7 @@ const (
 	AuditActionProjectUpdated        AuditAction = "project.updated"
 	AuditActionProjectDeleted        AuditAction = "project.deleted"
 	AuditActionProjectStarted        AuditAction = "project.started"
-	AuditActionProjectPaused         AuditAction = "project.paused"
-	AuditActionProjectResumed        AuditAction = "project.resumed"
-	AuditActionProjectApproved       AuditAction = "project.approved"
 	AuditActionProjectCompleted      AuditAction = "project.completed"
-	AuditActionProjectDismissed      AuditAction = "project.dismissed"
 	AuditActionProjectRunTriggered   AuditAction = "project.run_triggered"
 	AuditActionProjectCycleCompleted AuditAction = "project.cycle_completed"
 	AuditActionProjectTaskCreated    AuditAction = "project.task.created"
@@ -114,8 +110,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionPRRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
-		AuditActionProjectStarted, AuditActionProjectPaused, AuditActionProjectResumed,
-		AuditActionProjectApproved, AuditActionProjectCompleted, AuditActionProjectDismissed, AuditActionProjectRunTriggered,
+		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectRunTriggered,
 		AuditActionProjectCycleCompleted, AuditActionProjectTaskCreated, AuditActionProjectTaskUpdated,
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,

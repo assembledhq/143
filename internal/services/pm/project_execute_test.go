@@ -344,7 +344,8 @@ func TestExecuteProjectPlan_StatusRecommendationNeedsHumanReview(t *testing.T) {
 	err := svc.executeProjectPlan(context.Background(), orgID, pp, models.OrgSettings{AutonomyLevel: "auto_all"}, uuid.New())
 	require.NoError(t, err)
 
-	require.Equal(t, models.ProjectStatusPaused, ps.projects[projectID].Status)
+	// Project should remain active — needs_human_review does not change status.
+	require.Equal(t, models.ProjectStatusActive, ps.projects[projectID].Status)
 	require.Len(t, pcs.created, 1)
 }
 

@@ -177,12 +177,10 @@ describe("ProjectDetailContent", () => {
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
     expect(screen.getByRole("button", { name: "Start project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
   });
 
-  it("shows Pause and Cancel Project buttons for active project", async () => {
+  it("shows Mark done button but not Start for active project", async () => {
     const user = userEvent.setup();
     server.use(
       http.get("*/api/v1/projects/:id", () => {
@@ -214,48 +212,8 @@ describe("ProjectDetailContent", () => {
 
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
 
-    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mark done" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start project" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
-  });
-
-  it("shows Resume and Cancel Project buttons for paused project", async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.get("*/api/v1/projects/:id", () => {
-        return HttpResponse.json({
-          data: {
-            project: {
-              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
-              title: "Paused Settings Project", goal: "Paused goal",
-              status: "paused", priority: 50, execution_mode: "sequential",
-              max_concurrent: 1, auto_merge: false, base_branch: "main",
-              total_tasks: 3, completed_tasks: 1, failed_tasks: 0,
-              proposed_by_pm: false, source_issue_ids: [],
-              schedule_enabled: false, schedule_interval: 1, schedule_unit: 'days',
-              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-            },
-            tasks: [],
-            recent_cycles: [],
-            attachments: [],
-            specs: [],
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<ProjectDetailContent id="proj-1" />);
-    await waitFor(() => {
-      expect(screen.getByText("Paused Settings Project")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("tab", { name: /Settings/ }));
-
-    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Cancel project" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Start project" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
   it("renders configuration fields in settings tab", async () => {
