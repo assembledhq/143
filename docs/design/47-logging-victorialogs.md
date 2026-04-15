@@ -74,7 +74,7 @@ services:
       - -retentionPeriod=30d  # VictoriaLogs automatically deletes data older than this; no manual cleanup needed
       - -httpListenAddr=:9428
     ports:
-      - "${PRIVATE_IP:-10.0.0.3}:9428:9428"  # bind to private network IP only
+      - "${PRIVATE_IP}:9428:9428"  # bind to private network IP only; PRIVATE_IP must be set in .env
     restart: unless-stopped
     deploy:
       resources:
@@ -168,7 +168,7 @@ sinks:
   victorialogs:
     type: http
     inputs: ["filter_noise"]
-    uri: "http://${VICTORIALOGS_HOST:-10.0.0.3}:9428/insert/jsonline"
+    uri: "http://${VICTORIALOGS_HOST}:9428/insert/jsonline"  # VICTORIALOGS_HOST must be set in .env
     encoding:
       codec: json
     query_string_parameters:
@@ -194,7 +194,7 @@ Add the `vector` service and `vector-buffer` volume to the existing compose file
     image: timberio/vector:0.54.0-alpine
     environment:
       SERVER_ROLE: app
-      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST:-10.0.0.3}
+      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST}  # set in .env to the logging server's private IP
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./deploy/vector.yaml:/etc/vector/vector.yaml:ro
@@ -332,15 +332,21 @@ For now, Grafana alerting on log queries is sufficient:
 - **Error rate spike**: Alert if `level:error` count exceeds threshold in 5-min window
 - **Agent run failures**: Alert if `"agent run failed"` appears > 3 times in 15 min
 - **Sandbox OOM**: Alert on `"out of memory"` in worker logs
-- **Logging server disk usage**: Alert if disk usage on the logging server exceeds 80%. Use Vector's built-in `host_metrics` source with the `filesystem` collector on the logging server — this is cleaner than a cron job and avoids the problem of getting cron output into a Docker log stream. Add to `docker-compose.logging.yml`'s Vector config:
+- **Logging server disk usage**: Alert if disk usage on the logging server exceeds 80%. Add a lightweight disk-monitor container to `docker-compose.logging.yml` that emits JSON to stdout every 5 minutes — Vector's `docker_logs` source picks it up like any other container log:
   ```yaml
-  sources:
-    host_metrics:
-      type: host_metrics
-      collectors: [filesystem]
-      scrape_interval_secs: 300
+  disk-monitor:
+    image: alpine:3.21
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          PCT=$$(df / | awk 'NR==2 {gsub(/%/,""); print $$5}')
+          echo "{\"level\":\"info\",\"service\":\"disk-monitor\",\"disk_used_pct\":$$PCT,\"message\":\"disk usage check\"}"
+          sleep 300
+        done
+    restart: unless-stopped
   ```
-  Grafana alert on the `filesystem_used_ratio` metric exceeding 0.8.
+  Grafana alert query: `service:disk-monitor AND disk_used_pct:range(80, Inf)`
 
 ## Resource Budget
 
@@ -410,8 +416,8 @@ esac
 Update secret validation — logging doesn't need DB_PASSWORD or DB_HOST:
 
 ```bash
-: "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
 if [ "$ROLE" != "logging" ]; then
+  : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
   : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
 fi
 if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
@@ -490,8 +496,8 @@ Add secrets block (before the `db` block):
 #
 # Or manually substitute and pass as user-data:
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
-#   export GHCR_TOKEN="ghp_xxxx"
 #   export GRAFANA_ADMIN_PASSWORD="your-grafana-password"
+#   export PRIVATE_IP="10.0.0.5"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/logging.yml > /tmp/user-data.yml
 
@@ -510,10 +516,8 @@ packages:
   - jq
 
 runcmd:
-  # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
-  - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
-
   # Clone repo to get compose files and configs.
+  # No GHCR login needed — VictoriaLogs and Grafana are public images.
   - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
   - su - deploy -c 'cp /tmp/143-repo/docker-compose.logging.yml /opt/143/'
   - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
@@ -543,11 +547,7 @@ write_files:
     permissions: '0600'
     content: |
       GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-
-  - path: /opt/143/.ghcr-token
-    owner: deploy:deploy
-    permissions: '0600'
-    content: ${GHCR_TOKEN}
+      PRIVATE_IP=${PRIVATE_IP}
 ```
 
 ### A.5: Fleet Hosts Update (`.env.production.enc`)
