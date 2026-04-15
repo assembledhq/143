@@ -323,20 +323,7 @@ deploy-logging:
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
 deploy-fleet:
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	@$(read-fleet-hosts); \
-	if [ -z "$$FLEET" ]; then \
-		echo "ERROR: FLEET_HOSTS is not set. Set FLEET_HOSTS env var or add it to .env.production.enc"; \
-		exit 1; \
-	fi; \
-	echo "Deploying fleet..."; \
-	IFS=','; \
-	for entry in $$FLEET; do \
-		ROLE="$${entry%%:*}"; \
-		IP="$${entry#*:}"; \
-		echo "--- Deploying $$ROLE → $$IP ---"; \
-		./deploy/scripts/deploy.sh "$$ROLE" "$$IP" "$(SSH_KEY)"; \
-	done; \
-	echo "Fleet deployment complete."
+	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
