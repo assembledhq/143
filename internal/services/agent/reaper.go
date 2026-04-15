@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -25,7 +26,8 @@ type UsageRoller interface {
 }
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in four phases:
+// in five phases:
+//   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
 //   - Phase 1: Transition idle sessions to completed (keep snapshots)
 //   - Phase 2: Delete snapshots that have exceeded the max snapshot age
 //   - Phase 3: Close orphaned container usage events for billing accuracy
@@ -36,6 +38,7 @@ type SessionReaper struct {
 	orphanCloser     OrphanCloser // nil-safe — billing orphan cleanup disabled if nil
 	usageRoller      UsageRoller  // nil-safe — usage rollup disabled if nil
 	maxIdleAge       time.Duration
+	maxPendingAge    time.Duration
 	maxSnapshotAge   time.Duration
 	interval         time.Duration
 	logger           zerolog.Logger
@@ -46,8 +49,11 @@ type SessionReaper struct {
 // StaleSessionLister is the subset of the session store used by the reaper.
 type StaleSessionLister interface {
 	ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error)
+	ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error)
 	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
+	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
+	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 }
 
@@ -66,11 +72,16 @@ func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
 // sessions idle for longer than maxIdleAge and snapshots older than maxSnapshotAge.
+// defaultMaxPendingAge is the maximum time a session can stay in "pending"
+// before the reaper considers it stuck and marks it as failed.
+const defaultMaxPendingAge = 10 * time.Minute
+
 func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger, opts ...SessionReaperOption) *SessionReaper {
 	r := &SessionReaper{
 		sessions:       sessions,
 		snapshotStore:  snapshotStore,
 		maxIdleAge:     maxIdleAge,
+		maxPendingAge:  defaultMaxPendingAge,
 		maxSnapshotAge: maxSnapshotAge,
 		interval:       interval,
 		logger:         logger,
@@ -88,9 +99,10 @@ func (r *SessionReaper) Run(ctx context.Context) {
 
 	r.logger.Info().
 		Dur("interval", r.interval).
+		Dur("max_pending", r.maxPendingAge).
 		Dur("max_idle", r.maxIdleAge).
 		Dur("max_snapshot_age", r.maxSnapshotAge).
-		Msg("snapshot reaper started")
+		Msg("session reaper started")
 
 	for {
 		select {
@@ -103,7 +115,42 @@ func (r *SessionReaper) Run(ctx context.Context) {
 	}
 }
 
+// FailureCategoryStuckPending is the failure category for sessions that timed
+// out in the pending state without ever starting.
+const FailureCategoryStuckPending = "stuck_pending"
+
 func (r *SessionReaper) reap(ctx context.Context) {
+	// Phase 0: Fail sessions stuck in pending with no active job.
+	pendingCutoff := time.Now().Add(-r.maxPendingAge)
+	stalePending, err := r.sessions.ListStalePendingSessions(ctx, pendingCutoff)
+	if err != nil {
+		r.logger.Error().Err(err).Msg("reaper: failed to list stale pending sessions")
+	} else {
+		for _, s := range stalePending {
+			errMsg := fmt.Sprintf("session timed out after %s in pending state without starting", r.maxPendingAge)
+			result := &models.SessionResult{
+				Error: strPtr(errMsg),
+			}
+			if err := r.sessions.UpdateResult(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed), result); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale pending session as failed")
+				continue
+			}
+			explanation := "This session was unable to start within the expected time. This can happen when the system is under heavy load or if there was an internal error processing the request."
+			nextSteps := []string{
+				"Try running the session again",
+				"Check if you have other sessions currently running that may be consuming capacity",
+			}
+			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryStuckPending, nextSteps, true); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for stale pending session")
+			}
+			r.logger.Warn().
+				Str("session_id", s.ID.String()).
+				Str("org_id", s.OrgID.String()).
+				Time("created_at", s.CreatedAt).
+				Msg("reaper: failed stale pending session")
+		}
+	}
+
 	// Phase 1: Transition stale idle sessions to completed (keep snapshots).
 	idleCutoff := time.Now().Add(-r.maxIdleAge)
 	staleSessions, err := r.sessions.ListStaleIdleSessions(ctx, idleCutoff)

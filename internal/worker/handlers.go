@@ -597,6 +597,31 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 
 		if err := services.Orchestrator.RunAgent(ctx, &run); err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) {
+				// If the session has been pending for too long, fail it
+				// instead of retrying indefinitely.
+				if time.Since(run.CreatedAt) > 8*time.Minute {
+					logger.Warn().
+						Str("session_id", runID.String()).
+						Dur("age", time.Since(run.CreatedAt)).
+						Msg("concurrency limit: session pending too long, failing")
+					errMsg := "Session could not start: all agent slots are in use. Please try again when capacity is available."
+					failErr := stores.Sessions.UpdateResult(ctx, orgID, runID, "failed", &models.SessionResult{
+						Error: &errMsg,
+					})
+					if failErr != nil {
+						logger.Error().Err(failErr).Str("session_id", runID.String()).Msg("failed to mark timed-out session as failed")
+					}
+					_ = stores.Sessions.UpdateFailure(ctx, orgID, runID,
+						"This session was unable to start because all available agent slots were in use for an extended period.",
+						"concurrency_timeout",
+						[]string{
+							"Wait for other running sessions to complete, then retry",
+							"Cancel sessions that are no longer needed to free up capacity",
+						},
+						true,
+					)
+					return &FatalError{Err: fmt.Errorf("session timed out waiting for concurrency slot: %w", err)}
+				}
 				return &RetryableError{Err: err}
 			}
 			return err
