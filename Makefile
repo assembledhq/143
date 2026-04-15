@@ -308,7 +308,7 @@ logs:
 	fi; \
 	echo "Opening Grafana tunnel → http://localhost:9999"; \
 	echo "Press Ctrl+C to close."; \
-	ssh -i $(SSH_KEY) -L 9999:localhost:3000 -N deploy@$$LOGGING_HOST
+	ssh -i $(SSH_KEY) -L 9999:localhost:9999 -N deploy@$$LOGGING_HOST
 
 # Deploy all nodes in the fleet.
 # Requires FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
