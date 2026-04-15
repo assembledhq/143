@@ -575,6 +575,28 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 	return err
 }
 
+// ListStalePendingSessions returns pending sessions created before the given
+// cutoff. These sessions have been stuck in pending for too long and should be
+// failed with an explanatory error.
+func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionListColumns + `
+		FROM sessions s
+		WHERE s.status = 'pending'
+		  AND s.deleted_at IS NULL
+		  AND s.created_at < @created_before
+		ORDER BY s.created_at ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"created_before": createdBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query stale pending sessions: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
 // ListStaleIdleSessions returns idle sessions that have been inactive longer
 // than the idle timeout. These sessions should be transitioned to completed
 // but their snapshots are preserved for later resumption.
