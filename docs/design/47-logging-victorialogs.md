@@ -270,9 +270,26 @@ Vector will still collect and ship logs without this change, but all fields will
 
 ### Step 1: Provision Logging Server
 
+The logging server follows the same provisioning pattern as app, worker, and db nodes. This requires changes to:
+
+- **Makefile**: Add `provision-logging` and `deploy-logging` targets
+- **`deploy/scripts/provision.sh`**: Add `logging` role — lightweight bootstrap (Docker only, no gVisor, no kernel tuning), `GRAFANA_ADMIN_PASSWORD` as the only secret (no DB credentials or age key)
+- **`deploy/scripts/deploy.sh`**: Add `logging` role with `grafana` as the health service
+- **`deploy/scripts/bootstrap.sh`**: Accept `logging` as a valid role
+- **`deploy/cloud-init/logging.yml`**: Cloud-init template for automated provisioning
+- **`deploy/fleet-hosts.txt.example`**: Add `logging` entry
+
+Key differences from other roles:
+- **No gVisor** — logging server doesn't run sandboxes
+- **No DB credentials** — logging server doesn't connect to Postgres
+- **No GHCR login needed** — VictoriaLogs and Grafana are public Docker Hub images
+- **Minimal secrets** — only `GRAFANA_ADMIN_PASSWORD`
+
+Provisioning workflow:
+
 1. Provision Hetzner CX22
-2. Set up Hetzner Cloud Network between all three servers (app, worker, logging)
-3. Deploy `docker-compose.logging.yml` on the logging server
+2. Set up Hetzner Cloud Network between all servers (app, worker, db, logging)
+3. Run `make provision-logging HOST=<ip> SSH_KEY=~/.ssh/143-deploy`
 4. Verify Grafana is accessible and VictoriaLogs is reachable from the private network
 
 ### Step 2: Deploy Vector Collectors
@@ -360,3 +377,193 @@ Replaces manual SSH + `docker logs` debugging.
 - **Hetzner Object Storage**: If log volume grows, configure VictoriaLogs to offload older data to Hetzner Object Storage (~€0.005/GB/month) for cheap long-term retention
 - **VictoriaMetrics**: If we move off Datadog for metrics, VictoriaMetrics (same team) is the natural companion — same operational model, same Grafana integration
 - **Cluster mode**: If we add more servers and log volume exceeds single-node capacity, VictoriaLogs supports a cluster mode with separate insert/query/storage roles
+
+---
+
+## Appendix: Implementation Reference
+
+Ready-to-use configs and script diffs for implementation. These follow the existing patterns in `deploy/scripts/` and `deploy/cloud-init/`.
+
+### A.1: Makefile Additions
+
+```makefile
+#   make provision-logging HOST=10.0.0.5       SSH_KEY=~/.ssh/143-deploy
+
+provision-logging:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> SSH_KEY=<path>"; exit 1; }
+	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	./deploy/scripts/provision.sh logging $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+#   make deploy-logging HOST=10.0.0.5       SSH_KEY=~/.ssh/143-deploy
+
+deploy-logging:
+	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
+	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	./deploy/scripts/deploy.sh logging $(HOST) $(SSH_KEY)
+```
+
+### A.2: provision.sh Changes
+
+Add `logging` to the role validation:
+
+```bash
+case "$ROLE" in
+  app)     COMPOSE_FILE="docker-compose.app.yml" ;;
+  worker)  COMPOSE_FILE="docker-compose.worker.yml" ;;
+  db)      COMPOSE_FILE="docker-compose.db.yml" ;;
+  logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
+  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+esac
+```
+
+Update secret validation — logging doesn't need DB_PASSWORD or DB_HOST:
+
+```bash
+: "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
+if [ "$ROLE" != "logging" ]; then
+  : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
+  : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
+fi
+if [ "$ROLE" = "logging" ]; then
+  : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
+fi
+```
+
+Add bootstrap block (after the `db` block, before `else`):
+
+```bash
+elif [ "$ROLE" = "logging" ]; then
+  # Logging nodes just need Docker — no gVisor, no special kernel tuning
+  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'BOOTSTRAP_LOGGING'
+    set -euo pipefail
+    id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
+    mkdir -p /home/deploy/.ssh /opt/143
+    [ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+    chown -R deploy:deploy /home/deploy/.ssh /opt/143
+    chmod 700 /home/deploy/.ssh
+    command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
+    usermod -aG docker deploy
+    echo "Bootstrap complete (logging)."
+BOOTSTRAP_LOGGING
+```
+
+Add secrets block (before the `db` block):
+
+```bash
+if [ "$ROLE" = "logging" ]; then
+  # Logging nodes only need the Grafana admin password — no DB or age key
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
+elif [ "$ROLE" = "db" ]; then
+```
+
+Update image pull — logging uses public images:
+
+```bash
+  db|logging)
+    # Public images (postgres, victorialogs, grafana) are pulled automatically by compose
+    ;;
+```
+
+### A.3: deploy.sh Changes
+
+Add `logging` to the role case:
+
+```bash
+  logging)
+    COMPOSE_FILE="docker-compose.logging.yml"
+    HEALTH_SERVICE="grafana"
+    ;;
+```
+
+Add secrets block (before the `db` block):
+
+```bash
+  if [ "$ROLE" = "logging" ]; then
+    printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD:-}" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  elif [ "$ROLE" = "db" ]; then
+```
+
+### A.4: Cloud-Init Template (`deploy/cloud-init/logging.yml`)
+
+```yaml
+#cloud-config
+# Logging node bootstrap (VictoriaLogs + Grafana).
+# Receives logs from Vector collectors on app/worker nodes via Hetzner private network.
+#
+# Provision from your local machine:
+#   make provision-logging HOST=10.0.0.5 SSH_KEY=~/.ssh/143-deploy
+#
+# Or manually substitute and pass as user-data:
+#   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"
+#   export GHCR_TOKEN="ghp_xxxx"
+#   export GRAFANA_ADMIN_PASSWORD="your-grafana-password"
+#   export REPO_URL="https://github.com/assembledhq/143.git"
+#   envsubst < deploy/cloud-init/logging.yml > /tmp/user-data.yml
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+  - git
+  - jq
+
+runcmd:
+  # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
+  - su - deploy -c 'cat /opt/143/.ghcr-token | docker login ghcr.io -u deploy --password-stdin && rm -f /opt/143/.ghcr-token'
+
+  # Clone repo to get compose files and configs.
+  - su - deploy -c 'git clone --depth 1 ${REPO_URL} /tmp/143-repo'
+  - su - deploy -c 'cp /tmp/143-repo/docker-compose.logging.yml /opt/143/'
+  - su - deploy -c 'cp -r /tmp/143-repo/deploy /opt/143/deploy'
+  - rm -rf /tmp/143-repo
+
+  # Start the stack and wait for Grafana health
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.logging.yml up -d --remove-orphans'
+  - |
+    echo "Waiting for Grafana health check..."
+    HEALTHY=false
+    for i in $(seq 1 30); do
+      if wget -qO- http://localhost:3000/api/health > /dev/null 2>&1; then
+        echo "Health check passed."
+        HEALTHY=true
+        break
+      fi
+      sleep 2
+    done
+    if [ "$HEALTHY" != "true" ]; then
+      echo "ERROR: Grafana health check timed out after 60s."
+      exit 1
+    fi
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+
+  - path: /opt/143/.ghcr-token
+    owner: deploy:deploy
+    permissions: '0600'
+    content: ${GHCR_TOKEN}
+```
+
+### A.5: Fleet Hosts Update (`deploy/fleet-hosts.txt.example`)
+
+```
+db      10.0.0.3
+app     10.0.0.2
+worker  10.0.0.4
+logging 10.0.0.5
+```
