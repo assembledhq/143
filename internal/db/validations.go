@@ -60,7 +60,10 @@ func (s *ValidationStore) GetBySessionID(ctx context.Context, orgID, sessionID u
 		       regression_test_check, coverage_delta, ci_check, details,
 		       started_at, completed_at, created_at
 		FROM validations
-		WHERE session_id = @session_id AND org_id = @org_id`
+		WHERE session_id = @session_id AND org_id = @org_id
+		ORDER BY CASE WHEN status IN ('passed', 'failed') THEN 0 ELSE 1 END,
+		         created_at DESC
+		LIMIT 1`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"session_id": sessionID,
