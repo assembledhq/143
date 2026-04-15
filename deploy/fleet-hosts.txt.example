@@ -7,7 +7,6 @@
 #   # Edit with your actual IPs, then:
 #   make deploy-fleet SSH_KEY=~/.ssh/143-deploy
 
-db      10.0.0.3
-app     10.0.0.2
-worker  10.0.0.4
-logging 10.0.0.5
+db     10.0.0.3
+app    10.0.0.2
+worker 10.0.0.4

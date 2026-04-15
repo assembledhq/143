@@ -4,7 +4,7 @@ set -euo pipefail
 # Provision a node by running bootstrap.sh + copying config files via SSH.
 # Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
 #
-# Roles: app, worker, db, logging
+# Roles: app, worker, db
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
@@ -31,11 +31,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Validate role
 case "$ROLE" in
-  app)     COMPOSE_FILE="docker-compose.app.yml" ;;
-  worker)  COMPOSE_FILE="docker-compose.worker.yml" ;;
-  db)      COMPOSE_FILE="docker-compose.db.yml" ;;
-  logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
-  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+  app)    COMPOSE_FILE="docker-compose.app.yml" ;;
+  worker) COMPOSE_FILE="docker-compose.worker.yml" ;;
+  db)     COMPOSE_FILE="docker-compose.db.yml" ;;
+  *)      echo "Unknown role: $ROLE (expected: app, worker, db)"; exit 1 ;;
 esac
 
 # Read SOPS_AGE_KEY from the default age keyfile if not already set
@@ -76,15 +75,10 @@ else
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
+: "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
 : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
-if [ "$ROLE" != "logging" ]; then
-  : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
-fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
+if [ "$ROLE" != "db" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
-fi
-if [ "$ROLE" = "logging" ]; then
-  : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
 fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
@@ -128,19 +122,6 @@ SYSCTL
     sysctl -p /etc/sysctl.d/99-postgres.conf
     echo "Bootstrap complete (db)."
 BOOTSTRAP_DB
-elif [ "$ROLE" = "logging" ]; then
-  # Logging nodes just need Docker — no gVisor, no special kernel tuning
-  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'BOOTSTRAP_LOGGING'
-    set -euo pipefail
-    id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
-    mkdir -p /home/deploy/.ssh /opt/143
-    [ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
-    chown -R deploy:deploy /home/deploy/.ssh /opt/143
-    chmod 700 /home/deploy/.ssh
-    command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
-    usermod -aG docker deploy
-    echo "Bootstrap complete (logging)."
-BOOTSTRAP_LOGGING
 else
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'bash -s -- '"$ROLE" < "$SCRIPT_DIR/bootstrap.sh"
 fi
@@ -154,11 +135,7 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143"
 # Step 3: Write .env with secrets
 # Uses printf + pipe to avoid nested heredoc quoting issues with special chars.
 echo "--- Step 3/5: Writing secrets ---"
-if [ "$ROLE" = "logging" ]; then
-  # Logging nodes only need the Grafana admin password — no DB or age key
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "$GRAFANA_ADMIN_PASSWORD" \
-    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
-elif [ "$ROLE" = "db" ]; then
+if [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
@@ -197,8 +174,8 @@ PULL_APP
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
 PULL_WORKER
     ;;
-  db|logging)
-    # Public images (postgres, victorialogs, grafana) are pulled automatically by compose
+  db)
+    # Postgres image is pulled automatically by compose
     ;;
 esac
 

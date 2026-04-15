@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent machine setup for app and worker nodes.
 # Usage: ssh root@<vps-ip> 'bash -s -- <role>' < deploy/scripts/bootstrap.sh
-#        role: app | worker | logging (default: worker)
+#        role: app | worker (default: worker)
 set -euo pipefail
 
 ROLE="${1:-worker}"

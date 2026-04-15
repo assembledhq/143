@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy to a node via SSH.
 # Usage: ./deploy.sh <role> <host> <ssh-key-path> [image-tag]
 #
-# Roles: app, worker, db, logging
+# Roles: app, worker, db
 # Provider-agnostic — just needs SSH access to the target.
 
 ROLE="$1"
@@ -27,11 +27,7 @@ case "$ROLE" in
     COMPOSE_FILE="docker-compose.db.yml"
     HEALTH_SERVICE="postgres"
     ;;
-  logging)
-    COMPOSE_FILE="docker-compose.logging.yml"
-    HEALTH_SERVICE="grafana"
-    ;;
-  *)      echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+  *)      echo "Unknown role: $ROLE (expected: app, worker, db)"; exit 1 ;;
 esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
@@ -64,10 +60,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     fi
   done <<< "$DECRYPTED"
 
-  if [ "$ROLE" = "logging" ]; then
-    printf 'GRAFANA_ADMIN_PASSWORD=%s\n' "${GRAFANA_ADMIN_PASSWORD:-}" \
-      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
-  elif [ "$ROLE" = "db" ]; then
+  if [ "$ROLE" = "db" ]; then
     printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "worker" ]; then

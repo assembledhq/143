@@ -237,13 +237,12 @@ secrets-rotate:
 # (DB_PASSWORD, DB_HOST, GHCR_TOKEN) from .env.production.enc automatically.
 #
 # Usage:
-#   make provision-app     HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
-#   make provision-worker  HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
-#   make provision-db      HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
-#   make provision-logging HOST=10.0.0.5       SSH_KEY=~/.ssh/143-deploy
+#   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
+#   make provision-worker HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
+#   make provision-db     HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
 #
 # To tear down and reprovision an existing node:
-#   make provision-app     HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy REPROVISION=true
+#   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy REPROVISION=true
 
 REPROVISION ?=
 
@@ -262,17 +261,11 @@ provision-db:
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
-provision-logging:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> SSH_KEY=<path>"; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	./deploy/scripts/provision.sh logging $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
-
 # Deploy (update) an already-provisioned node.
 # Usage:
-#   make deploy-app     HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
-#   make deploy-worker  HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
-#   make deploy-db      HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
-#   make deploy-logging HOST=10.0.0.5       SSH_KEY=~/.ssh/143-deploy
+#   make deploy-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
+#   make deploy-worker HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
+#   make deploy-db     HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
 
 deploy-app:
 	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
@@ -288,11 +281,6 @@ deploy-db:
 	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/deploy.sh db $(HOST) $(SSH_KEY)
-
-deploy-logging:
-	@test -n "$(HOST)" || { echo "HOST is required."; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
-	./deploy/scripts/deploy.sh logging $(HOST) $(SSH_KEY)
 
 # Deploy all nodes in the fleet.
 # Requires fleet-hosts.txt with format: role IP (one per line).
