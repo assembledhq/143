@@ -3,7 +3,7 @@
 # Receives logs from Vector collectors on app/worker nodes via Hetzner private network.
 #
 # Provision from your local machine:
-#   make provision-logging HOST=10.0.0.5 SSH_KEY=~/.ssh/143-deploy
+#   make provision-logging HOST=10.0.0.5
 #
 # Or manually substitute and pass as user-data:
 #   export SSH_PUBLIC_KEY="$(cat ~/.ssh/143-deploy.pub)"

@@ -236,41 +236,51 @@ secrets-rotate:
 # Reads age key from ~/.config/sops/age/keys.txt and all other secrets
 # (DB_PASSWORD, DB_HOST, GHCR_TOKEN) from .env.production.enc automatically.
 #
+# SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
-#   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
-#   make provision-worker HOST=87.99.158.39   SSH_KEY=~/.ssh/143-deploy
-#   make provision-db     HOST=87.99.157.55   SSH_KEY=~/.ssh/143-deploy
+#   make provision-app    HOST=87.99.150.138
+#   make provision-worker HOST=87.99.158.39
+#   make provision-db     HOST=87.99.157.55
 #
 # To tear down and reprovision an existing node:
-#   make provision-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy REPROVISION=true
+#   make provision-app    HOST=87.99.150.138  REPROVISION=true
 
 REPROVISION ?=
 
+# Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
+SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
+
+# Guard: fail with a helpful message when SSH_KEY is empty.
+define check-ssh-key
+@test -n "$(SSH_KEY)" || { echo "SSH_KEY could not be auto-detected. Set SSH_KEY=<path>."; exit 1; }
+endef
+
 provision-app:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-app HOST=<ip> SSH_KEY=<path>"; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-app HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
 	./deploy/scripts/provision.sh app $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-worker:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> SSH_KEY=<path>"; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-db:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> SSH_KEY=<path>"; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
 	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-logging:
-	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> SSH_KEY=<path>"; exit 1; }
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
 	./deploy/scripts/provision.sh logging $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 # Deploy (update) an already-provisioned node.
 # HOST is optional — falls back to the matching role in FLEET_HOSTS from .env.production.enc.
+# SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
-#   make deploy-app    SSH_KEY=~/.ssh/143-deploy
-#   make deploy-app    HOST=87.99.150.138  SSH_KEY=~/.ssh/143-deploy
+#   make deploy-app
+#   make deploy-app    HOST=87.99.150.138
 
 # Shell snippet to read FLEET_HOSTS from env var or .env.production.enc via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
@@ -304,34 +314,49 @@ fi
 endef
 
 deploy-app:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	$(check-ssh-key)
 	@$(call resolve-host,app)
 
 deploy-worker:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	$(check-ssh-key)
 	@$(call resolve-host,worker)
 
 deploy-db:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	$(check-ssh-key)
 	@$(call resolve-host,db)
 
 deploy-logging:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	$(check-ssh-key)
 	@$(call resolve-host,logging)
 
 # Deploy all nodes in the fleet.
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
 deploy-fleet:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
+	$(check-ssh-key)
 	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
 
+# Sync SSH public keys from deploy/authorized_keys/*.pub to all fleet nodes.
+# Dry-run by default — shows diff without changing anything.
+# Usage: make sync-keys            (dry run)
+#        make sync-keys APPLY=1    (actually push changes)
+APPLY ?=
+sync-keys:
+	$(check-ssh-key)
+	@$(read-fleet-hosts); \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | cut -d: -f2 | sort -u)"; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: No hosts found. Set FLEET_HOSTS or add entries to .env.production.enc."; \
+		exit 1; \
+	fi; \
+	./deploy/scripts/sync-keys.sh $(if $(APPLY),--apply) $(SSH_KEY) $$HOSTS
+
 # Open Grafana via SSH tunnel.
-# Usage: make logs SSH_KEY=~/.ssh/143-deploy
+# Usage: make logs [SSH_KEY=~/.ssh/143-deploy]
 logs:
-	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required. Usage: make logs SSH_KEY=~/.ssh/143-deploy"; exit 1; }
+	$(check-ssh-key)
 	@LOGGING_HOST="$(LOGGING_HOST)"; \
 	if [ -z "$$LOGGING_HOST" ]; then \
 		$(read-fleet-hosts); \
