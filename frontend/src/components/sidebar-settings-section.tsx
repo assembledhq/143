@@ -12,6 +12,7 @@ import {
   FlaskConical,
   Users,
   ScrollText,
+  BarChart3,
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
@@ -56,6 +57,7 @@ const settingsGroups: SettingsGroup[] = [
     items: [
       { label: "General", icon: Settings, href: "/settings" },
       { label: "Team", icon: Users, href: "/settings/team" },
+      { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
     ],
   },

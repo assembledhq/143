@@ -562,6 +562,36 @@ export const api = {
     acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
   },
+  usage: {
+    getSummary: (params?: { start?: string; end?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.start) searchParams.set('start', params.start);
+      if (params?.end) searchParams.set('end', params.end);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').UsageSummary>>(`/api/v1/usage${qs ? `?${qs}` : ''}`);
+    },
+    getTimeseries: (params: { start: string; end: string; group_by?: string; user_id?: string; capacity?: string }) => {
+      const searchParams = new URLSearchParams({ start: params.start, end: params.end });
+      if (params.group_by) searchParams.set('group_by', params.group_by);
+      if (params.user_id) searchParams.set('user_id', params.user_id);
+      if (params.capacity) searchParams.set('capacity', params.capacity);
+      return get<import('./types').SingleResponse<import('./types').UsageTimeseriesResponse>>(`/api/v1/usage/timeseries?${searchParams.toString()}`);
+    },
+    getBreakdown: (params: { start: string; end: string; dimension?: string; sort?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams({ start: params.start, end: params.end });
+      if (params.dimension) searchParams.set('dimension', params.dimension);
+      if (params.sort) searchParams.set('sort', params.sort);
+      if (params.limit) searchParams.set('limit', String(params.limit));
+      return get<import('./types').ListResponse<import('./types').UsageBreakdownRow>>(`/api/v1/usage/breakdown?${searchParams.toString()}`);
+    },
+    getExportUrl: (params: { start: string; end: string; granularity?: string; dimension?: string; tz?: string }) => {
+      const searchParams = new URLSearchParams({ start: params.start, end: params.end });
+      if (params.granularity) searchParams.set('granularity', params.granularity);
+      if (params.dimension) searchParams.set('dimension', params.dimension);
+      if (params.tz) searchParams.set('tz', params.tz);
+      return `${API_BASE}/api/v1/usage/export?${searchParams.toString()}`;
+    },
+  },
   reviewComments: {
     list: (params?: { pull_request_id?: string; filter_status?: string; cursor?: string }) => {
       const searchParams = new URLSearchParams();
