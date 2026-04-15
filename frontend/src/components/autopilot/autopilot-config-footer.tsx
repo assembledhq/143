@@ -1,8 +1,16 @@
 "use client";
 
+import { useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
+import { cn } from "@/lib/utils";
 
 interface AutopilotConfigFooterProps {
   directionSummary: string;
@@ -54,45 +62,120 @@ export function AutopilotConfigFooter({
   onManageDocuments,
   onOpenSettings,
 }: AutopilotConfigFooterProps) {
-  const focusDisplay = focusAreas.length > 0
-    ? (
+  const [isOpen, setIsOpen] = useState(false);
+
+  const directionPill = directionSummary
+    ? directionSummary.length > 48
+      ? directionSummary.slice(0, 48) + "\u2026"
+      : directionSummary
+    : "No direction";
+
+  const focusPill =
+    focusAreas.length > 0
+      ? `${focusAreas.length} focus area${focusAreas.length !== 1 ? "s" : ""}`
+      : "No focus";
+
+  const docsPill = documentsSummary || "No docs";
+
+  const weightsPill = weightsSummary || "Default weights";
+
+  const focusDisplay =
+    focusAreas.length > 0 ? (
       <span className="inline-flex flex-wrap gap-1.5 align-middle">
         {focusAreas.map((area) => (
-          <Badge key={area} variant="secondary" className="text-xs">{area}</Badge>
+          <Badge key={area} variant="secondary" className="text-xs">
+            {area}
+          </Badge>
         ))}
       </span>
-    )
-    : "Add focus areas to narrow analysis";
+    ) : (
+      "Add focus areas to narrow analysis"
+    );
 
   return (
     <section>
       <Separator />
-      <div className="divide-y divide-border/60">
-        <ConfigRow
-          label="Direction"
-          value={directionSummary || "Set a direction to guide analysis"}
-          actionLabel="Edit"
-          onAction={onEditDirection}
-        />
-        <ConfigRow
-          label="Focus"
-          value={focusDisplay}
-          actionLabel="Edit"
-          onAction={onEditDirection}
-        />
-        <ConfigRow
-          label="Documents"
-          value={documentsSummary}
-          actionLabel="Manage"
-          onAction={onManageDocuments}
-        />
-        <ConfigRow
-          label="Weights & more"
-          value={weightsSummary || "Using defaults"}
-          actionLabel="Settings"
-          onAction={onOpenSettings}
-        />
-      </div>
+      <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+        {/* Pill bar — always visible */}
+        <div className="flex items-center gap-2 py-2.5">
+          <div className="flex flex-1 flex-wrap items-center gap-1.5 min-w-0">
+            <Badge
+              variant="secondary"
+              className="cursor-pointer text-xs hover:bg-secondary/80"
+              onClick={onEditDirection}
+            >
+              {directionPill}
+            </Badge>
+            <Badge
+              variant="secondary"
+              className="cursor-pointer text-xs hover:bg-secondary/80"
+              onClick={onEditDirection}
+            >
+              {focusPill}
+            </Badge>
+            <Badge
+              variant="secondary"
+              className="cursor-pointer text-xs hover:bg-secondary/80"
+              onClick={onManageDocuments}
+            >
+              {docsPill}
+            </Badge>
+            <Badge
+              variant="secondary"
+              className="cursor-pointer text-xs hover:bg-secondary/80"
+              onClick={onOpenSettings}
+            >
+              {weightsPill}
+            </Badge>
+          </div>
+          <CollapsibleTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="shrink-0 text-muted-foreground"
+            >
+              <ChevronRight
+                className={cn(
+                  "h-3.5 w-3.5 transition-transform duration-200",
+                  isOpen && "rotate-90"
+                )}
+              />
+            </Button>
+          </CollapsibleTrigger>
+        </div>
+
+        {/* Expanded detail view */}
+        <CollapsibleContent className="overflow-hidden">
+          <div>
+            <div className="divide-y divide-border/60">
+              <ConfigRow
+                label="Direction"
+                value={directionSummary || "Set a direction to guide analysis"}
+                actionLabel="Edit"
+                onAction={onEditDirection}
+              />
+              <ConfigRow
+                label="Focus"
+                value={focusDisplay}
+                actionLabel="Edit"
+                onAction={onEditDirection}
+              />
+              <ConfigRow
+                label="Documents"
+                value={documentsSummary}
+                actionLabel="Manage"
+                onAction={onManageDocuments}
+              />
+              <ConfigRow
+                label="Weights & more"
+                value={weightsSummary || "Using defaults"}
+                actionLabel="Settings"
+                onAction={onOpenSettings}
+              />
+            </div>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
     </section>
   );
 }
