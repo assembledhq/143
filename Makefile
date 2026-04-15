@@ -283,7 +283,7 @@ deploy-db:
 	./deploy/scripts/deploy.sh db $(HOST) $(SSH_KEY)
 
 # Deploy all nodes in the fleet.
-# Requires fleet-hosts.txt with format: role IP (one per line).
+# Requires FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
 deploy-fleet:
 	@test -n "$(SSH_KEY)" || { echo "SSH_KEY is required."; exit 1; }
 	./deploy/scripts/deploy-fleet.sh $(SSH_KEY)
