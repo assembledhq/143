@@ -709,7 +709,28 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
-		o.failRun(ctx, session, fmt.Sprintf("create sandbox: %s", err))
+		// For continued sessions, revert to idle instead of permanently failing
+		// so the user can retry once the infrastructure issue is resolved (e.g.
+		// Docker daemon restarted). Post an assistant message explaining the error.
+		log.Error().Err(err).Msg("sandbox creation failed during continue_session")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
+		}
+		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
+		}
+		if o.sessionMessages != nil {
+			errMsg := &models.SessionMessage{
+				SessionID:  session.ID,
+				OrgID:      session.OrgID,
+				TurnNumber: session.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
+			}
+			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+				log.Error().Err(createErr).Msg("failed to create error message for sandbox failure")
+			}
+		}
 		return fmt.Errorf("create sandbox: %w", err)
 	}
 	containerStartedAt := time.Now()
