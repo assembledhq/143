@@ -187,6 +187,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up
   fi
 
+  # Recreate non-health-service containers (vector, caddy, frontend, etc.)
+  # BEFORE the rolling deploy. These services don't depend on the health
+  # service version, and updating them first ensures config fixes (e.g.
+  # vector.yaml, Caddyfile) are applied even if the health service roll fails.
+  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+    echo "Updating supporting services..."
+    recreate_other_services "$HEALTH_SERVICE"
+  fi
+
   # Rolling deploy for the app service:
   #   1. Scale up a new container alongside the old one (both share the network
   #      so the new container can reach Postgres during startup)
@@ -239,10 +248,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=1" "$HEALTH_SERVICE"
     echo "$HEALTH_SERVICE rolled over successfully."
 
-    # Recreate remaining services (caddy, frontend, vector, etc.) but skip
-    # the health service we just rolled — --force-recreate would destroy it.
-    recreate_other_services "$HEALTH_SERVICE"
-
   elif [ "$ROLE" = "worker" ]; then
     # Workers poll for jobs, so running two simultaneously would double the
     # effective concurrency limit. Instead, stop-then-start: brief downtime is
@@ -260,7 +265,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     echo "$HEALTH_SERVICE restarted successfully."
 
-    recreate_other_services "$HEALTH_SERVICE"
   else
     # Non-rolling roles (db, logging) — just recreate everything.
     docker compose -f "$COMPOSE_FILE" up -d --force-recreate --remove-orphans
