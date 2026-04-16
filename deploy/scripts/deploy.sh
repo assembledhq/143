@@ -125,9 +125,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" logs --tail=50 "$HEALTH_SERVICE" 2>&1 || true
     if [ -n "$cid" ]; then
       echo "--- Docker health check log ---"
-      docker inspect --format '{{range .State.Health.Log}}--- {{.Start}} ---
+      docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}
-{{end}}' "$cid" 2>&1 || true
+{{end}}{{else}}(no health check configured){{end}}' "$cid" 2>&1 || true
     fi
   }
 
@@ -136,8 +136,25 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   wait_container_healthy() {
     local cid="$1" timeout="${2:-120}"
     echo "Waiting for container $cid health check (timeout ${timeout}s)..."
+
+    # If the container has no HEALTHCHECK, treat "running" as healthy.
+    local has_healthcheck
+    has_healthcheck="$(docker inspect --format '{{if .State.Health}}yes{{else}}no{{end}}' "$cid")"
+    if [ "$has_healthcheck" = "no" ]; then
+      local state
+      state="$(docker inspect --format '{{.State.Status}}' "$cid")"
+      if [ "$state" = "running" ]; then
+        echo "No health check configured; container is running."
+        return 0
+      else
+        echo "ERROR: container is $state (no health check configured)"
+        dump_diagnostics "$cid"
+        return 1
+      fi
+    fi
+
     for i in $(seq 1 $((timeout / 2))); do
-      HEALTH_STATUS="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")"
+      HEALTH_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$cid")"
       if [ "$HEALTH_STATUS" = "healthy" ]; then
         echo "Health check passed."
         return 0
