@@ -16,8 +16,11 @@ services:
       SANDBOX_RUNTIME: runsc
     env_file:
       - .env
+    group_add:
+      - ${DOCKER_GID:-988}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - .env.production.enc:/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 15s
