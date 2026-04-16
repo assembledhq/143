@@ -11,7 +11,7 @@ transforms:
     inputs: ["docker_logs"]
     source: |
       # Extract Docker Compose service name
-      .service = .label."com.docker.compose.service" ?? "unknown"
+      .service = .label."com.docker.compose.service" || "unknown"
 
       # Parse structured JSON logs from our Go services (zerolog output).
       # Selectively extract known zerolog fields rather than merging the entire parsed
