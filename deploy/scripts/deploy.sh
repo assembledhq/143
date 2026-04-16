@@ -110,6 +110,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   bash << 'REMOTE'
   cd /opt/143
 
+  recreate_other_services() {
+    local skip="$1"
+    local others
+    others="$(docker compose -f "$COMPOSE_FILE" config --services | grep -v "^${skip}$" || true)"
+    if [ -n "$others" ]; then
+      echo "$others" | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    fi
+  }
+
   dump_diagnostics() {
     local cid="${1:-}"
     echo "--- Last 50 lines of $HEALTH_SERVICE logs ---"
@@ -161,14 +170,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up
   fi
 
-  # Rolling deploy for the primary service:
-  #   1. Scale up a new container alongside the old one
+  # Rolling deploy for the app service:
+  #   1. Scale up a new container alongside the old one (both share the network
+  #      so the new container can reach Postgres during startup)
   #   2. Wait for the new container's health check to pass
   #   3. Stop the old container
-  # Both containers share the network during the health-check window so that
-  # the new container can reach dependencies (DB, etc.) that its health
-  # endpoint may probe.
-  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # NOTE: --no-recreate keeps the old container as-is. If you change compose
+  # config (env vars, ports, etc.) alongside a code deploy, the old container
+  # will still run the stale config during the health-check window.
+  if [ "$ROLE" = "app" ]; then
     OLD_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1 || true)"
 
     echo "Starting new $HEALTH_SERVICE container..."
@@ -208,14 +218,32 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker stop "$OLD_CONTAINER" >/dev/null 2>&1 || true
       docker rm "$OLD_CONTAINER" >/dev/null 2>&1 || true
     fi
+    # Reconcile Compose state back to scale=1 now that only one container remains.
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=1" "$HEALTH_SERVICE"
     echo "$HEALTH_SERVICE rolled over successfully."
 
     # Recreate remaining services (caddy, frontend, vector, etc.) but skip
     # the health service we just rolled — --force-recreate would destroy it.
-    OTHER_SERVICES="$(docker compose -f "$COMPOSE_FILE" ps --services | grep -v "^${HEALTH_SERVICE}$" || true)"
-    if [ -n "$OTHER_SERVICES" ]; then
-      echo "$OTHER_SERVICES" | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    recreate_other_services "$HEALTH_SERVICE"
+
+  elif [ "$ROLE" = "worker" ]; then
+    # Workers poll for jobs, so running two simultaneously would double the
+    # effective concurrency limit. Instead, stop-then-start: brief downtime is
+    # acceptable since workers process async jobs (no user-facing HTTP traffic).
+    echo "Stopping old $HEALTH_SERVICE container..."
+    docker compose -f "$COMPOSE_FILE" stop "$HEALTH_SERVICE"
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
+
+    CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    if [ -n "$CONTAINER_ID" ]; then
+      if ! wait_container_healthy "$CONTAINER_ID" 120; then
+        echo "ERROR: new worker failed health check"
+        exit 1
+      fi
     fi
+    echo "$HEALTH_SERVICE restarted successfully."
+
+    recreate_other_services "$HEALTH_SERVICE"
   else
     # Non-rolling roles (db, logging) — just recreate everything.
     docker compose -f "$COMPOSE_FILE" up -d --force-recreate --remove-orphans
