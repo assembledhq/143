@@ -33,7 +33,7 @@ transforms:
 
       # Add server identity
       .server = get_env_var("SERVER_ROLE") ?? "unknown"
-      .hostname = get_hostname()
+      .hostname, err = get_hostname()
 
   # Drop health check requests after JSON parsing so we can match on structured fields.
   # Filtering on .path avoids accidentally dropping app logs that mention health endpoints.
@@ -57,5 +57,5 @@ sinks:
       enabled: false
     buffer:
       type: disk
-      max_size: 268435456  # 256 MB disk buffer — survives logging server restarts
+      max_size: 268435488  # 256 MB disk buffer — survives logging server restarts
       when_full: drop_newest
