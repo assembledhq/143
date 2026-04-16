@@ -85,7 +85,7 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 
 	d.logger.Info().Str("runtime", d.runtime).Msg("running sandbox runtime health check")
 
-	pidsLimit := int64(16)
+	pidsLimit := int64(64)
 	resp, err := d.client.ContainerCreate(ctx, &container.Config{
 		Image: "busybox:latest",
 		Cmd:   []string{"echo", "runtime-ok"},

@@ -33,7 +33,7 @@ runcmd:
   - curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
   - echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
   - apt-get update && apt-get install -y runsc
-  - runsc install -- --systemd-cgroup
+  - runsc install
   - systemctl restart docker
 
   # Set up GHCR access (token written to file to avoid leaking in cloud-init logs)
