@@ -208,10 +208,9 @@ func (s *ProjectStore) GetByID(ctx context.Context, orgID, projectID uuid.UUID) 
 	return scanProject(row)
 }
 
-func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) ([]models.Project, error) {
-	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`, projectColumns)
-	args := pgx.NamedArgs{"org_id": orgID}
-
+// applyProjectFilters appends WHERE clauses for the common filter fields and
+// populates the corresponding named args. It returns the extended query string.
+func applyProjectFilters(query string, args pgx.NamedArgs, filters ProjectFilters) string {
 	if filters.Status != "" {
 		query += ` AND status = @status`
 		args["status"] = filters.Status
@@ -229,6 +228,14 @@ func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters P
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
 		args["search"] = "%" + escaped + "%"
 	}
+	return query
+}
+
+func (s *ProjectStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) ([]models.Project, error) {
+	query := fmt.Sprintf(`SELECT %s FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`, projectColumns)
+	args := pgx.NamedArgs{"org_id": orgID}
+
+	query = applyProjectFilters(query, args, filters)
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
 		if err == nil {
@@ -384,19 +391,7 @@ func (s *ProjectStore) UpdateStatus(ctx context.Context, orgID, projectID uuid.U
 func (s *ProjectStore) Count(ctx context.Context, orgID uuid.UUID, filters ProjectFilters) (int, error) {
 	query := `SELECT count(*) FROM projects WHERE org_id = @org_id AND deleted_at IS NULL`
 	args := pgx.NamedArgs{"org_id": orgID}
-
-	if filters.Status != "" {
-		query += ` AND status = @status`
-		args["status"] = filters.Status
-	}
-	if filters.RepositoryID != uuid.Nil {
-		query += ` AND repository_id = @repository_id`
-		args["repository_id"] = &filters.RepositoryID
-	}
-	if filters.ProposedByPM != nil {
-		query += ` AND proposed_by_pm = @proposed_by_pm`
-		args["proposed_by_pm"] = *filters.ProposedByPM
-	}
+	query = applyProjectFilters(query, args, filters)
 
 	var count int
 	err := s.db.QueryRow(ctx, query, args).Scan(&count)
