@@ -16,8 +16,8 @@ transforms:
       # Parse structured JSON logs from our Go services (zerolog output).
       # Selectively extract known zerolog fields rather than merging the entire parsed
       # object into root, which would clobber Vector metadata (source_type, container_name, etc.).
-      parsed, err = parse_json(.message)
-      if err == null {
+      parsed = parse_json(.message) ?? null
+      if parsed != null {
         .message = string(parsed.message) ?? .message
         .timestamp = string(parsed.time) ?? .timestamp
         .level = string(parsed.level) ?? .level
@@ -52,7 +52,7 @@ sinks:
     inputs: ["filter_noise"]
     uri: "http://${VICTORIALOGS_HOST}:9428/insert/jsonline?_stream_fields=service,server,hostname&_msg_field=message&_time_field=timestamp"
     encoding:
-      codec: json
+      codec: json_lines
     healthcheck:
       enabled: false
     buffer:
