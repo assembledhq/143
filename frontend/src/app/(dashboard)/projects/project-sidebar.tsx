@@ -47,8 +47,10 @@ export function ProjectSidebar() {
   const allProjects = data?.data ?? [];
   const currentFilter = activeFilter ?? "all";
 
-  const activeCount = allProjects.filter((p) => p.status === "active").length;
-  const scheduledCount = allProjects.filter((p) => p.schedule_enabled).length;
+  const { activeCount, scheduledCount } = useMemo(() => ({
+    activeCount: allProjects.filter((p) => p.status === "active").length,
+    scheduledCount: allProjects.filter((p) => p.schedule_enabled).length,
+  }), [allProjects]);
 
   const filteredProjects = useMemo(
     () => filterProjects(allProjects, activeFilter),
