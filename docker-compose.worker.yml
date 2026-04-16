@@ -16,7 +16,10 @@ services:
           echo "Install gVisor: https://gvisor.dev/docs/user_guide/install/"
           exit 1
         fi
-        docker run --rm --runtime=runsc busybox:latest echo "gVisor OK"
+        echo "Cgroup driver: $(docker info --format '{{.CgroupDriver}}')"
+        echo "Cgroup version: $(docker info --format '{{.CgroupVersion}}')"
+        docker run --rm --runtime=runsc busybox:latest echo "gVisor basic: OK"
+        docker run --rm --runtime=runsc --pids-limit 16 busybox:latest echo "gVisor pids-limit: OK"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: "no"
