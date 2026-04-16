@@ -175,6 +175,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     done
   }
 
+  # Ensure gVisor runtime is configured with --ignore-cgroups so Docker
+  # handles cgroup management (prevents EOF errors from cgroup conflicts).
+  if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
+    DAEMON_JSON="/etc/docker/daemon.json"
+    if [ -f "$DAEMON_JSON" ] && ! grep -q "ignore-cgroups" "$DAEMON_JSON"; then
+      echo "Patching runsc runtime to use --ignore-cgroups..."
+      sudo runsc install -- --ignore-cgroups
+      sudo systemctl restart docker
+      echo "Docker restarted with updated gVisor config."
+    fi
+  fi
+
   docker compose -f "$COMPOSE_FILE" pull
 
   # Run migrations BEFORE restarting the app so the DB schema is ready when

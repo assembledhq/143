@@ -26,7 +26,7 @@ if [ "$ROLE" = "worker" ]; then
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" \
       > /etc/apt/sources.list.d/gvisor.list
     apt-get update && apt-get install -y runsc
-    runsc install
+    runsc install -- --ignore-cgroups
     systemctl restart docker
   }
 fi
