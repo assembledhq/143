@@ -52,7 +52,9 @@ sinks:
     inputs: ["filter_noise"]
     uri: "http://${VICTORIALOGS_HOST}:9428/insert/jsonline?_stream_fields=service,server,hostname&_msg_field=message&_time_field=timestamp"
     encoding:
-      codec: json_lines
+      codec: json
+      framing:
+        method: newline_delimited
     healthcheck:
       enabled: false
     buffer:
