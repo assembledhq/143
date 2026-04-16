@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -976,6 +977,9 @@ func (s *UsageRollupStore) GetLatestRollupHour(ctx context.Context) (time.Time, 
 	// index (org_id, hour_utc DESC) can satisfy this with a reverse index scan
 	// rather than a full table scan.
 	err := s.db.QueryRow(ctx, `SELECT hour_utc FROM usage_hourly ORDER BY hour_utc DESC LIMIT 1`).Scan(&latest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("query latest rollup hour: %w", err)
 	}
