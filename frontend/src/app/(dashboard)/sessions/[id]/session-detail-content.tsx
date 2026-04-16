@@ -860,6 +860,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
       addSSEListener(eventSource, SSE_EVENT.STATUS, (updated) => {
         queryClient.setQueryData(["session", sessionId], { data: updated });
+        // When the session transitions out of running (e.g. sandbox creation
+        // failure reverts to idle), fetch the latest messages so any error
+        // message posted by the backend is displayed immediately.
+        if (updated.status !== "running") {
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+        }
       });
 
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
