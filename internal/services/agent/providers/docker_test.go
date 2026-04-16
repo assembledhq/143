@@ -160,7 +160,7 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 			require.Equal(t, []string(config.Cmd), []string{"echo", "runtime-ok"}, "health check should run echo command")
 			require.Equal(t, "runsc", hostConfig.Runtime, "health check should use configured runtime")
 			require.NotNil(t, hostConfig.Resources.PidsLimit)
-			require.Equal(t, int64(16), *hostConfig.Resources.PidsLimit)
+			require.Equal(t, int64(64), *hostConfig.Resources.PidsLimit)
 			return container.CreateResponse{ID: "health-check-container"}, nil
 		}
 		mock.containerStartFn = func(ctx context.Context, containerID string, options container.StartOptions) error {
