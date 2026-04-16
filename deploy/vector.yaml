@@ -1,3 +1,6 @@
+api:
+  enabled: true
+
 sources:
   docker_logs:
     type: docker_logs
