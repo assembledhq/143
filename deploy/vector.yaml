@@ -48,13 +48,17 @@ transforms:
 
 sinks:
   victorialogs:
-    type: http
+    type: elasticsearch
     inputs: ["filter_noise"]
-    uri: "http://${VICTORIALOGS_HOST}:9428/insert/jsonline?_stream_fields=service,server,hostname&_msg_field=message&_time_field=timestamp"
-    encoding:
-      codec: json
-      framing:
-        method: newline_delimited
+    endpoints:
+      - "http://${VICTORIALOGS_HOST}:9428/insert/elasticsearch"
+    api_version: v8
+    mode: bulk
+    query:
+      _stream_fields: "service,server,hostname"
+      _msg_field: "message"
+      _time_field: "timestamp"
+    compression: gzip
     healthcheck:
       enabled: false
     buffer:
