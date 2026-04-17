@@ -25,7 +25,7 @@ var sessionColumns = []string{
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
 	"repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "deleted_at", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
 }
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -51,6 +51,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,    // diff_history
 		nil,    // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
+		nil,    // automation_run_id
 		nil,    // deleted_at
 		now,
 	}
@@ -261,7 +262,7 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -299,7 +300,7 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),

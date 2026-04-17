@@ -51,6 +51,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypePMBootstrap, newOrgIDJobHandler("pm_bootstrap", services.PM.RunBootstrap, logger))
 		w.Register(models.JobTypePMContextRefresh, newOrgIDJobHandler("pm_context_refresh", services.PM.RunRefresh, logger))
 	}
+	if stores.Automations != nil && stores.AutomationRuns != nil {
+		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
+	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
@@ -91,24 +94,26 @@ func hasServiceHandlersDependencies(services *Services) bool {
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
 	Issues              *db.IssueStore
-	Sessions           *db.SessionStore
+	Sessions            *db.SessionStore
 	Jobs                *db.JobStore
 	Integrations        *db.IntegrationStore
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore      // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore  // nil-safe
-	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore     // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore   // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore      // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore       // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore     // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore    // nil-safe: needed for eval repo lookup
+	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore    // nil-safe
+	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
+	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
+	Automations         *db.AutomationStore     // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore  // nil-safe: automations feature disabled if nil
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -127,10 +132,10 @@ type Services struct {
 	Prioritization  *prioritization.Service
 	Feedback        *feedback.Service
 	PM              pmService
-	Memory          MemoryReinforcer // optional — enables memory reinforcement on PR approval
-	SlackSummarizer *ingestion.SlackSummarizer // nil-safe: Slack summarization disabled if nil
-	LLM             llmClient        // nil-safe: needed for eval LLM judge grading
-	GitHub          agent.GitHubTokenProvider // nil-safe: needed for eval repo cloning
+	Memory          MemoryReinforcer              // optional — enables memory reinforcement on PR approval
+	SlackSummarizer *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
+	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
+	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 }
 
@@ -209,9 +214,9 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID  string `json:"org_id"`
+			OrgID   string `json:"org_id"`
 			Trigger string `json:"trigger"`
-			RepoID string `json:"repo_id,omitempty"`
+			RepoID  string `json:"repo_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal pm_analyze payload: %w", err)
@@ -273,6 +278,44 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 
 		logger.Info().Str("org_id", orgID.String()).Str("project_id", projectID.String()).Msg("running project_cycle job")
 		return services.PM.AnalyzeProject(ctx, orgID, projectID)
+	}
+}
+
+// newAutomationRunHandler executes a single automation_run job.
+//
+// The actual agent invocation is not yet implemented (separation work first,
+// execution in a follow-up). The handler still must exist so the scheduler's
+// enqueued jobs do not pile up as "no handler registered" errors and so the
+// run row transitions out of `pending` deterministically each tick.
+func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID           string `json:"org_id"`
+			AutomationID    string `json:"automation_id"`
+			AutomationRunID string `json:"automation_run_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal automation_run payload: %w", err)
+		}
+
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		runID, err := uuid.Parse(input.AutomationRunID)
+		if err != nil {
+			return fmt.Errorf("parse run ID: %w", err)
+		}
+
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("automation_id", input.AutomationID).
+			Str("run_id", runID.String()).
+			Msg("running automation_run job (stub: marking completed_noop)")
+
+		now := time.Now()
+		summary := "automation execution not yet implemented; run skipped"
+		return stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusCompletedNoop, &now, &summary)
 	}
 }
 
@@ -570,7 +613,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID string `json:"session_id"`
-			OrgID      string `json:"org_id"`
+			OrgID     string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
@@ -680,7 +723,7 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID string `json:"session_id"`
-			OrgID      string `json:"org_id"`
+			OrgID     string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal validate payload: %w", err)
@@ -770,7 +813,7 @@ func newAnalyzeFailureHandler(stores *Stores, services *Services, logger zerolog
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID string `json:"session_id"`
-			OrgID      string `json:"org_id"`
+			OrgID     string `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal analyze_failure payload: %w", err)
@@ -1832,4 +1875,3 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 
 	return candidates, nil
 }
-

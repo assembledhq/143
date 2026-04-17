@@ -29,7 +29,7 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	require.NoError(t, err, "should create pgxmock pool")
 	stores := &Stores{
 		Issues:       db.NewIssueStore(mock),
-		Sessions:    db.NewSessionStore(mock),
+		Sessions:     db.NewSessionStore(mock),
 		Jobs:         db.NewJobStore(mock),
 		Integrations: db.NewIntegrationStore(mock),
 		Webhooks:     db.NewWebhookDeliveryStore(mock),
@@ -600,6 +600,23 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 		_, ok := w.handlers[name]
 		require.False(t, ok, "%s handler should not be registered without services", name)
 	}
+}
+
+func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	logger := zerolog.Nop()
+	w := New(nil, logger, "test-node")
+
+	RegisterHandlers(w, stores, nil, DataRetentionConfig{}, logger)
+
+	_, ok := w.handlers[models.JobTypeAutomationRun]
+	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
 func TestWorker_Register(t *testing.T) {
@@ -2019,7 +2036,7 @@ func TestComputeWeightedScore(t *testing.T) {
 		}
 		score, passed := computeWeightedScore(criteria, results, 0.3)
 		require.InDelta(t, 0.5, score, 0.01) // weighted avg is 0.5
-		require.False(t, passed)              // but fails due to required criterion
+		require.False(t, passed)             // but fails due to required criterion
 	})
 
 	t.Run("below threshold fails", func(t *testing.T) {

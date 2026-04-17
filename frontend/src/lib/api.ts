@@ -459,6 +459,41 @@ export const api = {
     aiGenerate: (body: { description: string }) =>
       post<{ data: import('./types').GeneratedProject }>('/api/v1/projects/ai/generate', body),
   },
+  automations: {
+    list: (params?: { enabled?: boolean; cursor?: string; limit?: number; search?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.enabled !== undefined) searchParams.set('enabled', String(params.enabled));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.search) searchParams.set('search', params.search);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').Automation>>(`/api/v1/automations${qs ? `?${qs}` : ''}`);
+    },
+    get: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`),
+    create: (body: Record<string, unknown>) =>
+      post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
+    update: (id: string, body: Record<string, unknown>) =>
+      patch<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, body),
+    del: (id: string) => del(`/api/v1/automations/${id}`),
+    pause: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}/pause`),
+    resume: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}/resume`),
+    runNow: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/run`),
+    bulk: (body: { action: 'pause' | 'resume' | 'delete'; automation_ids?: string[] }) =>
+      post('/api/v1/automations/bulk', body),
+    listRuns: (id: string, params?: { cursor?: string; limit?: number }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`);
+    },
+    getRun: (id: string, runId: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
+  },
   auditLogs: {
     list: (params?: {
       actor_type?: string;

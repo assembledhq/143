@@ -187,6 +187,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
 
+	automationStore := db.NewAutomationStore(pool)
+	automationRunStore := db.NewAutomationRunStore(pool)
+	automationHandler := handlers.NewAutomationHandler(automationStore, automationRunStore)
+	automationHandler.SetJobStore(jobStore)
+	automationHandler.SetRepositoryStore(repoStore)
+
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	githubStatusHandler := handlers.NewGitHubStatusHandler(
 		userCredentialStore, orgStore,
@@ -216,6 +222,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
+	automationHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetAuditEmitter(auditEmitter)
 	pmHandler.SetPMDocumentStore(pmDocumentStore)
 	projectAttachmentHandler := handlers.NewProjectAttachmentHandler(projectAttachmentStore, projectStore)
@@ -375,6 +382,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/pm/plans/latest", pmHandler.Latest)
 			r.Get("/api/v1/pm/decisions", pmHandler.Decisions)
 			r.Get("/api/v1/pm/status", pmHandler.Status)
+			// Automations (read-only)
+			r.Get("/api/v1/automations", automationHandler.List)
+			r.Get("/api/v1/automations/{id}", automationHandler.Get)
+			r.Get("/api/v1/automations/{id}/runs", automationHandler.ListRuns)
+			r.Get("/api/v1/automations/{id}/runs/{rid}", automationHandler.GetRun)
+
 			r.Get("/api/v1/projects", projectHandler.List)
 			r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)
 			r.Get("/api/v1/projects/{id}", projectHandler.Get)
@@ -468,6 +481,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 			r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 			r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
+			// Automations (write)
+			r.Post("/api/v1/automations", automationHandler.Create)
+			r.Patch("/api/v1/automations/{id}", automationHandler.Update)
+			r.Delete("/api/v1/automations/{id}", automationHandler.Delete)
+			r.Post("/api/v1/automations/{id}/run", automationHandler.RunNow)
+			r.Post("/api/v1/automations/{id}/pause", automationHandler.Pause)
+			r.Post("/api/v1/automations/{id}/resume", automationHandler.Resume)
+			r.Post("/api/v1/automations/bulk", automationHandler.Bulk)
+
 			r.Post("/api/v1/projects", projectHandler.Create)
 			r.Patch("/api/v1/projects/{id}", projectHandler.Update)
 			r.Delete("/api/v1/projects/{id}", projectHandler.Delete)
