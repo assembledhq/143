@@ -273,7 +273,7 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Send a message to the agent...')).toBeEnabled();
+    expect(screen.getByPlaceholderText('Agent is responding...')).toBeDisabled();
   });
 
   it('disables input for pending session', async () => {
