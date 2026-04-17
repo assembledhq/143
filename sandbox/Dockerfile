@@ -19,6 +19,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Stage 2: Runtime
 FROM ubuntu:24.04
 
+# Retry apt downloads to survive transient mirror flakiness.
+RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+
 # System dependencies for agent CLIs and typical repo operations.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
