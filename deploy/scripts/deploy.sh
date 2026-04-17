@@ -189,6 +189,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   docker compose -f "$COMPOSE_FILE" pull
 
+  # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
+  # service, so `docker compose pull` doesn't fetch it. Pull it explicitly —
+  # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
+  if [ "$ROLE" = "worker" ]; then
+    docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+  fi
+
   # Run migrations BEFORE restarting the app so the DB schema is ready when
   # the new code starts serving traffic. Uses `docker compose run` on the new
   # image (already pulled) to execute the migration binary without replacing
