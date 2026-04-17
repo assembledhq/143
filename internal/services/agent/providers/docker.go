@@ -26,6 +26,7 @@ var _ agent.SandboxProvider = (*DockerProvider)(nil)
 
 // DockerClient defines the subset of the Docker API used by DockerProvider.
 type DockerClient interface {
+	Ping(ctx context.Context) (types.Ping, error)
 	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerStop(ctx context.Context, containerID string, options container.StopOptions) error
@@ -76,11 +77,17 @@ func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerPr
 	return p
 }
 
-// HealthCheck verifies the configured runtime is available by running a test
-// container. Returns an error if the runtime (e.g. gVisor/runsc) is not functional.
+// HealthCheck verifies Docker daemon connectivity and, for non-runc runtimes,
+// that the configured runtime is functional by running a test container.
 func (d *DockerProvider) HealthCheck(ctx context.Context) error {
+	// Always verify we can reach the Docker daemon.
+	if _, err := d.client.Ping(ctx); err != nil {
+		return fmt.Errorf("docker health check: cannot connect to Docker daemon: %w", err)
+	}
+
 	if d.runtime == "runc" {
-		return nil // runc is always available
+		d.logger.Info().Msg("docker health check passed (runc)")
+		return nil
 	}
 
 	d.logger.Info().Str("runtime", d.runtime).Msg("running sandbox runtime health check")

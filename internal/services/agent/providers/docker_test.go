@@ -23,6 +23,7 @@ import (
 
 // mockDockerClient implements DockerClient for testing.
 type mockDockerClient struct {
+	pingFn                 func(ctx context.Context) (types.Ping, error)
 	containerCreateFn      func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	containerStartFn       func(ctx context.Context, containerID string, options container.StartOptions) error
 	containerStopFn        func(ctx context.Context, containerID string, options container.StopOptions) error
@@ -31,6 +32,13 @@ type mockDockerClient struct {
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	containerExecAttachFn  func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	containerExecInspectFn func(ctx context.Context, execID string) (container.ExecInspect, error)
+}
+
+func (m *mockDockerClient) Ping(ctx context.Context) (types.Ping, error) {
+	if m.pingFn != nil {
+		return m.pingFn(ctx)
+	}
+	return types.Ping{}, nil
 }
 
 func (m *mockDockerClient) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
@@ -132,12 +140,16 @@ func newTestLogger() zerolog.Logger {
 func TestDockerProvider_HealthCheck(t *testing.T) {
 	t.Parallel()
 
-	t.Run("runc skips health check", func(t *testing.T) {
+	t.Run("runc pings but skips container test", func(t *testing.T) {
 		t.Parallel()
 
+		var pingCalled bool
 		mock := &mockDockerClient{}
-		// If ContainerCreate were called, it would panic or return default — but we
-		// verify it's never called by setting a function that fails the test.
+		mock.pingFn = func(ctx context.Context) (types.Ping, error) {
+			pingCalled = true
+			return types.Ping{}, nil
+		}
+		// ContainerCreate should not be called for runc runtime.
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
 			t.Fatal("ContainerCreate should not be called for runc runtime")
 			return container.CreateResponse{}, nil
@@ -146,6 +158,21 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 
 		err := p.HealthCheck(context.Background())
 		require.NoError(t, err, "HealthCheck should return nil for runc runtime")
+		require.True(t, pingCalled, "Ping should be called to verify Docker connectivity")
+	})
+
+	t.Run("ping failure returns error", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.pingFn = func(ctx context.Context) (types.Ping, error) {
+			return types.Ping{}, fmt.Errorf("Cannot connect to the Docker daemon")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot connect to Docker daemon")
 	})
 
 	t.Run("success with non-runc runtime", func(t *testing.T) {
