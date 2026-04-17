@@ -65,12 +65,12 @@ export function AuditLogTrigger({ filters, members: membersProp, title }: AuditL
     <>
       <Button
         variant="ghost"
-        size="sm"
+        size="xs"
         onClick={() => setOpen(true)}
         className="inline-flex items-center gap-1.5 text-xs text-muted-foreground/70 hover:text-muted-foreground transition-all duration-150 h-auto px-1.5 py-0.5 -ml-1.5"
       >
         <Clock className="h-3 w-3" />
-        <span>
+        <span className="text-xs">
           Updated {formatTimeAgo(latestEntry.created_at)} by {actorName}
         </span>
       </Button>
