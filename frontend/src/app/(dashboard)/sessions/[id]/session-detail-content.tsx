@@ -209,7 +209,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
               )}
             </div>
           </CardHeader>
-          <CardContent className="pt-2 space-y-3">
+          <CardContent className="pt-0 space-y-3">
             <p className="text-xs">{session.failure_explanation || session.error}</p>
             {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
             {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
