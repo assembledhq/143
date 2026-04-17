@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -32,7 +32,7 @@ export default function NewAutomationPage() {
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
   const [scope, setScope] = useState("");
-  const [repoId, setRepoId] = useState("");
+  const [selectedRepoId, setSelectedRepoId] = useState("");
   const [intervalValue, setIntervalValue] = useState(1);
   const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">("days");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -46,12 +46,9 @@ export default function NewAutomationPage() {
   });
   const repos = reposData?.data ?? [];
 
-  // Auto-select first repo
-  useEffect(() => {
-    if (repos.length > 0 && !repoId) {
-      setRepoId(repos[0].id);
-    }
-  }, [repos, repoId]);
+  // Fall back to the first repo until the user picks one so the form has a
+  // valid default without syncing state inside an effect.
+  const repoId = selectedRepoId || repos[0]?.id || "";
 
   const applyTemplate = (templateId: string) => {
     const t = automationTemplates.find((t) => t.id === templateId);
@@ -157,7 +154,7 @@ export default function NewAutomationPage() {
         {/* Repository */}
         <div>
           <Label>Repository</Label>
-          <Select value={repoId} onValueChange={setRepoId}>
+          <Select value={repoId} onValueChange={setSelectedRepoId}>
             <SelectTrigger>
               <SelectValue placeholder="Select repo" />
             </SelectTrigger>

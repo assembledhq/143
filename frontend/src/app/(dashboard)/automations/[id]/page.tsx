@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -87,7 +87,7 @@ function RunsTab({ automationId }: { automationId: string }) {
   // across refetches. Using setState inside `select` would reset pagination on
   // every poll tick.
   const [extraPages, setExtraPages] = useState<AutomationRun[][]>([]);
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
 
   const { data, isLoading } = useQuery({
     queryKey: ["automation-runs", automationId],
@@ -98,19 +98,16 @@ function RunsTab({ automationId }: { automationId: string }) {
   const firstPage = data?.data ?? [];
   const firstPageCursor = data?.meta?.next_cursor || undefined;
 
-  // Sync the active "next page" cursor when a new first-page poll lands and we
-  // haven't loaded any extra pages yet.
-  useEffect(() => {
-    if (extraPages.length === 0) {
-      setCursor(firstPageCursor);
-    }
-  }, [firstPageCursor, extraPages.length]);
+  // Until "Load more" is clicked, the next-page cursor tracks the freshest
+  // first-page poll. Once extra pages exist, the cursor reflects the last
+  // mutation's response so polls don't rewind pagination.
+  const cursor = extraPages.length === 0 ? firstPageCursor : loadMoreCursor;
 
   const loadMoreMutation = useMutation({
     mutationFn: () => api.automations.listRuns(automationId, { limit: 25, cursor }),
     onSuccess: (res) => {
       setExtraPages((prev) => [...prev, res.data ?? []]);
-      setCursor(res.meta?.next_cursor || undefined);
+      setLoadMoreCursor(res.meta?.next_cursor || undefined);
     },
   });
 
