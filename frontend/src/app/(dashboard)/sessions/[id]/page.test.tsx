@@ -109,6 +109,40 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Could not reproduce the error in test environment')).toBeInTheDocument();
   });
 
+  it('keeps failed and updated timestamps visually aligned', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            failure_explanation: 'Could not reproduce the error in test environment',
+          },
+        });
+      }),
+      http.get('/api/v1/audit-logs', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 'audit-1',
+            actor_type: 'user',
+            user_id: mockMembers[0].id,
+            action: 'session.failed',
+            created_at: new Date(Date.now() - 12 * 60000).toISOString(),
+          }],
+          meta: {},
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    const updatedTrigger = await screen.findByRole('button', { name: /Updated.*ago by/i });
+    const metadataStack = updatedTrigger.parentElement;
+
+    expect(metadataStack?.className).toContain('space-y-1');
+    expect(updatedTrigger.className).toContain('px-1');
+    expect(updatedTrigger.className).toContain('text-muted-foreground');
+  });
+
   it('shows error state when session not found', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {

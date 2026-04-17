@@ -282,46 +282,54 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </CardContent>
       </Card>
 
-      {/* Timestamps — secondary reference data */}
-      <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
-        {/* Hide duration for failed/cancelled sessions with no meaningful runtime */}
-        {!((session.status === "failed" || session.status === "cancelled") &&
-          !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+      <div className="space-y-1">
+        {/* Timestamps — secondary reference data */}
+        <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
+          {/* Hide duration for failed/cancelled sessions with no meaningful runtime */}
+          {!((session.status === "failed" || session.status === "cancelled") &&
+            !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+            <span className="inline-flex items-center gap-1.5">
+              <Timer className="h-3 w-3" />
+              {session.status === "pending" ? formatDuration(session.created_at) : formatDuration(session.started_at, session.completed_at)}
+            </span>
+          )}
           <span className="inline-flex items-center gap-1.5">
-            <Timer className="h-3 w-3" />
-            {session.status === "pending" ? formatDuration(session.created_at) : formatDuration(session.started_at, session.completed_at)}
-          </span>
-        )}
-        <span className="inline-flex items-center gap-1.5">
-          {session.completed_at ? (
-            session.status === "failed" ? (
+            {session.completed_at ? (
+              session.status === "failed" ? (
+                <>
+                  <XCircle className="h-3 w-3" />
+                  Failed {formatTimeAgo(session.completed_at)}
+                </>
+              ) : session.status === "cancelled" ? (
+                <>
+                  <MinusCircle className="h-3 w-3" />
+                  Cancelled {formatTimeAgo(session.completed_at)}
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="h-3 w-3" />
+                  Completed {formatTimeAgo(session.completed_at)}
+                </>
+              )
+            ) : session.started_at ? (
               <>
-                <XCircle className="h-3 w-3" />
-                Failed {formatTimeAgo(session.completed_at)}
-              </>
-            ) : session.status === "cancelled" ? (
-              <>
-                <MinusCircle className="h-3 w-3" />
-                Cancelled {formatTimeAgo(session.completed_at)}
+                <Clock className="h-3 w-3" />
+                Started {formatTimeAgo(session.started_at)}
               </>
             ) : (
               <>
-                <CheckCircle2 className="h-3 w-3" />
-                Completed {formatTimeAgo(session.completed_at)}
+                <Clock className="h-3 w-3" />
+                Queued {formatTimeAgo(session.created_at)}
               </>
-            )
-          ) : session.started_at ? (
-            <>
-              <Clock className="h-3 w-3" />
-              Started {formatTimeAgo(session.started_at)}
-            </>
-          ) : (
-            <>
-              <Clock className="h-3 w-3" />
-              Queued {formatTimeAgo(session.created_at)}
-            </>
-          )}
-        </span>
+            )}
+          </span>
+        </div>
+
+        <AuditLogTrigger
+          filters={{ session_id: session.id }}
+          members={members}
+          title="Session activity"
+        />
       </div>
 
       {/* PM context */}
@@ -347,11 +355,6 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         </Card>
       )}
 
-      <AuditLogTrigger
-        filters={{ session_id: session.id }}
-        members={members}
-        title="Session activity"
-      />
     </div>
   );
 }
