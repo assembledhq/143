@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -o /bin/143-tools ./cmd/tools
 
 # Stage 2: Runtime
-FROM ubuntu:26.04
+FROM ubuntu:24.04
 
 # System dependencies for agent CLIs and typical repo operations.
 RUN apt-get update && apt-get install -y --no-install-recommends \
