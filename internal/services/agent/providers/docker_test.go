@@ -781,6 +781,12 @@ func TestDefaultSandboxConfig(t *testing.T) {
 	require.Equal(t, 10, cfg.DiskLimitGB, "default disk limit should be 10GB")
 }
 
+func TestDefaultSandboxConfigEnvOverride(t *testing.T) {
+	t.Setenv("SANDBOX_IMAGE", "ghcr.io/assembledhq/143-sandbox:latest")
+	cfg := agent.DefaultSandboxConfig()
+	require.Equal(t, "ghcr.io/assembledhq/143-sandbox:latest", cfg.Image, "SANDBOX_IMAGE env should override default")
+}
+
 func TestShellEscape(t *testing.T) {
 	t.Parallel()
 
