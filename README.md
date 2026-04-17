@@ -1,6 +1,6 @@
-# 143 — AI agents that fix and improve production systems
+# 143 — AI coding agents, built for teams
 
-**from issues to validated PRs, on autopilot**
+**Transparent automations. Cloud agents. Eval-driven loops.**
 
 [Getting Started](#getting-started) · [Development Setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [143.dev](https://www.143.dev)
 
@@ -8,37 +8,65 @@
 
 ## Why 143
 
-Most issues in your backlog don't need a sprint planning meeting. They need someone (or something) to analyze the landscape, prioritize what matters, write the fix, validate it, and open the PR.
+Most coding agent tools are built for solo developers. But most professional engineering teams need a high level of visibility. When someone sets up an automation to improve test coverage or scan for security vulnerabilities, the whole team should be able to access and have visibility by default. When a coding agent opens a PR, everyone should be able to see the prompt that drove it.
 
-143 gives you two things:
+143 is built from the ground up for teams (engineers and non-engineers alike). It was born from the experience of working on a small team where nobody had visibility into what others were doing, knowledge stayed siloed, and non-technical teammates had a hard time contributing code even when they knew exactly what needed to change.
 
-### Bring your own coding agent
+### Built for teams
 
-Use whatever coding agent you trust — Claude Code, Codex, Cursor, or your own custom agent. 143 orchestrates the work: it ingests issues, plans the approach, spins up sandboxed containers, and hands off execution to the coding agent you configure. You stay in control of how code gets written while 143 handles everything around it.
+By default, every automation, prompt, and agent run is visible to your entire team. When someone configures an automation to fix flaky tests or audit API endpoints, the rest of the team can see exactly what's been set up, what's running, and what it produced. This means non-engineers can contribute code too — they write prompts, the agent writes code, and the whole team can review both the prompt and the output in the open.
 
-### An autopilot PM that learns your product
+### Cloud agents you already use
 
-143 includes an AI product manager agent that understands your product roadmap and engineering philosophy. It analyzes your full issue landscape across Sentry errors, Linear tickets, and support requests — clusters related problems, identifies root causes, and builds a prioritized plan. Every PR review teaches it more about your codebase conventions and preferences, creating a flywheel that compounds over time.
+The big labs are constantly one-upping each other with newer and better models and agent harnesses. 143 has no vendor lock-in: use Claude Code, Codex, or whatever comes next. When a better model drops, you can swap it in and keep going.
 
-The result: bugs get triaged, planned, fixed, validated, and shipped as PRs — without context-switching your team away from the work that matters.
+143 runs your agents in the cloud so your whole team can use them without local setup. You can spin up the same workflow across branches, get preview environments automatically, and let anyone on the team kick off runs.
 
-> **Don't want to self-host?** [143.dev](https://www.143.dev) is the hosted version — connect your repos and start shipping fixes in minutes.
+### Loops: eval-driven improvement
+
+Based on Karpathy's autoresearch concept, you can define an eval and have your coding agents hill-climb toward better results. Want to improve API latency? Define a latency benchmark, and 143 will run your coding agent in a loop — each iteration measuring against the eval, learning what worked, and pushing further.
+
+This works for anything measurable: test coverage, bundle size, response times, error rates. Define the target, and let the agents grind toward it.
 
 ## How it works
 
 ```
-issues in → PM agent plans → coding agents execute → validate → ship PRs → measure impact
-                                                                                  ↓
-                                                                         learn from outcomes
+┌─────────────────────────────────────────────────────────┐
+│  Your Team (engineers + non-engineers)                  │
+│  Configure automations, projects, loops via 143 UI      │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  143 Orchestrator                                       │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
+│  │ Automations │  │  Sessions   │  │   Loops     │     │
+│  │ (recurring) │  │ (one-shot)  │  │ (eval-driven│     │
+│  └──────┬──────┘  └──────┬──────┘  │  iteration) │     │
+│         │                │         └──────┬──────┘     │
+│         └────────────────┼────────────────┘             │
+│                          ▼                              │
+│  ┌──────────────────────────────────────────────┐       │
+│  │  Cloud Sandboxes (gVisor-isolated Docker)    │       │
+│  │  ┌────────────┐ ┌───────┐ ┌────────────────┐│       │
+│  │  │ Claude Code│ │ Codex │ │ Any future agent││       │
+│  │  └────────────┘ └───────┘ └────────────────┘│       │
+│  └──────────────────────┬───────────────────────┘       │
+│                         ▼                               │
+│  Validate (CI + security scan + quality checks)         │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+    GitHub PRs   Preview Envs   Eval Results
+    (for review) (for testing)  (feed back into loops)
 ```
 
-1. **Ingest** — pull issues from Sentry, Linear, support tickets via webhooks
-2. **Plan** — AI product manager analyzes all issues, clusters related problems, and builds a prioritized work plan
-3. **Execute** — coding agents run in isolated Docker containers with the PM's approach hints
-4. **Validate** — direction/correctness/quality checks + CI + regression tests
-5. **Ship** — open GitHub PRs with full context for human review
-6. **Observe** — measure post-deploy impact on error rates and support volume
-7. **Learn** — extract review feedback into conventions, feed back into future runs
+1. **Configure** — set up automations, projects, or loops — shared with the team by default
+2. **Execute** — coding agents run in isolated Docker containers in the cloud
+3. **Validate** — CI, security scanning (gitleaks, semgrep), and quality checks
+4. **Ship** — open GitHub PRs with full context and preview environments
+5. **Loop** — for eval-driven tasks, measure results and iterate automatically
 
 ## Built for production
 
