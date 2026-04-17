@@ -82,11 +82,11 @@ const (
 
 // BuildConfigSnapshot returns the JSON config snapshot for an automation run.
 //
-// The map values are all string or *string, so json.Marshal cannot fail in
-// practice; we panic on the impossible branch so a future field change that
-// introduces a non-marshalable type surfaces immediately instead of silently
-// writing an empty snapshot.
-func (a *Automation) BuildConfigSnapshot() json.RawMessage {
+// The current fields are all string / *string and json.Marshal can't fail for
+// them, but returning an error keeps the contract honest: if a future field
+// change introduces a non-marshalable type, the HTTP handler surfaces a 500
+// instead of panicking inside chi middleware.
+func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 	data, err := json.Marshal(map[string]any{
 		"agent_type":     a.AgentType,
 		"model_override": a.ModelOverride,
@@ -94,9 +94,9 @@ func (a *Automation) BuildConfigSnapshot() json.RawMessage {
 		"base_branch":    a.BaseBranch,
 	})
 	if err != nil {
-		panic(fmt.Sprintf("BuildConfigSnapshot: %v", err))
+		return nil, fmt.Errorf("marshal automation config snapshot: %w", err)
 	}
-	return data
+	return data, nil
 }
 
 func ValidateAutomationScheduleType(t string) error {

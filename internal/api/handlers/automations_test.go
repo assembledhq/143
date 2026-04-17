@@ -613,6 +613,146 @@ func TestAutomationHandler_RunNow_NotConfigured(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
+func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT count.+FROM automation_runs").
+		WithArgs(testAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO automation_runs").
+		WithArgs(testAnyArgs(8)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
+				AddRow(runID, now, now, now),
+		)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(testAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+	mock.ExpectRollback() // deferred rollback (no-op after commit)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetJobStore(db.NewJobStore(mock))
+	h.SetPool(mock)
+
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/"+id.String()+"/run", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.RunNow(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_RunNow_Throttled(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	mock.ExpectBegin()
+	// A run is already in flight — CountInFlightRuns returns MaxConcurrent.
+	mock.ExpectQuery("SELECT count.+FROM automation_runs").
+		WithArgs(testAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectRollback()
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetJobStore(db.NewJobStore(mock))
+	h.SetPool(mock)
+
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/"+id.String()+"/run", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.RunNow(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "DUPLICATE_RUN")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_RunNow_EnqueueFailureRollsBack(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT count.+FROM automation_runs").
+		WithArgs(testAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO automation_runs").
+		WithArgs(testAnyArgs(8)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
+				AddRow(runID, now, now, now),
+		)
+	// Enqueue fails — the run row we just inserted must roll back alongside it.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(testAnyArgs(6)...).
+		WillReturnError(errors.New("enqueue failed"))
+	mock.ExpectRollback()
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetJobStore(db.NewJobStore(mock))
+	h.SetPool(mock)
+
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/"+id.String()+"/run", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.RunNow(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "ENQUEUE_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // --- Bulk ---
 
 func TestAutomationHandler_Bulk_ValidationErrors(t *testing.T) {

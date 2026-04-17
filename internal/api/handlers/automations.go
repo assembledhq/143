@@ -22,6 +22,63 @@ var validExecutionModes = map[string]bool{
 	"dependency_graph": true,
 }
 
+// automationListDefaultLimit and automationListMaxLimit must match the
+// store's internal clamp in AutomationStore.ListByOrg/ListByAutomation so
+// that the limit we pass in equals the bound actually applied — otherwise
+// the next_cursor check `len(results) == filters.Limit` stops pagination
+// one page early when a caller asks for more than the store will return.
+const (
+	automationListDefaultLimit = 25
+	automationListMaxLimit     = 100
+	automationNameMaxLength    = 200
+	automationGoalMaxLength    = 4000
+)
+
+// validateAutomationNameAndGoal caps the two free-text fields at their DB-level
+// lengths. Without this, a 10MB body is accepted and only rejected at write
+// time with a less legible CHECK violation from Postgres.
+func validateAutomationNameAndGoal(name, goal string) error {
+	if len(name) > automationNameMaxLength {
+		return fmt.Errorf("name must be at most %d characters", automationNameMaxLength)
+	}
+	if len(goal) > automationGoalMaxLength {
+		return fmt.Errorf("goal must be at most %d characters", automationGoalMaxLength)
+	}
+	return nil
+}
+
+// validateBaseBranch rejects branch names that obviously can't be refs:
+// empty/whitespace, path traversal, or embedded whitespace. We're intentionally
+// conservative — libgit2 has stricter rules but applying them here would
+// duplicate logic we'd have to keep in sync with git's rules. The callsite
+// (repo checkout) will fail loudly on anything we let through.
+func validateBaseBranch(b string) error {
+	trimmed := strings.TrimSpace(b)
+	if trimmed == "" {
+		return fmt.Errorf("base_branch must not be empty")
+	}
+	if trimmed != b {
+		return fmt.Errorf("base_branch must not contain leading/trailing whitespace")
+	}
+	if strings.ContainsAny(b, " \t\n\r") {
+		return fmt.Errorf("base_branch must not contain whitespace")
+	}
+	if strings.Contains(b, "..") {
+		return fmt.Errorf("base_branch must not contain '..'")
+	}
+	return nil
+}
+
+// validateTimezone rejects strings that time.LoadLocation can't parse. Without
+// this, a malformed timezone would be silently stored and later fail at
+// schedule evaluation time — far from the user's write.
+func validateTimezone(tz string) error {
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("invalid timezone %q", tz)
+	}
+	return nil
+}
+
 // resolveRepositoryID parses a repository_id from a request and verifies it
 // belongs to orgID. Returns nil + nil for empty input. The error is one a
 // handler can return directly (already user-safe).
@@ -92,7 +149,7 @@ func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	filters := db.AutomationFilters{
-		Limit:  queryInt(r, "limit", 25),
+		Limit:  clampListLimit(queryInt(r, "limit", automationListDefaultLimit), automationListDefaultLimit, automationListMaxLimit),
 		Cursor: r.URL.Query().Get("cursor"),
 		Search: r.URL.Query().Get("search"),
 	}
@@ -165,8 +222,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Goal) == "" {
+	name := strings.TrimSpace(req.Name)
+	goal := strings.TrimSpace(req.Goal)
+	if name == "" || goal == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "name and goal are required")
+		return
+	}
+	if err := validateAutomationNameAndGoal(name, goal); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_FIELD", err.Error())
 		return
 	}
 
@@ -230,11 +293,19 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	baseBranch := "main"
 	if req.BaseBranch != nil && *req.BaseBranch != "" {
+		if err := validateBaseBranch(*req.BaseBranch); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_BRANCH", err.Error())
+			return
+		}
 		baseBranch = *req.BaseBranch
 	}
 
 	timezone := "UTC"
 	if req.Timezone != nil && *req.Timezone != "" {
+		if err := validateTimezone(*req.Timezone); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", err.Error())
+			return
+		}
 		timezone = *req.Timezone
 	}
 
@@ -256,8 +327,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	automation := models.Automation{
 		OrgID:          orgID,
 		RepositoryID:   repoID,
-		Name:           strings.TrimSpace(req.Name),
-		Goal:           strings.TrimSpace(req.Goal),
+		Name:           name,
+		Goal:           goal,
 		Scope:          req.Scope,
 		AgentType:      req.AgentType,
 		ModelOverride:  req.Model,
@@ -328,12 +399,20 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "name must not be empty")
 			return
 		}
+		if len(trimmed) > automationNameMaxLength {
+			writeError(w, r, http.StatusBadRequest, "INVALID_FIELD", fmt.Sprintf("name must be at most %d characters", automationNameMaxLength))
+			return
+		}
 		automation.Name = trimmed
 	}
 	if req.Goal != nil {
 		trimmed := strings.TrimSpace(*req.Goal)
 		if trimmed == "" {
 			writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "goal must not be empty")
+			return
+		}
+		if len(trimmed) > automationGoalMaxLength {
+			writeError(w, r, http.StatusBadRequest, "INVALID_FIELD", fmt.Sprintf("goal must be at most %d characters", automationGoalMaxLength))
 			return
 		}
 		automation.Goal = trimmed
@@ -370,13 +449,17 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		automation.MaxConcurrent = *req.MaxConcurrent
 	}
 	if req.BaseBranch != nil {
-		if strings.TrimSpace(*req.BaseBranch) == "" {
-			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_BRANCH", "base_branch must not be empty")
+		if err := validateBaseBranch(*req.BaseBranch); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_BRANCH", err.Error())
 			return
 		}
 		automation.BaseBranch = *req.BaseBranch
 	}
 	if req.Timezone != nil {
+		if err := validateTimezone(*req.Timezone); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", err.Error())
+			return
+		}
 		automation.Timezone = *req.Timezone
 	}
 	if req.Priority != nil {
@@ -428,6 +511,11 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			next := models.NextRunTime(now, *automation.IntervalValue, *automation.IntervalUnit)
 			automation.NextRunAt = &next
 		}
+		// TODO(phase-3): when cron lands (design doc 48 §6.2), also recompute
+		// next_run_at from automation.CronExpression here. Today cron is
+		// rejected earlier in this handler, so a cron schedule_change cannot
+		// reach this block — but a pure CronExpression edit on an already-cron
+		// automation would silently leave next_run_at stale.
 	}
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
@@ -536,6 +624,12 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 
 // RunNow creates a manual automation run and enqueues the job atomically so a
 // failed enqueue cannot leave an orphaned pending run row behind.
+//
+// Manual runs leave scheduled_time NULL, so the unique idempotency index
+// (which is partial: WHERE scheduled_time IS NOT NULL) does NOT dedupe them.
+// We enforce throttling here via CountInFlightRuns inside the same tx: a
+// user who double-clicks "Run now" should not spawn N parallel jobs that
+// collectively blow past max_concurrent.
 func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	if h.jobStore == nil || h.pool == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store or pool not configured")
@@ -556,6 +650,12 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	configSnapshot, err := automation.BuildConfigSnapshot()
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONFIG_SNAPSHOT_FAILED", "failed to build config snapshot", err)
+		return
+	}
+
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin transaction", err)
@@ -563,13 +663,26 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
 
+	// Throttle against max_concurrent inside the tx so a rapid double-click
+	// sees the first insert before committing the second. CountInFlightRuns
+	// counts pending + running, matching the scheduler's throttle semantics.
+	inFlight, err := h.automationStore.CountInFlightRuns(r.Context(), tx, automation.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count in-flight runs", err)
+		return
+	}
+	if inFlight >= automation.MaxConcurrent {
+		writeError(w, r, http.StatusConflict, "DUPLICATE_RUN", "a run is already in progress")
+		return
+	}
+
 	run := models.AutomationRun{
 		AutomationID:      automation.ID,
 		OrgID:             automation.OrgID,
 		TriggeredBy:       models.AutomationTriggeredByManual,
 		TriggeredByUserID: &user.ID,
 		GoalSnapshot:      automation.Goal,
-		ConfigSnapshot:    automation.BuildConfigSnapshot(),
+		ConfigSnapshot:    configSnapshot,
 		Status:            models.AutomationRunStatusPending,
 	}
 
@@ -579,6 +692,9 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !created {
+		// Unreachable for manual runs (scheduled_time is NULL, so the partial
+		// unique index never fires). Kept for defense-in-depth if a future
+		// change widens the idempotency key.
 		writeError(w, r, http.StatusConflict, "DUPLICATE_RUN", "a run is already in progress")
 		return
 	}
@@ -675,7 +791,7 @@ func (h *AutomationHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filters := db.AutomationRunFilters{
-		Limit:  queryInt(r, "limit", 25),
+		Limit:  clampListLimit(queryInt(r, "limit", automationListDefaultLimit), automationListDefaultLimit, automationListMaxLimit),
 		Cursor: r.URL.Query().Get("cursor"),
 	}
 

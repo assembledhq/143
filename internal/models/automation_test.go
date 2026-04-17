@@ -74,7 +74,8 @@ func TestBuildConfigSnapshot(t *testing.T) {
 		BaseBranch:    "main",
 	}
 
-	raw := a.BuildConfigSnapshot()
+	raw, err := a.BuildConfigSnapshot()
+	require.NoError(t, err)
 	require.NotEmpty(t, raw)
 
 	var decoded map[string]any
@@ -90,7 +91,8 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 
 	a := Automation{BaseBranch: "develop"}
 
-	raw := a.BuildConfigSnapshot()
+	raw, err := a.BuildConfigSnapshot()
+	require.NoError(t, err)
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 	require.Nil(t, decoded["agent_type"])

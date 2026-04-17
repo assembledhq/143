@@ -53,6 +53,18 @@ ALTER TABLE automations
     ADD CONSTRAINT chk_automations_schedule_type CHECK (schedule_type IN ('interval', 'cron'));
 ALTER TABLE automations
     ADD CONSTRAINT chk_automations_execution_mode CHECK (execution_mode IN ('sequential', 'parallel', 'dependency_graph'));
+-- interval_unit gates BulkUpdateEnabled's resume path, which builds a Postgres
+-- interval via `(interval_value::text || ' ' || interval_unit)::interval`.
+-- A bad unit would raise at runtime for every row in the bulk update — cheaper
+-- to reject at write time.
+ALTER TABLE automations
+    ADD CONSTRAINT chk_automations_interval_unit CHECK (interval_unit IS NULL OR interval_unit IN ('hours', 'days', 'weeks'));
+-- Cap lengths to avoid a 10MB name/goal being accepted silently. Values are
+-- generous — the UI surface caps well below these.
+ALTER TABLE automations
+    ADD CONSTRAINT chk_automations_name_length CHECK (char_length(name) BETWEEN 1 AND 200);
+ALTER TABLE automations
+    ADD CONSTRAINT chk_automations_goal_length CHECK (char_length(goal) BETWEEN 1 AND 4000);
 
 -- automation_runs: each scheduled or manual trigger creates one run.
 -- org_id is denormalized from automations for cheap, safe tenancy filtering

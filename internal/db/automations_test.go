@@ -269,7 +269,10 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	store := NewAutomationStore(mock)
 	ids := []uuid.UUID{uuid.New()}
 
-	mock.ExpectExec("UPDATE automations SET").
+	// Assert the resume path emits the CASE expression that recomputes
+	// next_run_at from interval_value/interval_unit — without this regex
+	// a silent regression to `NULL` would pass the looser UPDATE check.
+	mock.ExpectExec(`interval_value::text \|\| ' ' \|\| interval_unit\)::interval`).
 		WithArgs(anyArgs(5)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -450,5 +453,143 @@ func TestAutomationRunStore_UpdateStatus(t *testing.T) {
 
 	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.AutomationRunStatusCompleted, &now, &summary)
 	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationStore_CountInFlightRuns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT count\(\*\) FROM automation_runs WHERE automation_id = .+ AND status IN \('pending', 'running'\)`).
+		WithArgs(anyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectCommit()
+
+	ctx := context.Background()
+	tx, err := mock.Begin(ctx)
+	require.NoError(t, err)
+
+	got, err := store.CountInFlightRuns(ctx, tx, uuid.New())
+	require.NoError(t, err)
+	require.Equal(t, 3, got)
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_CreateRunInTx_Inserts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+	now := time.Now()
+	runID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO automation_runs").
+		WithArgs(anyArgs(8)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
+				AddRow(runID, now, now, now),
+		)
+	mock.ExpectCommit()
+
+	ctx := context.Background()
+	tx, err := mock.Begin(ctx)
+	require.NoError(t, err)
+
+	r := &models.AutomationRun{
+		AutomationID: uuid.New(),
+		OrgID:        uuid.New(),
+		TriggeredBy:  models.AutomationTriggeredByManual,
+		GoalSnapshot: "goal",
+		Status:       models.AutomationRunStatusPending,
+	}
+	created, err := store.CreateRunInTx(ctx, tx, r)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.Equal(t, runID, r.ID)
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO automation_runs").
+		WithArgs(anyArgs(8)...).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	ctx := context.Background()
+	tx, err := mock.Begin(ctx)
+	require.NoError(t, err)
+
+	r := &models.AutomationRun{
+		AutomationID: uuid.New(),
+		OrgID:        uuid.New(),
+		TriggeredBy:  models.AutomationTriggeredBySchedule,
+		GoalSnapshot: "goal",
+		Status:       models.AutomationRunStatusPending,
+	}
+	created, err := store.CreateRunInTx(ctx, tx, r)
+	require.NoError(t, err)
+	require.False(t, created)
+	require.NoError(t, tx.Rollback(ctx))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+
+	// The reaper MUST filter by status IN ('pending', 'running') and by
+	// triggered_at < cutoff — regressions here would either reap healthy
+	// runs or fail to free saturated max_concurrent slots.
+	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
+		WithArgs(anyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
+
+	n, err := store.ReapStuckRuns(context.Background(), time.Hour)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, n)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_ReapStuckRuns_Error(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(anyArgs(2)...).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ReapStuckRuns(context.Background(), time.Hour)
+	require.Error(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

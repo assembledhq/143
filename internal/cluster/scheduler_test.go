@@ -476,9 +476,13 @@ func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, auto
 }
 
 type mockAutomationRuns struct {
-	created    []models.AutomationRun
-	createFlag bool // value returned by CreateRunInTx
-	createErr  error
+	created      []models.AutomationRun
+	createFlag   bool // value returned by CreateRunInTx
+	createErr    error
+	reapCount    int64
+	reapErr      error
+	reapCalls    int
+	lastThresh   time.Duration
 }
 
 func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
@@ -490,6 +494,12 @@ func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *mo
 	}
 	m.created = append(m.created, *r)
 	return m.createFlag, nil
+}
+
+func (m *mockAutomationRuns) ReapStuckRuns(ctx context.Context, threshold time.Duration) (int64, error) {
+	m.reapCalls++
+	m.lastThresh = threshold
+	return m.reapCount, m.reapErr
 }
 
 // newAutomationFixture builds an interval-scheduled automation with sensible
@@ -620,6 +630,45 @@ func TestScheduler_ScheduleAutomationRuns_DuplicateIdempotencySkip(t *testing.T)
 	s.scheduleAutomationRuns(context.Background(), time.Now())
 
 	require.NoError(t, mockPool.ExpectationsWereMet())
-	require.Len(t, automations.advancedIDs, 1, "next_run_at advances even when the run is a duplicate")
+	// On duplicate we do NOT advance next_run_at — whoever inserted the row
+	// already owns the advance, and re-advancing risks overwriting their value.
+	require.Empty(t, automations.advancedIDs, "duplicate skip must not advance next_run_at")
 	require.Empty(t, jobs.enqueued, "duplicate runs must not enqueue a job")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_CalledFromRunOnce(t *testing.T) {
+	t.Parallel()
+
+	runs := &mockAutomationRuns{reapCount: 3}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	s.reapStuckAutomationRuns(context.Background())
+
+	require.Equal(t, 1, runs.reapCalls, "reaper should run exactly once")
+	require.Equal(t, stuckAutomationRunThreshold, runs.lastThresh, "reaper should pass the tuned threshold")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_NilStoreNoop(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic when automationRuns is not wired.
+	s.reapStuckAutomationRuns(context.Background())
+}
+
+func TestScheduler_ReapStuckAutomationRuns_StoreError(t *testing.T) {
+	t.Parallel()
+
+	runs := &mockAutomationRuns{reapErr: pgx.ErrTxClosed}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	// Must swallow errors — a failed reap should not crash the scheduler tick.
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 1, runs.reapCalls)
 }

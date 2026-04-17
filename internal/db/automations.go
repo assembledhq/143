@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -381,7 +382,7 @@ func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.Automation
 		"status":               r.Status,
 	})
 	err = row.Scan(&r.ID, &r.TriggeredAt, &r.CreatedAt, &r.UpdatedAt)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil // duplicate — idempotency
 	}
 	return err == nil, err
@@ -417,8 +418,8 @@ func (s *AutomationRunStore) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *mo
 		"status":               r.Status,
 	})
 	err = row.Scan(&r.ID, &r.TriggeredAt, &r.CreatedAt, &r.UpdatedAt)
-	if err == pgx.ErrNoRows {
-		return false, nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil // duplicate — idempotency
 	}
 	return err == nil, err
 }
@@ -487,4 +488,30 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 		"result_summary": resultSummary,
 	})
 	return err
+}
+
+// ReapStuckRuns marks pending/running runs older than threshold as failed.
+// Without this, a worker that crashes mid-run would leave a row stuck and
+// permanently saturate max_concurrent for that automation — CountInFlightRuns
+// counts pending+running, so the scheduler would never fire a new run.
+//
+// Returns the number of runs reaped.
+func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, threshold time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-threshold)
+	summary := "run exceeded execution timeout; marked failed by reaper"
+	query := `UPDATE automation_runs
+		SET status = 'failed',
+		    completed_at = now(),
+		    result_summary = @summary,
+		    updated_at = now()
+		WHERE status IN ('pending', 'running')
+		  AND triggered_at < @cutoff`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"summary": summary,
+		"cutoff":  cutoff,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("reap stuck automation runs: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -245,10 +245,24 @@ export default function AutomationDetailPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
   });
 
+  // runNowInFlight guards against rapid double-clicks that can slip through
+  // `disabled={runNowMutation.isPending}`: React updates `isPending` on its
+  // next render tick, so two clicks in the same tick both see `isPending=false`
+  // and both fire mutate(). A synchronous ref flipped inside the click handler
+  // closes that window without waiting for a render.
+  const runNowInFlight = useRef(false);
   const runNowMutation = useMutation({
     mutationFn: () => api.automations.runNow(automationId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automation-runs", automationId] }),
+    onSettled: () => {
+      runNowInFlight.current = false;
+    },
   });
+  const handleRunNow = () => {
+    if (runNowInFlight.current || runNowMutation.isPending) return;
+    runNowInFlight.current = true;
+    runNowMutation.mutate();
+  };
 
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automationId),
@@ -318,7 +332,7 @@ export default function AutomationDetailPage() {
           )}
           <Button
             size="sm"
-            onClick={() => runNowMutation.mutate()}
+            onClick={handleRunNow}
             disabled={runNowMutation.isPending}
           >
             {runNowMutation.isPending ? (
