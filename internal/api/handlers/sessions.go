@@ -1314,6 +1314,12 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 		if errors.Is(err, db.ErrSessionAlreadyArchived) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or already archived")
 		} else {
+			zerolog.Ctx(r.Context()).Error().
+				Err(err).
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Str("user_id", user.ID.String()).
+				Msg("failed to archive session")
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to archive session", err)
 		}
 		return
@@ -1338,6 +1344,11 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, db.ErrSessionNotArchived) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or not archived")
 		} else {
+			zerolog.Ctx(r.Context()).Error().
+				Err(err).
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Msg("failed to unarchive session")
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to unarchive session", err)
 		}
 		return
