@@ -41,7 +41,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            AI coding agents,
+            Open-source coding agents,
             <br />
             built for teams
           </h1>
@@ -49,9 +49,8 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <p
             className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
           >
-            Run Claude Code, Codex, or any agent in the cloud. Engineers
-            and non-engineers ship together — every prompt and run is shared
-            by default.
+            Pick any coding agent. Run it in the cloud. Your whole team
+            sees what shipped and why.
           </p>
 
           <div className="pt-2 pointer-events-auto">
