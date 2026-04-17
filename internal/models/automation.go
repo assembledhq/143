@@ -81,13 +81,21 @@ const (
 )
 
 // BuildConfigSnapshot returns the JSON config snapshot for an automation run.
+//
+// The map values are all string or *string, so json.Marshal cannot fail in
+// practice; we panic on the impossible branch so a future field change that
+// introduces a non-marshalable type surfaces immediately instead of silently
+// writing an empty snapshot.
 func (a *Automation) BuildConfigSnapshot() json.RawMessage {
-	data, _ := json.Marshal(map[string]any{
+	data, err := json.Marshal(map[string]any{
 		"agent_type":     a.AgentType,
 		"model_override": a.ModelOverride,
 		"scope":          a.Scope,
 		"base_branch":    a.BaseBranch,
 	})
+	if err != nil {
+		panic(fmt.Sprintf("BuildConfigSnapshot: %v", err))
+	}
 	return data
 }
 

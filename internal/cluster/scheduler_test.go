@@ -8,6 +8,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -443,4 +444,182 @@ func TestScheduler_ShouldRunPM_OldFailure(t *testing.T) {
 	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
 	require.NoError(t, err, "shouldRunPM should not error")
 	require.True(t, run, "should run when the failure is older than the failure backoff")
+}
+
+// --- automation scheduling ---
+
+type mockAutomations struct {
+	due           []models.Automation
+	listErr       error
+	inFlight      map[uuid.UUID]int
+	inFlightErr   error
+	advanceErr    error
+	advancedIDs   []uuid.UUID
+	advancedNexts []time.Time
+}
+
+func (m *mockAutomations) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now time.Time) ([]models.Automation, error) {
+	return m.due, m.listErr
+}
+
+func (m *mockAutomations) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
+	m.advancedIDs = append(m.advancedIDs, automationID)
+	m.advancedNexts = append(m.advancedNexts, nextRunAt)
+	return m.advanceErr
+}
+
+func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, automationID uuid.UUID) (int, error) {
+	if m.inFlightErr != nil {
+		return 0, m.inFlightErr
+	}
+	return m.inFlight[automationID], nil
+}
+
+type mockAutomationRuns struct {
+	created    []models.AutomationRun
+	createFlag bool // value returned by CreateRunInTx
+	createErr  error
+}
+
+func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
+	if m.createErr != nil {
+		return false, m.createErr
+	}
+	if m.createFlag {
+		r.ID = uuid.New()
+	}
+	m.created = append(m.created, *r)
+	return m.createFlag, nil
+}
+
+// newAutomationFixture builds an interval-scheduled automation with sensible
+// defaults for scheduler tests.
+func newAutomationFixture() models.Automation {
+	orgID := uuid.New()
+	autoID := uuid.New()
+	interval := 1
+	unit := "days"
+	nextRun := time.Now().Add(-time.Minute)
+	return models.Automation{
+		ID:            autoID,
+		OrgID:         orgID,
+		Name:          "test",
+		Goal:          "goal",
+		ExecutionMode: "sequential",
+		MaxConcurrent: 1,
+		BaseBranch:    "main",
+		ScheduleType:  models.AutomationScheduleInterval,
+		IntervalValue: &interval,
+		IntervalUnit:  &unit,
+		Timezone:      "UTC",
+		NextRunAt:     &nextRun,
+		Enabled:       true,
+	}
+}
+
+func TestScheduler_ScheduleAutomationRuns_NilStores(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic when automation stores are not wired.
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+}
+
+func TestScheduler_ScheduleAutomationRuns_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "all pgxmock expectations should be met")
+	require.Len(t, runs.created, 1, "should create one run")
+	require.Equal(t, models.AutomationTriggeredBySchedule, runs.created[0].TriggeredBy)
+	require.Len(t, automations.advancedIDs, 1, "should advance next_run_at once")
+	require.Equal(t, a.ID, automations.advancedIDs[0])
+	require.Len(t, jobs.enqueued, 1, "should enqueue the job after commit")
+	require.Equal(t, models.JobTypeAutomationRun, jobs.enqueued[0])
+}
+
+func TestScheduler_ScheduleAutomationRuns_MaxConcurrentSaturated(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	a.MaxConcurrent = 1
+	automations := &mockAutomations{
+		due:      []models.Automation{a},
+		inFlight: map[uuid.UUID]int{a.ID: 1}, // saturated
+	}
+	runs := &mockAutomationRuns{}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet())
+	require.Empty(t, runs.created, "saturated automation must not create a run row")
+	require.Empty(t, jobs.enqueued, "saturated automation must not enqueue a job")
+	require.Len(t, automations.advancedIDs, 1, "next_run_at should still advance so we don't busy-loop")
+}
+
+func TestScheduler_ScheduleAutomationRuns_DuplicateIdempotencySkip(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: false} // idempotency hit → no insert
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet())
+	require.Len(t, automations.advancedIDs, 1, "next_run_at advances even when the run is a duplicate")
+	require.Empty(t, jobs.enqueued, "duplicate runs must not enqueue a job")
 }

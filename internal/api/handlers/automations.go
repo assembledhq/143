@@ -25,6 +25,10 @@ var validExecutionModes = map[string]bool{
 // resolveRepositoryID parses a repository_id from a request and verifies it
 // belongs to orgID. Returns nil + nil for empty input. The error is one a
 // handler can return directly (already user-safe).
+//
+// Fails closed when no repo store is configured: the router always calls
+// SetRepositoryStore so a missing store means a wiring bug, not a
+// less-secure-but-usable path.
 func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.UUID, raw string) (*uuid.UUID, error) {
 	if raw == "" {
 		return nil, nil
@@ -34,7 +38,7 @@ func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.
 		return nil, fmt.Errorf("invalid repository_id")
 	}
 	if h.repoStore == nil {
-		return &parsed, nil
+		return nil, fmt.Errorf("repository lookup not configured")
 	}
 	if _, err := h.repoStore.GetByID(ctx, orgID, parsed); err != nil {
 		return nil, fmt.Errorf("repository not found in this org")
@@ -48,6 +52,7 @@ type AutomationHandler struct {
 	repoStore          automationRepoLookup
 	jobStore           *db.JobStore
 	audit              *db.AuditEmitter
+	pool               db.TxStarter // needed for transactional RunNow
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
@@ -75,6 +80,12 @@ func (h *AutomationHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // belongs to the request org on Create/Update.
 func (h *AutomationHandler) SetRepositoryStore(repoStore automationRepoLookup) {
 	h.repoStore = repoStore
+}
+
+// SetPool wires the transaction starter used by RunNow to create the run row
+// and enqueue the job atomically.
+func (h *AutomationHandler) SetPool(pool db.TxStarter) {
+	h.pool = pool
 }
 
 func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +186,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cron is not yet implemented — accepting it would silently never run because
 	// next_run_at would never be set. Reject explicitly until a cron parser is wired.
+	// TODO(phase-3): wire gorhill/cronexpr per design doc 48 §6.2 and remove this gate.
 	if scheduleType == models.AutomationScheduleCron {
 		writeError(w, r, http.StatusBadRequest, "CRON_NOT_SUPPORTED", "cron schedules are not yet supported; use schedule_type=interval")
 		return
@@ -382,6 +394,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
+		// TODO(phase-3): wire gorhill/cronexpr per design doc 48 §6.2 and remove this gate.
 		if *req.ScheduleType == models.AutomationScheduleCron {
 			writeError(w, r, http.StatusBadRequest, "CRON_NOT_SUPPORTED", "cron schedules are not yet supported; use schedule_type=interval")
 			return
@@ -521,10 +534,11 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
-// RunNow creates a manual automation run.
+// RunNow creates a manual automation run and enqueues the job atomically so a
+// failed enqueue cannot leave an orphaned pending run row behind.
 func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
-	if h.jobStore == nil {
-		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store not configured")
+	if h.jobStore == nil || h.pool == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "NOT_CONFIGURED", "job store or pool not configured")
 		return
 	}
 
@@ -542,6 +556,13 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin transaction", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
 	run := models.AutomationRun{
 		AutomationID:      automation.ID,
 		OrgID:             automation.OrgID,
@@ -552,7 +573,7 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		Status:            models.AutomationRunStatusPending,
 	}
 
-	created, err := h.automationRunStore.CreateRun(r.Context(), &run)
+	created, err := h.automationRunStore.CreateRunInTx(r.Context(), tx, &run)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_RUN_FAILED", "failed to create automation run", err)
 		return
@@ -562,15 +583,19 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enqueue the job.
 	dedupeKey := fmt.Sprintf("automation_run:%s", run.ID.String())
 	payload := map[string]string{
 		"org_id":            orgID.String(),
 		"automation_id":     automation.ID.String(),
 		"automation_run_id": run.ID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue automation run job", err)
+		return
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit transaction", err)
 		return
 	}
 
@@ -599,25 +624,36 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var auditAction models.AuditAction
 	switch req.Action {
 	case "pause":
 		if err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to pause automations", err)
 			return
 		}
+		auditAction = models.AuditActionAutomationPaused
 	case "resume":
 		if err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to resume automations", err)
 			return
 		}
+		auditAction = models.AuditActionAutomationResumed
 	case "delete":
 		if err := h.automationStore.BulkSoftDelete(r.Context(), orgID, req.AutomationIDs); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to delete automations", err)
 			return
 		}
+		auditAction = models.AuditActionAutomationDeleted
 	default:
 		writeError(w, r, http.StatusBadRequest, "INVALID_ACTION", "action must be pause, resume, or delete")
 		return
+	}
+
+	// Emit one audit event per affected automation so the activity log stays
+	// consistent with the single-op handlers.
+	for _, id := range req.AutomationIDs {
+		idStr := id.String()
+		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, nil)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

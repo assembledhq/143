@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -50,6 +49,13 @@ type schedulerAutomationRunStore interface {
 	CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error)
 }
 
+// schedulerTxBeginner is the narrow transaction-starter surface the scheduler
+// needs from a pgx pool. Declared as an interface so tests can inject a mock
+// without depending on pgxpool.Pool directly.
+type schedulerTxBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 type schedulerPMDocStore interface {
 	GetByOrgAndSourceType(ctx context.Context, orgID uuid.UUID, sourceType string) (models.PMDocument, error)
 }
@@ -67,11 +73,11 @@ type Scheduler struct {
 	integrations   schedulerIntegrationStore
 	plans          schedulerPlanStore
 	repos          schedulerRepoStore
-	projects       schedulerProjectStore        // nil-safe: project scheduling disabled if nil
-	pmDocs         schedulerPMDocStore           // nil-safe: context refresh scheduling disabled if nil
-	automations    schedulerAutomationStore      // nil-safe: automation scheduling disabled if nil
-	automationRuns schedulerAutomationRunStore   // nil-safe: automation scheduling disabled if nil
-	pool           *pgxpool.Pool                 // needed for automation scheduling transactions
+	projects       schedulerProjectStore       // nil-safe: project scheduling disabled if nil
+	pmDocs         schedulerPMDocStore         // nil-safe: context refresh scheduling disabled if nil
+	automations    schedulerAutomationStore    // nil-safe: automation scheduling disabled if nil
+	automationRuns schedulerAutomationRunStore // nil-safe: automation scheduling disabled if nil
+	pool           schedulerTxBeginner         // needed for automation scheduling transactions
 	logger         zerolog.Logger
 
 	lastCleanupDates map[string]string // tracks UTC date of last cleanup scheduling per job type
@@ -110,7 +116,7 @@ func (s *Scheduler) SetPMDocStore(pmDocs schedulerPMDocStore) {
 
 // SetAutomationStores injects the automation stores and connection pool for
 // automation scheduling via the claim-and-fire loop.
-func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, runs schedulerAutomationRunStore, pool *pgxpool.Pool) {
+func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, runs schedulerAutomationRunStore, pool schedulerTxBeginner) {
 	s.automations = automations
 	s.automationRuns = runs
 	s.pool = pool
@@ -416,9 +422,9 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 	}
 
 	type pendingEnqueue struct {
-		orgID         uuid.UUID
-		automationID  uuid.UUID
-		runID         uuid.UUID
+		orgID        uuid.UUID
+		automationID uuid.UUID
+		runID        uuid.UUID
 	}
 	var toEnqueue []pendingEnqueue
 

@@ -3,35 +3,38 @@
 --
 -- After insertion we disable the legacy project schedule so the scheduler does
 -- not fire BOTH a project_cycle and an automation_run for the same workload.
--- The down migration below restores schedule_enabled and removes the rows we
--- inserted (tracked via a marker column on the projects table so the rollback
--- can identify them precisely instead of name/goal matching).
+--
+-- Correlation uses a transient source_project_id column on automations (instead
+-- of matching on (org_id, title, goal)) so a migration still works correctly
+-- when two scheduled projects share the same name and goal.
 
 ALTER TABLE projects
     ADD COLUMN IF NOT EXISTS migrated_to_automation_id UUID REFERENCES automations(id);
 
-WITH inserted AS (
-    INSERT INTO automations (
-        org_id, repository_id, name, goal, scope, agent_type,
-        model_override, execution_mode, max_concurrent, base_branch,
-        schedule_type, interval_value, interval_unit, next_run_at, enabled,
-        created_by, priority, created_at, updated_at
-    )
-    SELECT
-        org_id, repository_id, title, goal, scope, agent_type,
-        model_override, execution_mode, max_concurrent, base_branch,
-        'interval', schedule_interval, schedule_unit, next_run_at, schedule_enabled,
-        created_by, priority, created_at, updated_at
-    FROM projects
-    WHERE schedule_enabled = true AND deleted_at IS NULL
-    RETURNING id, org_id, name, goal
+ALTER TABLE automations
+    ADD COLUMN IF NOT EXISTS source_project_id UUID REFERENCES projects(id);
+
+INSERT INTO automations (
+    org_id, repository_id, name, goal, scope, agent_type,
+    model_override, execution_mode, max_concurrent, base_branch,
+    schedule_type, interval_value, interval_unit, next_run_at, enabled,
+    created_by, priority, created_at, updated_at, source_project_id
 )
+SELECT
+    org_id, repository_id, title, goal, scope, agent_type,
+    model_override, execution_mode, max_concurrent, base_branch,
+    'interval', schedule_interval, schedule_unit, next_run_at, schedule_enabled,
+    created_by, priority, created_at, updated_at, id
+FROM projects
+WHERE schedule_enabled = true AND deleted_at IS NULL;
+
 UPDATE projects p
 SET schedule_enabled = false,
-    migrated_to_automation_id = i.id
-FROM inserted i
-WHERE p.org_id = i.org_id
-  AND p.title = i.name
-  AND p.goal = i.goal
-  AND p.schedule_enabled = true
-  AND p.deleted_at IS NULL;
+    migrated_to_automation_id = a.id
+FROM automations a
+WHERE a.source_project_id = p.id;
+
+-- Drop the transient correlation column so it doesn't bleed into the normal
+-- schema. The down migration doesn't need it because rollback identifies rows
+-- via projects.migrated_to_automation_id.
+ALTER TABLE automations DROP COLUMN source_project_id;

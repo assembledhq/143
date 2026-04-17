@@ -42,14 +42,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 func scanAutomations(rows pgx.Rows) ([]models.Automation, error) {
 	var automations []models.Automation
 	for rows.Next() {
-		var a models.Automation
-		err := rows.Scan(
-			&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
-			&a.AgentType, &a.ModelOverride, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
-			&a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.CronExpression, &a.Timezone,
-			&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
-			&a.Priority, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
-		)
+		a, err := scanAutomation(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -256,7 +249,14 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, auto
 // interval automation's next_run_at is recomputed from now() so it doesn't sit
 // dead with a NULL next_run_at (which the scheduler's idx_automations_due
 // excludes).
+//
+// Fails closed on empty automationIDs so a caller who forgot to populate the
+// list can't silently pause or resume every automation in the org.
 func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) error {
+	if len(automationIDs) == 0 {
+		return nil
+	}
+
 	var pausedBy *uuid.UUID
 	var pausedAt *time.Time
 	if !enabled {
@@ -285,35 +285,32 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			paused_at = @paused_at,
 			next_run_at = %s,
 			updated_at = now()
-		WHERE org_id = @org_id AND deleted_at IS NULL`, nextRunAtExpr)
-	args := pgx.NamedArgs{
+		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)`, nextRunAtExpr)
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
 		"enabled":   enabled,
 		"paused_by": pausedBy,
 		"paused_at": pausedAt,
-	}
-
-	if len(automationIDs) > 0 {
-		query += ` AND id = ANY(@ids)`
-		args["ids"] = automationIDs
-	}
-
-	_, err := s.db.Exec(ctx, query, args)
+		"ids":       automationIDs,
+	})
 	return err
 }
 
-// BulkSoftDelete soft-deletes multiple automations.
+// BulkSoftDelete soft-deletes multiple automations. Fails closed on empty
+// automationIDs to avoid silently wiping an entire org's automations.
 func (s *AutomationStore) BulkSoftDelete(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID) error {
-	query := `UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
-		WHERE org_id = @org_id AND deleted_at IS NULL`
-	args := pgx.NamedArgs{"org_id": orgID}
-
-	if len(automationIDs) > 0 {
-		query += ` AND id = ANY(@ids)`
-		args["ids"] = automationIDs
+	if len(automationIDs) == 0 {
+		return nil
 	}
 
-	_, err := s.db.Exec(ctx, query, args)
+	query := `UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
+		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"org_id": orgID,
+		"ids":    automationIDs,
+	})
 	return err
 }
 
@@ -344,12 +341,7 @@ func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 func scanAutomationRuns(rows pgx.Rows) ([]models.AutomationRun, error) {
 	var runs []models.AutomationRun
 	for rows.Next() {
-		var r models.AutomationRun
-		err := rows.Scan(
-			&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
-			&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
-			&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
-		)
+		r, err := scanAutomationRun(rows)
 		if err != nil {
 			return nil, err
 		}
