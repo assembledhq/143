@@ -41,16 +41,17 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            Open-source autopilot
+            AI coding agents,
             <br />
-            for Claude Code
+            built for teams
           </h1>
 
           <p
             className={`max-w-md text-sm leading-relaxed ${isDark ? "text-white/45" : "text-slate-600"}`}
           >
-            Fix bugs and ship projects automatically. Works with
-            Claude Code, Codex, or any coding agent.
+            Run Claude Code, Codex, or any agent in the cloud. Engineers
+            and non-engineers ship together — every prompt and run is shared
+            by default.
           </p>
 
           <div className="pt-2 pointer-events-auto">
