@@ -27,7 +27,8 @@ type Automation struct {
 	IntervalValue  *int       `db:"interval_value"  json:"interval_value,omitempty"`
 	IntervalUnit   *string    `db:"interval_unit"   json:"interval_unit,omitempty"`
 	CronExpression *string    `db:"cron_expression" json:"cron_expression,omitempty"`
-	Timezone       string     `db:"timezone"        json:"timezone"`
+	// Timezone is reserved for cron schedules (Phase 3); interval schedules ignore it.
+	Timezone string `db:"timezone"        json:"timezone"`
 	NextRunAt      *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
 	LastRunAt      *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
 	Enabled        bool       `db:"enabled"         json:"enabled"`

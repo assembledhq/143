@@ -801,9 +801,9 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE automations SET").
+	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(testAnyArgs(5)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()).AddRow(uuid.New()))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	body := map[string]any{"action": "pause", "automation_ids": []string{uuid.New().String(), uuid.New().String()}}
@@ -821,9 +821,9 @@ func TestAutomationHandler_Bulk_DeleteOK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE automations SET deleted_at").
+	mock.ExpectQuery("UPDATE automations SET deleted_at").
 		WithArgs(testAnyArgs(2)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	body := map[string]any{"action": "delete", "automation_ids": []string{uuid.New().String()}}

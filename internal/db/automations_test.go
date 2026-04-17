@@ -234,8 +234,9 @@ func TestAutomationStore_BulkUpdateEnabled_EmptyIDsNoop(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationStore(mock)
-	err = store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
+	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
 	require.NoError(t, err)
+	require.Empty(t, affected)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -250,12 +251,13 @@ func TestAutomationStore_BulkUpdateEnabled_Pause(t *testing.T) {
 	userID := uuid.New()
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 
-	mock.ExpectExec("UPDATE automations SET").
+	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(anyArgs(5)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]))
 
-	err = store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, false, &userID)
+	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, false, &userID)
 	require.NoError(t, err)
+	require.ElementsMatch(t, ids, affected)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -272,12 +274,13 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	// Assert the resume path emits the CASE expression that recomputes
 	// next_run_at from interval_value/interval_unit — without this regex
 	// a silent regression to `NULL` would pass the looser UPDATE check.
-	mock.ExpectExec(`interval_value::text \|\| ' ' \|\| interval_unit\)::interval`).
+	mock.ExpectQuery(`interval_value::text \|\| ' ' \|\| interval_unit\)::interval`).
 		WithArgs(anyArgs(5)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]))
 
-	err = store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, true, nil)
+	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, true, nil)
 	require.NoError(t, err)
+	require.ElementsMatch(t, ids, affected)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -289,7 +292,9 @@ func TestAutomationStore_BulkSoftDelete_EmptyIDsNoop(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationStore(mock)
-	require.NoError(t, store.BulkSoftDelete(context.Background(), uuid.New(), nil))
+	affected, err := store.BulkSoftDelete(context.Background(), uuid.New(), nil)
+	require.NoError(t, err)
+	require.Empty(t, affected)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -303,11 +308,13 @@ func TestAutomationStore_BulkSoftDelete(t *testing.T) {
 	store := NewAutomationStore(mock)
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 
-	mock.ExpectExec("UPDATE automations SET deleted_at").
+	mock.ExpectQuery("UPDATE automations SET deleted_at").
 		WithArgs(anyArgs(2)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]))
 
-	require.NoError(t, store.BulkSoftDelete(context.Background(), uuid.New(), ids))
+	affected, err := store.BulkSoftDelete(context.Background(), uuid.New(), ids)
+	require.NoError(t, err)
+	require.ElementsMatch(t, ids, affected)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

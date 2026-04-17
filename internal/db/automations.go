@@ -122,7 +122,11 @@ func (s *AutomationStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filter
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
 		if err == nil {
-			query += ` AND (created_at < (SELECT created_at FROM automations WHERE id = @cursor_id) OR (created_at = (SELECT created_at FROM automations WHERE id = @cursor_id) AND id < @cursor_id))`
+			// Filter deleted_at IS NULL inside the subquery: a cursor pointing
+			// at a row that was soft-deleted between pages would otherwise
+			// resolve to NULL and the `<` comparison would silently return no
+			// rows, stalling pagination for the rest of the list.
+			query += ` AND (created_at < (SELECT created_at FROM automations WHERE id = @cursor_id AND deleted_at IS NULL) OR (created_at = (SELECT created_at FROM automations WHERE id = @cursor_id AND deleted_at IS NULL) AND id < @cursor_id))`
 			args["cursor_id"] = cursorID
 		}
 	}
@@ -251,11 +255,16 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, auto
 // dead with a NULL next_run_at (which the scheduler's idx_automations_due
 // excludes).
 //
+// Returns the IDs actually affected (scoped to org_id and not-yet-deleted) so
+// callers can emit audit events only for rows that really changed — IDs from
+// another tenant or stale/deleted rows are silently filtered by the WHERE
+// clause and must not leak into the audit log.
+//
 // Fails closed on empty automationIDs so a caller who forgot to populate the
 // list can't silently pause or resume every automation in the org.
-func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) error {
+func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) ([]uuid.UUID, error) {
 	if len(automationIDs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var pausedBy *uuid.UUID
@@ -286,33 +295,57 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			paused_at = @paused_at,
 			next_run_at = %s,
 			updated_at = now()
-		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)`, nextRunAtExpr)
+		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
+		RETURNING id`, nextRunAtExpr)
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
 		"enabled":   enabled,
 		"paused_by": pausedBy,
 		"paused_at": pausedAt,
 		"ids":       automationIDs,
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectIDs(rows)
 }
 
-// BulkSoftDelete soft-deletes multiple automations. Fails closed on empty
-// automationIDs to avoid silently wiping an entire org's automations.
-func (s *AutomationStore) BulkSoftDelete(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID) error {
+// BulkSoftDelete soft-deletes multiple automations. Returns the IDs actually
+// affected for audit-logging purposes. Fails closed on empty automationIDs to
+// avoid silently wiping an entire org's automations.
+func (s *AutomationStore) BulkSoftDelete(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID) ([]uuid.UUID, error) {
 	if len(automationIDs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	query := `UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
-		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)`
+		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
+		RETURNING id`
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id": orgID,
 		"ids":    automationIDs,
 	})
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectIDs(rows)
+}
+
+// collectIDs scans a single-column UUID result set.
+func collectIDs(rows pgx.Rows) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // --- AutomationRunStore ---
@@ -351,27 +384,37 @@ func scanAutomationRuns(rows pgx.Rows) ([]models.AutomationRun, error) {
 	return runs, rows.Err()
 }
 
-// CreateRun inserts a new automation run. If scheduled_time is set and a
-// duplicate exists (idempotency index), the insert is skipped and false is returned.
-func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.AutomationRun) (bool, error) {
+// runInserter is the minimal QueryRow surface shared by pgxpool.Pool, pgx.Tx,
+// and pgxmock — all used here to insert automation runs. Unifying the pool and
+// tx paths through this interface lets CreateRun and CreateRunInTx delegate to
+// a single insertRun helper without duplicating the SQL.
+type runInserter interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+const createAutomationRunSQL = `
+	INSERT INTO automation_runs (
+		automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
+		goal_snapshot, config_snapshot, status
+	) VALUES (
+		@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
+		@goal_snapshot, @config_snapshot, @status
+	)
+	ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
+	DO NOTHING
+	RETURNING id, triggered_at, created_at, updated_at`
+
+// insertRun runs the shared INSERT for automation_runs against either a pool
+// or a transaction. Returns (false, nil) on conflict — the partial unique
+// index only fires when scheduled_time IS NOT NULL (i.e. scheduler-triggered
+// runs), so manual runs always insert successfully.
+func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (bool, error) {
 	configJSON, err := json.Marshal(r.ConfigSnapshot)
 	if err != nil {
 		configJSON = nil
 	}
 
-	query := `
-		INSERT INTO automation_runs (
-			automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
-			goal_snapshot, config_snapshot, status
-		) VALUES (
-			@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
-			@goal_snapshot, @config_snapshot, @status
-		)
-		ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
-		DO NOTHING
-		RETURNING id, triggered_at, created_at, updated_at`
-
-	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	row := q.QueryRow(ctx, createAutomationRunSQL, pgx.NamedArgs{
 		"automation_id":        r.AutomationID,
 		"org_id":               r.OrgID,
 		"triggered_by":         r.TriggeredBy,
@@ -388,40 +431,15 @@ func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.Automation
 	return err == nil, err
 }
 
+// CreateRun inserts a new automation run. If scheduled_time is set and a
+// duplicate exists (idempotency index), the insert is skipped and false is returned.
+func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.AutomationRun) (bool, error) {
+	return insertRun(ctx, s.db, r)
+}
+
 // CreateRunInTx inserts a new automation run inside an existing transaction.
 func (s *AutomationRunStore) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
-	configJSON, err := json.Marshal(r.ConfigSnapshot)
-	if err != nil {
-		configJSON = nil
-	}
-
-	query := `
-		INSERT INTO automation_runs (
-			automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
-			goal_snapshot, config_snapshot, status
-		) VALUES (
-			@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
-			@goal_snapshot, @config_snapshot, @status
-		)
-		ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
-		DO NOTHING
-		RETURNING id, triggered_at, created_at, updated_at`
-
-	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
-		"automation_id":        r.AutomationID,
-		"org_id":               r.OrgID,
-		"triggered_by":         r.TriggeredBy,
-		"triggered_by_user_id": r.TriggeredByUserID,
-		"scheduled_time":       r.ScheduledTime,
-		"goal_snapshot":        r.GoalSnapshot,
-		"config_snapshot":      configJSON,
-		"status":               r.Status,
-	})
-	err = row.Scan(&r.ID, &r.TriggeredAt, &r.CreatedAt, &r.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil // duplicate — idempotency
-	}
-	return err == nil, err
+	return insertRun(ctx, tx, r)
 }
 
 // GetByID returns a single automation run scoped to the given org and parent

@@ -3,6 +3,9 @@
 -- (set by the up migration) so we never delete user-created automations that
 -- happen to share a name or goal with a project.
 
+-- Note: this re-enables schedule_enabled on all projects that were migrated,
+-- including soft-deleted ones. That matches the pre-migration state for live
+-- projects; for soft-deleted rows the flag is effectively inert.
 UPDATE projects
 SET schedule_enabled = true
 WHERE migrated_to_automation_id IS NOT NULL;

@@ -741,33 +741,42 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var auditAction models.AuditAction
+	var affected []uuid.UUID
 	switch req.Action {
 	case "pause":
-		if err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID); err != nil {
+		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
+		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to pause automations", err)
 			return
 		}
+		affected = ids
 		auditAction = models.AuditActionAutomationPaused
 	case "resume":
-		if err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID); err != nil {
+		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
+		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to resume automations", err)
 			return
 		}
+		affected = ids
 		auditAction = models.AuditActionAutomationResumed
 	case "delete":
-		if err := h.automationStore.BulkSoftDelete(r.Context(), orgID, req.AutomationIDs); err != nil {
+		ids, err := h.automationStore.BulkSoftDelete(r.Context(), orgID, req.AutomationIDs)
+		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to delete automations", err)
 			return
 		}
+		affected = ids
 		auditAction = models.AuditActionAutomationDeleted
 	default:
 		writeError(w, r, http.StatusBadRequest, "INVALID_ACTION", "action must be pause, resume, or delete")
 		return
 	}
 
-	// Emit one audit event per affected automation so the activity log stays
-	// consistent with the single-op handlers.
-	for _, id := range req.AutomationIDs {
+	// Emit one audit event per actually-affected automation. IDs from other
+	// tenants or stale/deleted rows are filtered out at the store layer and
+	// must not pollute the audit log (cross-tenant probing would otherwise
+	// leave ghost events behind).
+	for _, id := range affected {
 		idStr := id.String()
 		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, nil)
 	}

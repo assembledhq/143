@@ -11,7 +11,6 @@ import {
   Clock,
   Minus,
   Loader2,
-  ChevronDown,
 } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -27,7 +26,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
 
 const runStatusConfig: Record<AutomationRunStatus, { icon: React.ComponentType<{ className?: string }>; label: string; color: string }> = {
