@@ -311,9 +311,10 @@ func buildServices(
 	}
 	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime))
 
-	// Runtime health check: verify gVisor works if required.
-	// Retry a few times because gVisor can fail transiently during startup.
-	if cfg.SandboxRuntime == "runsc" {
+	// Startup health check: verify Docker daemon connectivity and, for gVisor,
+	// that the runsc runtime is functional. Retry a few times because Docker and
+	// gVisor can fail transiently during startup.
+	{
 		const maxRetries = 3
 		var healthErr error
 		for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -323,17 +324,18 @@ func buildServices(
 			if healthErr == nil {
 				break
 			}
-			logger.Warn().Err(healthErr).Int("attempt", attempt).Int("max", maxRetries).Msg("gVisor health check failed, retrying")
+			logger.Warn().Err(healthErr).Int("attempt", attempt).Int("max", maxRetries).Msg("sandbox health check failed, retrying")
 			if attempt < maxRetries {
 				time.Sleep(2 * time.Second)
 			}
 		}
 		if healthErr != nil {
-			if cfg.SandboxRequireGVisor {
-				logger.Fatal().Err(healthErr).Msg("gVisor health check failed — set SANDBOX_REQUIRE_GVISOR=false to disable")
-			} else {
+			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
 				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"))
+			} else {
+				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
+				return nil
 			}
 		}
 	}
