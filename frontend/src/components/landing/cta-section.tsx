@@ -21,14 +21,15 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Start building
+          Give your team superpowers
         </h2>
         <p
           className={`text-sm leading-relaxed max-w-md mx-auto ${
             isDark ? "text-white/45" : "text-slate-600"
           }`}
         >
-          Connect your repos and your favorite coding agents.
+          Connect your repos, pick your agents, and start shipping
+          as a team.
         </p>
         <div>
           <Button
