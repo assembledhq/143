@@ -169,8 +169,9 @@ describe("CreateSessionDialog", () => {
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
+    // With multiple repos the first one is auto-selected, so the button shows its name
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
+      expect(screen.getByText("api-server")).toBeInTheDocument();
     });
   });
 
@@ -302,23 +303,22 @@ describe("CreateSessionDialog", () => {
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
-    // Wait for repo selector to appear
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
-    });
-
-    // Open repo dropdown and select a repo
-    await user.click(screen.getByRole("button", { name: /Repo/ }));
-    await user.click(screen.getByText("acme/api-server"));
-
-    // Should show the repo short name
+    // First repo is auto-selected; switch to the second one
     await waitFor(() => {
       expect(screen.getByText("api-server")).toBeInTheDocument();
+    });
+
+    // Open repo dropdown and select the other repo
+    await user.click(screen.getByText("api-server"));
+    await user.click(screen.getByText("acme/web-app"));
+
+    // Should show the new repo short name
+    await waitFor(() => {
+      expect(screen.getByText("web-app")).toBeInTheDocument();
     });
   });
 
   it("shows branch selector after selecting a repo", async () => {
-    const user = userEvent.setup();
     setupRepoHandlers();
 
     server.use(
@@ -337,15 +337,9 @@ describe("CreateSessionDialog", () => {
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
+    // First repo is auto-selected, so branch selector should appear
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: /Repo/ }));
-    await user.click(screen.getByText("acme/api-server"));
-
-    // Should show a branch selector button with default branch
-    await waitFor(() => {
+      expect(screen.getByText("api-server")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
     });
   });
@@ -362,20 +356,11 @@ describe("CreateSessionDialog", () => {
       }),
     );
 
-    const user = userEvent.setup();
-
     renderWithProviders(
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Repo/ })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: /Repo/ }));
-    await user.click(screen.getByText("acme/web-app"));
-
-    // Should show a text input for branch instead of dropdown
+    // First repo is auto-selected and branch fetch fails, so fallback input should appear
     await waitFor(() => {
       expect(screen.getByLabelText("Target branch")).toBeInTheDocument();
     });
@@ -454,15 +439,7 @@ describe("CreateSessionDialog", () => {
         "Fix the bug",
       );
 
-      // Wait for repo selector and select a repo
-      const repoButton = await screen.findByRole("button", { name: /Repo/ });
-      await user.click(repoButton);
-
-      // Wait for dropdown to fully open and select repo
-      const repoOption = await screen.findByText("acme/api-server");
-      await user.click(repoOption);
-
-      // Wait for dropdown to close, selection to settle, and branch data to load
+      // First repo is auto-selected; wait for branch data to load
       await waitFor(() => {
         expect(screen.getByText("api-server")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();

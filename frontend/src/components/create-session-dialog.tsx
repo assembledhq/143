@@ -84,6 +84,14 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   const selectedRepoId = useMemo(() => {
     if (userSelectedRepoId !== null) return userSelectedRepoId;
     if (repositories.length === 1) return repositories[0].id;
+    // Default to the last used repo if available
+    if (repositories.length > 0) {
+      try {
+        const lastUsed = localStorage.getItem("143:lastUsedRepoId");
+        if (lastUsed && repositories.some((r) => r.id === lastUsed)) return lastUsed;
+      } catch {}
+      return repositories[0].id;
+    }
     return "";
   }, [userSelectedRepoId, repositories]);
 
@@ -155,6 +163,9 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       return { optimisticId: addOptimisticSession(title) };
     },
     onSuccess: async (response, _variables, context) => {
+      if (selectedRepoId) {
+        try { localStorage.setItem("143:lastUsedRepoId", selectedRepoId); } catch {}
+      }
       await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       removeOptimisticSession(context.optimisticId);
       onOpenChange(false);
@@ -332,12 +343,6 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-72">
-                <DropdownMenuItem
-                  onClick={() => setUserSelectedRepoId("")}
-                  className={!selectedRepoId ? "font-medium" : ""}
-                >
-                  No specific repo
-                </DropdownMenuItem>
                 {repositories.map((repo) => (
                   <DropdownMenuItem
                     key={repo.id}
