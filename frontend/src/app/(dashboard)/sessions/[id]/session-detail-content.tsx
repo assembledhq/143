@@ -1043,7 +1043,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (hasContent && canSendMessage && !sendMutation.isPending) {
+      if (hasContent && canSendMessage && !sendMutation.isPending && !isRunning) {
         sendMutation.mutate({});
       }
     }
@@ -1173,10 +1173,10 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
                 : planMode
                 ? "Describe what you want to plan..."
                 : isRunning
-                ? "Send a message to the agent..."
+                ? "Agent is responding..."
                 : "Send a follow-up message..."
             }
-            disabled={!canSendMessage || sendMutation.isPending}
+            disabled={!canSendMessage || sendMutation.isPending || isRunning}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
 
