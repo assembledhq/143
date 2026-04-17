@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -161,8 +162,12 @@ type SandboxConfig struct {
 
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.
 func DefaultSandboxConfig() SandboxConfig {
+	image := "143-sandbox:latest"
+	if v := os.Getenv("SANDBOX_IMAGE"); v != "" {
+		image = v
+	}
 	return SandboxConfig{
-		Image:         "143-sandbox:latest",
+		Image:         image,
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
 		DiskLimitGB:   10,
