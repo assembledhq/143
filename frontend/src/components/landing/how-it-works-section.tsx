@@ -40,21 +40,21 @@ const dispatches = [
 
 const terminalLines = [
   {
-    prefix: "SCAN",
+    prefix: "AGENT",
     prefixColor: "text-yellow-400",
-    text: "3 Sentry errors, 2 Linear tickets",
+    text: "claude-code spinning up in cloud sandbox",
     threshold: 0.15,
   },
   {
-    prefix: "PRIO",
+    prefix: "EXEC",
     prefixColor: "text-orange-400",
-    text: "Auth flow TypeError → highest impact",
+    text: "running: fix null ref in auth flow",
     threshold: 0.3,
   },
   {
-    prefix: "SEND",
+    prefix: "PREV",
     prefixColor: "text-blue-400",
-    text: "→ claude-code: fix null ref in handleLogin()",
+    text: "preview env ready → preview-342.143.dev",
     threshold: 0.45,
   },
   {
@@ -66,21 +66,21 @@ const terminalLines = [
 ];
 
 const projectTasks = [
-  { task: "Add session store schema", baseStatus: "done" as const },
-  { task: "Update login endpoint", baseStatus: "done" as const },
+  { task: "Baseline: p95 latency 420ms", baseStatus: "done" as const },
+  { task: "Iteration 1: optimize DB queries → 380ms", baseStatus: "done" as const },
   {
-    task: "Migrate middleware",
+    task: "Iteration 2: add response caching → 310ms",
     baseStatus: "active" as const,
     completeAt: 0.2,
   },
   {
-    task: "Remove JWT dependencies",
+    task: "Iteration 3: reduce serialization → 265ms",
     baseStatus: "pending" as const,
     activateAt: 0.2,
     completeAt: 0.4,
   },
   {
-    task: "Update integration tests",
+    task: "Target: p95 latency < 250ms",
     baseStatus: "pending" as const,
     activateAt: 0.4,
     completeAt: 0.6,
@@ -152,7 +152,7 @@ function TerminalContent({ progress }: { progress: number }) {
       >
         <span>{">"}</span>
         <span>
-          sleeping... next scan in 2h 14m
+          done · team notified · PR visible to all
           <span className="animate-pulse">_</span>
         </span>
       </div>
@@ -195,7 +195,7 @@ function ProjectsContent({
               isDark ? "text-white/80" : "text-slate-800"
             }`}
           >
-            Migrate auth from JWT to sessions
+            Loop: reduce API latency
           </span>
           <span
             className={`text-xs font-mono ${
@@ -484,7 +484,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
       />
 
       <div className="relative mx-auto max-w-5xl space-y-40 sm:space-y-52">
-        {/* ── Step 01: Everything Connects ── text LEFT, radar RIGHT */}
+        {/* ── Step 01: Built for Teams ── text LEFT, radar RIGHT */}
         <FadeInStep>
           <div className="flex flex-col md:flex-row items-center gap-12 md:gap-20">
             <div className="md:w-1/2 space-y-4">
@@ -496,12 +496,15 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Everything connects
+                Built for teams,
+                <br />
+                not solo devs
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Sentry errors, Linear tickets, Slack threads, your product
-                roadmap. The PM watches all of it so your team doesn&rsquo;t have
-                to.
+                By default, every automation, prompt, and agent run is visible
+                to your whole team. Non-engineers can write prompts, kick off
+                runs, and contribute code &mdash; and the team sees exactly
+                what was asked for and what was produced.
               </p>
             </div>
             <div className="md:w-1/2 w-full max-w-[400px] md:max-w-none relative">
@@ -521,7 +524,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           </div>
         </FadeInStep>
 
-        {/* ── Step 02: Always On ── terminal LEFT, text RIGHT (flipped) */}
+        {/* ── Step 02: Cloud Agents ── terminal LEFT, text RIGHT (flipped) */}
         <FadeInStep>
           <div
             ref={termRef}
@@ -536,13 +539,16 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Wakes up. Fixes bugs.
+                Your agents,
                 <br />
-                Goes back to sleep.
+                running in the cloud
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                The PM scans for bugs on a loop, sends them to your coding
-                agents, and opens PRs when CI passes. No prompt needed.
+                The big labs are constantly one-upping each other. With 143,
+                there&rsquo;s no vendor lock-in &mdash; use Claude Code, Codex,
+                or whatever comes next. When a better model drops, swap it in.
+                Everything runs in sandboxed cloud containers with preview
+                environments.
               </p>
             </div>
             <div className="md:w-1/2 relative">
@@ -571,7 +577,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                   <div className="w-2.5 h-2.5 rounded-full bg-[#febc2e]" />
                   <div className="w-2.5 h-2.5 rounded-full bg-[#28c840]" />
                   <span className="ml-3 text-xs font-mono text-white/25">
-                    pm-agent · loop
+                    143 · cloud agent
                   </span>
                 </div>
                 <TerminalContent progress={termProgress} />
@@ -580,7 +586,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           </div>
         </FadeInStep>
 
-        {/* ── Step 03: You Direct ── text LEFT, app window RIGHT */}
+        {/* ── Step 03: Loops ── text LEFT, app window RIGHT */}
         <FadeInStep>
           <div
             ref={projRef}
@@ -595,13 +601,15 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Create projects.
+                Loops: define an eval,
                 <br />
-                The PM chips away.
+                let agents improve it
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Describe what you want built and the PM breaks it into tasks.
-                It works through them one by one, opening PRs as it goes.
+                Want better latency? Define a benchmark. 143 runs your coding
+                agent in a loop &mdash; each iteration measures against the eval
+                and hill-climbs toward the target. Works for test coverage,
+                bundle size, error rates, or anything measurable.
               </p>
             </div>
             <div className="md:w-1/2 relative">
@@ -638,7 +646,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                       isDark ? "text-white/25" : "text-slate-400"
                     }`}
                   >
-                    Projects
+                    Loops
                   </span>
                 </div>
                 <ProjectsContent isDark={isDark} progress={projProgress} />
@@ -653,7 +661,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
                       isDark ? "text-white/20" : "text-slate-400"
                     }`}
                   >
-                    &ldquo;focus on auth this sprint&rdquo;
+                    eval: p95 latency &lt; 250ms &middot; 3 iterations complete
                   </p>
                 </div>
               </div>
@@ -661,7 +669,7 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
           </div>
         </FadeInStep>
 
-        {/* ── Step 04: Your Agents ── dashboard LEFT, text RIGHT (flipped) */}
+        {/* ── Step 04: Full Transparency ── dashboard LEFT, text RIGHT (flipped) */}
         <FadeInStep>
           <div
             ref={dispRef}
@@ -676,14 +684,14 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               <h2
                 className={`text-2xl sm:text-3xl font-light tracking-tight ${heading}`}
               >
-                Cloud agents for
+                Full visibility
                 <br />
-                the whole team
+                across the team
               </h2>
               <p className={`text-sm leading-relaxed max-w-sm ${body}`}>
-                Agents run in the cloud, so anyone on your team can use them.
-                Each engineer picks their own, whether it&rsquo;s Claude Code,
-                Codex, or Gemini CLI.
+                By default, every agent run, prompt, and automation is shared
+                with the team &mdash; all in one place. No more wondering
+                what other engineers are working on or duplicating effort.
               </p>
             </div>
             <div className="md:w-1/2 relative">
