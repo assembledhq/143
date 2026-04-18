@@ -123,6 +123,7 @@ type Service struct {
 	clientID    string
 	pending   sync.Map // pendingKey (orgID+label) -> *PendingAuth
 	refreshMu sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
+	initMu    sync.Map // pendingKey (orgID+label) -> *sync.Mutex (per-(org,label) init lock)
 }
 
 // NewService creates a new Device Code Auth service.
@@ -157,6 +158,16 @@ func pendingKey(orgID uuid.UUID, label string) string {
 // The label distinguishes multiple subscriptions (e.g. "Team A", "Team B").
 // createdBy records which user added the subscription; pass nil if unknown.
 func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string) (*DeviceAuthResponse, error) {
+	// Serialize concurrent init calls for the same (org, label). Otherwise two
+	// racing initiations could both reach InsertPendingAuth, with the slower
+	// request overwriting the faster one's pending state (or worse, racing
+	// against a still-in-flight OpenAI call).
+	pKey := pendingKey(orgID, label)
+	muVal, _ := s.initMu.LoadOrStore(pKey, &sync.Mutex{})
+	mu := muVal.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	endpoint := s.issuer + "/api/accounts/deviceauth/usercode"
 
 	reqBody, err := json.Marshal(map[string]string{
@@ -224,7 +235,6 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID, creat
 		Interval:        interval,
 		Label:           label,
 	}
-	pKey := pendingKey(orgID, label)
 	s.pending.Store(pKey, pending)
 
 	// Persist to DB so the pending state survives server restarts.
@@ -625,16 +635,6 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 	return &newCfg, nil
 }
 
-// RefreshToken refreshes the token for the single (legacy, label="") credential.
-// Kept for backward compatibility with the orchestrator.
-func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
-	if err != nil {
-		return nil, fmt.Errorf("get credential: %w", err)
-	}
-	return s.RefreshTokenByID(ctx, orgID, cred.ID)
-}
-
 // maxRoundRobinAttempts caps how many distinct credentials GetValidToken
 // will try before giving up. With healthy round-robin behavior we expect
 // to succeed on the first attempt; the cap exists so a multi-subscription
@@ -752,11 +752,17 @@ func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID 
 
 // DisconnectAll removes all ChatGPT OAuth credentials for the given org.
 func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
-	// Clean up in-memory pending auth and refresh mutexes for this org.
+	// Clean up in-memory pending auth and init mutexes for this org.
 	orgPrefix := orgID.String() + ":"
 	s.pending.Range(func(key, val any) bool {
-		if k, ok := key.(string); ok && len(k) >= len(orgPrefix) && k[:len(orgPrefix)] == orgPrefix {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, orgPrefix) {
 			s.pending.Delete(key)
+		}
+		return true
+	})
+	s.initMu.Range(func(key, val any) bool {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, orgPrefix) {
+			s.initMu.Delete(key)
 		}
 		return true
 	})

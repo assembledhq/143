@@ -141,7 +141,7 @@ export function AgentSettingsEditor({
   });
 
   const disconnectMutation = useMutation({
-    mutationFn: () => api.codexAuth.disconnect(),
+    mutationFn: () => api.codexAuth.disconnectAll(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
     },

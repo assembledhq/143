@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/codexauth"
 )
@@ -38,6 +39,10 @@ type codexCredentialStoreStub struct {
 	disabled   bool
 	// getByIDResult is returned by GetByID if set, otherwise "not found".
 	getByIDResult *models.DecryptedCredential
+	// insertPendingAuthErr overrides the default "not implemented" error
+	// returned by InsertPendingAuth, letting tests inject typed errors like
+	// *db.ErrCredentialLabelTaken to exercise handler branches.
+	insertPendingAuthErr error
 }
 
 func (s *codexCredentialStoreStub) Upsert(_ context.Context, _ uuid.UUID, _ models.ProviderConfig) error {
@@ -65,6 +70,9 @@ func (s *codexCredentialStoreStub) UpsertWithLabel(_ context.Context, _ uuid.UUI
 }
 
 func (s *codexCredentialStoreStub) InsertPendingAuth(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
+	if s.insertPendingAuthErr != nil {
+		return nil, s.insertPendingAuthErr
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -240,4 +248,57 @@ func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	require.NoError(t, err, "disconnect response should be valid JSON")
 	require.Equal(t, true, resp.Data["disconnected"], "disconnect should return disconnected=true")
 	require.Equal(t, true, store.disabled, "disconnect should disable the stored ChatGPT credential")
+}
+
+// TestCodexAuthHandler_Initiate_LabelTaken verifies that when InsertPendingAuth
+// returns a *db.ErrCredentialLabelTaken, the handler converts it to a 409
+// Conflict response with code LABEL_TAKEN and a status-aware message — so the
+// frontend can show "this label is already connected" instead of a generic 500.
+func TestCodexAuthHandler_Initiate_LabelTaken(t *testing.T) {
+	t.Parallel()
+
+	// The upstream OpenAI call must succeed so the service proceeds to the
+	// DB persist step, where our stub injects the conflict.
+	mockOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"device_auth_id":   "dev_test_123",
+			"user_code":        "TEST-CODE",
+			"verification_uri": "https://auth.openai.com/codex/device",
+			"expires_in":       900,
+			"interval":         5,
+		})
+	}))
+	defer mockOpenAI.Close()
+
+	store := &codexCredentialStoreStub{
+		insertPendingAuthErr: &db.ErrCredentialLabelTaken{Label: "Team A", ExistingStatus: "active"},
+	}
+	svc := codexauth.NewService(store, codexTestLogger())
+	svc.SetHTTPClient(mockOpenAI.Client())
+	svc.SetIssuer(mockOpenAI.URL)
+
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
+
+	reqBody := bytes.NewReader([]byte(`{"label":"Team A"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	req = codexAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "initiate should return 409 when the label is taken")
+
+	var resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err, "error response should be valid JSON")
+	require.Equal(t, "LABEL_TAKEN", resp.Error.Code, "initiate should surface LABEL_TAKEN error code")
+	require.Contains(t, resp.Error.Message, "Team A", "error message should mention the offending label")
+	require.Contains(t, resp.Error.Message, "already connected", "active-status message should guide the user to disconnect")
 }

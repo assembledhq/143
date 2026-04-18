@@ -349,10 +349,10 @@ export const api = {
     status: (label?: string) => get<import('./types').SingleResponse<import('./types').CodexAuthStatus>>(`/api/v1/settings/codex-auth/status${label ? `?label=${encodeURIComponent(label)}` : ''}`),
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').CodexSubscription>>('/api/v1/settings/codex-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/codex-auth/subscriptions/${id}`),
-    // Legacy: disconnects every ChatGPT subscription for the org. Used by the
+    // Disconnects every ChatGPT subscription for the org. Used by the
     // single-subscription UI (account settings, agent settings editor) where
     // there is no per-subscription picker.
-    disconnect: () => post<import('./types').SingleResponse<{ disconnected: boolean }>>('/api/v1/settings/codex-auth/disconnect'),
+    disconnectAll: () => post<import('./types').SingleResponse<{ disconnected: boolean }>>('/api/v1/settings/codex-auth/disconnect'),
   },
   githubStatus: {
     get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),

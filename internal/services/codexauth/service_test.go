@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -558,7 +560,86 @@ func TestGetValidToken_AutoRefresh(t *testing.T) {
 	}
 }
 
-func TestRefreshToken_Revoked(t *testing.T) {
+// TestGetValidToken_RoundRobinFailover verifies that when the first claimed
+// credential has an expired cached token AND a broken refresh, the service
+// marks it invalid and retries with the next credential in the rotation.
+func TestGetValidToken_RoundRobinFailover(t *testing.T) {
+	t.Parallel()
+
+	// Refresh server refuses the first credential's refresh but succeeds for
+	// the second. We distinguish by refresh_token value.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "chr_broken") {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"invalid_grant"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "cha_good_refreshed",
+			"refresh_token": "chr_good_new",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+
+	// First credential: expired access token + broken refresh token. Seeded
+	// with an older LastUsedAt so round-robin claims it first.
+	firstID, err := store.UpsertWithLabel(context.Background(), orgID, nil, "Team A", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_broken_expired",
+		RefreshToken: "chr_broken",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("seed first credential: %v", err)
+	}
+	older := time.Now().Add(-1 * time.Hour)
+	firstKey := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team A")
+	store.creds[firstKey].LastUsedAt = &older
+
+	// Second credential: also expired but with a working refresh token.
+	// Seeded with a newer LastUsedAt so round-robin picks it second.
+	if _, err := store.UpsertWithLabel(context.Background(), orgID, nil, "Team B", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_good_expired",
+		RefreshToken: "chr_good",
+		ExpiresAt:    time.Now().Add(-30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("seed second credential: %v", err)
+	}
+	newer := time.Now().Add(-1 * time.Minute)
+	secondKey := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team B")
+	store.creds[secondKey].LastUsedAt = &newer
+
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config from failover")
+	}
+	if cfg.AccessToken != "cha_good_refreshed" {
+		t.Errorf("expected failover to return refreshed token from Team B, got %q", cfg.AccessToken)
+	}
+
+	// The first credential should have been marked invalid.
+	first, getErr := store.GetByID(context.Background(), orgID, *firstID)
+	if getErr != nil {
+		t.Fatalf("get first credential: %v", getErr)
+	}
+	if first.Status != "invalid" {
+		t.Errorf("expected first credential to be marked invalid, got %q", first.Status)
+	}
+}
+
+func TestRefreshTokenByID_Revoked(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -577,8 +658,12 @@ func TestRefreshToken_Revoked(t *testing.T) {
 		RefreshToken: "chr_revoked",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 	})
+	cred, err := store.Get(context.Background(), orgID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		t.Fatalf("failed to get credential: %v", err)
+	}
 
-	_, err := svc.RefreshToken(context.Background(), orgID)
+	_, err = svc.RefreshTokenByID(context.Background(), orgID, cred.ID)
 	if err == nil {
 		t.Fatal("expected error for revoked refresh token")
 	}
@@ -1154,7 +1239,7 @@ func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
 	}
 }
 
-func TestRefreshToken_NonAuthError(t *testing.T) {
+func TestRefreshTokenByID_NonAuthError(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1173,39 +1258,45 @@ func TestRefreshToken_NonAuthError(t *testing.T) {
 		RefreshToken: "chr_tok",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 	})
+	cred, err := store.Get(context.Background(), orgID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		t.Fatalf("failed to get credential: %v", err)
+	}
 
-	_, err := svc.RefreshToken(context.Background(), orgID)
+	_, err = svc.RefreshTokenByID(context.Background(), orgID, cred.ID)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
 }
 
-func TestRefreshToken_InvalidConfigType(t *testing.T) {
+func TestRefreshTokenByID_InvalidConfigType(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
+	credID := uuid.New()
 	k := store.key(orgID, models.ProviderOpenAIChatGPT)
 	store.creds[k] = &models.DecryptedCredential{
+		ID:       credID,
 		OrgID:    orgID,
 		Provider: models.ProviderOpenAIChatGPT,
 		Config:   models.AnthropicConfig{APIKey: "wrong"},
 		Status:   "active",
 	}
 
-	_, err := svc.RefreshToken(context.Background(), orgID)
+	_, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
 	if err == nil {
 		t.Fatal("expected error for invalid config type")
 	}
 }
 
-func TestRefreshToken_NotFound(t *testing.T) {
+func TestRefreshTokenByID_NotFound(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
 	svc := NewService(store, zerolog.Nop())
 
-	_, err := svc.RefreshToken(context.Background(), uuid.New())
+	_, err := svc.RefreshTokenByID(context.Background(), uuid.New(), uuid.New())
 	if err == nil {
 		t.Fatal("expected error when credential not found")
 	}
@@ -1367,7 +1458,7 @@ func TestIsNotFoundError(t *testing.T) {
 	}
 }
 
-func TestRefreshToken_ConcurrentRefreshesAreSerialized(t *testing.T) {
+func TestRefreshTokenByID_ConcurrentRefreshesAreSerialized(t *testing.T) {
 	t.Parallel()
 
 	var refreshCount atomic.Int32
@@ -1393,12 +1484,16 @@ func TestRefreshToken_ConcurrentRefreshesAreSerialized(t *testing.T) {
 		RefreshToken: "chr_old",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Expired.
 	})
+	cred, err := store.Get(context.Background(), orgID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		t.Fatalf("failed to get credential: %v", err)
+	}
 
 	// Fire two concurrent refreshes.
 	done := make(chan *models.OpenAIChatGPTConfig, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			cfg, _ := svc.RefreshToken(context.Background(), orgID)
+			cfg, _ := svc.RefreshTokenByID(context.Background(), orgID, cred.ID)
 			done <- cfg
 		}()
 	}
