@@ -619,6 +619,48 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
+func TestAutomationRunHandler_CompletesOnlyPendingActiveAutomationRun(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+	}{
+		{name: "completes pending run for active automation", rowsAffected: 1},
+		{name: "preserves skipped run for deleted automation", rowsAffected: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			stores.Automations = db.NewAutomationStore(mock)
+			stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+			orgID := uuid.New()
+			automationID := uuid.New()
+			runID := uuid.New()
+			payload, err := json.Marshal(map[string]string{
+				"org_id":            orgID.String(),
+				"automation_id":     automationID.String(),
+				"automation_run_id": runID.String(),
+			})
+			require.NoError(t, err, "payload should marshal")
+
+			mock.ExpectExec(`UPDATE automation_runs AS r\s+SET status = @status.*FROM automations AS a.*r.status = 'pending'.*a.deleted_at IS NULL`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+			err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+			require.NoError(t, err, "handler should succeed even when the run was already skipped")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestWorker_Register(t *testing.T) {
 	t.Parallel()
 

@@ -15,6 +15,7 @@ import (
 
 type schedulerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error)
 }
 
@@ -476,13 +477,6 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		return
 	}
 
-	type pendingEnqueue struct {
-		orgID        uuid.UUID
-		automationID uuid.UUID
-		runID        uuid.UUID
-	}
-	var toEnqueue []pendingEnqueue
-
 	for _, a := range dueAutomations {
 		// Any DB error inside this loop leaves pgx's tx in an aborted state,
 		// so subsequent queries on the same tx will fail. On such errors we
@@ -576,37 +570,27 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			return
 		}
 
-		toEnqueue = append(toEnqueue, pendingEnqueue{
-			orgID:        a.OrgID,
-			automationID: a.ID,
-			runID:        run.ID,
-		})
+		dedupeKey := fmt.Sprintf("automation_run:%s", run.ID.String())
+		payload := map[string]string{
+			"org_id":            a.OrgID.String(),
+			"automation_id":     a.ID.String(),
+			"automation_run_id": run.ID.String(),
+		}
+		if _, err := s.jobs.EnqueueInTx(ctx, tx, a.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
+			s.logger.Error().Err(err).
+				Str("automation_id", a.ID.String()).
+				Str("run_id", run.ID.String()).
+				Msg("failed to enqueue automation_run job; aborting tick")
+			return
+		}
+		s.logger.Info().
+			Str("automation_id", a.ID.String()).
+			Str("run_id", run.ID.String()).
+			Msg("enqueued automation run")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		s.logger.Error().Err(err).Msg("scheduler failed to commit automation tx")
 		return
-	}
-
-	// Only enqueue jobs after the run rows are durably committed. If Enqueue
-	// fails the worker recovery path will pick up the pending run.
-	for _, p := range toEnqueue {
-		dedupeKey := fmt.Sprintf("automation_run:%s", p.runID.String())
-		payload := map[string]string{
-			"org_id":            p.orgID.String(),
-			"automation_id":     p.automationID.String(),
-			"automation_run_id": p.runID.String(),
-		}
-		if _, err := s.jobs.Enqueue(ctx, p.orgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
-			s.logger.Warn().Err(err).
-				Str("automation_id", p.automationID.String()).
-				Str("run_id", p.runID.String()).
-				Msg("failed to enqueue automation_run job")
-			continue
-		}
-		s.logger.Info().
-			Str("automation_id", p.automationID.String()).
-			Str("run_id", p.runID.String()).
-			Msg("enqueued automation run")
 	}
 }

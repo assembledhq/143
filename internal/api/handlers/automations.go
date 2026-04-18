@@ -587,7 +587,14 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	automation, err := h.automationStore.GetByID(r.Context(), orgID, automationID)
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin transaction", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	automation, err := h.automationStore.LockByIDForUpdate(r.Context(), tx, orgID, automationID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
 		return
@@ -607,15 +614,8 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := h.pool.Begin(r.Context())
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin transaction", err)
-		return
-	}
-	defer func() { _ = tx.Rollback(r.Context()) }()
-
 	// Throttle against max_concurrent inside the tx so a rapid double-click
-	// sees the first insert before committing the second. CountInFlightRuns
+	// serializes on the automation row before checking capacity. CountInFlightRuns
 	// counts pending + running, matching the scheduler's throttle semantics.
 	inFlight, err := h.automationStore.CountInFlightRuns(r.Context(), tx, orgID, automation.ID)
 	if err != nil {

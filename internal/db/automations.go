@@ -99,6 +99,20 @@ func (s *AutomationStore) GetByID(ctx context.Context, orgID, automationID uuid.
 	return scanAutomation(row)
 }
 
+// LockByIDForUpdate returns an automation row locked for the caller's
+// transaction. Use this before making decisions that must serialize against
+// other writers for the same automation, such as max_concurrent checks.
+func (s *AutomationStore) LockByIDForUpdate(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (models.Automation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automations
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		FOR UPDATE`, automationColumns)
+	row := tx.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     automationID,
+		"org_id": orgID,
+	})
+	return scanAutomation(row)
+}
+
 type AutomationFilters struct {
 	Enabled *bool
 	Limit   int
@@ -562,6 +576,37 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 		"result_summary": resultSummary,
 	})
 	return err
+}
+
+// CompletePendingNoopIfAutomationActive moves a pending run to completed_noop
+// only if its parent automation still exists. This protects runs cancelled by
+// SoftDelete/BulkSoftDelete from being rewritten by a queued worker job.
+func (s *AutomationRunStore) CompletePendingNoopIfAutomationActive(ctx context.Context, orgID, automationID, runID uuid.UUID, completedAt *time.Time, resultSummary *string) (bool, error) {
+	query := `UPDATE automation_runs AS r
+		SET status = @status,
+		    completed_at = @completed_at,
+		    result_summary = @result_summary,
+		    updated_at = now()
+		FROM automations AS a
+		WHERE r.id = @id
+		  AND r.org_id = @org_id
+		  AND r.automation_id = @automation_id
+		  AND r.status = 'pending'
+		  AND a.id = r.automation_id
+		  AND a.org_id = r.org_id
+		  AND a.deleted_at IS NULL`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":             runID,
+		"org_id":         orgID,
+		"automation_id":  automationID,
+		"status":         models.AutomationRunStatusCompletedNoop,
+		"completed_at":   completedAt,
+		"result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ListOrgsWithStuckRuns returns the distinct org_ids that have at least one

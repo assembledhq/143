@@ -306,16 +306,31 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("parse run ID: %w", err)
 		}
+		automationID, err := uuid.Parse(input.AutomationID)
+		if err != nil {
+			return fmt.Errorf("parse automation ID: %w", err)
+		}
 
 		logger.Info().
 			Str("org_id", orgID.String()).
-			Str("automation_id", input.AutomationID).
+			Str("automation_id", automationID.String()).
 			Str("run_id", runID.String()).
 			Msg("running automation_run job (stub: marking completed_noop)")
 
 		now := time.Now()
 		summary := "Automation execution is not yet implemented (Phase 3). This run was recorded but no agent was launched."
-		return stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusCompletedNoop, &now, &summary)
+		updated, err := stores.AutomationRuns.CompletePendingNoopIfAutomationActive(ctx, orgID, automationID, runID, &now, &summary)
+		if err != nil {
+			return err
+		}
+		if !updated {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("automation_id", automationID.String()).
+				Str("run_id", runID.String()).
+				Msg("automation_run job skipped because run is no longer pending or automation is deleted")
+		}
+		return nil
 	}
 }
 

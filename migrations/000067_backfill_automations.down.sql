@@ -17,6 +17,8 @@ UPDATE projects
 SET schedule_enabled = true
 WHERE migrated_to_automation_id IS NOT NULL;
 
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_migrated_to_automation_id_fkey;
+
 DELETE FROM automations
 WHERE id IN (SELECT migrated_to_automation_id FROM projects WHERE migrated_to_automation_id IS NOT NULL);
 

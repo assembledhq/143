@@ -639,11 +639,10 @@ func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id = .+ FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
-
-	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -687,11 +686,11 @@ func TestAutomationHandler_RunNow_Paused(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 
-	// Only the GetByID fires — no Begin/Query/Commit since the handler
-	// short-circuits on !Enabled before opening a tx.
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id = .+ FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectRollback()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	h.SetJobStore(db.NewJobStore(mock))
@@ -722,11 +721,10 @@ func TestAutomationHandler_RunNow_Throttled(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id = .+ FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
-
-	mock.ExpectBegin()
 	// A run is already in flight — CountInFlightRuns returns MaxConcurrent.
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
 		WithArgs(testAnyArgs(2)...).
@@ -763,11 +761,10 @@ func TestAutomationHandler_RunNow_EnqueueFailureRollsBack(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now,
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id = .+ FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
-
-	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))

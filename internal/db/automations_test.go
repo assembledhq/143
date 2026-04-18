@@ -507,6 +507,40 @@ func TestAutomationStore_CountInFlightRuns(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationStore_LockByIDForUpdate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	now := time.Now()
+	automation := models.Automation{
+		ID: uuid.New(), OrgID: uuid.New(), Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = .+ FOR UPDATE`).
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), automation))
+	mock.ExpectCommit()
+
+	ctx := context.Background()
+	tx, err := mock.Begin(ctx)
+	require.NoError(t, err)
+
+	got, err := store.LockByIDForUpdate(ctx, tx, automation.OrgID, automation.ID)
+	require.NoError(t, err)
+	require.Equal(t, automation.ID, got.ID)
+	require.Equal(t, automation.OrgID, got.OrgID)
+	require.NoError(t, tx.Commit(ctx))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAutomationRunStore_CreateRunInTx_Inserts(t *testing.T) {
 	t.Parallel()
 
@@ -577,6 +611,42 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 	require.False(t, created)
 	require.NoError(t, tx.Rollback(ctx))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_CompletePendingNoopIfAutomationActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expected     bool
+	}{
+		{name: "updates pending run for active automation", rowsAffected: 1, expected: true},
+		{name: "leaves skipped or deleted automation run unchanged", rowsAffected: 0, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewAutomationRunStore(mock)
+			now := time.Now()
+			summary := "noop"
+
+			mock.ExpectExec(`UPDATE automation_runs AS r\s+SET status = @status.*FROM automations AS a.*r.status = 'pending'.*a.deleted_at IS NULL`).
+				WithArgs(anyArgs(6)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			updated, err := store.CompletePendingNoopIfAutomationActive(context.Background(), uuid.New(), uuid.New(), uuid.New(), &now, &summary)
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, updated)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {

@@ -36,6 +36,10 @@ func (m *mockJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 	return uuid.New(), nil
 }
 
+func (m *mockJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
 func (m *mockJobs) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	return m.failedJob, nil
 }
@@ -82,11 +86,21 @@ func (m *mockProjects) UpdateNextRunAt(ctx context.Context, orgID, projectID uui
 }
 
 type trackingJobs struct {
-	enqueued []string // jobType values
+	enqueued   []string // jobType values
+	enqueuedTx []string // jobType values inserted in the scheduler tx
+	enqueueErr error
 }
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.enqueued = append(m.enqueued, jobType)
+	return uuid.New(), nil
+}
+
+func (m *trackingJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	if m.enqueueErr != nil {
+		return uuid.Nil, m.enqueueErr
+	}
+	m.enqueuedTx = append(m.enqueuedTx, jobType)
 	return uuid.New(), nil
 }
 
@@ -574,8 +588,9 @@ func TestScheduler_ScheduleAutomationRuns_HappyPath(t *testing.T) {
 	require.Equal(t, models.AutomationTriggeredBySchedule, runs.created[0].TriggeredBy)
 	require.Len(t, automations.advancedIDs, 1, "should advance next_run_at once")
 	require.Equal(t, a.ID, automations.advancedIDs[0])
-	require.Len(t, jobs.enqueued, 1, "should enqueue the job after commit")
-	require.Equal(t, models.JobTypeAutomationRun, jobs.enqueued[0])
+	require.Empty(t, jobs.enqueued, "scheduled automation jobs should not be enqueued after commit")
+	require.Len(t, jobs.enqueuedTx, 1, "should enqueue the job inside the scheduler transaction")
+	require.Equal(t, models.JobTypeAutomationRun, jobs.enqueuedTx[0])
 }
 
 func TestScheduler_ScheduleAutomationRuns_MaxConcurrentSaturated(t *testing.T) {
@@ -643,6 +658,38 @@ func TestScheduler_ScheduleAutomationRuns_DuplicateIdempotencySkip(t *testing.T)
 	// already owns the advance, and re-advancing risks overwriting their value.
 	require.Empty(t, automations.advancedIDs, "duplicate skip must not advance next_run_at")
 	require.Empty(t, jobs.enqueued, "duplicate runs must not enqueue a job")
+	require.Empty(t, jobs.enqueuedTx, "duplicate runs must not enqueue a job in tx")
+}
+
+func TestScheduler_ScheduleAutomationRuns_EnqueueErrorAbortsTick(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectRollback()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{enqueueErr: errors.New("enqueue boom")}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "tx should roll back, not commit")
+	require.Len(t, runs.created, 1, "should create the run before enqueue")
+	require.Len(t, automations.advancedIDs, 1, "should advance next_run_at before enqueue")
+	require.Empty(t, jobs.enqueued, "failed tx enqueue must not be retried after rollback")
 }
 
 func TestScheduler_ScheduleAutomationRuns_AdvanceErrorAbortsTick(t *testing.T) {
