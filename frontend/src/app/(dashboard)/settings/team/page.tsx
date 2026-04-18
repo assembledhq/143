@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
@@ -26,22 +26,42 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
-import type { User, InvitationResponse, ListResponse } from "@/lib/types";
+import type {
+  User,
+  InvitationResponse,
+  ListResponse,
+  SingleResponse,
+  GitHubInviteStatus,
+  GitHubUserSuggestion,
+} from "@/lib/types";
 
 export default function TeamSettingsPage() {
   const queryClient = useQueryClient();
   const { user: currentUser } = useAuth();
   const canManageTeam = currentUser?.role === "admin";
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteGitHubUsername, setInviteGitHubUsername] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
+  const [inviteMode, setInviteMode] = useState<"email" | "github">("email");
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<User | null>(null);
+  const [ghSearchQuery, setGhSearchQuery] = useState("");
+  const [debouncedGhQuery, setDebouncedGhQuery] = useState("");
 
   const { data: membersData, isLoading: membersLoading } = useQuery<ListResponse<User>>({
     queryKey: ["team", "members"],
@@ -52,6 +72,37 @@ export default function TeamSettingsPage() {
     queryKey: ["team-invitations"],
     queryFn: () => api.team.listInvitations(),
   });
+
+  const { data: ghStatusData } = useQuery<SingleResponse<GitHubInviteStatus>>({
+    queryKey: ["team-github-status"],
+    queryFn: () => api.team.githubInviteStatus(),
+    enabled: canManageTeam,
+  });
+  const githubConnected = ghStatusData?.data.connected ?? false;
+
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), 200);
+    return () => clearTimeout(handle);
+  }, [ghSearchQuery]);
+
+  const ghSearchEnabled =
+    canManageTeam &&
+    githubConnected &&
+    inviteMode === "github" &&
+    isInviteDialogOpen &&
+    debouncedGhQuery.length > 0;
+
+  const { data: ghSearchData, isFetching: ghSearchLoading } = useQuery<
+    ListResponse<GitHubUserSuggestion>
+  >({
+    queryKey: ["team-github-search", debouncedGhQuery],
+    queryFn: () => api.team.searchGitHubUsers(debouncedGhQuery),
+    enabled: ghSearchEnabled,
+  });
+  const ghSuggestions = useMemo(
+    () => ghSearchData?.data ?? [],
+    [ghSearchData?.data],
+  );
 
   const changeRoleMutation = useMutation({
     mutationFn: ({ id, role }: { id: string; role: string }) =>
@@ -79,11 +130,13 @@ export default function TeamSettingsPage() {
   });
 
   const inviteMutation = useMutation({
-    mutationFn: ({ email, role }: { email: string; role: string }) =>
-      api.team.createInvitation(email, role),
+    mutationFn: (body: { email?: string; github_username?: string; role: string }) =>
+      api.team.createInvitation(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team-invitations"] });
       setInviteEmail("");
+      setInviteGitHubUsername("");
+      setGhSearchQuery("");
       setInviteRole("member");
       setInviteError("");
       setIsInviteDialogOpen(false);
@@ -114,8 +167,18 @@ export default function TeamSettingsPage() {
   function handleInvite(e: React.FormEvent) {
     e.preventDefault();
     setInviteError("");
-    if (!inviteEmail.trim()) return;
-    inviteMutation.mutate({ email: inviteEmail.trim(), role: inviteRole });
+    if (inviteMode === "email") {
+      const email = inviteEmail.trim();
+      if (!email) return;
+      inviteMutation.mutate({ email, role: inviteRole });
+    } else {
+      const username = inviteGitHubUsername.trim().replace(/^@/, "");
+      if (!username) {
+        setInviteError("Enter a GitHub username.");
+        return;
+      }
+      inviteMutation.mutate({ github_username: username, role: inviteRole });
+    }
   }
 
   const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -303,9 +366,16 @@ export default function TeamSettingsPage() {
                   >
                     <div className="min-w-0">
                       <div className="text-xs font-medium truncate">
-                        {inv.email}
+                        {inv.email
+                          ? inv.email
+                          : inv.github_username
+                            ? `@${inv.github_username}`
+                            : "Unknown invitee"}
                       </div>
                       <div className="text-xs text-muted-foreground">
+                        {inv.github_username && inv.email && (
+                          <span className="mr-1">@{inv.github_username} ·</span>
+                        )}
                         Invited by {inv.invited_by.name} as{" "}
                         <Badge variant="outline" className="ml-0.5">
                           {capitalize(inv.role)}
@@ -344,22 +414,116 @@ export default function TeamSettingsPage() {
             <AlertDialogHeader>
               <AlertDialogTitle>Invite a member</AlertDialogTitle>
               <AlertDialogDescription>
-                Send an invitation by email and choose the member&apos;s initial role.
+                Invite by email or GitHub username and choose the member&apos;s initial role.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <form onSubmit={handleInvite} className="space-y-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="invite-email">Email</Label>
-                <Input
-                  id="invite-email"
-                  type="email"
-                  placeholder="colleague@company.com"
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  className="h-9"
-                  required
-                />
-              </div>
+              <Tabs
+                value={inviteMode}
+                onValueChange={(v) => {
+                  setInviteMode(v as "email" | "github");
+                  setInviteError("");
+                }}
+              >
+                <TabsList className="w-full">
+                  <TabsTrigger value="email" className="flex-1">
+                    Email
+                  </TabsTrigger>
+                  <TabsTrigger value="github" className="flex-1">
+                    GitHub username
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent value="email" className="mt-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="invite-email">Email</Label>
+                    <Input
+                      id="invite-email"
+                      type="email"
+                      placeholder="colleague@company.com"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      className="h-9"
+                    />
+                  </div>
+                </TabsContent>
+                <TabsContent value="github" className="mt-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="invite-github">GitHub username</Label>
+                    {githubConnected ? (
+                      <div className="rounded-md border border-input">
+                        <Command shouldFilter={false}>
+                          <CommandInput
+                            id="invite-github"
+                            placeholder="Search GitHub users..."
+                            value={ghSearchQuery}
+                            onValueChange={(value) => {
+                              setGhSearchQuery(value);
+                              setInviteGitHubUsername(value.replace(/^@/, ""));
+                            }}
+                          />
+                          {debouncedGhQuery.length > 0 && (
+                            <CommandList className="max-h-48">
+                              {ghSearchLoading ? (
+                                <div className="py-3 text-center text-xs text-muted-foreground">
+                                  Searching...
+                                </div>
+                              ) : ghSuggestions.length === 0 ? (
+                                <CommandEmpty>
+                                  No users found. You can still invite{" "}
+                                  <span className="font-mono">
+                                    @{debouncedGhQuery}
+                                  </span>
+                                  .
+                                </CommandEmpty>
+                              ) : (
+                                <CommandGroup>
+                                  {ghSuggestions.map((user) => (
+                                    <CommandItem
+                                      key={user.login}
+                                      value={user.login}
+                                      onSelect={() => {
+                                        setInviteGitHubUsername(user.login);
+                                        setGhSearchQuery(user.login);
+                                      }}
+                                    >
+                                      {user.avatar_url && (
+                                        /* eslint-disable-next-line @next/next/no-img-element */
+                                        <img
+                                          src={user.avatar_url}
+                                          alt=""
+                                          className="h-5 w-5 rounded-full"
+                                        />
+                                      )}
+                                      <span className="text-sm">
+                                        @{user.login}
+                                      </span>
+                                    </CommandItem>
+                                  ))}
+                                </CommandGroup>
+                              )}
+                            </CommandList>
+                          )}
+                        </Command>
+                      </div>
+                    ) : (
+                      <>
+                        <Input
+                          id="invite-github"
+                          placeholder="octocat"
+                          value={inviteGitHubUsername}
+                          onChange={(e) =>
+                            setInviteGitHubUsername(e.target.value)
+                          }
+                          className="h-9"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Connect a GitHub App to search for users.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </TabsContent>
+              </Tabs>
               <div className="space-y-1.5">
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>

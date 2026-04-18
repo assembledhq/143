@@ -14,7 +14,7 @@ import (
 )
 
 var invitationColumns = []string{
-	"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
+	"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
 }
 
 func TestInvitationStore_Create(t *testing.T) {
@@ -30,9 +30,10 @@ func TestInvitationStore_Create(t *testing.T) {
 	orgID := uuid.New()
 	invitedBy := uuid.New()
 
+	email := "new@example.com"
 	inv := &models.Invitation{
 		OrgID:     orgID,
-		Email:     "new@example.com",
+		Email:     &email,
 		Role:      "member",
 		InvitedBy: invitedBy,
 		Token:     "tok_abc123",
@@ -41,7 +42,7 @@ func TestInvitationStore_Create(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "status", "created_at"}).
 				AddRow(generatedID, "pending", now),
@@ -64,9 +65,10 @@ func TestInvitationStore_Create_Error(t *testing.T) {
 
 	store := NewInvitationStore(mock)
 
+	email := "new@example.com"
 	inv := &models.Invitation{
 		OrgID:     uuid.New(),
-		Email:     "new@example.com",
+		Email:     &email,
 		Role:      "member",
 		InvitedBy: uuid.New(),
 		Token:     "tok_abc",
@@ -75,7 +77,7 @@ func TestInvitationStore_Create_Error(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("unique violation"))
 
 	err = store.Create(context.Background(), inv)
@@ -100,13 +102,14 @@ func TestInvitationStore_GetByToken(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(id, orgID, "user@example.com", "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(id, orgID, "user@example.com", nil, "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	inv, err := store.GetByToken(context.Background(), "tok_xyz")
 	require.NoError(t, err)
 	require.Equal(t, id, inv.ID)
-	require.Equal(t, "user@example.com", inv.Email)
+	require.NotNil(t, inv.Email)
+	require.Equal(t, "user@example.com", *inv.Email)
 	require.Equal(t, "pending", inv.Status)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -144,15 +147,17 @@ func TestInvitationStore_ListPendingByOrg(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(uuid.New(), orgID, "a@example.com", "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
-				AddRow(uuid.New(), orgID, "b@example.com", "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(uuid.New(), orgID, "a@example.com", nil, "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
+				AddRow(uuid.New(), orgID, "b@example.com", nil, "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	invs, err := store.ListPendingByOrg(context.Background(), orgID)
 	require.NoError(t, err)
 	require.Len(t, invs, 2)
-	require.Equal(t, "a@example.com", invs[0].Email)
-	require.Equal(t, "b@example.com", invs[1].Email)
+	require.NotNil(t, invs[0].Email)
+	require.Equal(t, "a@example.com", *invs[0].Email)
+	require.NotNil(t, invs[1].Email)
+	require.Equal(t, "b@example.com", *invs[1].Email)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

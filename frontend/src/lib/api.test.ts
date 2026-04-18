@@ -812,7 +812,7 @@ describe('api client', () => {
         }),
       );
 
-      await api.team.createInvitation('bob@test.com', 'member');
+      await api.team.createInvitation({ email: 'bob@test.com', role: 'member' });
       expect(capturedBody).toEqual({ email: 'bob@test.com', role: 'member' });
     });
   });
