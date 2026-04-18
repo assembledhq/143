@@ -28,6 +28,14 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, created_at, updated_at, deleted_at`
 
+// maxDueAutomationsPerTick caps how many due automations the scheduler claims
+// in one tick. Combined with the 10-minute tick cadence, this gives a global
+// ceiling of ~600 fires/hour. Excess due rows aren't dropped — they're just
+// claimed on the next tick (FOR UPDATE SKIP LOCKED leaves them visible to the
+// next claimer). Raise this only after confirming downstream worker capacity
+// can absorb the larger batch.
+const maxDueAutomationsPerTick = 100
+
 func scanAutomation(row pgx.Row) (models.Automation, error) {
 	var a models.Automation
 	err := row.Scan(
@@ -250,7 +258,7 @@ func (s *AutomationStore) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now
 			AND next_run_at IS NOT NULL AND next_run_at <= @now
 		ORDER BY priority ASC, next_run_at ASC
 		FOR UPDATE SKIP LOCKED
-		LIMIT 100`, automationColumns)
+		LIMIT %d`, automationColumns, maxDueAutomationsPerTick)
 
 	rows, err := tx.Query(ctx, query, pgx.NamedArgs{"now": now})
 	if err != nil {

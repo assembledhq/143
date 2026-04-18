@@ -43,6 +43,27 @@ SET schedule_enabled = false,
 FROM automations a
 WHERE a.source_project_id = p.id;
 
+-- Surface counts so an operator running this migration in production can
+-- verify backfill completeness from logs without a follow-up query. The
+-- skipped count is the audit signal: anything > 0 means projects with
+-- schedule_enabled=true but missing schedule_interval/schedule_unit were left
+-- behind for manual repair (see the comment above the INSERT). Projects in
+-- that state are untouched by the UPDATE above, so they still have
+-- schedule_enabled=true and we can identify them directly.
+DO $$
+DECLARE
+    migrated_count INT;
+    skipped_count  INT;
+BEGIN
+    SELECT count(*) INTO migrated_count FROM projects WHERE migrated_to_automation_id IS NOT NULL;
+    SELECT count(*) INTO skipped_count
+        FROM projects
+        WHERE schedule_enabled = true
+            AND deleted_at IS NULL
+            AND (schedule_interval IS NULL OR schedule_unit IS NULL);
+    RAISE NOTICE 'automations backfill: migrated=% skipped_corrupt=%', migrated_count, skipped_count;
+END $$;
+
 -- Drop the transient correlation column so it doesn't bleed into the normal
 -- schema. The down migration doesn't need it because rollback identifies rows
 -- via projects.migrated_to_automation_id.
