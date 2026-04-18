@@ -14,7 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-var credColumns = []string{"id", "org_id", "provider", "config", "status", "last_verified_at", "created_at", "updated_at"}
+var credColumns = []string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 
 func TestOrgCredentialStore_Upsert(t *testing.T) {
 	t.Parallel()
@@ -30,9 +30,8 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test", BaseURL: ""},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-						AddRow(uuid.New(), time.Now(), time.Now()))
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 			},
 		},
 		{
@@ -40,9 +39,8 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.OpenAIConfig{APIKey: "sk-test", APIType: "chat"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-						AddRow(uuid.New(), time.Now(), time.Now()))
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 			},
 		},
 		{
@@ -50,7 +48,7 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
@@ -97,7 +95,7 @@ func TestOrgCredentialStore_Get(t *testing.T) {
 				mock.ExpectQuery("SELECT .* FROM org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
-						AddRow(uuid.New(), uuid.New(), "anthropic", configData, "active", nil, time.Now(), time.Now()))
+						AddRow(uuid.New(), uuid.New(), "anthropic", "", configData, "active", nil, nil, nil, time.Now(), time.Now()))
 			},
 		},
 		{
@@ -153,8 +151,8 @@ func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 				mock.ExpectQuery("SELECT .* FROM org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
-						AddRow(uuid.New(), uuid.New(), "anthropic", anthropicData, "active", nil, time.Now(), time.Now()).
-						AddRow(uuid.New(), uuid.New(), "openai", openaiData, "active", nil, time.Now(), time.Now()))
+						AddRow(uuid.New(), uuid.New(), "anthropic", "", anthropicData, "active", nil, nil, nil, time.Now(), time.Now()).
+						AddRow(uuid.New(), uuid.New(), "openai", "", openaiData, "active", nil, nil, nil, time.Now(), time.Now()))
 			},
 			expected: 2,
 		},
@@ -204,7 +202,7 @@ func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM org_credentials").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(credColumns).
-			AddRow(uuid.New(), uuid.New(), "anthropic", anthropicData, "active", nil, time.Now(), time.Now()))
+			AddRow(uuid.New(), uuid.New(), "anthropic", "", anthropicData, "active", nil, nil, nil, time.Now(), time.Now()))
 
 	summaries, err := store.ListSummaries(context.Background(), uuid.New())
 	require.NoError(t, err, "ListSummaries should not return an error")

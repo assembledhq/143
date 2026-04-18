@@ -47,7 +47,7 @@ describe("CodexDeviceCodeModal", () => {
     render(<CodexDeviceCodeModal onClose={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByText(/failed to start authentication/i)).toBeInTheDocument();
+      expect(screen.getByText("Nope")).toBeInTheDocument();
     });
   });
 

@@ -60,14 +60,14 @@ func TestInitiateDeviceAuth_IntervalParsing(t *testing.T) {
 			svc.SetIssuer(server.URL)
 
 			orgID := uuid.New()
-			_, err := svc.InitiateDeviceAuth(context.Background(), orgID)
+			_, err := svc.InitiateDeviceAuth(context.Background(), orgID, nil, "")
 			if tc.expectErr {
 				require.Error(t, err, "initiate should fail for invalid interval values")
 				return
 			}
 
 			require.NoError(t, err, "initiate should succeed for supported interval formats")
-			val, ok := svc.pending.Load(orgID.String())
+			val, ok := svc.pending.Load(orgID.String() + ":")
 			require.True(t, ok, "pending auth should be stored after successful initiation")
 
 			pending, ok := val.(*PendingAuth)

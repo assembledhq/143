@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -35,25 +36,70 @@ func codexAddOrgContext(r *http.Request) *http.Request {
 type codexCredentialStoreStub struct {
 	disableErr error
 	disabled   bool
+	// getByIDResult is returned by GetByID if set, otherwise "not found".
+	getByIDResult *models.DecryptedCredential
 }
 
-func (s *codexCredentialStoreStub) Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error {
+func (s *codexCredentialStoreStub) Upsert(_ context.Context, _ uuid.UUID, _ models.ProviderConfig) error {
 	return nil
 }
 
-func (s *codexCredentialStoreStub) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+func (s *codexCredentialStoreStub) Get(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
 	return nil, errors.New("not found")
 }
 
-func (s *codexCredentialStoreStub) UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error {
+func (s *codexCredentialStoreStub) UpdateStatus(_ context.Context, _ uuid.UUID, _ models.ProviderName, _ string) error {
 	return nil
 }
 
-func (s *codexCredentialStoreStub) Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
+func (s *codexCredentialStoreStub) Disable(_ context.Context, _ uuid.UUID, _ models.ProviderName) error {
 	if s.disableErr != nil {
 		return s.disableErr
 	}
 	s.disabled = true
+	return nil
+}
+
+func (s *codexCredentialStoreStub) UpsertWithLabel(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *codexCredentialStoreStub) InsertPendingAuth(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ string, _ models.ProviderConfig) (*uuid.UUID, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *codexCredentialStoreStub) GetByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*models.DecryptedCredential, error) {
+	if s.getByIDResult != nil {
+		return s.getByIDResult, nil
+	}
+	return nil, errors.New("not found")
+}
+
+func (s *codexCredentialStoreStub) ListByProvider(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+	return nil, nil
+}
+
+func (s *codexCredentialStoreStub) GetByProviderAndLabel(_ context.Context, _ uuid.UUID, _ models.ProviderName, _ string) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+
+func (s *codexCredentialStoreStub) ClaimNextRoundRobin(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+
+func (s *codexCredentialStoreStub) DisableByID(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
+	if s.disableErr != nil {
+		return s.disableErr
+	}
+	s.disabled = true
+	return nil
+}
+
+func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+	return nil
+}
+
+func (s *codexCredentialStoreStub) UpsertByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderConfig) error {
 	return nil
 }
 
@@ -140,18 +186,30 @@ func TestCodexAuthHandler_Initiate_Error(t *testing.T) {
 	require.Contains(t, logBuf.String(), "device auth request", "initiate error log should include wrapped service error details")
 }
 
+func codexAddRouteParam(r *http.Request, key, val string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add(key, val)
+	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+}
+
 func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 	t.Parallel()
 
-	store := &codexCredentialStoreStub{disableErr: errors.New("db error")}
+	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	credID := uuid.New()
+	store := &codexCredentialStoreStub{
+		disableErr:    errors.New("db error"),
+		getByIDResult: &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/disconnect", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/codex-auth/subscriptions/"+credID.String(), nil)
 	req = codexAddOrgContext(req)
+	req = codexAddRouteParam(req, "id", credID.String())
 	w := httptest.NewRecorder()
 
-	handler.Disconnect(w, req)
+	handler.DisconnectByPath(w, req)
 
 	require.Equal(t, http.StatusInternalServerError, w.Code, "disconnect should return 500 when store fails")
 }
@@ -159,15 +217,20 @@ func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	t.Parallel()
 
-	store := &codexCredentialStoreStub{}
+	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	credID := uuid.New()
+	store := &codexCredentialStoreStub{
+		getByIDResult: &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/disconnect", nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/codex-auth/subscriptions/"+credID.String(), nil)
 	req = codexAddOrgContext(req)
+	req = codexAddRouteParam(req, "id", credID.String())
 	w := httptest.NewRecorder()
 
-	handler.Disconnect(w, req)
+	handler.DisconnectByPath(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "disconnect should return 200 so the API client can parse JSON")
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"), "disconnect should return JSON content type")

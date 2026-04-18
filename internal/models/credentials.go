@@ -452,9 +452,12 @@ type OrgCredential struct {
 	ID             uuid.UUID    `db:"id"`
 	OrgID          uuid.UUID    `db:"org_id"`
 	Provider       ProviderName `db:"provider"`
+	Label          string       `db:"label"`
 	Config         []byte       `db:"config"`
 	Status         string       `db:"status"`
 	LastVerifiedAt *time.Time   `db:"last_verified_at"`
+	LastUsedAt     *time.Time   `db:"last_used_at"`
+	CreatedBy      *uuid.UUID   `db:"created_by"`
 	CreatedAt      time.Time    `db:"created_at"`
 	UpdatedAt      time.Time    `db:"updated_at"`
 }
@@ -464,9 +467,13 @@ type DecryptedCredential struct {
 	ID             uuid.UUID      `json:"id"`
 	OrgID          uuid.UUID      `json:"org_id"`
 	Provider       ProviderName   `json:"provider"`
+	Label          string         `json:"label,omitempty"`
 	Config         ProviderConfig `json:"-"`
 	Status         string         `json:"status"`
 	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
+	LastUsedAt     *time.Time     `json:"last_used_at,omitempty"`
+	CreatedBy      *uuid.UUID     `json:"created_by,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 

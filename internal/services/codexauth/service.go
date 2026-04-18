@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -48,6 +50,17 @@ type CredentialStore interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	UpdateStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, status string) error
 	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
+
+	// Multi-credential methods for round-robin subscription support.
+	UpsertWithLabel(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
+	InsertPendingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
+	GetByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) (*models.DecryptedCredential, error)
+	GetByProviderAndLabel(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, label string) (*models.DecryptedCredential, error)
+	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
+	ClaimNextRoundRobin(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	DisableByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
+	UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status string) error
+	UpsertByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error
 }
 
 // ErrCredentialNotFound is returned when no credential exists for the given org/provider.
@@ -61,6 +74,8 @@ type PendingAuth struct {
 	ExpiresAt       time.Time
 	Interval        int       // poll interval in seconds
 	LastPollAt      time.Time // tracks when we last polled OpenAI
+	Label           string    // user-provided label for this subscription
+	CredentialID    *uuid.UUID // DB credential ID once persisted
 }
 
 // DeviceAuthResponse is returned to the caller of InitiateDeviceAuth.
@@ -77,6 +92,28 @@ type AuthStatus struct {
 	Message     string `json:"message,omitempty"`
 }
 
+// SubscriptionStatus is the public-facing status of a Codex subscription.
+type SubscriptionStatus string
+
+const (
+	SubscriptionStatusActive      SubscriptionStatus = "active"
+	SubscriptionStatusPendingAuth SubscriptionStatus = "pending_auth"
+	SubscriptionStatusInvalid     SubscriptionStatus = "invalid"
+	SubscriptionStatusDisabled    SubscriptionStatus = "disabled"
+)
+
+// SubscriptionInfo is the API-safe summary of a connected Codex subscription.
+type SubscriptionInfo struct {
+	ID          uuid.UUID          `json:"id"`
+	Label       string             `json:"label"`
+	AccountType string             `json:"account_type,omitempty"`
+	Status      SubscriptionStatus `json:"status"`
+	MaskedKey   string             `json:"masked_key,omitempty"`
+	LastUsedAt  *time.Time         `json:"last_used_at,omitempty"`
+	CreatedBy   *uuid.UUID         `json:"created_by,omitempty"`
+	CreatedAt   time.Time          `json:"created_at,omitempty"`
+}
+
 // Service handles the OpenAI Device Code Auth flow.
 type Service struct {
 	credentials CredentialStore
@@ -84,8 +121,8 @@ type Service struct {
 	logger      zerolog.Logger
 	issuer      string
 	clientID    string
-	pending   sync.Map // orgID string -> *PendingAuth
-	refreshMu sync.Map // orgID string -> *sync.Mutex (per-org refresh lock; entries are tiny and bounded by org count)
+	pending   sync.Map // pendingKey (orgID+label) -> *PendingAuth
+	refreshMu sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
 }
 
 // NewService creates a new Device Code Auth service.
@@ -111,8 +148,15 @@ func (s *Service) SetIssuer(issuer string) {
 	s.issuer = issuer
 }
 
+// pendingKey returns the sync.Map key for pending auth state scoped to org+label.
+func pendingKey(orgID uuid.UUID, label string) string {
+	return orgID.String() + ":" + label
+}
+
 // InitiateDeviceAuth starts a new device code auth flow for the given org.
-func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*DeviceAuthResponse, error) {
+// The label distinguishes multiple subscriptions (e.g. "Team A", "Team B").
+// createdBy records which user added the subscription; pass nil if unknown.
+func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string) (*DeviceAuthResponse, error) {
 	endpoint := s.issuer + "/api/accounts/deviceauth/usercode"
 
 	reqBody, err := json.Marshal(map[string]string{
@@ -178,10 +222,15 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 		VerificationURI: result.VerificationURI,
 		ExpiresAt:       expiresAt,
 		Interval:        interval,
+		Label:           label,
 	}
-	s.pending.Store(orgID.String(), pending)
+	pKey := pendingKey(orgID, label)
+	s.pending.Store(pKey, pending)
 
 	// Persist to DB so the pending state survives server restarts.
+	// InsertPendingAuth refuses to overwrite a credential that already holds a
+	// real access token, so an in-progress re-auth flow can never wipe a working
+	// subscription.
 	if s.credentials != nil {
 		pendingCfg := models.OpenAIChatGPTConfig{
 			DeviceAuthID:    result.DeviceAuthID,
@@ -190,13 +239,12 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 			ExpiresAt:       expiresAt,
 			PollInterval:    interval,
 		}
-		if err := s.credentials.Upsert(ctx, orgID, pendingCfg); err != nil {
-			s.logger.Warn().Err(err).Msg("failed to persist pending device auth to DB")
-		} else {
-			if err := s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "pending_auth"); err != nil {
-				s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to update credential status")
-			}
+		credID, err := s.credentials.InsertPendingAuth(ctx, orgID, createdBy, label, pendingCfg)
+		if err != nil {
+			s.pending.Delete(pKey)
+			return nil, fmt.Errorf("persist pending device auth: %w", err)
 		}
+		pending.CredentialID = credID
 	}
 
 	s.logger.Info().
@@ -213,39 +261,45 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, orgID uuid.UUID) (*Dev
 
 // PollForToken checks whether the user has completed authentication.
 // It performs a single poll attempt and returns the status.
-func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatus, error) {
-	val, ok := s.pending.Load(orgID.String())
+// The label identifies which subscription's auth flow to poll.
+func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID, label string) (*AuthStatus, error) {
+	pKey := pendingKey(orgID, label)
+	val, ok := s.pending.Load(pKey)
 	if !ok {
 		// No in-memory state — check DB for persisted state.
 		if s.credentials != nil {
-			cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
-			if err == nil && cred.Status == "active" {
-				cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
-				if !ok {
-					return &AuthStatus{Status: "error", Message: "invalid credential config"}, nil
+			cred, err := s.credentials.GetByProviderAndLabel(ctx, orgID, models.ProviderOpenAIChatGPT, label)
+			if err == nil {
+				if cred.Status == "active" {
+					cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+					if !cfgOk {
+						return &AuthStatus{Status: "error", Message: "invalid credential config"}, nil
+					}
+					return &AuthStatus{
+						Status:      "completed",
+						AccountType: cfg.AccountType,
+					}, nil
 				}
-				return &AuthStatus{
-					Status:      "completed",
-					AccountType: cfg.AccountType,
-				}, nil
-			}
-			// Restore pending auth from DB (survives server restart).
-			if err == nil && cred.Status == "pending_auth" {
-				cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
-				if cfgOk && cfg.DeviceAuthID != "" && time.Now().Before(cfg.ExpiresAt) {
-					restored := &PendingAuth{
-						DeviceAuthID:    cfg.DeviceAuthID,
-						UserCode:        cfg.UserCode,
-						VerificationURI: cfg.VerificationURI,
-						ExpiresAt:       cfg.ExpiresAt,
-						Interval:        cfg.PollInterval,
+				// Restore pending auth from DB (survives server restart).
+				if cred.Status == "pending_auth" {
+					cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+					if cfgOk && cfg.DeviceAuthID != "" && time.Now().Before(cfg.ExpiresAt) {
+						restored := &PendingAuth{
+							DeviceAuthID:    cfg.DeviceAuthID,
+							UserCode:        cfg.UserCode,
+							VerificationURI: cfg.VerificationURI,
+							ExpiresAt:       cfg.ExpiresAt,
+							Interval:        cfg.PollInterval,
+							Label:           label,
+							CredentialID:    &cred.ID,
+						}
+						if restored.Interval <= 0 {
+							restored.Interval = 5
+						}
+						s.pending.Store(pKey, restored)
+						val = restored
+						ok = true
 					}
-					if restored.Interval <= 0 {
-						restored.Interval = 5
-					}
-					s.pending.Store(orgID.String(), restored)
-					val = restored
-					ok = true
 				}
 			}
 		}
@@ -258,7 +312,7 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 
 	// Check expiry.
 	if time.Now().After(pending.ExpiresAt) {
-		s.pending.Delete(orgID.String())
+		s.pending.Delete(pKey)
 		return &AuthStatus{Status: "expired", Message: "device code expired, please try again"}, nil
 	}
 
@@ -318,10 +372,10 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 			pending.Interval = pending.Interval * 2
 			return &AuthStatus{Status: "pending", Message: "waiting for user to enter code"}, nil
 		case "expired_token":
-			s.pending.Delete(orgID.String())
+			s.pending.Delete(pKey)
 			return &AuthStatus{Status: "expired", Message: "device code expired, please try again"}, nil
 		case "access_denied":
-			s.pending.Delete(orgID.String())
+			s.pending.Delete(pKey)
 			return &AuthStatus{Status: "error", Message: "authentication denied by user"}, nil
 		default:
 			msg := errResp.Error
@@ -362,12 +416,20 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID) (*AuthStatu
 		storedCfg.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	}
 
-	if err := s.credentials.Upsert(ctx, orgID, storedCfg); err != nil {
-		return nil, fmt.Errorf("store credential: %w", err)
+	// Store credential. If we have a credential ID from the pending state, update
+	// by ID to preserve the label. Otherwise fall back to label-based upsert.
+	if pending.CredentialID != nil {
+		if err := s.credentials.UpsertByID(ctx, orgID, *pending.CredentialID, storedCfg); err != nil {
+			return nil, fmt.Errorf("store credential: %w", err)
+		}
+	} else {
+		if _, err := s.credentials.UpsertWithLabel(ctx, orgID, nil, pending.Label, storedCfg); err != nil {
+			return nil, fmt.Errorf("store credential: %w", err)
+		}
 	}
 
 	// Clean up pending state.
-	s.pending.Delete(orgID.String())
+	s.pending.Delete(pKey)
 
 	s.logger.Info().
 		Str("org_id", orgID.String()).
@@ -457,32 +519,23 @@ func parsePollInterval(raw any) (int, error) {
 	}
 }
 
-// orgRefreshMu returns a per-org mutex for serializing token refreshes.
+// credRefreshMu returns a per-credential mutex for serializing token refreshes.
 // This prevents concurrent requests from both consuming the same refresh
 // token at OpenAI, which would cause refresh_token_reused errors.
-func (s *Service) orgRefreshMu(orgID uuid.UUID) *sync.Mutex {
-	val, _ := s.refreshMu.LoadOrStore(orgID.String(), &sync.Mutex{})
+func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
+	val, _ := s.refreshMu.LoadOrStore(credID.String(), &sync.Mutex{})
 	return val.(*sync.Mutex)
 }
 
-// RefreshToken refreshes an expired access token using the refresh token.
-// It serializes refreshes per-org to prevent concurrent calls from consuming
+// RefreshTokenByID refreshes an expired access token for a specific credential.
+// It serializes refreshes per-credential to prevent concurrent calls from consuming
 // the same refresh token at OpenAI (which causes refresh_token_reused errors).
-func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
-	mu := s.orgRefreshMu(orgID)
+func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	mu := s.credRefreshMu(credID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	// After acquiring the lock, check if another goroutine already refreshed
-	// the token while we were waiting. If the token is fresh (not within the
-	// refresh window), return it directly without hitting OpenAI.
-	if cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT); err == nil {
-		if cfg, ok := cred.Config.(models.OpenAIChatGPTConfig); ok && !cfg.NeedsRefresh(refreshWindow) && cfg.AccessToken != "" {
-			return &cfg, nil
-		}
-	}
-
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
+	cred, err := s.credentials.GetByID(ctx, orgID, credID)
 	if err != nil {
 		return nil, fmt.Errorf("get credential: %w", err)
 	}
@@ -490,6 +543,11 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 	cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
 	if !ok {
 		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
+	}
+
+	// After acquiring the lock, check if another goroutine already refreshed.
+	if !cfg.NeedsRefresh(refreshWindow) && cfg.AccessToken != "" {
+		return &cfg, nil
 	}
 
 	if cfg.RefreshToken == "" {
@@ -524,17 +582,12 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// Check if this is a "refresh_token_reused" error, which means
-		// another client (e.g. the user's local Codex CLI) already used
-		// the refresh token. In this case, the access token may still be
-		// valid — don't mark the credential as invalid.
 		if strings.Contains(string(body), "refresh_token_reused") {
-			s.logger.Warn().Str("org_id", orgID.String()).Msg("refresh token already used by another client; access token may still be valid")
+			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
 			return nil, fmt.Errorf("refresh token already used by another client")
 		}
-		// Refresh token truly revoked or expired — mark credential as invalid.
-		if err := s.credentials.UpdateStatus(ctx, orgID, models.ProviderOpenAIChatGPT, "invalid"); err != nil {
-			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to update credential status")
+		if err := s.credentials.UpdateStatusByID(ctx, orgID, credID, "invalid"); err != nil {
+			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
 		return nil, fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode)
 	}
@@ -553,7 +606,6 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 		return nil, fmt.Errorf("parse refresh response: %w", err)
 	}
 
-	// Update stored credential.
 	newCfg := models.OpenAIChatGPTConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
@@ -562,92 +614,203 @@ func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.Op
 		AccountType:  cfg.AccountType,
 	}
 
-	if err := s.credentials.Upsert(ctx, orgID, newCfg); err != nil {
+	if err := s.credentials.UpsertByID(ctx, orgID, credID, newCfg); err != nil {
 		return nil, fmt.Errorf("store refreshed credential: %w", err)
 	}
 
 	s.logger.Debug().
-		Str("org_id", orgID.String()).
+		Str("cred_id", credID.String()).
 		Msg("ChatGPT OAuth token refreshed")
 
 	return &newCfg, nil
 }
 
-// GetValidToken returns a valid access token, auto-refreshing if needed.
-// Returns nil, nil if no ChatGPT OAuth credential exists for this org.
+// RefreshToken refreshes the token for the single (legacy, label="") credential.
+// Kept for backward compatibility with the orchestrator.
+func (s *Service) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		return nil, fmt.Errorf("get credential: %w", err)
+	}
+	return s.RefreshTokenByID(ctx, orgID, cred.ID)
+}
+
+// maxRoundRobinAttempts caps how many distinct credentials GetValidToken
+// will try before giving up. With healthy round-robin behavior we expect
+// to succeed on the first attempt; the cap exists so a multi-subscription
+// org with several broken credentials degrades to a clear error instead
+// of an unbounded loop.
+const maxRoundRobinAttempts = 5
+
+// GetValidToken returns a valid access token using round-robin across all
+// active ChatGPT credentials for the org. It auto-refreshes if needed and,
+// when a credential's refresh fails AND its cached token has already
+// expired, marks that credential invalid and tries the next one in the
+// rotation. Returns nil, nil if no usable ChatGPT credential exists.
 func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
 
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderOpenAIChatGPT)
-	if err != nil {
-		// Distinguish "not found" from real errors (DB failures, decryption, etc.).
-		if isNotFoundError(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get credential: %w", err)
-	}
+	tried := make(map[uuid.UUID]struct{}, maxRoundRobinAttempts)
+	var lastErr error
 
-	if cred.Status != "active" {
-		return nil, nil
-	}
-
-	cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
-	if !ok {
-		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
-	}
-
-	// A credential with an empty access token means the device code flow
-	// was initiated but hasn't completed yet (pending state).
-	if cfg.AccessToken == "" {
-		return nil, nil
-	}
-
-	// If no refresh token is available (device code flow doesn't always
-	// return one), skip the expiry check and use the access token as-is.
-	// The token may be long-lived or the agent will get a clear 401 if
-	// it's actually expired.
-	if cfg.RefreshToken == "" {
-		return &cfg, nil
-	}
-
-	// Refresh if expiring within the refresh window.
-	if cfg.NeedsRefresh(refreshWindow) {
-		refreshed, err := s.RefreshToken(ctx, orgID)
+	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
+		cred, err := s.credentials.ClaimNextRoundRobin(ctx, orgID, models.ProviderOpenAIChatGPT)
 		if err != nil {
-			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("token refresh failed")
-			// For any refresh failure, use the cached token only if it
-			// hasn't actually expired yet. Previously we returned expired
-			// tokens on refresh_token_reused errors, which caused 401s
-			// downstream. Now we consistently check expiry for all error types.
-			if !cfg.IsExpired() {
-				return &cfg, nil
+			if isNotFoundError(err) {
+				if lastErr != nil {
+					return nil, fmt.Errorf("no usable codex credential: %w", lastErr)
+				}
+				return nil, nil
 			}
-			return nil, fmt.Errorf("token expired and refresh failed: %w", err)
+			return nil, fmt.Errorf("get credential: %w", err)
 		}
-		return refreshed, nil
+
+		// If round-robin handed us a credential we already tried this call
+		// (e.g. only one credential exists, or all others were also marked
+		// invalid this iteration), stop — no progress is possible.
+		if _, seen := tried[cred.ID]; seen {
+			break
+		}
+		tried[cred.ID] = struct{}{}
+
+		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		if !ok {
+			lastErr = fmt.Errorf("credential %s is not OpenAIChatGPTConfig", cred.ID)
+			continue
+		}
+
+		if cfg.AccessToken == "" {
+			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			continue
+		}
+
+		if cfg.RefreshToken == "" || !cfg.NeedsRefresh(refreshWindow) {
+			return &cfg, nil
+		}
+
+		refreshed, refreshErr := s.RefreshTokenByID(ctx, orgID, cred.ID)
+		if refreshErr == nil {
+			return refreshed, nil
+		}
+		lastErr = refreshErr
+
+		if !cfg.IsExpired() {
+			// Refresh failed but the cached token is still valid — use it.
+			s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed; using cached token")
+			return &cfg, nil
+		}
+
+		// Cached token is expired and we couldn't refresh it. Mark the
+		// credential invalid so it stops being claimed in the rotation,
+		// then try the next one. RefreshTokenByID may have already done
+		// this for some HTTP error paths; the second update is a no-op.
+		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
+		if statusErr := s.credentials.UpdateStatusByID(ctx, orgID, cred.ID, "invalid"); statusErr != nil {
+			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
+		}
 	}
 
-	return &cfg, nil
+	if lastErr != nil {
+		return nil, fmt.Errorf("no usable codex credential after %d attempts: %w", len(tried), lastErr)
+	}
+	return nil, nil
 }
 
-// Disconnect removes the ChatGPT OAuth credential for the given org.
-func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID) error {
-	s.pending.Delete(orgID.String())
-	s.refreshMu.Delete(orgID.String())
+// Disconnect removes a specific ChatGPT OAuth credential by ID for an org.
+// It also cleans up any in-memory pending auth state for this credential.
+func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
+	s.refreshMu.Delete(credID.String())
+
+	// Clean up any pending auth entries that reference this credential ID.
+	s.pending.Range(func(key, val any) bool {
+		if p, ok := val.(*PendingAuth); ok && p.CredentialID != nil && *p.CredentialID == credID {
+			s.pending.Delete(key)
+		}
+		return true
+	})
+
+	if s.credentials == nil {
+		return nil
+	}
+	return s.credentials.DisableByID(ctx, orgID, credID)
+}
+
+// DisconnectForOrg removes a credential by ID after verifying it belongs to the given org.
+// Returns ErrCredentialNotFound if the credential doesn't exist or belongs to a different org.
+func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
+	if s.credentials == nil {
+		return nil
+	}
+	// GetByID is org-scoped — cross-org IDs return not-found by construction.
+	if _, err := s.credentials.GetByID(ctx, orgID, credID); err != nil {
+		return ErrCredentialNotFound
+	}
+	return s.Disconnect(ctx, orgID, credID)
+}
+
+// DisconnectAll removes all ChatGPT OAuth credentials for the given org.
+func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
+	// Clean up in-memory pending auth and refresh mutexes for this org.
+	orgPrefix := orgID.String() + ":"
+	s.pending.Range(func(key, val any) bool {
+		if k, ok := key.(string); ok && len(k) >= len(orgPrefix) && k[:len(orgPrefix)] == orgPrefix {
+			s.pending.Delete(key)
+		}
+		return true
+	})
+	// Clean up refresh mutexes for all credentials belonging to this org.
+	if s.credentials != nil {
+		creds, _ := s.credentials.ListByProvider(ctx, orgID, models.ProviderOpenAIChatGPT)
+		for _, cred := range creds {
+			s.refreshMu.Delete(cred.ID.String())
+		}
+	}
+
 	if s.credentials == nil {
 		return nil
 	}
 	return s.credentials.Disable(ctx, orgID, models.ProviderOpenAIChatGPT)
 }
 
-// isNotFoundError checks if an error represents a "not found" condition.
-// This distinguishes missing credentials from real infrastructure errors.
-func isNotFoundError(err error) bool {
-	if err == nil {
-		return false
+// ListSubscriptions returns all connected Codex subscriptions for an org.
+func (s *Service) ListSubscriptions(ctx context.Context, orgID uuid.UUID) ([]SubscriptionInfo, error) {
+	if s.credentials == nil {
+		return nil, nil
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "no rows")
+
+	creds, err := s.credentials.ListByProvider(ctx, orgID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions: %w", err)
+	}
+
+	var subs []SubscriptionInfo
+	for _, cred := range creds {
+		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		if !ok {
+			continue
+		}
+		sub := SubscriptionInfo{
+			ID:         cred.ID,
+			Label:      cred.Label,
+			Status:     SubscriptionStatus(cred.Status),
+			MaskedKey:  models.MaskKey(cfg.AccessToken),
+			LastUsedAt: cred.LastUsedAt,
+			CreatedBy:  cred.CreatedBy,
+			CreatedAt:  cred.CreatedAt,
+		}
+		if cfg.AccountType != "" {
+			sub.AccountType = cfg.AccountType
+		}
+		subs = append(subs, sub)
+	}
+	return subs, nil
+}
+
+// isNotFoundError reports whether err signals "no matching credential row".
+// We rely on pgx's typed sentinel rather than string matching so the check
+// keeps working if the wrapper text changes.
+func isNotFoundError(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrCredentialNotFound)
 }

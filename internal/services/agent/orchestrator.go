@@ -1327,18 +1327,14 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, nil
 	}
 
-	// Force-refresh the token to ensure a fresh access_token is injected
-	// into the sandbox. If the refresh fails (e.g. token already consumed),
-	// fall back to GetValidToken which returns any cached valid token.
-	cfg, err := o.codexAuth.RefreshToken(ctx, orgID)
-	if err != nil || cfg == nil {
-		if err != nil {
-			o.logger.Debug().Err(err).Str("org_id", orgID.String()).Msg("forced token refresh failed, falling back to GetValidToken")
-		}
-		cfg, err = o.codexAuth.GetValidToken(ctx, orgID)
-		if err != nil {
-			return false, fmt.Errorf("get codex auth token: %w", err)
-		}
+	// Use round-robin selection across all active subscriptions for this org.
+	// GetValidToken claims the least-recently-used credential, refreshing it
+	// in-band if it's near expiry. This is the canonical path; the legacy
+	// single-credential RefreshToken would always pick the same row and bypass
+	// round-robin entirely.
+	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get codex auth token: %w", err)
 	}
 	if cfg == nil {
 		// No OAuth token — not an error, agent will use API key.
