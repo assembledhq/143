@@ -89,6 +89,14 @@ const (
 	AuditActionTeamInvitationRevoked  AuditAction = "team.invitation_revoked"
 	AuditActionTeamInvitationAccepted AuditAction = "team.invitation_accepted"
 
+	// Org-level teams actions (distinct from team member management above)
+	AuditActionOrgTeamCreated     AuditAction = "org_team.created"
+	AuditActionOrgTeamUpdated     AuditAction = "org_team.updated"
+	AuditActionOrgTeamDeleted     AuditAction = "org_team.deleted"
+	AuditActionOrgTeamMemberAdded AuditAction = "org_team.member_added"
+	AuditActionOrgTeamMemberRemoved AuditAction = "org_team.member_removed"
+	AuditActionOrgTeamGitHubSynced AuditAction = "org_team.github_synced"
+
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"
 	AuditActionCredentialUpdated    AuditAction = "credential.updated" // #nosec G101 -- not a credential
@@ -133,7 +141,9 @@ func (a AuditAction) Validate() error {
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
-		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted:
+		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted,
+		AuditActionOrgTeamCreated, AuditActionOrgTeamUpdated, AuditActionOrgTeamDeleted,
+		AuditActionOrgTeamMemberAdded, AuditActionOrgTeamMemberRemoved, AuditActionOrgTeamGitHubSynced:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditAction: %q", a)
@@ -163,6 +173,7 @@ const (
 	AuditResourceEvalRun              AuditResourceType = "eval_run"
 	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
 	AuditResourceAutomation           AuditResourceType = "automation"
+	AuditResourceOrgTeam              AuditResourceType = "org_team"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -173,7 +184,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation:
+		AuditResourceAutomation, AuditResourceOrgTeam:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

@@ -39,6 +39,7 @@ type Project struct {
 	ScheduleUnit       string           `db:"schedule_unit" json:"schedule_unit"`
 	NextRunAt          *time.Time       `db:"next_run_at" json:"next_run_at,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
+	TeamID             *uuid.UUID       `db:"team_id" json:"team_id,omitempty"`
 	DeletedAt          *time.Time       `db:"deleted_at" json:"-"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time        `db:"updated_at" json:"updated_at"`

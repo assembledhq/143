@@ -69,6 +69,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	evalBatchStore := db.NewEvalBatchStore(pool)
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
+	teamStore := db.NewTeamStore(pool)
 	previewStore := db.NewPreviewStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
@@ -194,6 +195,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+		}
+	}
+
+	orgTeamHandler := handlers.NewOrgTeamHandler(teamStore, userStore)
+	orgTeamHandler.SetAuditEmitter(auditEmitter)
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			orgTeamHandler.SetGitHubSync(ghSvc, integrationStore, repoStore)
 		}
 	}
 
@@ -435,6 +445,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
 			r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
 
+			// Teams — summary list and caller-scoped list are safe for all roles.
+			// Full team detail (with members) is admin-only; see below.
+			r.Get("/api/v1/teams", orgTeamHandler.List)
+			r.Get("/api/v1/teams/mine", orgTeamHandler.ListMine)
+
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/summary", repoHandler.Summary)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
@@ -666,6 +681,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			// Audit logs
 			r.Get("/api/v1/audit-logs", auditLogHandler.List)
 			r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
+
+			// Org teams management
+			r.Post("/api/v1/teams", orgTeamHandler.Create)
+			r.Get("/api/v1/teams/{id}", orgTeamHandler.Get)
+			r.Patch("/api/v1/teams/{id}", orgTeamHandler.Update)
+			r.Delete("/api/v1/teams/{id}", orgTeamHandler.Delete)
+			r.Post("/api/v1/teams/{id}/members", orgTeamHandler.AddMember)
+			r.Delete("/api/v1/teams/{id}/members/{userId}", orgTeamHandler.RemoveMember)
+			r.Post("/api/v1/teams/sync-github", orgTeamHandler.SyncGitHub)
 
 			// Team management
 			r.Get("/api/v1/team/members", teamHandler.ListMembers)

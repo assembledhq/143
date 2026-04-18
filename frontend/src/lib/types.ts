@@ -120,6 +120,7 @@ export interface Session {
   diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
   archived_at?: string;
   archived_by_user_id?: string;
+  team_id?: string;
   created_at: string;
 }
 
@@ -643,6 +644,7 @@ export interface Project {
   schedule_unit: 'hours' | 'days' | 'weeks';
   next_run_at?: string;
   created_by?: string;
+  team_id?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
@@ -1082,4 +1084,23 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+}
+
+// ── Teams ─────────────────────────────────────────────────────────────
+
+export interface Team {
+  id: string;
+  org_id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  github_team_id?: number;
+  github_team_slug?: string;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TeamWithMembers extends Team {
+  members: User[];
 }

@@ -26,8 +26,9 @@ type ProjectFilters struct {
 	Limit        int
 	Cursor       string
 	RepositoryID uuid.UUID
-	Search       string // When non-empty, filter projects by title or goal (case-insensitive substring match).
-	ProposedByPM *bool  // When non-nil, filter by proposed_by_pm flag.
+	Search       string    // When non-empty, filter projects by title or goal (case-insensitive substring match).
+	ProposedByPM *bool    // When non-nil, filter by proposed_by_pm flag.
+	TeamID       uuid.UUID // When non-zero, filter projects by team.
 }
 
 // projectColumns is the column list shared across all project queries.
@@ -38,7 +39,7 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
 	schedule_enabled, schedule_interval, schedule_unit, next_run_at,
-	created_by, deleted_at, created_at, updated_at, completed_at`
+	created_by, team_id, deleted_at, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
 	var p models.Project
@@ -53,7 +54,7 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
 		&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
-		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+		&p.CreatedBy, &p.TeamID, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
 		return models.Project{}, err
@@ -89,7 +90,7 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
 			&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
-			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
+			&p.CreatedBy, &p.TeamID, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -142,7 +143,8 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			current_phase, lessons_learned, approach_history,
 			proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects, created_by,
 			agent_type, model_override,
-			schedule_enabled, schedule_interval, schedule_unit, next_run_at
+			schedule_enabled, schedule_interval, schedule_unit, next_run_at,
+			team_id
 		)
 		VALUES (
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
@@ -150,7 +152,8 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			@current_phase, @lessons_learned, @approach_history,
 			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @similar_projects, @created_by,
 			@agent_type, @model_override,
-			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at
+			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at,
+			@team_id
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -181,6 +184,7 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"schedule_interval":   p.ScheduleInterval,
 		"schedule_unit":       p.ScheduleUnit,
 		"next_run_at":         p.NextRunAt,
+		"team_id":             p.TeamID,
 	})
 	if err := row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return err
@@ -222,6 +226,10 @@ func applyProjectFilters(query string, args pgx.NamedArgs, filters ProjectFilter
 	if filters.ProposedByPM != nil {
 		query += ` AND proposed_by_pm = @proposed_by_pm`
 		args["proposed_by_pm"] = *filters.ProposedByPM
+	}
+	if filters.TeamID != uuid.Nil {
+		query += ` AND team_id = @team_id`
+		args["team_id"] = filters.TeamID
 	}
 	if filters.Search != "" {
 		query += ` AND (title ILIKE @search OR goal ILIKE @search)`
@@ -298,6 +306,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			total_tasks = @total_tasks, completed_tasks = @completed_tasks, failed_tasks = @failed_tasks,
 			schedule_enabled = @schedule_enabled, schedule_interval = @schedule_interval,
 			schedule_unit = @schedule_unit, next_run_at = @next_run_at,
+			team_id = @team_id,
 			completed_at = @completed_at, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -325,6 +334,7 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 		"schedule_interval":   p.ScheduleInterval,
 		"schedule_unit":       p.ScheduleUnit,
 		"next_run_at":         p.NextRunAt,
+		"team_id":             p.TeamID,
 		"completed_at":        p.CompletedAt,
 	})
 	return err

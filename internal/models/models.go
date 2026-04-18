@@ -154,6 +154,7 @@ type Session struct {
 	ArchivedAt       *time.Time  `db:"archived_at" json:"archived_at,omitempty"`
 	ArchivedByUserID *uuid.UUID  `db:"archived_by_user_id" json:"archived_by_user_id,omitempty"`
 	AutomationRunID  *uuid.UUID  `db:"automation_run_id" json:"automation_run_id,omitempty"`
+	TeamID           *uuid.UUID  `db:"team_id" json:"team_id,omitempty"`
 	DeletedAt        *time.Time  `db:"deleted_at" json:"-"`
 	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
 }

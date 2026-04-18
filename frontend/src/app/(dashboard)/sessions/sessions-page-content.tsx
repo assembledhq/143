@@ -28,9 +28,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { useTeamFilter } from "@/hooks/use-team-filter";
+import { TeamSelector } from "@/components/team-selector";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, User } from "@/lib/types";
 import {
@@ -200,6 +203,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 export function SessionsPageContent() {
   const router = useRouter();
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
+  const { selectedTeamId, myTeams, setTeamFilter } = useTeamFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -229,21 +233,21 @@ export function SessionsPageContent() {
   // the limit. If polling cost becomes a concern, consider a dedicated
   // /sessions/counts endpoint.
   const { data: allData, isLoading, error } = useQuery({
-    queryKey: ["sessions", repo, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
+    queryKey: [...queryKeys.sessions.list(repo ?? undefined), triggeredByUserId, selectedTeamId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, team_id: selectedTeamId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: ["sessions", repo, statusParam, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
+    queryKey: [...queryKeys.sessions.list(repo ?? undefined), statusParam, triggeredByUserId, selectedTeamId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId, team_id: selectedTeamId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
 
   const { data: membersData } = useQuery({
-    queryKey: ["team", "members"],
+    queryKey: queryKeys.team.members,
     queryFn: () => api.team.listMembers(),
   });
 
@@ -314,12 +318,17 @@ export function SessionsPageContent() {
           })}
         </div>
 
-        {/* User filter toggle */}
-        <SessionOwnerToggle
-          currentUserFilter={currentUserFilter}
-          onFilterChange={setUserFilter}
-          className="ml-auto shrink-0 mr-2"
-        />
+        <div className="ml-auto flex items-center gap-2 shrink-0 mr-2">
+          <TeamSelector
+            teams={myTeams}
+            selectedTeamId={selectedTeamId}
+            onSelect={setTeamFilter}
+          />
+          <SessionOwnerToggle
+            currentUserFilter={currentUserFilter}
+            onFilterChange={setUserFilter}
+          />
+        </div>
       </div>
 
       {/* ── Decisions tab ──────────────────────────────────────────── */}

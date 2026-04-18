@@ -78,7 +78,7 @@ var sessionColumnsForFiles = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "team_id", "deleted_at", "created_at",
 }
 
 func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, containerID *string) {
@@ -101,6 +101,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 				nil,                                // input_manifest
 				nil, nil,                           // archived_at, archived_by_user_id
 				nil,                                // automation_run_id
+				nil,                                // team_id
 				nil,                                // deleted_at
 				now,                                // created_at
 			),

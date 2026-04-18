@@ -52,7 +52,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "team_id", "deleted_at", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -92,6 +92,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -177,6 +178,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -273,6 +275,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -434,6 +437,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -515,7 +519,7 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -563,7 +567,7 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock job enqueue (6 named args)
@@ -1150,6 +1154,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1240,6 +1245,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1303,6 +1309,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1330,6 +1337,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1417,7 +1425,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock concurrency check
@@ -1465,7 +1473,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 				// Mock concurrency check
@@ -1626,6 +1634,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1688,6 +1697,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -1871,6 +1881,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -1913,6 +1924,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -1997,6 +2009,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2023,6 +2036,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2066,6 +2080,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2113,6 +2128,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2151,6 +2167,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2181,6 +2198,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2216,6 +2234,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2246,6 +2265,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
+							nil, // team_id
 							nil, // deleted_at
 							now,
 						),
@@ -2413,7 +2433,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock concurrency check
@@ -2505,7 +2525,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
 
 	// Mock concurrency check
@@ -2576,6 +2596,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2640,6 +2661,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2694,6 +2716,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2791,6 +2814,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2861,6 +2885,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2915,6 +2940,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),
@@ -2993,6 +3019,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 				nil, // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
+				nil, // team_id
 				nil, // deleted_at
 				now,
 			),

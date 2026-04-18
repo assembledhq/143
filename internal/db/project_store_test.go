@@ -21,7 +21,7 @@ var projectTestColumns = []string{
 	"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 	"agent_type", "model_override",
 	"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
-	"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
+	"created_by", "team_id", "deleted_at", "created_at", "updated_at", "completed_at",
 }
 
 func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interface{} {
@@ -33,7 +33,7 @@ func newProjectRow(projectID, orgID, repoID uuid.UUID, now time.Time) []interfac
 		false, []uuid.UUID{}, nil, json.RawMessage(`[]`),
 		nil, nil,
 		false, 1, "days", nil,
-		nil, (*time.Time)(nil), now, now, nil,
+		nil, nil, (*time.Time)(nil), now, now, nil,
 	}
 }
 
@@ -61,7 +61,7 @@ func TestProjectStore_Create(t *testing.T) {
 	mock.ExpectBegin()
 	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
 	mock.ExpectQuery("INSERT INTO projects").
-		WithArgs(anyArgs(26)...).
+		WithArgs(anyArgs(27)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
 	mock.ExpectCommit()
 
@@ -275,7 +275,7 @@ func TestProjectStore_Update(t *testing.T) {
 
 	// Update has 24 named args (including schedule and similar_projects fields)
 	mock.ExpectExec("UPDATE projects SET").
-		WithArgs(anyArgs(24)...).
+		WithArgs(anyArgs(25)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	project := &models.Project{

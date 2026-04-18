@@ -206,7 +206,7 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string; include_archived?: boolean; only_archived?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; search?: string; include_archived?: boolean; only_archived?: boolean; team_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -214,6 +214,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       if (params?.search) searchParams.set('search', params.search);
+      if (params?.team_id) searchParams.set('team_id', params.team_id);
       if (params?.only_archived) searchParams.set('only_archived', 'true');
       else if (params?.include_archived) searchParams.set('include_archived', 'true');
       const qs = searchParams.toString();
@@ -433,7 +434,7 @@ export const api = {
       ),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; team_id?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -441,6 +442,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
+      if (params?.team_id) searchParams.set('team_id', params.team_id);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },
@@ -669,5 +671,21 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').ReviewComment>>(`/api/v1/review-comments${qs ? `?${qs}` : ''}`);
     },
+  },
+  teams: {
+    list: () => get<import('./types').ListResponse<import('./types').Team>>('/api/v1/teams'),
+    listMine: () => get<import('./types').ListResponse<import('./types').Team>>('/api/v1/teams/mine'),
+    get: (id: string) => get<import('./types').SingleResponse<import('./types').TeamWithMembers>>(`/api/v1/teams/${id}`),
+    create: (body: { name: string; slug?: string; description?: string }) =>
+      post<import('./types').SingleResponse<import('./types').Team>>('/api/v1/teams', body),
+    update: (id: string, body: { name: string; slug?: string; description?: string }) =>
+      patch<import('./types').SingleResponse<import('./types').Team>>(`/api/v1/teams/${id}`, body),
+    del: (id: string) => del(`/api/v1/teams/${id}`),
+    addMember: (teamId: string, userId: string, role?: string) =>
+      post(`/api/v1/teams/${teamId}/members`, { user_id: userId, role: role || 'member' }),
+    removeMember: (teamId: string, userId: string) =>
+      del(`/api/v1/teams/${teamId}/members/${userId}`),
+    syncGitHub: (org?: string) =>
+      post<import('./types').ListResponse<import('./types').Team>>('/api/v1/teams/sync-github', org ? { org } : {}),
   },
 };

@@ -10,6 +10,9 @@ import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { TeamSelector } from "@/components/team-selector";
+import { useTeamFilter } from "@/hooks/use-team-filter";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
 const filterTabs = [
@@ -35,10 +38,11 @@ export function ProjectSidebar() {
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
+  const { selectedTeamId, myTeams, setTeamFilter } = useTeamFilter();
 
   const { data, isLoading } = useQuery({
-    queryKey: ["projects", activeFilter, repo],
-    queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: [...queryKeys.projects.all, activeFilter, repo, selectedTeamId],
+    queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined, team_id: selectedTeamId }),
     refetchInterval: 10000,
   });
 
@@ -83,6 +87,12 @@ export function ProjectSidebar() {
             className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
+
+        <TeamSelector
+          teams={myTeams}
+          selectedTeamId={selectedTeamId}
+          onSelect={setTeamFilter}
+        />
 
         {/* New project button */}
         <Link

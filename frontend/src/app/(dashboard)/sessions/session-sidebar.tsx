@@ -17,6 +17,8 @@ import { SessionOwnerToggle } from "./session-owner-toggle";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import { TeamSelector } from "@/components/team-selector";
+import { useTeamFilter } from "@/hooks/use-team-filter";
 import type { SessionListItem } from "@/lib/types";
 import {
   activeSet,
@@ -151,6 +153,7 @@ export function SessionSidebar() {
   const pathname = usePathname();
   const queryClient = useQueryClient();
   const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
+  const { selectedTeamId, myTeams, setTeamFilter } = useTeamFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
 
@@ -167,23 +170,23 @@ export function SessionSidebar() {
   // Also fetches a filtered query when a tab is active — see sessions-page-content
   // for the rationale on the double-fetch tradeoff.
   const { data: allData, isLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
+    queryKey: [...queryKeys.sessions.list(repo ?? undefined), triggeredByUserId, selectedTeamId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, team_id: selectedTeamId }),
     refetchInterval: 10000,
   });
 
   // Fetch filtered sessions from the backend when a specific tab is selected.
   const { data: filteredData } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), statusParam, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
+    queryKey: [...queryKeys.sessions.list(repo ?? undefined), statusParam, triggeredByUserId, selectedTeamId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId, team_id: selectedTeamId }),
     refetchInterval: 10000,
     enabled: !!statusParam,
   });
 
   // Fetch archived sessions when the archived tab is active.
   const { data: archivedData, isLoading: isArchivedLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "archived", triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, only_archived: true }),
+    queryKey: [...queryKeys.sessions.list(repo ?? undefined), "archived", triggeredByUserId, selectedTeamId],
+    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, team_id: selectedTeamId, only_archived: true }),
     refetchInterval: 10000,
     enabled: isArchivedView,
   });
@@ -264,6 +267,12 @@ export function SessionSidebar() {
             className="shrink-0"
           />
         </div>
+
+        <TeamSelector
+          teams={myTeams}
+          selectedTeamId={selectedTeamId}
+          onSelect={setTeamFilter}
+        />
 
         {/* New session button */}
         <Link

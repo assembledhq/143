@@ -11,6 +11,7 @@ import {
   Target,
   FlaskConical,
   Users,
+  UsersRound,
   ScrollText,
   BarChart3,
   ChevronRight,
@@ -57,6 +58,7 @@ const settingsGroups: SettingsGroup[] = [
     items: [
       { label: "General", icon: Settings, href: "/settings" },
       { label: "Team", icon: Users, href: "/settings/team" },
+      { label: "Teams", icon: UsersRound, href: "/settings/teams", adminOnly: true },
       { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
     ],
