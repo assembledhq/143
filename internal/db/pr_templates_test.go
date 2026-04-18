@@ -23,16 +23,17 @@ func TestPRTemplateStore_GetByRepositoryID_Success(t *testing.T) {
 
 	store := NewPRTemplateStore(mock)
 	repoID := uuid.New()
+	orgID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM repository_pr_templates WHERE repository_id").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("SELECT .+ FROM repository_pr_templates WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(prTemplateColumns).
-				AddRow(uuid.New(), repoID, uuid.New(), "## Template", ".github/pull_request_template.md", now, now, now),
+				AddRow(uuid.New(), repoID, orgID, "## Template", ".github/pull_request_template.md", now, now, now),
 		)
 
-	tpl, err := store.GetByRepositoryID(context.Background(), repoID)
+	tpl, err := store.GetByRepositoryID(context.Background(), orgID, repoID)
 	require.NoError(t, err)
 	require.NotNil(t, tpl)
 	require.Equal(t, "## Template", tpl.TemplateContent)
@@ -48,12 +49,13 @@ func TestPRTemplateStore_GetByRepositoryID_NotFound(t *testing.T) {
 
 	store := NewPRTemplateStore(mock)
 	repoID := uuid.New()
+	orgID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM repository_pr_templates WHERE repository_id").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("SELECT .+ FROM repository_pr_templates WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTemplateColumns))
 
-	_, err = store.GetByRepositoryID(context.Background(), repoID)
+	_, err = store.GetByRepositoryID(context.Background(), orgID, repoID)
 	require.Error(t, err, "should return error when no template found")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -78,7 +78,7 @@ func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID 
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"session_id": sessionID,
-		"org_id":       orgID,
+		"org_id":     orgID,
 	})
 	if err != nil {
 		return models.PullRequest{}, fmt.Errorf("query pull request by session: %w", err)
@@ -103,6 +103,7 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 // This is intentionally org-agnostic because it is called from GitHub webhook
 // handlers where no org context exists. The returned pr.OrgID is used for
 // subsequent org-scoped operations.
+// lint:allow-no-orgid reason="GitHub webhook lookup; no org context pre-auth"
 func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, number int) (models.PullRequest, error) {
 	query := `
 		SELECT ` + prSelectColumns + `

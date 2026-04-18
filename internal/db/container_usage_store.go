@@ -46,6 +46,7 @@ func (s *ContainerUsageStore) RecordStart(ctx context.Context, event *models.Con
 // RecordStop updates a container usage event when the sandbox is destroyed.
 // It computes duration_ms and container_minutes from started_at → stoppedAt.
 // Returns an error if no matching event was found (e.g. RecordStart failed).
+// lint:allow-no-orgid reason="lifecycle close by opaque event UUID; eventID is globally unique"
 func (s *ContainerUsageStore) RecordStop(ctx context.Context, eventID uuid.UUID, stoppedAt time.Time, exitReason string) error {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE container_usage_events
@@ -162,6 +163,7 @@ func (s *ContainerUsageStore) GetUsageSummary(ctx context.Context, orgID uuid.UU
 // to server crash). It sets stopped_at = now() and exit_reason = "orphaned" for
 // any event started before the cutoff that still has stopped_at IS NULL.
 // Returns the number of rows updated.
+// lint:allow-no-orgid reason="system-wide cleanup of orphaned events across all orgs"
 func (s *ContainerUsageStore) CloseOrphans(ctx context.Context, startedBefore time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE container_usage_events
@@ -179,6 +181,7 @@ func (s *ContainerUsageStore) CloseOrphans(ctx context.Context, startedBefore ti
 
 // CountActive returns the number of container usage events that have not been
 // stopped yet. Used by the observable gauge to report the true active count.
+// lint:allow-no-orgid reason="system-wide gauge counting active containers across all orgs"
 func (s *ContainerUsageStore) CountActive(ctx context.Context) (int64, error) {
 	var count int64
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM container_usage_events WHERE stopped_at IS NULL`).Scan(&count)

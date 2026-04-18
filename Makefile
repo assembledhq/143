@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -147,13 +147,37 @@ frontend-check:
 server-dev:
 	go run -ldflags "$(LDFLAGS)" cmd/server/main.go
 
-lint:
+lint: lint-tenancy
 	@$(MAKE) lint-bootstrap
 	$(GOLANGCI_LINT_BIN) run ./...
+
+# Multi-tenancy guardrails — see AGENTS.md ("Multi-tenancy").
+# Schema: every new table must declare org_id (or be allowlisted in cmd/lint-schema).
+# Stores: every exported *Store method must take org scope (or be annotated
+#         with // lint:allow-no-orgid reason="...").
+lint-tenancy: lint-schema lint-stores
+
+lint-schema:
+	@go run ./cmd/lint-schema
+
+lint-stores:
+	@go run ./cmd/lint-stores
 
 lint-bootstrap:
 	@mkdir -p $(CURDIR)/bin
 	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+# Point git at .githooks/. The pre-commit hook runs lint-schema / lint-stores
+# (scoped to the staged files) and gofmt before every commit. Skip with
+# `git commit --no-verify` or disable with `make hooks-uninstall`.
+hooks-install:
+	@git rev-parse --git-dir >/dev/null 2>&1 || { echo "Not a git repo"; exit 1; }
+	git config core.hooksPath .githooks
+	@echo "Installed: git will now run .githooks/pre-commit on every commit."
+
+hooks-uninstall:
+	@git config --unset core.hooksPath || true
+	@echo "Uninstalled: git will use the default .git/hooks/ path."
 
 # ── Secrets management (SOPS + age) ─────────────────────────────────
 # Optional — only needed if you want encrypted secrets committed to git.

@@ -32,14 +32,15 @@ func NewPRTemplateStore(db DBTX) *PRTemplateStore {
 }
 
 // GetByRepositoryID returns the cached PR template for a repository, if any.
-func (s *PRTemplateStore) GetByRepositoryID(ctx context.Context, repoID uuid.UUID) (*PRTemplate, error) {
+func (s *PRTemplateStore) GetByRepositoryID(ctx context.Context, orgID, repoID uuid.UUID) (*PRTemplate, error) {
 	query := `
 		SELECT id, repository_id, org_id, template_content, template_path,
 		       fetched_at, created_at, updated_at
 		FROM repository_pr_templates
-		WHERE repository_id = @repository_id`
+		WHERE org_id = @org_id AND repository_id = @repository_id`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":        orgID,
 		"repository_id": repoID,
 	})
 	if err != nil {

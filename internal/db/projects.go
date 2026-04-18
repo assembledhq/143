@@ -347,6 +347,7 @@ func (s *ProjectStore) UpdateProgress(ctx context.Context, orgID, projectID uuid
 }
 
 // ListDueForSchedule returns active projects with scheduling enabled that are due to run.
+// lint:allow-no-orgid reason="cross-org scheduler scan for due projects"
 func (s *ProjectStore) ListDueForSchedule(ctx context.Context, now time.Time) ([]models.Project, error) {
 	query := fmt.Sprintf(`SELECT %s FROM projects
 		WHERE schedule_enabled = true AND status = 'active' AND deleted_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= @now

@@ -23,31 +23,31 @@ import (
 )
 
 const (
-	defaultGitHubAPI       = "https://api.github.com"
-	maxBranchSlugLen       = 60
-	maxLabelsToCreate      = 5
-	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
+	defaultGitHubAPI   = "https://api.github.com"
+	maxBranchSlugLen   = 60
+	maxLabelsToCreate  = 5
+	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
-	tokenProvider    *Service
-	pullRequests     *db.PullRequestStore
-	sessions         *db.SessionStore
-	issues           *db.IssueStore
-	deploys          *db.DeployStore
-	validations      *db.ValidationStore
-	repos            *db.RepositoryStore
-	jobs             *db.JobStore
-	reviewComments   *db.ReviewCommentStore
-	userCredentials  *db.UserCredentialStore
-	users            *db.UserStore
-	orgs             *db.OrganizationStore
-	prTemplates      *db.PRTemplateStore
-	llmClient        llm.Client
-	logger           zerolog.Logger
-	baseURL          string
-	httpClient       *http.Client
+	tokenProvider   *Service
+	pullRequests    *db.PullRequestStore
+	sessions        *db.SessionStore
+	issues          *db.IssueStore
+	deploys         *db.DeployStore
+	validations     *db.ValidationStore
+	repos           *db.RepositoryStore
+	jobs            *db.JobStore
+	reviewComments  *db.ReviewCommentStore
+	userCredentials *db.UserCredentialStore
+	users           *db.UserStore
+	orgs            *db.OrganizationStore
+	prTemplates     *db.PRTemplateStore
+	llmClient       llm.Client
+	logger          zerolog.Logger
+	baseURL         string
+	httpClient      *http.Client
 }
 
 func NewPRService(
@@ -64,7 +64,7 @@ func NewPRService(
 	return &PRService{
 		tokenProvider: tokenProvider,
 		pullRequests:  pullRequests,
-		sessions:     sessions,
+		sessions:      sessions,
 		issues:        issues,
 		deploys:       deploys,
 		validations:   validations,
@@ -1407,7 +1407,7 @@ func summarizeDiff(diff string, maxChars int) (summary string, truncated string)
 func (s *PRService) getOrFetchPRTemplate(ctx context.Context, token, owner, repoName, defaultBranch string, repoID, orgID uuid.UUID) string {
 	// Check DB cache.
 	if s.prTemplates != nil {
-		cached, err := s.prTemplates.GetByRepositoryID(ctx, repoID)
+		cached, err := s.prTemplates.GetByRepositoryID(ctx, orgID, repoID)
 		if err == nil && time.Since(cached.FetchedAt) < prTemplateCacheTTL {
 			return cached.TemplateContent
 		}
@@ -1484,7 +1484,6 @@ func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue
 
 	return b.String()
 }
-
 
 func buildLabels(issue *models.Issue) []string {
 	labels := []string{"143-generated"}

@@ -140,6 +140,7 @@ func (s *RepositoryStore) UpsertFromGitHub(ctx context.Context, repo *models.Rep
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 }
 
+// lint:allow-no-orgid reason="pre-auth lookup in GitHub webhook handlers; no org context available"
 func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (models.Repository, error) {
 	query := `
 		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
@@ -153,6 +154,7 @@ func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (m
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
+// lint:allow-no-orgid reason="cross-org cascade when a GitHub app installation is uninstalled"
 func (s *RepositoryStore) DisconnectByInstallationID(ctx context.Context, installationID int64) error {
 	query := `
 		UPDATE repositories
@@ -204,6 +206,7 @@ func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]Re
 	return pgx.CollectRows(rows, pgx.RowToStructByName[RepoSummary])
 }
 
+// lint:allow-no-orgid reason="cross-org cascade when a GitHub repo is deleted via webhook"
 func (s *RepositoryStore) DisconnectByGitHubID(ctx context.Context, installationID, githubID int64) error {
 	query := `
 		UPDATE repositories

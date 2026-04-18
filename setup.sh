@@ -221,6 +221,17 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 8.5 Install git pre-commit hooks
+# ---------------------------------------------------------------------------
+if [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
+  info "Installing git pre-commit hooks (tenancy lints + gofmt)..."
+  git config core.hooksPath .githooks
+  info "Hooks installed. Skip a commit's hooks with: git commit --no-verify"
+else
+  warn "Not a git repo — skipping hook install."
+fi
+
+# ---------------------------------------------------------------------------
 # 9. Done
 # ---------------------------------------------------------------------------
 echo ""

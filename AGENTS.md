@@ -16,6 +16,20 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **Multi-tenancy**: Every table has an `org_id` column (FK to `organizations`). Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug.
 
+Two lints enforce this, both run in CI via `make lint-tenancy`:
+
+- **`cmd/lint-schema`** — scans `migrations/*.up.sql`. Every `CREATE TABLE` must declare `org_id uuid NOT NULL REFERENCES organizations(id)`. Exemptions (rare: root tables, FK-scoped child tables, infra tables) are declared in the `allowedNoOrgID` map in `cmd/lint-schema/main.go` with a short justification, or inline via `-- lint:no-org-id reason="..."` on the `CREATE TABLE` line. Default to adding `org_id` over allowlisting; defense-in-depth beats transitive scoping.
+- **`cmd/lint-stores`** — scans exported methods on `*XxxStore` types under `internal/db/`. Each method must either take `orgID uuid.UUID` directly, or receive a `*models.X` carrier whose `OrgID` field scopes the operation. Methods that are legitimately cross-org (pre-auth lookups, system cleanup, scheduler scans) opt out with a doc comment on the line above `func`:
+
+  ```go
+  // lint:allow-no-orgid reason="pre-auth login lookup by email"
+  func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, error) { ... }
+  ```
+
+When writing a new store method: add `orgID uuid.UUID` as the first arg after `ctx`, filter every SQL clause by `org_id`, and pass `middleware.OrgIDFromContext(r.Context())` from the handler. Do NOT add `lint:allow-no-orgid` unless the method truly must run across orgs.
+
+A **git pre-commit hook** (`.githooks/pre-commit`, installed by `./setup.sh` or `make hooks-install`) runs these lints against staged files before every commit so violations surface in seconds instead of after a CI round-trip. Bypass with `git commit --no-verify` only for WIP snapshots; CI enforces the same rules regardless.
+
 **API response format**: Lists return `{data: [...], meta: {next_cursor}}` with cursor-based pagination. Errors return `{error: {code, message, details}}`. All routes under `/api/v1/`.
 
 **Enum response fields use typed strings**: For model fields that represent enums (especially API response fields like provider/status/state/type), define a dedicated typed string in `internal/models` with named constants and a `Validate() error` method. Prefer `IntegrationProvider`/`IntegrationStatus`-style types over raw `string` fields. When writing new enum-like fields, add table-driven validation tests.

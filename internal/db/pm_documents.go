@@ -27,11 +27,13 @@ func NewPMDocumentStore(db TxStarter) *PMDocumentStore {
 }
 
 // Begin starts a transaction using the underlying DB handle.
+// lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PMDocumentStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return s.db.Begin(ctx)
 }
 
 // WithTx returns a new PMDocumentStore that uses the given transaction.
+// lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PMDocumentStore) WithTx(tx pgx.Tx) *PMDocumentStore {
 	return &PMDocumentStore{db: tx}
 }

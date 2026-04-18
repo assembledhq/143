@@ -33,6 +33,7 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 	return row.Scan(&org.ID, &org.CreatedAt, &org.UpdatedAt)
 }
 
+// lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `
 		SELECT id, name, settings, created_at, updated_at
@@ -42,19 +43,6 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id})
 	if err != nil {
 		return models.Organization{}, fmt.Errorf("query organization: %w", err)
-	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
-}
-
-func (s *OrganizationStore) GetByName(ctx context.Context, name string) (models.Organization, error) {
-	query := `
-		SELECT id, name, settings, created_at, updated_at
-		FROM organizations
-		WHERE name = @name`
-
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"name": name})
-	if err != nil {
-		return models.Organization{}, fmt.Errorf("query organization by name: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }

@@ -1,0 +1,188 @@
+// Command lint-schema enforces multi-tenancy rules on SQL migrations.
+//
+// Every CREATE TABLE that is not in the allowlist must declare an `org_id`
+// column so every row can be scoped to a tenant. Tables without org_id are a
+// P0 data isolation risk — see AGENTS.md ("Multi-tenancy").
+//
+// To exempt a table:
+//  1. Add it to allowedNoOrgID with a short justification; OR
+//  2. Add an inline comment on the line of the CREATE TABLE:
+//     `-- lint:no-org-id reason="<why>"`
+//
+// Run via `make lint-schema` or directly: `go run ./cmd/lint-schema`.
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// allowedNoOrgID lists tables that legitimately don't need org_id.
+// Prefer adding org_id over allowlisting — allowlist only when the table is
+// truly global or is scoped transitively via a parent FK that already has
+// org_id (defense-in-depth still favors adding org_id directly).
+var allowedNoOrgID = map[string]string{
+	"organizations":               "root tenant table",
+	"schema_migrations":           "golang-migrate library internal",
+	"nodes":                       "cluster/infrastructure registry, not tenant data",
+	"audit_log":                   "legacy table superseded by audit_logs",
+	"preview_services":            "child of preview_instances, scoped via preview_instance_id FK",
+	"preview_infrastructure":      "child of preview_instances, scoped via preview_instance_id FK",
+	"preview_snapshots":           "child of preview_instances, scoped via preview_instance_id FK",
+	"issue_events":                "child of issues, scoped via issue_id FK",
+	"agent_run_logs":              "child of agent_runs, scoped via agent_run_id FK",
+	"pm_document_set_pin_members": "join table, scoped via pin_id -> pm_document_set_pins",
+	"project_task_dependencies":   "self-referential join on project_tasks",
+	"project_source_issues":       "join of projects and issues (both org-scoped)",
+}
+
+var (
+	// Match `CREATE TABLE <name> (`, optionally with IF NOT EXISTS.
+	// Skip PARTITION OF (inherits org_id from parent) and CREATE TABLE ... AS
+	// SELECT (not a schema definition for tenant rows).
+	createTableRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
+
+	// Detect partition children like `CREATE TABLE foo_default PARTITION OF foo DEFAULT;`
+	partitionOfRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+PARTITION\s+OF\s+`)
+
+	// Detect `CREATE TABLE ... AS SELECT` (backup/temp tables).
+	createTableAsRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+`)
+
+	// Inline escape hatch on a CREATE TABLE line:
+	//   CREATE TABLE foo ( -- lint:no-org-id reason="global registry"
+	inlineEscapeRE = regexp.MustCompile(`--\s*lint:no-org-id`)
+)
+
+type violation struct {
+	file  string
+	line  int
+	table string
+}
+
+func main() {
+	dir := "migrations"
+	if len(os.Args) > 1 {
+		dir = os.Args[1]
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil {
+		fatal("glob migrations: %v", err)
+	}
+	if len(files) == 0 {
+		fatal("no *.up.sql files found under %q", dir)
+	}
+	sort.Strings(files)
+
+	var violations []violation
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			fatal("read %s: %v", f, err)
+		}
+		violations = append(violations, scan(f, string(src))...)
+	}
+
+	if len(violations) == 0 {
+		fmt.Printf("lint-schema: OK — scanned %d migration file(s)\n", len(files))
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "lint-schema: multi-tenancy violations")
+	for _, v := range violations {
+		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q is missing org_id column\n", v.file, v.line, v.table)
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Every new table MUST have `org_id uuid NOT NULL REFERENCES organizations(id)`.")
+	fmt.Fprintln(os.Stderr, "To exempt a table, add it to allowedNoOrgID in cmd/lint-schema/main.go")
+	fmt.Fprintln(os.Stderr, "with a justification, or add `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
+	os.Exit(1)
+}
+
+// scan finds violations in a single migration file.
+func scan(file, src string) []violation {
+	var out []violation
+
+	// Walk all CREATE TABLE matches, filtering out partitions and AS SELECT.
+	for _, m := range createTableRE.FindAllStringSubmatchIndex(src, -1) {
+		start := m[0]
+		line := src[start:findLineEnd(src, start)]
+
+		if partitionOfRE.MatchString(line) || createTableAsRE.MatchString(line) {
+			continue
+		}
+		if inlineEscapeRE.MatchString(line) {
+			continue
+		}
+
+		table := src[m[2]:m[3]]
+		if _, ok := allowedNoOrgID[table]; ok {
+			continue
+		}
+		// Skip internal backup/temp tables that start with underscore.
+		if strings.HasPrefix(table, "_") {
+			continue
+		}
+
+		body := extractTableBody(src, m[1]-1) // m[1]-1 = index of the '('
+		if hasOrgIDColumn(body) {
+			continue
+		}
+
+		out = append(out, violation{
+			file:  file,
+			line:  lineOf(src, start),
+			table: table,
+		})
+	}
+	return out
+}
+
+// extractTableBody returns the contents between the matching parentheses of a
+// CREATE TABLE statement, starting at the opening '(' byte.
+func extractTableBody(src string, openParen int) string {
+	depth := 0
+	for i := openParen; i < len(src); i++ {
+		switch src[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return src[openParen+1 : i]
+			}
+		}
+	}
+	return src[openParen+1:]
+}
+
+// hasOrgIDColumn returns true if the column list declares an org_id column.
+// Matches lines like:   org_id uuid NOT NULL REFERENCES ...
+// or:                    org_id       UUID  NOT NULL,
+var orgIDColumnRE = regexp.MustCompile(`(?im)(?:^|,)\s*org_id\s+uuid\b`)
+
+func hasOrgIDColumn(body string) bool {
+	return orgIDColumnRE.MatchString(body)
+}
+
+func findLineEnd(s string, i int) int {
+	for j := i; j < len(s); j++ {
+		if s[j] == '\n' {
+			return j
+		}
+	}
+	return len(s)
+}
+
+func lineOf(s string, i int) int {
+	return strings.Count(s[:i], "\n") + 1
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "lint-schema: "+format+"\n", args...)
+	os.Exit(2)
+}
