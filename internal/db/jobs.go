@@ -43,6 +43,21 @@ func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, j
 }
 
 func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return enqueueOn(ctx, s.db, orgID, queue, jobType, payload, priority, dedupeKey)
+}
+
+// EnqueueInTx inserts a job inside an existing transaction so callers that
+// must create a row and a job atomically (e.g. automation RunNow) don't leave
+// orphaned state when one side fails.
+func (s *JobStore) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return enqueueOn(ctx, tx, orgID, queue, jobType, payload, priority, dedupeKey)
+}
+
+type jobQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		return uuid.Nil, err
@@ -55,7 +70,7 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 		ON CONFLICT DO NOTHING
 		RETURNING id`
 
-	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	err = q.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
 		"queue":     queue,
 		"job_type":  jobType,

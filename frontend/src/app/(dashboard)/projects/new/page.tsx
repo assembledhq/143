@@ -4,11 +4,6 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Sparkles,
-  Timer,
-  Bot,
-  ShieldCheck,
-  TestTube2,
-  Wrench,
   ChevronDown,
   Loader2,
 } from "lucide-react";
@@ -30,7 +25,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -49,55 +43,6 @@ type PriorityLevel = (typeof PRIORITY_OPTIONS)[number]["value"];
 function priorityLevelToNumeric(level: PriorityLevel): number {
   return PRIORITY_OPTIONS.find((o) => o.value === level)!.numeric;
 }
-
-interface ScheduledTemplate {
-  id: string;
-  name: string;
-  goal: string;
-  description: string;
-  scheduleInterval: number;
-  scheduleUnit: "hours" | "days" | "weeks";
-  icon: React.ComponentType<{ className?: string }>;
-}
-
-const SCHEDULED_TEMPLATES: ScheduledTemplate[] = [
-  {
-    id: "flaky-tests",
-    name: "Find flaky tests",
-    goal: "Identify flaky tests from recent failures, reproduce nondeterminism, and propose or implement deterministic test fixes with minimal behavior change.",
-    description: "Detect nondeterministic tests and make them stable.",
-    scheduleInterval: 1,
-    scheduleUnit: "days",
-    icon: TestTube2,
-  },
-  {
-    id: "security-sweep",
-    name: "Security sweep",
-    goal: "Review recent changes and open issues to identify concrete security vulnerabilities, then propose high-confidence remediation steps and tests.",
-    description: "Scan for exploit paths and prioritize high-risk remediations.",
-    scheduleInterval: 7,
-    scheduleUnit: "days",
-    icon: ShieldCheck,
-  },
-  {
-    id: "codebase-maintenance",
-    name: "Codebase maintenance",
-    goal: "Identify high-leverage maintenance opportunities that reduce operational risk, improve reliability, or reduce long-term complexity without broad rewrites.",
-    description: "Pay down technical debt with targeted, low-risk improvements.",
-    scheduleInterval: 3,
-    scheduleUnit: "days",
-    icon: Wrench,
-  },
-  {
-    id: "linear-triage",
-    name: "Triage Linear backlog",
-    goal: "Analyze current issue context, prioritize work by impact and urgency, and cluster related items into actionable follow-up tasks.",
-    description: "Reprioritize and cluster incoming work from Linear.",
-    scheduleInterval: 1,
-    scheduleUnit: "days",
-    icon: Bot,
-  },
-];
 
 export default function NewProjectPage() {
   const router = useRouter();
@@ -118,13 +63,6 @@ export default function NewProjectPage() {
   const [agentType, setAgentType] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
-
-  // Schedule
-  const [scheduleEnabled, setScheduleEnabled] = useState(false);
-  const [scheduleInterval, setScheduleInterval] = useState(1);
-  const [scheduleUnit, setScheduleUnit] = useState<
-    "hours" | "days" | "weeks"
-  >("days");
 
   // Advanced section
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -180,9 +118,7 @@ export default function NewProjectPage() {
         goal: goal.trim(),
         repository_id: repositoryId,
         scope: scope.trim() || undefined,
-        completion_criteria: !scheduleEnabled
-          ? completionCriteria.trim() || undefined
-          : undefined,
+        completion_criteria: completionCriteria.trim() || undefined,
         execution_mode: executionMode,
         max_concurrent:
           executionMode === "parallel" ? maxConcurrent : undefined,
@@ -190,22 +126,11 @@ export default function NewProjectPage() {
         base_branch: baseBranch.trim() || undefined,
         agent_type: agentType || undefined,
         model: selectedModel || undefined,
-        schedule_enabled: scheduleEnabled ? true : undefined,
-        schedule_interval: scheduleEnabled ? scheduleInterval : undefined,
-        schedule_unit: scheduleEnabled ? scheduleUnit : undefined,
       }),
     onSuccess: (response) => {
       router.push(`/projects/${response.data.id}`);
     },
   });
-
-  function applyTemplate(template: ScheduledTemplate) {
-    setTitle(template.name);
-    setGoal(template.goal);
-    setScheduleEnabled(true);
-    setScheduleInterval(template.scheduleInterval);
-    setScheduleUnit(template.scheduleUnit);
-  }
 
   function clearGenerated() {
     if (hasGenerated) setHasGenerated(false);
@@ -319,11 +244,7 @@ export default function NewProjectPage() {
                 setGoal(e.target.value);
                 clearGenerated();
               }}
-              placeholder={
-                scheduleEnabled
-                  ? "What should this project do on each scheduled run?"
-                  : "What should this project accomplish?"
-              }
+              placeholder="What should this project accomplish?"
               rows={3}
             />
           </div>
@@ -344,23 +265,21 @@ export default function NewProjectPage() {
             />
           </div>
 
-          {!scheduleEnabled && (
-            <div className="space-y-1.5">
-              <Label htmlFor="completion-criteria">
-                Completion criteria{" "}
-                <span className="text-muted-foreground font-normal">
-                  (optional)
-                </span>
-              </Label>
-              <Textarea
-                id="completion-criteria"
-                value={completionCriteria}
-                onChange={(e) => setCompletionCriteria(e.target.value)}
-                placeholder="How do we know the project is done?"
-                rows={2}
-              />
-            </div>
-          )}
+          <div className="space-y-1.5">
+            <Label htmlFor="completion-criteria">
+              Completion criteria{" "}
+              <span className="text-muted-foreground font-normal">
+                (optional)
+              </span>
+            </Label>
+            <Textarea
+              id="completion-criteria"
+              value={completionCriteria}
+              onChange={(e) => setCompletionCriteria(e.target.value)}
+              placeholder="How do we know the project is done?"
+              rows={2}
+            />
+          </div>
 
           {repos.length === 0 && <NoReposWarning />}
 
@@ -378,79 +297,6 @@ export default function NewProjectPage() {
                 ))}
               </SelectContent>
             </Select>
-          </div>
-
-          {/* ── Schedule toggle ───────────────────────────────── */}
-          <div className="rounded-lg border border-border p-3 space-y-3">
-            <div className="flex items-center justify-between">
-              <Label
-                htmlFor="schedule-toggle"
-                className="flex items-center gap-2 cursor-pointer font-medium"
-              >
-                <Timer className="h-4 w-4 text-muted-foreground" />
-                Run on a schedule
-              </Label>
-              <Switch
-                id="schedule-toggle"
-                checked={scheduleEnabled}
-                onCheckedChange={setScheduleEnabled}
-              />
-            </div>
-
-            {scheduleEnabled && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-muted-foreground">
-                    Run every
-                  </span>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={365}
-                    value={scheduleInterval}
-                    onChange={(e) =>
-                      setScheduleInterval(Number(e.target.value))
-                    }
-                    className="w-20 h-8"
-                  />
-                  <Select
-                    value={scheduleUnit}
-                    onValueChange={(v) =>
-                      setScheduleUnit(v as "hours" | "days" | "weeks")
-                    }
-                  >
-                    <SelectTrigger className="w-28 h-8">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="hours">hour(s)</SelectItem>
-                      <SelectItem value="days">day(s)</SelectItem>
-                      <SelectItem value="weeks">week(s)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Template quick-start pills */}
-                <div className="space-y-1.5">
-                  <p className="text-xs text-muted-foreground/60">
-                    Quick start from a template
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {SCHEDULED_TEMPLATES.map((template) => (
-                      <button
-                        key={template.id}
-                        type="button"
-                        onClick={() => applyTemplate(template)}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background px-2.5 py-1 text-xs text-muted-foreground hover:border-primary/40 hover:text-foreground transition-colors"
-                      >
-                        <template.icon className="h-3 w-3" />
-                        {template.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
 
           {/* ── Advanced Settings ─────────────────────────────── */}

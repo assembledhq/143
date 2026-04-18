@@ -48,6 +48,10 @@ func (m *schedulerRuntimeJobsMock) Enqueue(ctx context.Context, orgID uuid.UUID,
 	return uuid.New(), nil
 }
 
+func (m *schedulerRuntimeJobsMock) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
+}
+
 func (m *schedulerRuntimeJobsMock) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	return nil, nil
 }
@@ -122,8 +126,8 @@ func TestSchedulerRunOnce(t *testing.T) {
 		expectedRelease int
 	}{
 		{
-			name: "returns early when lock acquisition fails",
-			lock: &schedulerRuntimeLockMock{acquireErr: fmt.Errorf("lock unavailable")},
+			name:            "returns early when lock acquisition fails",
+			lock:            &schedulerRuntimeLockMock{acquireErr: fmt.Errorf("lock unavailable")},
 			integrations:    &schedulerRuntimeIntegrationStoreMock{},
 			orgs:            &schedulerRuntimeOrgStoreMock{},
 			plans:           &schedulerRuntimePlanStoreMock{},
@@ -133,8 +137,8 @@ func TestSchedulerRunOnce(t *testing.T) {
 			expectedRelease: 0,
 		},
 		{
-			name: "returns early when lock is not acquired",
-			lock: &schedulerRuntimeLockMock{acquired: false},
+			name:            "returns early when lock is not acquired",
+			lock:            &schedulerRuntimeLockMock{acquired: false},
 			integrations:    &schedulerRuntimeIntegrationStoreMock{},
 			orgs:            &schedulerRuntimeOrgStoreMock{},
 			plans:           &schedulerRuntimePlanStoreMock{},
@@ -144,8 +148,8 @@ func TestSchedulerRunOnce(t *testing.T) {
 			expectedRelease: 0,
 		},
 		{
-			name: "releases lock when integration lookup fails",
-			lock: &schedulerRuntimeLockMock{acquired: true},
+			name:            "releases lock when integration lookup fails",
+			lock:            &schedulerRuntimeLockMock{acquired: true},
 			integrations:    &schedulerRuntimeIntegrationStoreMock{err: fmt.Errorf("db error")},
 			orgs:            &schedulerRuntimeOrgStoreMock{},
 			plans:           &schedulerRuntimePlanStoreMock{},
@@ -154,8 +158,8 @@ func TestSchedulerRunOnce(t *testing.T) {
 			expectedRelease: 1,
 		},
 		{
-			name: "enqueues PM job only for orgs due by schedule",
-			lock: &schedulerRuntimeLockMock{acquired: true},
+			name:         "enqueues PM job only for orgs due by schedule",
+			lock:         &schedulerRuntimeLockMock{acquired: true},
 			integrations: &schedulerRuntimeIntegrationStoreMock{orgIDs: []uuid.UUID{oldOrgID, newOrgID}},
 			orgs: &schedulerRuntimeOrgStoreMock{orgByID: map[uuid.UUID]models.Organization{
 				oldOrgID: {ID: oldOrgID, Settings: defaultSettingsJSON},
@@ -212,4 +216,3 @@ func TestSchedulerStartAndNodeHeartbeatStopOnCanceledContext(t *testing.T) {
 
 	require.True(t, true, "Start and StartHeartbeat should return immediately when context is canceled")
 }
-

@@ -50,6 +50,21 @@ func queryInt(r *http.Request, key string, defaultVal int) int {
 	return n
 }
 
+// clampListLimit bounds a page-size request to [1, maxLimit], substituting the
+// default when zero/negative. Keeping the clamp in the handler (not silently
+// inside the store) means the value passed to the store equals the value used
+// to compute next_cursor — otherwise a caller who asked for limit=1000 could
+// get back 25 rows with no cursor and believe there were no more pages.
+func clampListLimit(requested, defaultLimit, maxLimit int) int {
+	if requested <= 0 {
+		return defaultLimit
+	}
+	if requested > maxLimit {
+		return maxLimit
+	}
+	return requested
+}
+
 func strPtr(s string) *string { return &s }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
