@@ -289,6 +289,26 @@ export function AgentSettingsEditor({
         </div>
       )}
 
+      {defaultAgentType === "claude_code" && (
+        <div className="rounded-md border border-input bg-muted/30 p-3 text-xs text-muted-foreground">
+          <p className="font-medium text-foreground">Why API key only?</p>
+          <p className="mt-1">
+            Anthropic prohibits third-party tools from authenticating users via Claude Pro/Max subscription OAuth, so
+            we can&apos;t offer a &ldquo;Sign in with Claude&rdquo; option like we do for ChatGPT. Generate an API key
+            in the{" "}
+            <a
+              href="https://console.anthropic.com/settings/keys"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              Anthropic Console
+            </a>
+            ; usage bills pay-as-you-go to that key.
+          </p>
+        </div>
+      )}
+
       <div className="space-y-3">
         {(() => {
           const envVarsToRender =
