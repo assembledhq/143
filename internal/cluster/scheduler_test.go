@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -634,6 +635,42 @@ func TestScheduler_ScheduleAutomationRuns_DuplicateIdempotencySkip(t *testing.T)
 	// already owns the advance, and re-advancing risks overwriting their value.
 	require.Empty(t, automations.advancedIDs, "duplicate skip must not advance next_run_at")
 	require.Empty(t, jobs.enqueued, "duplicate runs must not enqueue a job")
+}
+
+func TestScheduler_ScheduleAutomationRuns_AdvanceErrorAbortsTick(t *testing.T) {
+	t.Parallel()
+
+	// A DB error inside the loop leaves pgx's tx aborted, so subsequent
+	// queries silently no-op. The fix: on Advance failure we return without
+	// commit so the tx rolls back and the next tick retries cleanly.
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectRollback() // from deferred tx.Rollback; no Commit expected
+
+	a := newAutomationFixture()
+	b := newAutomationFixture() // a second automation that must NOT be enqueued
+	automations := &mockAutomations{
+		due:        []models.Automation{a, b},
+		advanceErr: errors.New("advance boom"),
+	}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "tx should roll back, not commit")
+	require.Empty(t, jobs.enqueued, "no jobs must be enqueued when the tick aborts")
 }
 
 func TestScheduler_ReapStuckAutomationRuns_CalledFromRunOnce(t *testing.T) {

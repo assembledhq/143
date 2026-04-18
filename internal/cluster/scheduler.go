@@ -467,15 +467,16 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 	var toEnqueue []pendingEnqueue
 
 	for _, a := range dueAutomations {
-		// Throttle check first: if max_concurrent is already saturated, advance
-		// next_run_at so we don't busy-loop on this automation, but skip both
-		// the run row and the job enqueue.
+		// Any DB error inside this loop leaves pgx's tx in an aborted state,
+		// so subsequent queries on the same tx will fail. On such errors we
+		// abort the whole tick (return without commit). The rolled-back row
+		// lock releases, and the next tick will retry.
 		inFlight, err := s.automations.CountInFlightRuns(ctx, tx, a.ID)
 		if err != nil {
-			s.logger.Warn().Err(err).
+			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
-				Msg("failed to count in-flight runs")
-			continue
+				Msg("failed to count in-flight runs; aborting tick")
+			return
 		}
 
 		var nextRunAt time.Time
@@ -492,18 +493,18 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 				Int("max_concurrent", a.MaxConcurrent).
 				Msg("skipping automation: max_concurrent saturated, deferring to next tick")
 			if err := s.automations.AdvanceNextRunAt(ctx, tx, a.ID, now, nextRunAt); err != nil {
-				s.logger.Warn().Err(err).
+				s.logger.Error().Err(err).
 					Str("automation_id", a.ID.String()).
-					Msg("failed to advance automation next_run_at")
+					Msg("failed to advance automation next_run_at; aborting tick")
+				return
 			}
 			continue
 		}
 
 		scheduledTime := a.NextRunAt
 
-		// Build the run row first. ConfigSnapshot can only fail on a future
-		// non-marshalable field change; skip this automation rather than
-		// crashing the whole tick.
+		// BuildConfigSnapshot doesn't touch the DB, so on marshal failure we
+		// can safely skip this one row without poisoning the tx.
 		configSnapshot, err := a.BuildConfigSnapshot()
 		if err != nil {
 			s.logger.Warn().Err(err).
@@ -515,9 +516,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		// Create run row (with idempotency via scheduled_time). We insert
 		// BEFORE advancing next_run_at so that on duplicate/no-op the parent
 		// row's next_run_at is left untouched — any out-of-band writer that
-		// already advanced it wins. Within a single tick this is equivalent
-		// (SKIP LOCKED prevents two schedulers from seeing the same row), but
-		// the ordering keeps the invariant robust to future writers.
+		// already advanced it wins.
 		run := models.AutomationRun{
 			AutomationID:   a.ID,
 			OrgID:          a.OrgID,
@@ -530,10 +529,10 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 
 		created, err := s.automationRuns.CreateRunInTx(ctx, tx, &run)
 		if err != nil {
-			s.logger.Warn().Err(err).
+			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
-				Msg("failed to create automation run")
-			continue
+				Msg("failed to create automation run; aborting tick")
+			return
 		}
 		if !created {
 			// Duplicate — idempotency check. Skip advancing too: whoever
@@ -544,14 +543,11 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		// Only advance next_run_at after we've confirmed the run row was
-		// created. A failed Advance here is non-fatal — the run is already
-		// committed and the next tick will skip via idempotency.
 		if err := s.automations.AdvanceNextRunAt(ctx, tx, a.ID, now, nextRunAt); err != nil {
-			s.logger.Warn().Err(err).
+			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
-				Msg("failed to advance automation next_run_at")
-			continue
+				Msg("failed to advance automation next_run_at; aborting tick")
+			return
 		}
 
 		toEnqueue = append(toEnqueue, pendingEnqueue{

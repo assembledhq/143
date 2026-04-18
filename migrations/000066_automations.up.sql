@@ -59,6 +59,12 @@ ALTER TABLE automations
 -- to reject at write time.
 ALTER TABLE automations
     ADD CONSTRAINT chk_automations_interval_unit CHECK (interval_unit IS NULL OR interval_unit IN ('hours', 'days', 'weeks'));
+-- Interval schedules ignore timezone (NextRunTime uses fixed duration arithmetic),
+-- so storing a non-UTC value would be misleading. Only cron schedules evaluate
+-- the field. Enforce this at the DB layer so a buggy writer can't silently
+-- persist a meaningless tz on an interval row.
+ALTER TABLE automations
+    ADD CONSTRAINT chk_automations_timezone_interval CHECK (schedule_type = 'cron' OR timezone = 'UTC');
 -- Cap lengths to avoid a 10MB name/goal being accepted silently. Values are
 -- generous — the UI surface caps well below these.
 ALTER TABLE automations

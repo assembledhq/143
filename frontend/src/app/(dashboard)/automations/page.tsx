@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Plus, Pause, Play, MoreHorizontal, Trash2 } from "lucide-react";
 import Link from "next/link";
@@ -37,10 +37,23 @@ function AutomationCard({ automation }: { automation: Automation }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
   });
 
+  // deleteInFlight closes the same render-tick race that runNowInFlight does on
+  // the detail page: `disabled={isPending}` is only applied on the next render,
+  // so a rapid double-click can fire mutate() twice before React catches up. A
+  // synchronous ref rejects the second click immediately.
+  const deleteInFlight = useRef(false);
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automation.id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSettled: () => {
+      deleteInFlight.current = false;
+    },
   });
+  const handleDelete = () => {
+    if (deleteInFlight.current || deleteMutation.isPending) return;
+    deleteInFlight.current = true;
+    deleteMutation.mutate();
+  };
 
   return (
     <div className="flex items-start justify-between gap-4 rounded-lg border border-border bg-background p-4 transition-colors hover:bg-muted/30">
@@ -96,7 +109,7 @@ function AutomationCard({ automation }: { automation: Automation }) {
             </DropdownMenuItem>
           )}
           <DropdownMenuItem
-            onClick={() => deleteMutation.mutate()}
+            onClick={handleDelete}
             disabled={deleteMutation.isPending}
             className="text-destructive focus:text-destructive"
           >

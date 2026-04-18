@@ -95,22 +95,25 @@ export default function NewAutomationPage() {
           Start from a template
         </Label>
         <div className="flex flex-wrap gap-2">
-          {automationTemplates.map((t) => (
-            <Button
-              key={t.id}
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => applyTemplate(t.id)}
-              className={cn(
-                "rounded-full h-7 px-3 text-xs",
-                name === t.name && "border-primary bg-primary/5"
-              )}
-            >
-              <span className="mr-1.5">{t.icon}</span>
-              {t.name}
-            </Button>
-          ))}
+          {automationTemplates.map((t) => {
+            const Icon = t.icon;
+            return (
+              <Button
+                key={t.id}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => applyTemplate(t.id)}
+                className={cn(
+                  "rounded-full h-7 px-3 text-xs",
+                  name === t.name && "border-primary bg-primary/5"
+                )}
+              >
+                <Icon className="h-3.5 w-3.5 mr-1.5" />
+                {t.name}
+              </Button>
+            );
+          })}
         </div>
       </div>
 

@@ -314,7 +314,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			Msg("running automation_run job (stub: marking completed_noop)")
 
 		now := time.Now()
-		summary := "automation execution not yet implemented; run skipped"
+		summary := "Automation execution is not yet implemented (Phase 3). This run was recorded but no agent was launched."
 		return stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusCompletedNoop, &now, &summary)
 	}
 }

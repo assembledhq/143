@@ -187,20 +187,41 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 	return err
 }
 
+// SoftDelete marks an automation deleted and cancels any pending runs in the
+// same transaction. Running rows are left alone — the worker is expected to
+// observe the deleted_at on pickup/finish. Skipping only pending rows keeps
+// the semantics tight: we don't race-cancel a run that's actively executing.
 func (s *AutomationStore) SoftDelete(ctx context.Context, orgID, automationID uuid.UUID) error {
-	query := `UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
-	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":     automationID,
-		"org_id": orgID,
-	})
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin soft-delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		pgx.NamedArgs{"id": automationID, "org_id": orgID},
+	)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("automation not found or already deleted")
 	}
-	return nil
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE automation_runs SET status = 'skipped',
+			completed_at = now(),
+			result_summary = 'automation deleted before run could start',
+			updated_at = now()
+			WHERE automation_id = @id AND status = 'pending'`,
+		pgx.NamedArgs{"id": automationID},
+	); err != nil {
+		return fmt.Errorf("cancel pending runs: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 // ListDueForSchedule returns enabled automations that are due to run.
@@ -312,27 +333,55 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	return collectIDs(rows)
 }
 
-// BulkSoftDelete soft-deletes multiple automations. Returns the IDs actually
-// affected for audit-logging purposes. Fails closed on empty automationIDs to
-// avoid silently wiping an entire org's automations.
+// BulkSoftDelete soft-deletes multiple automations and cancels their pending
+// runs in the same transaction. Returns the IDs actually affected for audit-
+// logging purposes. Fails closed on empty automationIDs to avoid silently
+// wiping an entire org's automations.
+//
+// Running rows are left alone; see SoftDelete for the rationale.
 func (s *AutomationStore) BulkSoftDelete(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID) ([]uuid.UUID, error) {
 	if len(automationIDs) == 0 {
 		return nil, nil
 	}
 
-	query := `UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
-		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
-		RETURNING id`
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin bulk-soft-delete tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id": orgID,
-		"ids":    automationIDs,
-	})
+	rows, err := tx.Query(ctx,
+		`UPDATE automations SET deleted_at = now(), enabled = false, updated_at = now()
+			WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
+			RETURNING id`,
+		pgx.NamedArgs{"org_id": orgID, "ids": automationIDs},
+	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectIDs(rows)
+	affected, err := collectIDs(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(affected) > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE automation_runs SET status = 'skipped',
+				completed_at = now(),
+				result_summary = 'automation deleted before run could start',
+				updated_at = now()
+				WHERE automation_id = ANY(@ids) AND status = 'pending'`,
+			pgx.NamedArgs{"ids": affected},
+		); err != nil {
+			return nil, fmt.Errorf("cancel pending runs: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return affected, nil
 }
 
 // collectIDs scans a single-column UUID result set.
@@ -411,7 +460,7 @@ const createAutomationRunSQL = `
 func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (bool, error) {
 	configJSON, err := json.Marshal(r.ConfigSnapshot)
 	if err != nil {
-		configJSON = nil
+		return false, fmt.Errorf("marshal config snapshot: %w", err)
 	}
 
 	row := q.QueryRow(ctx, createAutomationRunSQL, pgx.NamedArgs{

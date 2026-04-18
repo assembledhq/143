@@ -415,7 +415,8 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		"interval_unit":  "days",
 		"priority":       75,
 		"base_branch":    "develop",
-		"timezone":       "America/Los_Angeles",
+		// Interval schedules must be UTC — matches the chk_automations_timezone_interval DB constraint.
+		"timezone": "UTC",
 	}
 	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr := httptest.NewRecorder()
@@ -464,9 +465,15 @@ func TestAutomationHandler_Delete_OK(t *testing.T) {
 	defer mock.Close()
 
 	id := uuid.New()
+	// SoftDelete wraps the automation update and pending-run cancel in one tx.
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE automations SET deleted_at").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE automation_runs SET status = 'skipped'`).
+		WithArgs(testAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
@@ -663,6 +670,41 @@ func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationHandler_RunNow_Paused(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: false,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	// Only the GetByID fires — no Begin/Query/Commit since the handler
+	// short-circuits on !Enabled before opening a tx.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetJobStore(db.NewJobStore(mock))
+	h.SetPool(mock)
+
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/"+id.String()+"/run", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.RunNow(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "AUTOMATION_PAUSED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAutomationHandler_RunNow_Throttled(t *testing.T) {
 	t.Parallel()
 
@@ -821,9 +863,16 @@ func TestAutomationHandler_Bulk_DeleteOK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	// BulkSoftDelete runs inside a tx so affected automations' pending runs
+	// are cancelled atomically alongside the soft delete.
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET deleted_at").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec(`UPDATE automation_runs SET status = 'skipped'`).
+		WithArgs(testAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	body := map[string]any{"action": "delete", "automation_ids": []string{uuid.New().String()}}

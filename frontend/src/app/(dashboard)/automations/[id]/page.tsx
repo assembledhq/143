@@ -33,7 +33,7 @@ const runStatusConfig: Record<AutomationRunStatus, { icon: React.ComponentType<{
   pending: { icon: Clock, label: "Pending", color: "text-muted-foreground" },
   running: { icon: RefreshCw, label: "Running", color: "text-blue-500" },
   completed: { icon: CheckCircle2, label: "Completed", color: "text-green-500" },
-  completed_noop: { icon: Minus, label: "No-op", color: "text-muted-foreground" },
+  completed_noop: { icon: Minus, label: "Not executed", color: "text-amber-600 dark:text-amber-500" },
   failed: { icon: AlertTriangle, label: "Failed", color: "text-red-500" },
   skipped: { icon: Minus, label: "Skipped", color: "text-muted-foreground" },
 };
@@ -49,7 +49,7 @@ function RunCard({ run }: { run: AutomationRun }) {
       className={cn(
         "rounded-lg border p-4",
         isFailed ? "border-red-200 bg-red-50/50 dark:border-red-900/30 dark:bg-red-950/20" :
-        isNoop ? "border-border/50 opacity-70" : "border-border bg-background"
+        isNoop ? "border-amber-200 bg-amber-50/50 dark:border-amber-900/30 dark:bg-amber-950/20" : "border-border bg-background"
       )}
     >
       <div className="flex items-center justify-between mb-2">

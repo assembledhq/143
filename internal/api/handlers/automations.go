@@ -15,13 +15,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// validExecutionModes mirrors the chk_automations_execution_mode CHECK constraint.
-var validExecutionModes = map[string]bool{
-	"sequential":       true,
-	"parallel":         true,
-	"dependency_graph": true,
-}
-
 // automationListDefaultLimit and automationListMaxLimit must match the
 // store's internal clamp in AutomationStore.ListByOrg/ListByAutomation so
 // that the limit we pass in equals the bound actually applied — otherwise
@@ -30,78 +23,7 @@ var validExecutionModes = map[string]bool{
 const (
 	automationListDefaultLimit = 25
 	automationListMaxLimit     = 100
-	automationNameMaxLength    = 200
-	automationGoalMaxLength    = 4000
 )
-
-// validateAutomationNameAndGoal caps the two free-text fields at their DB-level
-// lengths. Without this, a 10MB body is accepted and only rejected at write
-// time with a less legible CHECK violation from Postgres.
-func validateAutomationNameAndGoal(name, goal string) error {
-	if len(name) > automationNameMaxLength {
-		return fmt.Errorf("name must be at most %d characters", automationNameMaxLength)
-	}
-	if len(goal) > automationGoalMaxLength {
-		return fmt.Errorf("goal must be at most %d characters", automationGoalMaxLength)
-	}
-	return nil
-}
-
-// validateBaseBranch rejects branch names that obviously can't be refs:
-// empty/whitespace, path traversal, or embedded whitespace. We're intentionally
-// conservative — libgit2 has stricter rules but applying them here would
-// duplicate logic we'd have to keep in sync with git's rules. The callsite
-// (repo checkout) will fail loudly on anything we let through.
-func validateBaseBranch(b string) error {
-	trimmed := strings.TrimSpace(b)
-	if trimmed == "" {
-		return fmt.Errorf("base_branch must not be empty")
-	}
-	if trimmed != b {
-		return fmt.Errorf("base_branch must not contain leading/trailing whitespace")
-	}
-	if strings.ContainsAny(b, " \t\n\r") {
-		return fmt.Errorf("base_branch must not contain whitespace")
-	}
-	if strings.Contains(b, "..") {
-		return fmt.Errorf("base_branch must not contain '..'")
-	}
-	return nil
-}
-
-// validateTimezone rejects strings that time.LoadLocation can't parse. Without
-// this, a malformed timezone would be silently stored and later fail at
-// schedule evaluation time — far from the user's write.
-func validateTimezone(tz string) error {
-	if _, err := time.LoadLocation(tz); err != nil {
-		return fmt.Errorf("invalid timezone %q", tz)
-	}
-	return nil
-}
-
-// resolveRepositoryID parses a repository_id from a request and verifies it
-// belongs to orgID. Returns nil + nil for empty input. The error is one a
-// handler can return directly (already user-safe).
-//
-// Fails closed when no repo store is configured: the router always calls
-// SetRepositoryStore so a missing store means a wiring bug, not a
-// less-secure-but-usable path.
-func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.UUID, raw string) (*uuid.UUID, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	parsed, err := uuid.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid repository_id")
-	}
-	if h.repoStore == nil {
-		return nil, fmt.Errorf("repository lookup not configured")
-	}
-	if _, err := h.repoStore.GetByID(ctx, orgID, parsed); err != nil {
-		return nil, fmt.Errorf("repository not found in this org")
-	}
-	return &parsed, nil
-}
 
 type AutomationHandler struct {
 	automationStore    *db.AutomationStore
@@ -307,6 +229,12 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		timezone = *req.Timezone
+	}
+	// Interval schedules ignore timezone, so rejecting non-UTC here matches
+	// the DB CHECK and keeps the API honest about what the value does.
+	if scheduleType == models.AutomationScheduleInterval && timezone != "UTC" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", "timezone must be UTC for interval schedules")
+		return
 	}
 
 	priority := 50
@@ -518,6 +446,13 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		// automation would silently leave next_run_at stale.
 	}
 
+	// Interval schedules ignore timezone. Enforce after all partial updates so
+	// a change to either field alone is still caught (matches the DB CHECK).
+	if automation.ScheduleType == models.AutomationScheduleInterval && automation.Timezone != "UTC" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", "timezone must be UTC for interval schedules")
+		return
+	}
+
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
 		return
@@ -647,6 +582,14 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	automation, err := h.automationStore.GetByID(r.Context(), orgID, automationID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+
+	// Refuse manual runs on paused automations. A paused automation is one the
+	// user has explicitly disabled; letting Run-now bypass that would make the
+	// pause toggle misleading (and could fire runs the user no longer wants).
+	if !automation.Enabled {
+		writeError(w, r, http.StatusConflict, "AUTOMATION_PAUSED", "automation is paused; resume it before running")
 		return
 	}
 

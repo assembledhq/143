@@ -200,9 +200,16 @@ func TestAutomationStore_SoftDelete(t *testing.T) {
 	orgID := uuid.New()
 	id := uuid.New()
 
+	// SoftDelete wraps both the automation update and the pending-run cancel in
+	// one tx so a deleted automation never leaves pending runs behind.
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE automations SET deleted_at").
 		WithArgs(anyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE automation_runs SET status = 'skipped'`).
+		WithArgs(anyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 
 	require.NoError(t, store.SoftDelete(context.Background(), orgID, id))
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -217,9 +224,13 @@ func TestAutomationStore_SoftDelete_NotFound(t *testing.T) {
 
 	store := NewAutomationStore(mock)
 
+	// No pending-run cancel or commit expected: the automation update returns
+	// 0 rows, so SoftDelete aborts and the rollback fires.
+	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE automations SET deleted_at").
 		WithArgs(anyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
 
 	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
@@ -308,9 +319,16 @@ func TestAutomationStore_BulkSoftDelete(t *testing.T) {
 	store := NewAutomationStore(mock)
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 
+	// Bulk delete runs in a tx so affected automations' pending runs are
+	// cancelled atomically alongside the soft delete.
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET deleted_at").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]))
+	mock.ExpectExec(`UPDATE automation_runs SET status = 'skipped'`).
+		WithArgs(anyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
 
 	affected, err := store.BulkSoftDelete(context.Background(), uuid.New(), ids)
 	require.NoError(t, err)
