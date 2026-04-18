@@ -156,6 +156,8 @@ func main() {
 		projectTaskStore := db.NewProjectTaskStore(pool)
 		projectCycleStore := db.NewProjectCycleStore(pool)
 		pmDocumentStore := db.NewPMDocumentStore(pool)
+		automationStore := db.NewAutomationStore(pool)
+		automationRunStore := db.NewAutomationRunStore(pool)
 		snapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
 
 		auditLogStore := db.NewAuditLogStore(pool)
@@ -181,6 +183,8 @@ func main() {
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
+			Automations:         automationStore,
+			AutomationRuns:      automationRunStore,
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -224,6 +228,7 @@ func main() {
 		)
 		scheduler.SetProjectStore(projectStore)
 		scheduler.SetPMDocStore(pmDocumentStore)
+		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 

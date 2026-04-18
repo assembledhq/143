@@ -4,6 +4,7 @@ import {
   Zap,
   Play,
   FolderKanban,
+  RefreshCw,
   LogOut,
   ChevronsUpDown,
   Search,
@@ -86,6 +87,7 @@ const navItems = [
   { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
   { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
   { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
+  { label: "Automations", icon: RefreshCw, href: "/automations", showProposalBadge: false },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {

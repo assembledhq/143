@@ -57,6 +57,14 @@ const (
 	AuditActionProjectTaskDeleted    AuditAction = "project.task.deleted"
 	AuditActionProjectTaskRetried    AuditAction = "project.task.retried"
 
+	// Automation actions
+	AuditActionAutomationCreated      AuditAction = "automation.created"
+	AuditActionAutomationUpdated      AuditAction = "automation.updated"
+	AuditActionAutomationDeleted      AuditAction = "automation.deleted"
+	AuditActionAutomationPaused       AuditAction = "automation.paused"
+	AuditActionAutomationResumed      AuditAction = "automation.resumed"
+	AuditActionAutomationRunTriggered AuditAction = "automation.run_triggered"
+
 	// Issue actions
 	AuditActionIssueCreated       AuditAction = "issue.created"
 	AuditActionIssueReprioritized AuditAction = "issue.reprioritized"
@@ -113,6 +121,8 @@ func (a AuditAction) Validate() error {
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectRunTriggered,
 		AuditActionProjectCycleCompleted, AuditActionProjectTaskCreated, AuditActionProjectTaskUpdated,
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
+		AuditActionAutomationCreated, AuditActionAutomationUpdated, AuditActionAutomationDeleted,
+		AuditActionAutomationPaused, AuditActionAutomationResumed, AuditActionAutomationRunTriggered,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
 		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
@@ -152,6 +162,7 @@ const (
 	AuditResourceEvalTask             AuditResourceType = "eval_task"
 	AuditResourceEvalRun              AuditResourceType = "eval_run"
 	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
+	AuditResourceAutomation           AuditResourceType = "automation"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -161,7 +172,8 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
-		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch:
+		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
+		AuditResourceAutomation:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

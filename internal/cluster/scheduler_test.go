@@ -2,12 +2,14 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -31,6 +33,10 @@ type mockJobs struct {
 }
 
 func (m *mockJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func (m *mockJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
 
@@ -80,11 +86,21 @@ func (m *mockProjects) UpdateNextRunAt(ctx context.Context, orgID, projectID uui
 }
 
 type trackingJobs struct {
-	enqueued []string // jobType values
+	enqueued   []string // jobType values
+	enqueuedTx []string // jobType values inserted in the scheduler tx
+	enqueueErr error
 }
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.enqueued = append(m.enqueued, jobType)
+	return uuid.New(), nil
+}
+
+func (m *trackingJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+	if m.enqueueErr != nil {
+		return uuid.Nil, m.enqueueErr
+	}
+	m.enqueuedTx = append(m.enqueuedTx, jobType)
 	return uuid.New(), nil
 }
 
@@ -443,4 +459,350 @@ func TestScheduler_ShouldRunPM_OldFailure(t *testing.T) {
 	run, err := s.shouldRunPM(context.Background(), uuid.New(), now, 4*time.Hour)
 	require.NoError(t, err, "shouldRunPM should not error")
 	require.True(t, run, "should run when the failure is older than the failure backoff")
+}
+
+// --- automation scheduling ---
+
+type mockAutomations struct {
+	due           []models.Automation
+	listErr       error
+	inFlight      map[uuid.UUID]int
+	inFlightErr   error
+	advanceErr    error
+	advancedIDs   []uuid.UUID
+	advancedNexts []time.Time
+}
+
+func (m *mockAutomations) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now time.Time) ([]models.Automation, error) {
+	return m.due, m.listErr
+}
+
+func (m *mockAutomations) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
+	m.advancedIDs = append(m.advancedIDs, automationID)
+	m.advancedNexts = append(m.advancedNexts, nextRunAt)
+	return m.advanceErr
+}
+
+func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (int, error) {
+	if m.inFlightErr != nil {
+		return 0, m.inFlightErr
+	}
+	return m.inFlight[automationID], nil
+}
+
+type mockAutomationRuns struct {
+	created     []models.AutomationRun
+	createFlag  bool // value returned by CreateRunInTx
+	createErr   error
+	reapCount   int64
+	reapErr     error
+	reapCalls   int
+	reapOrgIDs  []uuid.UUID
+	lastThresh  time.Duration
+	listOrgs    []uuid.UUID
+	listOrgsErr error
+}
+
+func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
+	if m.createErr != nil {
+		return false, m.createErr
+	}
+	if m.createFlag {
+		r.ID = uuid.New()
+	}
+	m.created = append(m.created, *r)
+	return m.createFlag, nil
+}
+
+func (m *mockAutomationRuns) ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error) {
+	return m.listOrgs, m.listOrgsErr
+}
+
+func (m *mockAutomationRuns) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
+	m.reapCalls++
+	m.reapOrgIDs = append(m.reapOrgIDs, orgID)
+	m.lastThresh = threshold
+	return m.reapCount, m.reapErr
+}
+
+// newAutomationFixture builds an interval-scheduled automation with sensible
+// defaults for scheduler tests.
+func newAutomationFixture() models.Automation {
+	orgID := uuid.New()
+	autoID := uuid.New()
+	interval := 1
+	unit := "days"
+	nextRun := time.Now().Add(-time.Minute)
+	return models.Automation{
+		ID:            autoID,
+		OrgID:         orgID,
+		Name:          "test",
+		Goal:          "goal",
+		ExecutionMode: "sequential",
+		MaxConcurrent: 1,
+		BaseBranch:    "main",
+		ScheduleType:  models.AutomationScheduleInterval,
+		IntervalValue: &interval,
+		IntervalUnit:  &unit,
+		Timezone:      "UTC",
+		NextRunAt:     &nextRun,
+		Enabled:       true,
+	}
+}
+
+func TestScheduler_ScheduleAutomationRuns_NilStores(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic when automation stores are not wired.
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+}
+
+func TestScheduler_ScheduleAutomationRuns_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "all pgxmock expectations should be met")
+	require.Len(t, runs.created, 1, "should create one run")
+	require.Equal(t, models.AutomationTriggeredBySchedule, runs.created[0].TriggeredBy)
+	require.Len(t, automations.advancedIDs, 1, "should advance next_run_at once")
+	require.Equal(t, a.ID, automations.advancedIDs[0])
+	require.Empty(t, jobs.enqueued, "scheduled automation jobs should not be enqueued after commit")
+	require.Len(t, jobs.enqueuedTx, 1, "should enqueue the job inside the scheduler transaction")
+	require.Equal(t, models.JobTypeAutomationRun, jobs.enqueuedTx[0])
+}
+
+func TestScheduler_ScheduleAutomationRuns_MaxConcurrentSaturated(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	a.MaxConcurrent = 1
+	automations := &mockAutomations{
+		due:      []models.Automation{a},
+		inFlight: map[uuid.UUID]int{a.ID: 1}, // saturated
+	}
+	runs := &mockAutomationRuns{}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet())
+	require.Empty(t, runs.created, "saturated automation must not create a run row")
+	require.Empty(t, jobs.enqueued, "saturated automation must not enqueue a job")
+	require.Len(t, automations.advancedIDs, 1, "next_run_at should still advance so we don't busy-loop")
+}
+
+func TestScheduler_ScheduleAutomationRuns_DuplicateIdempotencySkip(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectCommit()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: false} // idempotency hit → no insert
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet())
+	// On duplicate we do NOT advance next_run_at — whoever inserted the row
+	// already owns the advance, and re-advancing risks overwriting their value.
+	require.Empty(t, automations.advancedIDs, "duplicate skip must not advance next_run_at")
+	require.Empty(t, jobs.enqueued, "duplicate runs must not enqueue a job")
+	require.Empty(t, jobs.enqueuedTx, "duplicate runs must not enqueue a job in tx")
+}
+
+func TestScheduler_ScheduleAutomationRuns_EnqueueErrorAbortsTick(t *testing.T) {
+	t.Parallel()
+
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectRollback()
+
+	a := newAutomationFixture()
+	automations := &mockAutomations{due: []models.Automation{a}}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{enqueueErr: errors.New("enqueue boom")}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "tx should roll back, not commit")
+	require.Len(t, runs.created, 1, "should create the run before enqueue")
+	require.Len(t, automations.advancedIDs, 1, "should advance next_run_at before enqueue")
+	require.Empty(t, jobs.enqueued, "failed tx enqueue must not be retried after rollback")
+}
+
+func TestScheduler_ScheduleAutomationRuns_AdvanceErrorAbortsTick(t *testing.T) {
+	t.Parallel()
+
+	// A DB error inside the loop leaves pgx's tx aborted, so subsequent
+	// queries silently no-op. The fix: on Advance failure we return without
+	// commit so the tx rolls back and the next tick retries cleanly.
+	mockPool, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mockPool.Close()
+
+	mockPool.ExpectBegin()
+	mockPool.ExpectRollback() // from deferred tx.Rollback; no Commit expected
+
+	a := newAutomationFixture()
+	b := newAutomationFixture() // a second automation that must NOT be enqueued
+	automations := &mockAutomations{
+		due:        []models.Automation{a, b},
+		advanceErr: errors.New("advance boom"),
+	}
+	runs := &mockAutomationRuns{createFlag: true}
+	jobs := &trackingJobs{}
+
+	s := &Scheduler{
+		jobs:           jobs,
+		automations:    automations,
+		automationRuns: runs,
+		pool:           mockPool,
+		logger:         zerolog.Nop(),
+	}
+
+	s.scheduleAutomationRuns(context.Background(), time.Now())
+
+	require.NoError(t, mockPool.ExpectationsWereMet(), "tx should roll back, not commit")
+	require.Empty(t, jobs.enqueued, "no jobs must be enqueued when the tick aborts")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_CalledPerOrg(t *testing.T) {
+	t.Parallel()
+
+	// Two orgs with stuck runs — each must get its own org-scoped UPDATE so
+	// the reaper can never sweep across tenants.
+	orgA := uuid.New()
+	orgB := uuid.New()
+	runs := &mockAutomationRuns{
+		reapCount: 3,
+		listOrgs:  []uuid.UUID{orgA, orgB},
+	}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	s.reapStuckAutomationRuns(context.Background())
+
+	require.Equal(t, 2, runs.reapCalls, "reaper should fire once per org")
+	require.ElementsMatch(t, []uuid.UUID{orgA, orgB}, runs.reapOrgIDs, "every reap call must carry its org_id")
+	require.Equal(t, stuckAutomationRunThreshold, runs.lastThresh, "reaper should pass the tuned threshold")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_NilStoreNoop(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic when automationRuns is not wired.
+	s.reapStuckAutomationRuns(context.Background())
+}
+
+func TestScheduler_ReapStuckAutomationRuns_NoStuckOrgsNoop(t *testing.T) {
+	t.Parallel()
+
+	runs := &mockAutomationRuns{} // listOrgs empty
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 0, runs.reapCalls, "reaper must not run when no orgs have stuck runs")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_ListOrgsError(t *testing.T) {
+	t.Parallel()
+
+	runs := &mockAutomationRuns{listOrgsErr: pgx.ErrTxClosed}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	// Must swallow errors and never call ReapStuckRuns if listing orgs failed —
+	// firing an UPDATE with a zero UUID would be a cross-tenant bug.
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 0, runs.reapCalls)
+}
+
+func TestScheduler_ReapStuckAutomationRuns_PerOrgReapErrorContinues(t *testing.T) {
+	t.Parallel()
+
+	orgA := uuid.New()
+	orgB := uuid.New()
+	runs := &mockAutomationRuns{
+		reapErr:  pgx.ErrTxClosed,
+		listOrgs: []uuid.UUID{orgA, orgB},
+	}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	// Must swallow per-org errors — a failed reap on one org should not skip
+	// the others (crashed worker in org A shouldn't block cleanup in org B).
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 2, runs.reapCalls)
 }
