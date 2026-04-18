@@ -33,6 +33,7 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 	return row.Scan(&org.ID, &org.CreatedAt, &org.UpdatedAt)
 }
 
+// GetByID returns the organization with the given id.
 // lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `

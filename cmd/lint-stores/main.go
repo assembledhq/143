@@ -49,6 +49,7 @@ func main() {
 			continue
 		}
 		scanned++
+		// #nosec G304 -- f comes from filepath.Glob over internal/db; not user input.
 		src, err := os.ReadFile(f)
 		if err != nil {
 			fatal("read %s: %v", f, err)

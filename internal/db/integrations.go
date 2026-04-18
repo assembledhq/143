@@ -61,6 +61,7 @@ func (s *IntegrationStore) GetByOrgAndProvider(ctx context.Context, orgID uuid.U
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
 }
 
+// GetByID returns the integration with the given id, regardless of org.
 // lint:allow-no-orgid reason="pre-auth lookup used by webhook handlers; returned integration carries the org"
 func (s *IntegrationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Integration, error) {
 	query := `
@@ -136,6 +137,8 @@ func (s *IntegrationStore) UpdateConfig(ctx context.Context, orgID, integrationI
 	return err
 }
 
+// GetByGitHubInstallationID returns the active GitHub integration for the
+// given installation id, used by webhook dispatch to map an event to an org.
 // lint:allow-no-orgid reason="GitHub webhook lookup by installation ID; no org context available pre-auth"
 func (s *IntegrationStore) GetByGitHubInstallationID(ctx context.Context, installationID int64) (models.Integration, error) {
 	query := `
@@ -152,6 +155,8 @@ func (s *IntegrationStore) GetByGitHubInstallationID(ctx context.Context, instal
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Integration])
 }
 
+// ListOrgsWithActiveIntegrations returns every org that currently has at
+// least one active integration, used by background sync schedulers.
 // lint:allow-no-orgid reason="deliberately cross-org scan enumerating orgs with active integrations"
 func (s *IntegrationStore) ListOrgsWithActiveIntegrations(ctx context.Context) ([]uuid.UUID, error) {
 	query := `SELECT DISTINCT org_id FROM integrations WHERE status = 'active'`

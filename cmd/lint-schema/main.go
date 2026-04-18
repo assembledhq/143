@@ -80,6 +80,7 @@ func main() {
 
 	var violations []violation
 	for _, f := range files {
+		// #nosec G304 -- f comes from filepath.Glob over the migrations dir; not user input.
 		src, err := os.ReadFile(f)
 		if err != nil {
 			fatal("read %s: %v", f, err)

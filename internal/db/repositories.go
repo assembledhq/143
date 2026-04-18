@@ -140,6 +140,7 @@ func (s *RepositoryStore) UpsertFromGitHub(ctx context.Context, repo *models.Rep
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 }
 
+// GetByFullName returns the active repository with the given owner/name slug.
 // lint:allow-no-orgid reason="pre-auth lookup in GitHub webhook handlers; no org context available"
 func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (models.Repository, error) {
 	query := `
@@ -154,6 +155,8 @@ func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (m
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
+// DisconnectByInstallationID marks every repo under the given GitHub
+// installation as disconnected (cascades on app uninstall).
 // lint:allow-no-orgid reason="cross-org cascade when a GitHub app installation is uninstalled"
 func (s *RepositoryStore) DisconnectByInstallationID(ctx context.Context, installationID int64) error {
 	query := `
@@ -206,6 +209,8 @@ func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]Re
 	return pgx.CollectRows(rows, pgx.RowToStructByName[RepoSummary])
 }
 
+// DisconnectByGitHubID marks the matching repo as disconnected when GitHub
+// reports it deleted via webhook.
 // lint:allow-no-orgid reason="cross-org cascade when a GitHub repo is deleted via webhook"
 func (s *RepositoryStore) DisconnectByGitHubID(ctx context.Context, installationID, githubID int64) error {
 	query := `

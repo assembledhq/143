@@ -63,6 +63,7 @@ func (s *UserStore) GetByID(ctx context.Context, orgID, userID uuid.UUID) (model
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+// GetByGitHubID looks up a user by their GitHub user id (cross-org).
 // lint:allow-no-orgid reason="pre-auth login lookup; GitHub id is globally unique"
 func (s *UserStore) GetByGitHubID(ctx context.Context, githubID int64) (models.User, error) {
 	query := fmt.Sprintf(`
