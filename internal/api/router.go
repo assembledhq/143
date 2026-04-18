@@ -208,6 +208,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		prService.SetOrgStore(orgStore)
 		prService.SetLLMClient(llmClient)
 		prService.SetPRTemplateStore(prTemplateStore)
+		prService.SetAuditEmitter(auditEmitter)
 	}
 
 	// Wire user credential store into auth handler for token storage on login.
