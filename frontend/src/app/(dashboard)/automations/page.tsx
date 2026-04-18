@@ -55,69 +55,89 @@ function AutomationCard({ automation }: { automation: Automation }) {
     deleteMutation.mutate();
   };
 
-  return (
-    <div className="flex items-start justify-between gap-4 rounded-lg border border-border bg-background p-4 transition-colors hover:bg-muted/30">
-      <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
-        <div className="flex items-center gap-2.5">
-          {automation.enabled ? (
-            <RefreshCw className="h-4 w-4 text-blue-500 shrink-0" />
-          ) : (
-            <Pause className="h-4 w-4 text-muted-foreground shrink-0" />
-          )}
-          <h3 className="text-sm font-medium text-foreground truncate">
-            {automation.name}
-          </h3>
-          <span className="text-xs text-muted-foreground shrink-0">
-            {formatSchedule(automation)}
-          </span>
-        </div>
-        <div className="mt-1 ml-6.5 flex items-center gap-3 text-xs text-muted-foreground">
-          {automation.last_run_at && (
-            <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
-          )}
-          {automation.next_run_at && automation.enabled && (
-            <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
-          )}
-          {!automation.enabled && automation.paused_at && (
-            <span>Paused {formatTimeAgo(automation.paused_at)}</span>
-          )}
-        </div>
-      </Link>
+  // Any of the three mutations failing is worth surfacing inline; silent
+  // failure leaves the user thinking the action worked.
+  const mutationError =
+    pauseMutation.isError ? "Failed to pause." :
+    resumeMutation.isError ? "Failed to resume." :
+    deleteMutation.isError ? "Failed to delete." :
+    null;
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" className="h-8 w-8">
-            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          {automation.enabled ? (
-            <DropdownMenuItem
-              onClick={() => pauseMutation.mutate()}
-              disabled={pauseMutation.isPending}
+  return (
+    <div className="rounded-lg border border-border bg-background transition-colors hover:bg-muted/30">
+      <div className="flex items-start justify-between gap-4 p-4">
+        <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
+          <div className="flex items-center gap-2.5">
+            {automation.enabled ? (
+              <RefreshCw className="h-4 w-4 text-blue-500 shrink-0" />
+            ) : (
+              <Pause className="h-4 w-4 text-muted-foreground shrink-0" />
+            )}
+            <h3 className="text-sm font-medium text-foreground truncate">
+              {automation.name}
+            </h3>
+            <span className="text-xs text-muted-foreground shrink-0">
+              {formatSchedule(automation)}
+            </span>
+          </div>
+          <div className="mt-1 ml-6.5 flex items-center gap-3 text-xs text-muted-foreground">
+            {automation.last_run_at && (
+              <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
+            )}
+            {automation.next_run_at && automation.enabled && (
+              <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
+            )}
+            {!automation.enabled && automation.paused_at && (
+              <span>Paused {formatTimeAgo(automation.paused_at)}</span>
+            )}
+          </div>
+        </Link>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              aria-label={`More options for ${automation.name}`}
             >
-              <Pause className="h-3.5 w-3.5 mr-2" />
-              Pause
-            </DropdownMenuItem>
-          ) : (
+              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {automation.enabled ? (
+              <DropdownMenuItem
+                onClick={() => pauseMutation.mutate()}
+                disabled={pauseMutation.isPending}
+              >
+                <Pause className="h-3.5 w-3.5 mr-2" />
+                Pause
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem
+                onClick={() => resumeMutation.mutate()}
+                disabled={resumeMutation.isPending}
+              >
+                <Play className="h-3.5 w-3.5 mr-2" />
+                Resume
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
-              onClick={() => resumeMutation.mutate()}
-              disabled={resumeMutation.isPending}
+              onClick={handleDelete}
+              disabled={deleteMutation.isPending}
+              className="text-destructive focus:text-destructive"
             >
-              <Play className="h-3.5 w-3.5 mr-2" />
-              Resume
+              <Trash2 className="h-3.5 w-3.5 mr-2" />
+              Delete
             </DropdownMenuItem>
-          )}
-          <DropdownMenuItem
-            onClick={handleDelete}
-            disabled={deleteMutation.isPending}
-            className="text-destructive focus:text-destructive"
-          >
-            <Trash2 className="h-3.5 w-3.5 mr-2" />
-            Delete
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {mutationError && (
+        <p className="px-4 pb-3 text-xs text-destructive" role="alert">
+          {mutationError}
+        </p>
+      )}
     </div>
   );
 }

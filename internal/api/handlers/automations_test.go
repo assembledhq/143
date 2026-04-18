@@ -645,7 +645,7 @@ func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
-		WithArgs(testAnyArgs(1)...).
+		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO automation_runs").
 		WithArgs(testAnyArgs(8)...).
@@ -729,7 +729,7 @@ func TestAutomationHandler_RunNow_Throttled(t *testing.T) {
 	mock.ExpectBegin()
 	// A run is already in flight — CountInFlightRuns returns MaxConcurrent.
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
-		WithArgs(testAnyArgs(1)...).
+		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectRollback()
 
@@ -769,7 +769,7 @@ func TestAutomationHandler_RunNow_EnqueueFailureRollsBack(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT count.+FROM automation_runs").
-		WithArgs(testAnyArgs(1)...).
+		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO automation_runs").
 		WithArgs(testAnyArgs(8)...).

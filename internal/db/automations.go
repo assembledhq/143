@@ -247,11 +247,16 @@ func (s *AutomationStore) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now
 }
 
 // AdvanceNextRunAt updates last_run_at and next_run_at after claiming.
-func (s *AutomationStore) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
+// org_id is required (not just automation_id) so a caller that confuses IDs
+// across tenants can't mutate another org's row. The scheduler already claims
+// under FOR UPDATE SKIP LOCKED, so today the check is redundant — it's kept
+// as defense-in-depth against future callers.
+func (s *AutomationStore) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
 	query := `UPDATE automations SET last_run_at = @now, next_run_at = @next_run_at, updated_at = now()
-		WHERE id = @id`
+		WHERE id = @id AND org_id = @org_id`
 	_, err := tx.Exec(ctx, query, pgx.NamedArgs{
 		"id":          automationID,
+		"org_id":      orgID,
 		"now":         now,
 		"next_run_at": nextRunAt,
 	})
@@ -259,13 +264,15 @@ func (s *AutomationStore) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, autom
 }
 
 // CountInFlightRuns returns the number of runs for an automation that are
-// pending or running, used for max_concurrent enforcement.
+// pending or running, used for max_concurrent enforcement. org_id is required
+// so a leaked automation UUID from another tenant cannot be counted against
+// this org's quota.
 // Accepts a transaction so the count is consistent with the scheduling transaction.
-func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, automationID uuid.UUID) (int, error) {
+func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (int, error) {
 	var count int
 	err := tx.QueryRow(ctx,
-		`SELECT count(*) FROM automation_runs WHERE automation_id = @id AND status IN ('pending', 'running')`,
-		pgx.NamedArgs{"id": automationID},
+		`SELECT count(*) FROM automation_runs WHERE automation_id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
+		pgx.NamedArgs{"id": automationID, "org_id": orgID},
 	).Scan(&count)
 	return count, err
 }
@@ -557,13 +564,35 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 	return err
 }
 
-// ReapStuckRuns marks pending/running runs older than threshold as failed.
-// Without this, a worker that crashes mid-run would leave a row stuck and
-// permanently saturate max_concurrent for that automation — CountInFlightRuns
-// counts pending+running, so the scheduler would never fire a new run.
+// ListOrgsWithStuckRuns returns the distinct org_ids that have at least one
+// pending/running run older than threshold. The scheduler uses this to fan the
+// reaper out to one UPDATE per org, so every reap query carries an explicit
+// org_id filter — defense-in-depth against a bug elsewhere causing cross-org
+// state mutation, and it lets the reaper log per-org counts for audit clarity.
+func (s *AutomationRunStore) ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error) {
+	cutoff := time.Now().Add(-threshold)
+	rows, err := s.db.Query(ctx,
+		`SELECT DISTINCT org_id FROM automation_runs
+			WHERE status IN ('pending', 'running') AND triggered_at < @cutoff`,
+		pgx.NamedArgs{"cutoff": cutoff},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs with stuck runs: %w", err)
+	}
+	defer rows.Close()
+	return collectIDs(rows)
+}
+
+// ReapStuckRuns marks pending/running runs older than threshold as failed for
+// a single org. Without this, a worker that crashes mid-run would leave a row
+// stuck and permanently saturate max_concurrent for that automation —
+// CountInFlightRuns counts pending+running, so the scheduler would never fire
+// a new run.
 //
-// Returns the number of runs reaped.
-func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, threshold time.Duration) (int64, error) {
+// Scoped by org_id: the scheduler's reaper pass iterates ListOrgsWithStuckRuns
+// and calls this once per org, so no query ever sweeps across tenants. Returns
+// the number of runs reaped for this org.
+func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
 	summary := "run exceeded execution timeout; marked failed by reaper"
 	query := `UPDATE automation_runs
@@ -571,9 +600,11 @@ func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, threshold time.D
 		    completed_at = now(),
 		    result_summary = @summary,
 		    updated_at = now()
-		WHERE status IN ('pending', 'running')
+		WHERE org_id = @org_id
+		  AND status IN ('pending', 'running')
 		  AND triggered_at < @cutoff`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"org_id":  orgID,
 		"summary": summary,
 		"cutoff":  cutoff,
 	})

@@ -41,13 +41,14 @@ type schedulerProjectStore interface {
 
 type schedulerAutomationStore interface {
 	ListDueForSchedule(ctx context.Context, tx pgx.Tx, now time.Time) ([]models.Automation, error)
-	AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error
-	CountInFlightRuns(ctx context.Context, tx pgx.Tx, automationID uuid.UUID) (int, error)
+	AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error
+	CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (int, error)
 }
 
 type schedulerAutomationRunStore interface {
 	CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error)
-	ReapStuckRuns(ctx context.Context, threshold time.Duration) (int64, error)
+	ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error)
+	ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error)
 }
 
 // stuckAutomationRunThreshold is how long a pending/running automation_run
@@ -417,20 +418,36 @@ func (s *Scheduler) shouldRunPM(ctx context.Context, orgID uuid.UUID, now time.T
 // threshold as failed. A crashed worker would otherwise hold max_concurrent
 // slots forever (CountInFlightRuns counts pending+running), blocking all
 // future runs for the automation.
+//
+// Fans out one UPDATE per org: the reaper first lists orgs with any stuck
+// runs, then issues a per-org, org-scoped UPDATE. This keeps every mutating
+// query tenant-isolated at the SQL layer (defense-in-depth even though the
+// scheduler is leader-elected and takes no external input) and produces
+// per-org reap counts that are useful for audit/metrics.
 func (s *Scheduler) reapStuckAutomationRuns(ctx context.Context) {
 	if s.automationRuns == nil {
 		return
 	}
-	reaped, err := s.automationRuns.ReapStuckRuns(ctx, stuckAutomationRunThreshold)
+	orgIDs, err := s.automationRuns.ListOrgsWithStuckRuns(ctx, stuckAutomationRunThreshold)
 	if err != nil {
-		s.logger.Warn().Err(err).Msg("failed to reap stuck automation runs")
+		s.logger.Warn().Err(err).Msg("failed to list orgs with stuck automation runs")
 		return
 	}
-	if reaped > 0 {
-		s.logger.Info().
-			Int64("reaped", reaped).
-			Dur("threshold", stuckAutomationRunThreshold).
-			Msg("reaped stuck automation runs")
+	for _, orgID := range orgIDs {
+		reaped, err := s.automationRuns.ReapStuckRuns(ctx, orgID, stuckAutomationRunThreshold)
+		if err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Msg("failed to reap stuck automation runs for org")
+			continue
+		}
+		if reaped > 0 {
+			s.logger.Info().
+				Str("org_id", orgID.String()).
+				Int64("reaped", reaped).
+				Dur("threshold", stuckAutomationRunThreshold).
+				Msg("reaped stuck automation runs")
+		}
 	}
 }
 
@@ -471,7 +488,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		// so subsequent queries on the same tx will fail. On such errors we
 		// abort the whole tick (return without commit). The rolled-back row
 		// lock releases, and the next tick will retry.
-		inFlight, err := s.automations.CountInFlightRuns(ctx, tx, a.ID)
+		inFlight, err := s.automations.CountInFlightRuns(ctx, tx, a.OrgID, a.ID)
 		if err != nil {
 			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
@@ -479,12 +496,21 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			return
 		}
 
-		var nextRunAt time.Time
-		if a.IntervalValue != nil && a.IntervalUnit != nil {
-			nextRunAt = models.NextRunTime(now, *a.IntervalValue, *a.IntervalUnit)
-		} else {
-			nextRunAt = now.Add(24 * time.Hour) // fallback: 1 day
+		// An interval automation without interval_value/interval_unit is a
+		// corrupt row: the Create/Update handlers enforce both fields, and the
+		// DB CHECK on interval_unit enforces the set of valid units. If we get
+		// here it means someone bypassed the validation (manual DB edit, a bug
+		// in a future migration, or cron support landing without wiring the
+		// next_run_at computation). Skip the row loudly rather than defaulting
+		// to an arbitrary interval that could mask the bug for days.
+		if a.IntervalValue == nil || a.IntervalUnit == nil {
+			s.logger.Error().
+				Str("automation_id", a.ID.String()).
+				Str("schedule_type", a.ScheduleType).
+				Msg("skipping automation: interval fields missing; expected Create/Update validation to enforce them")
+			continue
 		}
+		nextRunAt := models.NextRunTime(now, *a.IntervalValue, *a.IntervalUnit)
 
 		if inFlight >= a.MaxConcurrent {
 			s.logger.Info().
@@ -492,7 +518,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 				Int("in_flight", inFlight).
 				Int("max_concurrent", a.MaxConcurrent).
 				Msg("skipping automation: max_concurrent saturated, deferring to next tick")
-			if err := s.automations.AdvanceNextRunAt(ctx, tx, a.ID, now, nextRunAt); err != nil {
+			if err := s.automations.AdvanceNextRunAt(ctx, tx, a.OrgID, a.ID, now, nextRunAt); err != nil {
 				s.logger.Error().Err(err).
 					Str("automation_id", a.ID.String()).
 					Msg("failed to advance automation next_run_at; aborting tick")
@@ -543,7 +569,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		if err := s.automations.AdvanceNextRunAt(ctx, tx, a.ID, now, nextRunAt); err != nil {
+		if err := s.automations.AdvanceNextRunAt(ctx, tx, a.OrgID, a.ID, now, nextRunAt); err != nil {
 			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
 				Msg("failed to advance automation next_run_at; aborting tick")

@@ -34,6 +34,28 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 	}
 }
 
+func TestValidateAutomationScheduleSupported(t *testing.T) {
+	t.Parallel()
+
+	// interval is always supported.
+	require.NoError(t, ValidateAutomationScheduleSupported(AutomationScheduleInterval))
+
+	// Cron passes type validation but must be gated by AutomationCronSupported
+	// until the cron parser lands. If this test starts failing because
+	// AutomationCronSupported flipped to true, make sure NextRunTime handles
+	// cron and remove the cron-specific branch in the function above.
+	if AutomationCronSupported {
+		require.NoError(t, ValidateAutomationScheduleSupported(AutomationScheduleCron))
+	} else {
+		err := ValidateAutomationScheduleSupported(AutomationScheduleCron)
+		require.Error(t, err, "cron must be rejected while AutomationCronSupported is false")
+		require.Contains(t, err.Error(), "cron")
+	}
+
+	// Unknown type is rejected with the same error ValidateAutomationScheduleType returns.
+	require.Error(t, ValidateAutomationScheduleSupported("every-friday"))
+}
+
 func TestValidateAutomationRunStatus(t *testing.T) {
 	t.Parallel()
 

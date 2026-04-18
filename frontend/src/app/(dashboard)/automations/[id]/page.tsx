@@ -29,6 +29,14 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
 
+// Single source of truth for interval unit values. Kept as a tuple so we can
+// derive the union type for state AND runtime-validate incoming Select values
+// without an unsafe `as` cast. Adding a unit means updating this tuple only.
+const INTERVAL_UNITS = ["hours", "days", "weeks"] as const;
+type IntervalUnit = (typeof INTERVAL_UNITS)[number];
+const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
+  (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
+
 const runStatusConfig: Record<AutomationRunStatus, { icon: React.ComponentType<{ className?: string }>; label: string; color: string }> = {
   pending: { icon: Clock, label: "Pending", color: "text-muted-foreground" },
   running: { icon: RefreshCw, label: "Running", color: "text-blue-500" },
@@ -88,19 +96,27 @@ function RunsTab({ automationId }: { automationId: string }) {
   const [extraPages, setExtraPages] = useState<AutomationRun[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
 
+  // Pause polling once the user paginates. If polling kept running while
+  // extra pages were loaded, any new run arriving at the top would shift the
+  // window and make the stored loadMoreCursor point into the middle of a
+  // now-different result set — producing skipped or duplicated runs on the
+  // next "Load more". Users who want fresh first-page runs can reload or
+  // re-navigate to the tab.
+  const isPaginated = extraPages.length > 0;
+
   const { data, isLoading } = useQuery({
     queryKey: ["automation-runs", automationId],
     queryFn: () => api.automations.listRuns(automationId, { limit: 25 }),
-    refetchInterval: 10000,
+    refetchInterval: isPaginated ? false : 10000,
   });
 
   const firstPage = data?.data ?? [];
   const firstPageCursor = data?.meta?.next_cursor || undefined;
 
-  // Until "Load more" is clicked, the next-page cursor tracks the freshest
-  // first-page poll. Once extra pages exist, the cursor reflects the last
-  // mutation's response so polls don't rewind pagination.
-  const cursor = extraPages.length === 0 ? firstPageCursor : loadMoreCursor;
+  // Before the user paginates, the cursor tracks the freshest first-page poll.
+  // Once extra pages exist, polling is disabled (see above) and the cursor
+  // comes from the most recent Load-more response.
+  const cursor = isPaginated ? loadMoreCursor : firstPageCursor;
 
   const loadMoreMutation = useMutation({
     mutationFn: () => api.automations.listRuns(automationId, { limit: 25, cursor }),
@@ -128,6 +144,11 @@ function RunsTab({ automationId }: { automationId: string }) {
       {allRuns.map((run) => (
         <RunCard key={run.id} run={run} />
       ))}
+      {loadMoreMutation.isError && (
+        <p className="text-center text-xs text-destructive">
+          Failed to load more runs. Please try again.
+        </p>
+      )}
       {hasMore && (
         <Button
           variant="ghost"
@@ -149,7 +170,9 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const [goal, setGoal] = useState(automation.goal);
   const [scope, setScope] = useState(automation.scope ?? "");
   const [intervalValue, setIntervalValue] = useState(automation.interval_value ?? 1);
-  const [intervalUnit, setIntervalUnit] = useState(automation.interval_unit ?? "days");
+  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
+    toIntervalUnit(automation.interval_unit ?? "days", "days"),
+  );
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
 
   const updateMutation = useMutation({
@@ -182,19 +205,31 @@ function SettingsTab({ automation }: { automation: Automation }) {
         <Input id="scope" value={scope} onChange={(e) => setScope(e.target.value)} />
       </div>
       <div>
-        <Label>Schedule</Label>
-        <div className="flex items-center gap-2 mt-1">
+        <Label id="schedule-label">Schedule</Label>
+        <div
+          className="flex items-center gap-2 mt-1"
+          role="group"
+          aria-labelledby="schedule-label"
+        >
           <span className="text-sm text-muted-foreground">Run every</span>
           <Input
+            id="interval-value"
+            aria-label="Interval value"
             type="number"
             min={1}
             max={365}
             value={intervalValue}
-            onChange={(e) => setIntervalValue(parseInt(e.target.value) || 1)}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
+            }}
             className="w-20"
           />
-          <Select value={intervalUnit} onValueChange={(v) => setIntervalUnit(v as "hours" | "days" | "weeks")}>
-            <SelectTrigger className="w-28">
+          <Select
+            value={intervalUnit}
+            onValueChange={(v) => setIntervalUnit(toIntervalUnit(v, intervalUnit))}
+          >
+            <SelectTrigger className="w-28" aria-label="Interval unit">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -209,13 +244,21 @@ function SettingsTab({ automation }: { automation: Automation }) {
         <Label htmlFor="baseBranch">Base branch</Label>
         <Input id="baseBranch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
       </div>
-      <Button
-        onClick={() => updateMutation.mutate()}
-        disabled={updateMutation.isPending}
-      >
-        {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-        Save changes
-      </Button>
+      <div className="flex items-center gap-3">
+        <Button
+          onClick={() => updateMutation.mutate()}
+          disabled={updateMutation.isPending}
+        >
+          {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+          Save changes
+        </Button>
+        {updateMutation.isError && (
+          <p className="text-xs text-destructive">Failed to save changes.</p>
+        )}
+        {updateMutation.isSuccess && !updateMutation.isPending && (
+          <p className="text-xs text-muted-foreground">Saved.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -288,6 +331,17 @@ export default function AutomationDetailPage() {
     ? `cron: ${automation.cron_expression}`
     : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}`;
 
+  // Surface the most recent failure across the header mutations. These are
+  // user-initiated actions (pause/resume/run now/delete) so silent failure is
+  // worse than a potentially stale banner — the user needs to know the click
+  // did not take effect before deciding whether to retry.
+  const headerError =
+    pauseMutation.isError ? "Failed to pause automation." :
+    resumeMutation.isError ? "Failed to resume automation." :
+    runNowMutation.isError ? "Failed to trigger run." :
+    deleteMutation.isError ? "Failed to delete automation." :
+    null;
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-8">
       {/* Header */}
@@ -315,7 +369,11 @@ export default function AutomationDetailPage() {
               onClick={() => pauseMutation.mutate()}
               disabled={pauseMutation.isPending}
             >
-              <Pause className="h-3.5 w-3.5 mr-1.5" />
+              {pauseMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <Pause className="h-3.5 w-3.5 mr-1.5" />
+              )}
               Pause
             </Button>
           ) : (
@@ -325,7 +383,11 @@ export default function AutomationDetailPage() {
               onClick={() => resumeMutation.mutate()}
               disabled={resumeMutation.isPending}
             >
-              <Play className="h-3.5 w-3.5 mr-1.5" />
+              {resumeMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <Play className="h-3.5 w-3.5 mr-1.5" />
+              )}
               Resume
             </Button>
           )}
@@ -343,6 +405,12 @@ export default function AutomationDetailPage() {
           </Button>
         </div>
       </div>
+
+      {headerError && (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          {headerError}
+        </div>
+      )}
 
       {/* Tabs */}
       <Tabs defaultValue="runs">

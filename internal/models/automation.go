@@ -27,7 +27,13 @@ type Automation struct {
 	IntervalValue  *int       `db:"interval_value"  json:"interval_value,omitempty"`
 	IntervalUnit   *string    `db:"interval_unit"   json:"interval_unit,omitempty"`
 	CronExpression *string    `db:"cron_expression" json:"cron_expression,omitempty"`
-	// Timezone is reserved for cron schedules (Phase 3); interval schedules ignore it.
+	// Timezone applies ONLY to cron schedules. Interval schedules use fixed
+	// duration arithmetic (NextRunTime) and ignore this field — the API, the
+	// DB CHECK (chk_automations_timezone_interval), and migration 66 all
+	// enforce timezone='UTC' when schedule_type='interval'. When cron lands
+	// (phase 3), the scheduler's next_run_at computation must evaluate the
+	// cron expression in this timezone. Do not read this field outside a cron
+	// codepath: changing it on an interval automation is a no-op by design.
 	Timezone string `db:"timezone"        json:"timezone"`
 	NextRunAt      *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
 	LastRunAt      *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
@@ -107,6 +113,32 @@ func ValidateAutomationScheduleType(t string) error {
 	default:
 		return fmt.Errorf("invalid schedule_type: %q (must be interval or cron)", t)
 	}
+}
+
+// AutomationCronSupported gates every code path that would otherwise accept
+// a cron schedule. The DB CHECK allows 'cron' for forward compatibility, but
+// until a cron parser is wired (design doc 48 §6.2), nothing computes
+// next_run_at for cron rows — accepting one would create an automation that
+// silently never runs. Keep this flag as the single source of truth: flip it
+// to true in the same PR that lands cron parsing so no call site is missed.
+//
+// TODO(phase-3): flip to true and remove ValidateAutomationScheduleSupported's
+// cron branch once gorhill/cronexpr is integrated.
+const AutomationCronSupported = false
+
+// ValidateAutomationScheduleSupported is the runtime gate shared by Create
+// and Update: rejects schedule types that this build doesn't implement.
+// Use this instead of hand-rolled == AutomationScheduleCron checks in
+// handlers so that flipping AutomationCronSupported updates every call site
+// at once.
+func ValidateAutomationScheduleSupported(t string) error {
+	if err := ValidateAutomationScheduleType(t); err != nil {
+		return err
+	}
+	if t == AutomationScheduleCron && !AutomationCronSupported {
+		return fmt.Errorf("cron schedules are not yet supported; use schedule_type=interval")
+	}
+	return nil
 }
 
 func ValidateAutomationRunStatus(s string) error {

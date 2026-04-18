@@ -14,6 +14,12 @@ ALTER TABLE projects
 ALTER TABLE automations
     ADD COLUMN IF NOT EXISTS source_project_id UUID REFERENCES projects(id);
 
+-- Only migrate projects whose schedule fields are fully populated. A project
+-- with schedule_enabled=true but NULL schedule_interval/schedule_unit is a
+-- corrupt legacy row — copying it would create an automation the scheduler
+-- can't fire (see scheduler.go: interval fields missing → skip). Leave those
+-- behind so an operator can notice and repair rather than silently forwarding
+-- the corruption into the new table.
 INSERT INTO automations (
     org_id, repository_id, name, goal, scope, agent_type,
     model_override, execution_mode, max_concurrent, base_branch,
@@ -26,7 +32,10 @@ SELECT
     'interval', schedule_interval, schedule_unit, next_run_at, schedule_enabled,
     created_by, priority, created_at, updated_at, id
 FROM projects
-WHERE schedule_enabled = true AND deleted_at IS NULL;
+WHERE schedule_enabled = true
+    AND deleted_at IS NULL
+    AND schedule_interval IS NOT NULL
+    AND schedule_unit IS NOT NULL;
 
 UPDATE projects p
 SET schedule_enabled = false,

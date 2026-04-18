@@ -463,13 +463,13 @@ func (m *mockAutomations) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now
 	return m.due, m.listErr
 }
 
-func (m *mockAutomations) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
+func (m *mockAutomations) AdvanceNextRunAt(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, now time.Time, nextRunAt time.Time) error {
 	m.advancedIDs = append(m.advancedIDs, automationID)
 	m.advancedNexts = append(m.advancedNexts, nextRunAt)
 	return m.advanceErr
 }
 
-func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, automationID uuid.UUID) (int, error) {
+func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (int, error) {
 	if m.inFlightErr != nil {
 		return 0, m.inFlightErr
 	}
@@ -477,13 +477,16 @@ func (m *mockAutomations) CountInFlightRuns(ctx context.Context, tx pgx.Tx, auto
 }
 
 type mockAutomationRuns struct {
-	created      []models.AutomationRun
-	createFlag   bool // value returned by CreateRunInTx
-	createErr    error
-	reapCount    int64
-	reapErr      error
-	reapCalls    int
-	lastThresh   time.Duration
+	created     []models.AutomationRun
+	createFlag  bool // value returned by CreateRunInTx
+	createErr   error
+	reapCount   int64
+	reapErr     error
+	reapCalls   int
+	reapOrgIDs  []uuid.UUID
+	lastThresh  time.Duration
+	listOrgs    []uuid.UUID
+	listOrgsErr error
 }
 
 func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
@@ -497,8 +500,13 @@ func (m *mockAutomationRuns) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *mo
 	return m.createFlag, nil
 }
 
-func (m *mockAutomationRuns) ReapStuckRuns(ctx context.Context, threshold time.Duration) (int64, error) {
+func (m *mockAutomationRuns) ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error) {
+	return m.listOrgs, m.listOrgsErr
+}
+
+func (m *mockAutomationRuns) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	m.reapCalls++
+	m.reapOrgIDs = append(m.reapOrgIDs, orgID)
 	m.lastThresh = threshold
 	return m.reapCount, m.reapErr
 }
@@ -673,10 +681,17 @@ func TestScheduler_ScheduleAutomationRuns_AdvanceErrorAbortsTick(t *testing.T) {
 	require.Empty(t, jobs.enqueued, "no jobs must be enqueued when the tick aborts")
 }
 
-func TestScheduler_ReapStuckAutomationRuns_CalledFromRunOnce(t *testing.T) {
+func TestScheduler_ReapStuckAutomationRuns_CalledPerOrg(t *testing.T) {
 	t.Parallel()
 
-	runs := &mockAutomationRuns{reapCount: 3}
+	// Two orgs with stuck runs — each must get its own org-scoped UPDATE so
+	// the reaper can never sweep across tenants.
+	orgA := uuid.New()
+	orgB := uuid.New()
+	runs := &mockAutomationRuns{
+		reapCount: 3,
+		listOrgs:  []uuid.UUID{orgA, orgB},
+	}
 	s := &Scheduler{
 		automationRuns: runs,
 		logger:         zerolog.Nop(),
@@ -684,7 +699,8 @@ func TestScheduler_ReapStuckAutomationRuns_CalledFromRunOnce(t *testing.T) {
 
 	s.reapStuckAutomationRuns(context.Background())
 
-	require.Equal(t, 1, runs.reapCalls, "reaper should run exactly once")
+	require.Equal(t, 2, runs.reapCalls, "reaper should fire once per org")
+	require.ElementsMatch(t, []uuid.UUID{orgA, orgB}, runs.reapOrgIDs, "every reap call must carry its org_id")
 	require.Equal(t, stuckAutomationRunThreshold, runs.lastThresh, "reaper should pass the tuned threshold")
 }
 
@@ -696,16 +712,50 @@ func TestScheduler_ReapStuckAutomationRuns_NilStoreNoop(t *testing.T) {
 	s.reapStuckAutomationRuns(context.Background())
 }
 
-func TestScheduler_ReapStuckAutomationRuns_StoreError(t *testing.T) {
+func TestScheduler_ReapStuckAutomationRuns_NoStuckOrgsNoop(t *testing.T) {
 	t.Parallel()
 
-	runs := &mockAutomationRuns{reapErr: pgx.ErrTxClosed}
+	runs := &mockAutomationRuns{} // listOrgs empty
 	s := &Scheduler{
 		automationRuns: runs,
 		logger:         zerolog.Nop(),
 	}
 
-	// Must swallow errors — a failed reap should not crash the scheduler tick.
 	s.reapStuckAutomationRuns(context.Background())
-	require.Equal(t, 1, runs.reapCalls)
+	require.Equal(t, 0, runs.reapCalls, "reaper must not run when no orgs have stuck runs")
+}
+
+func TestScheduler_ReapStuckAutomationRuns_ListOrgsError(t *testing.T) {
+	t.Parallel()
+
+	runs := &mockAutomationRuns{listOrgsErr: pgx.ErrTxClosed}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	// Must swallow errors and never call ReapStuckRuns if listing orgs failed —
+	// firing an UPDATE with a zero UUID would be a cross-tenant bug.
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 0, runs.reapCalls)
+}
+
+func TestScheduler_ReapStuckAutomationRuns_PerOrgReapErrorContinues(t *testing.T) {
+	t.Parallel()
+
+	orgA := uuid.New()
+	orgB := uuid.New()
+	runs := &mockAutomationRuns{
+		reapErr:  pgx.ErrTxClosed,
+		listOrgs: []uuid.UUID{orgA, orgB},
+	}
+	s := &Scheduler{
+		automationRuns: runs,
+		logger:         zerolog.Nop(),
+	}
+
+	// Must swallow per-org errors — a failed reap on one org should not skip
+	// the others (crashed worker in org A shouldn't block cleanup in org B).
+	s.reapStuckAutomationRuns(context.Background())
+	require.Equal(t, 2, runs.reapCalls)
 }

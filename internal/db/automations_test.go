@@ -491,8 +491,8 @@ func TestAutomationStore_CountInFlightRuns(t *testing.T) {
 	store := NewAutomationStore(mock)
 
 	mock.ExpectBegin()
-	mock.ExpectQuery(`SELECT count\(\*\) FROM automation_runs WHERE automation_id = .+ AND status IN \('pending', 'running'\)`).
-		WithArgs(anyArgs(1)...).
+	mock.ExpectQuery(`SELECT count\(\*\) FROM automation_runs WHERE automation_id = .+ AND org_id = .+ AND status IN \('pending', 'running'\)`).
+		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 	mock.ExpectCommit()
 
@@ -500,7 +500,7 @@ func TestAutomationStore_CountInFlightRuns(t *testing.T) {
 	tx, err := mock.Begin(ctx)
 	require.NoError(t, err)
 
-	got, err := store.CountInFlightRuns(ctx, tx, uuid.New())
+	got, err := store.CountInFlightRuns(ctx, tx, uuid.New(), uuid.New())
 	require.NoError(t, err)
 	require.Equal(t, 3, got)
 	require.NoError(t, tx.Commit(ctx))
@@ -587,15 +587,17 @@ func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationRunStore(mock)
+	orgID := uuid.New()
 
-	// The reaper MUST filter by status IN ('pending', 'running') and by
-	// triggered_at < cutoff — regressions here would either reap healthy
-	// runs or fail to free saturated max_concurrent slots.
-	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
-		WithArgs(anyArgs(2)...).
+	// The reaper MUST filter by org_id, status IN ('pending', 'running'), and
+	// triggered_at < cutoff. Regressions on the org_id filter would sweep
+	// across tenants; regressions on status/triggered_at would either reap
+	// healthy runs or fail to free saturated max_concurrent slots.
+	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
+		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
 
-	n, err := store.ReapStuckRuns(context.Background(), time.Hour)
+	n, err := store.ReapStuckRuns(context.Background(), orgID, time.Hour)
 	require.NoError(t, err)
 	require.EqualValues(t, 4, n)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -611,10 +613,31 @@ func TestAutomationRunStore_ReapStuckRuns_Error(t *testing.T) {
 	store := NewAutomationRunStore(mock)
 
 	mock.ExpectExec("UPDATE automation_runs").
-		WithArgs(anyArgs(2)...).
+		WithArgs(anyArgs(3)...).
 		WillReturnError(errors.New("boom"))
 
-	_, err = store.ReapStuckRuns(context.Background(), time.Hour)
+	_, err = store.ReapStuckRuns(context.Background(), uuid.New(), time.Hour)
 	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_ListOrgsWithStuckRuns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+	orgA := uuid.New()
+	orgB := uuid.New()
+
+	mock.ExpectQuery(`SELECT DISTINCT org_id FROM automation_runs\s+WHERE status IN \('pending', 'running'\) AND triggered_at < @cutoff`).
+		WithArgs(anyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"org_id"}).AddRow(orgA).AddRow(orgB))
+
+	orgs, err := store.ListOrgsWithStuckRuns(context.Background(), time.Hour)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []uuid.UUID{orgA, orgB}, orgs)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

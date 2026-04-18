@@ -173,19 +173,38 @@ export default function NewAutomationPage() {
 
         {/* Schedule */}
         <div>
-          <Label>Schedule</Label>
-          <div className="flex items-center gap-2 mt-1">
+          <Label id="schedule-label">Schedule</Label>
+          <div
+            className="flex items-center gap-2 mt-1"
+            role="group"
+            aria-labelledby="schedule-label"
+          >
             <span className="text-sm text-muted-foreground">Run every</span>
             <Input
+              id="interval-value"
+              aria-label="Interval value"
               type="number"
               min={1}
               max={365}
               value={intervalValue}
-              onChange={(e) => setIntervalValue(parseInt(e.target.value) || 1)}
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10);
+                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
+              }}
               className="w-20"
             />
-            <Select value={intervalUnit} onValueChange={(v) => setIntervalUnit(v as typeof intervalUnit)}>
-              <SelectTrigger className="w-28">
+            <Select
+              value={intervalUnit}
+              onValueChange={(v) => {
+                // Validated against the SelectItem values below; if the tuple
+                // ever drifts from the Select options, fall back rather than
+                // coercing an unexpected value through `as`.
+                if (v === "hours" || v === "days" || v === "weeks") {
+                  setIntervalUnit(v);
+                }
+              }}
+            >
+              <SelectTrigger className="w-28" aria-label="Interval unit">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -215,7 +234,7 @@ export default function NewAutomationPage() {
             </div>
             <div>
               <Label>Priority</Label>
-              <Select value={String(priority)} onValueChange={(v) => setPriority(parseInt(v))}>
+              <Select value={String(priority)} onValueChange={(v) => setPriority(parseInt(v, 10))}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>

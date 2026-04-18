@@ -164,17 +164,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	scheduleType := models.AutomationScheduleInterval
 	if req.ScheduleType != nil {
 		scheduleType = *req.ScheduleType
-		if err := models.ValidateAutomationScheduleType(scheduleType); err != nil {
+		// ValidateAutomationScheduleSupported enforces both the allowed set
+		// AND the phase-2 cron gate (see models.AutomationCronSupported).
+		// Keeping both checks in one call means a future flip of the cron
+		// flag updates Create, Update, and any future caller in lockstep.
+		if err := models.ValidateAutomationScheduleSupported(scheduleType); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
-	}
-	// Cron is not yet implemented — accepting it would silently never run because
-	// next_run_at would never be set. Reject explicitly until a cron parser is wired.
-	// TODO(phase-3): wire gorhill/cronexpr per design doc 48 §6.2 and remove this gate.
-	if scheduleType == models.AutomationScheduleCron {
-		writeError(w, r, http.StatusBadRequest, "CRON_NOT_SUPPORTED", "cron schedules are not yet supported; use schedule_type=interval")
-		return
 	}
 
 	// Default interval: 1 day.
@@ -401,13 +398,10 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// Handle schedule changes — recompute next_run_at.
 	scheduleChanged := false
 	if req.ScheduleType != nil {
-		if err := models.ValidateAutomationScheduleType(*req.ScheduleType); err != nil {
+		// Shared gate with Create: rejects both invalid schedule types and
+		// schedule types the current build does not implement (cron today).
+		if err := models.ValidateAutomationScheduleSupported(*req.ScheduleType); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
-			return
-		}
-		// TODO(phase-3): wire gorhill/cronexpr per design doc 48 §6.2 and remove this gate.
-		if *req.ScheduleType == models.AutomationScheduleCron {
-			writeError(w, r, http.StatusBadRequest, "CRON_NOT_SUPPORTED", "cron schedules are not yet supported; use schedule_type=interval")
 			return
 		}
 		automation.ScheduleType = *req.ScheduleType
@@ -536,6 +530,16 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Defense-in-depth: reject resume for schedule types the build doesn't yet
+	// implement. Create/Update already block cron via the same gate, so a cron
+	// row shouldn't exist today — but if one slipped in (legacy row, manual DB
+	// edit, future migration) we'd resume it with NextRunAt=NULL and the
+	// scheduler would silently never fire it. Fail loudly instead.
+	if err := models.ValidateAutomationScheduleSupported(automation.ScheduleType); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
+		return
+	}
+
 	automation.Enabled = true
 	automation.PausedBy = nil
 	automation.PausedAt = nil
@@ -546,6 +550,10 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 		next := models.NextRunTime(now, *automation.IntervalValue, *automation.IntervalUnit)
 		automation.NextRunAt = &next
 	}
+	// TODO(phase-3): when cron lands, also recompute next_run_at from
+	// automation.CronExpression here. The gate above currently prevents a cron
+	// row from reaching this point; remove the gate in the same PR that wires
+	// the cron next_run_at computation.
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to resume automation", err)
@@ -609,7 +617,7 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	// Throttle against max_concurrent inside the tx so a rapid double-click
 	// sees the first insert before committing the second. CountInFlightRuns
 	// counts pending + running, matching the scheduler's throttle semantics.
-	inFlight, err := h.automationStore.CountInFlightRuns(r.Context(), tx, automation.ID)
+	inFlight, err := h.automationStore.CountInFlightRuns(r.Context(), tx, orgID, automation.ID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to count in-flight runs", err)
 		return
