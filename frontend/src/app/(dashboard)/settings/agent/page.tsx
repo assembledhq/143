@@ -230,9 +230,6 @@ export default function AgentPage() {
                   {sub.account_type && (
                     <span className="text-xs text-muted-foreground">({sub.account_type})</span>
                   )}
-                  {sub.masked_key && (
-                    <span className="text-xs text-muted-foreground font-mono">{sub.masked_key}</span>
-                  )}
                 </div>
                 <Button
                   size="sm"

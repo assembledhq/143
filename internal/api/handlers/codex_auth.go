@@ -125,7 +125,7 @@ func (h *CodexAuthHandler) DisconnectByPath(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := h.svc.DisconnectForOrg(r.Context(), orgID, credID); err != nil {
-		if err == codexauth.ErrCredentialNotFound {
+		if errors.Is(err, codexauth.ErrCredentialNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "credential not found", nil)
 			return
 		}

@@ -209,6 +209,10 @@ func (m *mockCredentialStore) UpdateStatusByID(_ context.Context, orgID uuid.UUI
 func (m *mockCredentialStore) UpsertByID(_ context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error {
 	for k, cred := range m.creds {
 		if cred.ID == id && cred.OrgID == orgID {
+			// Mirror the real store: disabled rows aren't resurrected by a refresh.
+			if cred.Status == "disabled" {
+				return nil
+			}
 			m.creds[k] = &models.DecryptedCredential{
 				ID:       id,
 				OrgID:    cred.OrgID,
@@ -221,6 +225,15 @@ func (m *mockCredentialStore) UpsertByID(_ context.Context, orgID uuid.UUID, id 
 		}
 	}
 	return ErrCredentialNotFound
+}
+
+func (m *mockCredentialStore) ExistsForProviderByID(_ context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error) {
+	for _, cred := range m.creds {
+		if cred.ID == id && cred.OrgID == orgID && cred.Provider == provider {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func TestInitiateDeviceAuth(t *testing.T) {
@@ -842,6 +855,9 @@ func (s *failingCredentialStore) UpdateStatusByID(_ context.Context, _ uuid.UUID
 }
 func (s *failingCredentialStore) UpsertByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderConfig) error {
 	return fmt.Errorf("db connection refused")
+}
+func (s *failingCredentialStore) ExistsForProviderByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderName) (bool, error) {
+	return false, fmt.Errorf("db connection refused")
 }
 
 func TestGetValidToken_DBError(t *testing.T) {
@@ -1584,5 +1600,152 @@ func TestGetValidToken_RefreshTokenReused_ValidToken(t *testing.T) {
 	}
 	if cfg.AccessToken != "cha_still_valid" {
 		t.Errorf("expected original token, got %s", cfg.AccessToken)
+	}
+}
+
+// TestDisconnectForOrg_AlreadyDisabled verifies DisconnectForOrg is idempotent
+// for rows whose status is already "disabled": the ExistsByID check still sees
+// the row (disabled rows aren't filtered out), so a second disconnect call
+// returns nil rather than ErrCredentialNotFound. This matches the user mental
+// model where clicking "Remove" twice shouldn't surface an error.
+func TestDisconnectForOrg_AlreadyDisabled(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	credID, err := store.UpsertWithLabel(context.Background(), orgID, nil, "Team A", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_token",
+		RefreshToken: "chr_refresh",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	// Flip the row's status to "disabled" directly (simulating a row the real
+	// DB would leave in status='disabled' after a prior DisableByID).
+	k := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team A")
+	store.creds[k].Status = "disabled"
+
+	// Disconnecting an already-disabled row should return nil, not ErrCredentialNotFound.
+	if err := svc.DisconnectForOrg(context.Background(), orgID, *credID); err != nil {
+		t.Fatalf("expected idempotent disconnect to succeed, got: %v", err)
+	}
+}
+
+// alwaysSameCredStore wraps mockCredentialStore but always hands back the same
+// credential from ClaimNextRoundRobin and swallows UpdateStatusByID. This lets
+// us exercise the dedupe break-out path in GetValidToken: even if a broken
+// credential isn't marked invalid (simulating a failed status update), the
+// loop must terminate instead of spinning forever.
+type alwaysSameCredStore struct {
+	*mockCredentialStore
+	fixed *models.DecryptedCredential
+}
+
+func (s *alwaysSameCredStore) ClaimNextRoundRobin(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
+	return s.fixed, nil
+}
+
+func (s *alwaysSameCredStore) UpdateStatusByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+	return nil // Simulate a silent status-update failure (no row actually marked invalid).
+}
+
+// TestGetValidToken_TriedDedupeBreaksLoop covers the safety net in GetValidToken
+// that breaks out when ClaimNextRoundRobin re-serves a credential we already
+// tried this call. Without the break, a store that fails to filter invalid rows
+// would cause the loop to spin until maxRoundRobinAttempts with the same
+// credential, wasting HTTP calls.
+func TestGetValidToken_TriedDedupeBreaksLoop(t *testing.T) {
+	t.Parallel()
+
+	var refreshCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error": "invalid_grant"}`))
+	}))
+	defer server.Close()
+
+	base := newMockCredentialStore()
+	orgID := uuid.New()
+	if _, err := base.UpsertWithLabel(context.Background(), orgID, nil, "Solo", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_expired",
+		RefreshToken: "chr_broken",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired.
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	k := base.labelKey(orgID, models.ProviderOpenAIChatGPT, "Solo")
+	fixed := base.creds[k]
+
+	store := &alwaysSameCredStore{mockCredentialStore: base, fixed: fixed}
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	cfg, err := svc.GetValidToken(context.Background(), orgID)
+	if err == nil {
+		t.Fatal("expected error when only credential has broken refresh and expired token")
+	}
+	if cfg != nil {
+		t.Errorf("expected nil config, got %+v", cfg)
+	}
+
+	// The break-out should kick in on the second claim, so at most one refresh
+	// HTTP call should have fired (for the first attempt). Without dedupe we
+	// would see maxRoundRobinAttempts (5) refresh calls.
+	if got := refreshCalls.Load(); got > 1 {
+		t.Errorf("expected at most 1 refresh call before dedupe break, got %d", got)
+	}
+}
+
+// TestDisconnectAll_CleansRefreshMutexes verifies that DisconnectAll removes
+// per-credential refresh mutex entries for every credential belonging to the
+// org. Without this cleanup the sync.Map would leak entries across the
+// lifetime of the process for any org that reconnects with new credential IDs.
+func TestDisconnectAll_CleansRefreshMutexes(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	firstID, err := store.UpsertWithLabel(context.Background(), orgID, nil, "Team A", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_a",
+		RefreshToken: "chr_a",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("seed first credential: %v", err)
+	}
+	secondID, err := store.UpsertWithLabel(context.Background(), orgID, nil, "Team B", models.OpenAIChatGPTConfig{
+		AccessToken:  "cha_b",
+		RefreshToken: "chr_b",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("seed second credential: %v", err)
+	}
+
+	// Populate the refresh-mutex map as real traffic would.
+	_ = svc.credRefreshMu(*firstID)
+	_ = svc.credRefreshMu(*secondID)
+	if _, ok := svc.refreshMu.Load(firstID.String()); !ok {
+		t.Fatal("expected refresh mutex to be populated for first credential")
+	}
+	if _, ok := svc.refreshMu.Load(secondID.String()); !ok {
+		t.Fatal("expected refresh mutex to be populated for second credential")
+	}
+
+	if err := svc.DisconnectAll(context.Background(), orgID); err != nil {
+		t.Fatalf("DisconnectAll: %v", err)
+	}
+
+	if _, ok := svc.refreshMu.Load(firstID.String()); ok {
+		t.Error("expected refresh mutex for first credential to be cleared after DisconnectAll")
+	}
+	if _, ok := svc.refreshMu.Load(secondID.String()); ok {
+		t.Error("expected refresh mutex for second credential to be cleared after DisconnectAll")
 	}
 }

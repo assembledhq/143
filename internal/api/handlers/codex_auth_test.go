@@ -39,6 +39,8 @@ type codexCredentialStoreStub struct {
 	disabled   bool
 	// getByIDResult is returned by GetByID if set, otherwise "not found".
 	getByIDResult *models.DecryptedCredential
+	// existsForProviderByIDResult is returned by ExistsForProviderByID; default false means "not ours".
+	existsForProviderByIDResult bool
 	// insertPendingAuthErr overrides the default "not implemented" error
 	// returned by InsertPendingAuth, letting tests inject typed errors like
 	// *db.ErrCredentialLabelTaken to exercise handler branches.
@@ -109,6 +111,10 @@ func (s *codexCredentialStoreStub) UpdateStatusByID(_ context.Context, _ uuid.UU
 
 func (s *codexCredentialStoreStub) UpsertByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderConfig) error {
 	return nil
+}
+
+func (s *codexCredentialStoreStub) ExistsForProviderByID(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.ProviderName) (bool, error) {
+	return s.existsForProviderByIDResult, nil
 }
 
 func TestCodexAuthHandler_Initiate(t *testing.T) {
@@ -206,8 +212,9 @@ func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
-		disableErr:    errors.New("db error"),
-		getByIDResult: &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		disableErr:       errors.New("db error"),
+		existsForProviderByIDResult: true,
+		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())
@@ -228,7 +235,8 @@ func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
-		getByIDResult: &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		existsForProviderByIDResult: true,
+		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())

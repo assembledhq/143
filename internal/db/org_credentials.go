@@ -158,13 +158,16 @@ func (s *OrgCredentialStore) lookupCredentialStatus(ctx context.Context, orgID u
 }
 
 // UpsertByID updates an existing credential's config by ID, scoped to org.
+// Refuses to resurrect a disabled row: if a user disconnects a credential
+// while a refresh is mid-flight, this prevents the refresh from silently
+// flipping the row back to active.
 func (s *OrgCredentialStore) UpsertByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error {
 	encrypted, err := s.marshalAndEncrypt(cfg)
 	if err != nil {
 		return err
 	}
 
-	query := `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id AND status != 'disabled'`
 	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
@@ -361,6 +364,12 @@ func (s *OrgCredentialStore) ListByProvider(ctx context.Context, orgID uuid.UUID
 // a valid credential exists. Waiting for the lock is correct here because
 // claims are fast (one UPDATE) and a single-credential org would otherwise
 // fail spuriously under load.
+//
+// last_used_at is bumped preemptively — before the caller knows whether the
+// downstream request actually succeeded. That's a deliberate trade-off: a
+// failed request still "consumes" the credential's turn in the rotation, but
+// the alternative (update on success) would require a second round-trip and
+// reintroduce the double-claim race that FOR UPDATE is here to prevent.
 func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	query := `
 		WITH next AS (
@@ -409,6 +418,24 @@ func (s *OrgCredentialStore) DisableByID(ctx context.Context, orgID uuid.UUID, i
 		"org_id": orgID,
 	})
 	return err
+}
+
+// ExistsForProviderByID reports whether a credential with the given id belongs
+// to the org AND matches the expected provider. Includes disabled rows, so
+// callers that need to tell "not mine" apart from "already disconnected" get a
+// true answer in both cases. The provider filter keeps provider-specific
+// endpoints (e.g. codex-auth) from affecting unrelated credentials that happen
+// to share the org.
+func (s *OrgCredentialStore) ExistsForProviderByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM org_credentials WHERE id = @id AND org_id = @org_id AND provider = @provider)`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "provider": string(provider)},
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check credential ownership: %w", err)
+	}
+	return exists, nil
 }
 
 // UpdateStatus updates the status and last_verified_at timestamp.

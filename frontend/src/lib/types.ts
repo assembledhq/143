@@ -486,7 +486,6 @@ export interface CodexSubscription {
   label: string;
   account_type?: string;
   status: CodexSubscriptionStatus;
-  masked_key?: string;
   last_used_at?: string;
   created_by?: string;
   created_at?: string;

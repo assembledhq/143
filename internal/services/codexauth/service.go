@@ -61,6 +61,7 @@ type CredentialStore interface {
 	DisableByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 	UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status string) error
 	UpsertByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error
+	ExistsForProviderByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error)
 }
 
 // ErrCredentialNotFound is returned when no credential exists for the given org/provider.
@@ -103,12 +104,15 @@ const (
 )
 
 // SubscriptionInfo is the API-safe summary of a connected Codex subscription.
+// Deliberately omits any token material: the access token is a JWT with a
+// structurally-predictable prefix, so a "masked" view would leak only the
+// high-entropy suffix — exactly the part we want to keep secret. Label +
+// CreatedAt are enough for users to disambiguate subscriptions in the UI.
 type SubscriptionInfo struct {
 	ID          uuid.UUID          `json:"id"`
 	Label       string             `json:"label"`
 	AccountType string             `json:"account_type,omitempty"`
 	Status      SubscriptionStatus `json:"status"`
-	MaskedKey   string             `json:"masked_key,omitempty"`
 	LastUsedAt  *time.Time         `json:"last_used_at,omitempty"`
 	CreatedBy   *uuid.UUID         `json:"created_by,omitempty"`
 	CreatedAt   time.Time          `json:"created_at,omitempty"`
@@ -123,7 +127,12 @@ type Service struct {
 	clientID    string
 	pending   sync.Map // pendingKey (orgID+label) -> *PendingAuth
 	refreshMu sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
-	initMu    sync.Map // pendingKey (orgID+label) -> *sync.Mutex (per-(org,label) init lock)
+	// initMu entries accumulate per distinct (org, label) pair. Growth is bounded
+	// in practice by the number of subscription labels an org ever uses, and
+	// entries are reclaimed on DisconnectAll. Cleaning up inside InitiateDeviceAuth
+	// would race with concurrent callers doing LoadOrStore on the same key, so we
+	// accept the bounded growth rather than introduce a second mutex to guard it.
+	initMu sync.Map // pendingKey (orgID+label) -> *sync.Mutex (per-(org,label) init lock)
 }
 
 // NewService creates a new Device Code Auth service.
@@ -152,6 +161,47 @@ func (s *Service) SetIssuer(issuer string) {
 // pendingKey returns the sync.Map key for pending auth state scoped to org+label.
 func pendingKey(orgID uuid.UUID, label string) string {
 	return orgID.String() + ":" + label
+}
+
+// restorePendingFromDB recovers pending-auth state after a server restart.
+// Returns (terminalStatus, nil) when the DB row tells us the flow is already
+// complete (active) or unusable (bad config), (nil, restoredPending) when a
+// still-valid pending_auth row can resume polling, or (nil, nil) when there
+// is nothing to recover and the caller should report "no pending auth flow".
+func (s *Service) restorePendingFromDB(ctx context.Context, orgID uuid.UUID, label string) (*AuthStatus, *PendingAuth) {
+	if s.credentials == nil {
+		return nil, nil
+	}
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, orgID, models.ProviderOpenAIChatGPT, label)
+	if err != nil {
+		return nil, nil
+	}
+	cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+	switch cred.Status {
+	case "active":
+		if !cfgOk {
+			return &AuthStatus{Status: "error", Message: "invalid credential config"}, nil
+		}
+		return &AuthStatus{Status: "completed", AccountType: cfg.AccountType}, nil
+	case "pending_auth":
+		if !cfgOk || cfg.DeviceAuthID == "" || !time.Now().Before(cfg.ExpiresAt) {
+			return nil, nil
+		}
+		interval := cfg.PollInterval
+		if interval <= 0 {
+			interval = 5
+		}
+		return nil, &PendingAuth{
+			DeviceAuthID:    cfg.DeviceAuthID,
+			UserCode:        cfg.UserCode,
+			VerificationURI: cfg.VerificationURI,
+			ExpiresAt:       cfg.ExpiresAt,
+			Interval:        interval,
+			Label:           label,
+			CredentialID:    &cred.ID,
+		}
+	}
+	return nil, nil
 }
 
 // InitiateDeviceAuth starts a new device code auth flow for the given org.
@@ -276,42 +326,14 @@ func (s *Service) PollForToken(ctx context.Context, orgID uuid.UUID, label strin
 	pKey := pendingKey(orgID, label)
 	val, ok := s.pending.Load(pKey)
 	if !ok {
-		// No in-memory state — check DB for persisted state.
-		if s.credentials != nil {
-			cred, err := s.credentials.GetByProviderAndLabel(ctx, orgID, models.ProviderOpenAIChatGPT, label)
-			if err == nil {
-				if cred.Status == "active" {
-					cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
-					if !cfgOk {
-						return &AuthStatus{Status: "error", Message: "invalid credential config"}, nil
-					}
-					return &AuthStatus{
-						Status:      "completed",
-						AccountType: cfg.AccountType,
-					}, nil
-				}
-				// Restore pending auth from DB (survives server restart).
-				if cred.Status == "pending_auth" {
-					cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
-					if cfgOk && cfg.DeviceAuthID != "" && time.Now().Before(cfg.ExpiresAt) {
-						restored := &PendingAuth{
-							DeviceAuthID:    cfg.DeviceAuthID,
-							UserCode:        cfg.UserCode,
-							VerificationURI: cfg.VerificationURI,
-							ExpiresAt:       cfg.ExpiresAt,
-							Interval:        cfg.PollInterval,
-							Label:           label,
-							CredentialID:    &cred.ID,
-						}
-						if restored.Interval <= 0 {
-							restored.Interval = 5
-						}
-						s.pending.Store(pKey, restored)
-						val = restored
-						ok = true
-					}
-				}
-			}
+		status, restored := s.restorePendingFromDB(ctx, orgID, label)
+		if status != nil {
+			return status, nil
+		}
+		if restored != nil {
+			s.pending.Store(pKey, restored)
+			val = restored
+			ok = true
 		}
 		if !ok {
 			return &AuthStatus{Status: "none", Message: "no pending auth flow"}, nil
@@ -720,7 +742,19 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 
 // Disconnect removes a specific ChatGPT OAuth credential by ID for an org.
 // It also cleans up any in-memory pending auth state for this credential.
+//
+// Ordering matters: the credential is disabled in the DB first, then in-memory
+// mutex/pending state is cleaned up. If we deleted the mutex first, a concurrent
+// refresh arriving between the Delete and DisableByID calls could acquire a
+// fresh mutex, successfully refresh, and UpsertByID the now-disabled row back
+// to active — silently resurrecting a credential the user just disconnected.
 func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
+	if s.credentials != nil {
+		if err := s.credentials.DisableByID(ctx, orgID, credID); err != nil {
+			return err
+		}
+	}
+
 	s.refreshMu.Delete(credID.String())
 
 	// Clean up any pending auth entries that reference this credential ID.
@@ -731,20 +765,26 @@ func (s *Service) Disconnect(ctx context.Context, orgID uuid.UUID, credID uuid.U
 		return true
 	})
 
-	if s.credentials == nil {
-		return nil
-	}
-	return s.credentials.DisableByID(ctx, orgID, credID)
+	return nil
 }
 
 // DisconnectForOrg removes a credential by ID after verifying it belongs to the given org.
-// Returns ErrCredentialNotFound if the credential doesn't exist or belongs to a different org.
+// Returns ErrCredentialNotFound if the credential doesn't exist or belongs to a different
+// org. Disconnecting an already-disabled credential is idempotent (returns nil) — this
+// matches the user's mental model where clicking "Remove" twice shouldn't error.
 func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID uuid.UUID) error {
 	if s.credentials == nil {
 		return nil
 	}
-	// GetByID is org-scoped — cross-org IDs return not-found by construction.
-	if _, err := s.credentials.GetByID(ctx, orgID, credID); err != nil {
+	// ExistsForProviderByID includes disabled rows, so this distinguishes
+	// "not ours" (cross-org, bogus id, or another provider like an Anthropic
+	// API key) from "already disconnected". The provider filter prevents the
+	// codex-auth DELETE endpoint from disabling unrelated credentials.
+	exists, err := s.credentials.ExistsForProviderByID(ctx, orgID, credID, models.ProviderOpenAIChatGPT)
+	if err != nil {
+		return fmt.Errorf("check credential ownership: %w", err)
+	}
+	if !exists {
 		return ErrCredentialNotFound
 	}
 	return s.Disconnect(ctx, orgID, credID)
@@ -797,19 +837,15 @@ func (s *Service) ListSubscriptions(ctx context.Context, orgID uuid.UUID) ([]Sub
 		if !ok {
 			continue
 		}
-		sub := SubscriptionInfo{
-			ID:         cred.ID,
-			Label:      cred.Label,
-			Status:     SubscriptionStatus(cred.Status),
-			MaskedKey:  models.MaskKey(cfg.AccessToken),
-			LastUsedAt: cred.LastUsedAt,
-			CreatedBy:  cred.CreatedBy,
-			CreatedAt:  cred.CreatedAt,
-		}
-		if cfg.AccountType != "" {
-			sub.AccountType = cfg.AccountType
-		}
-		subs = append(subs, sub)
+		subs = append(subs, SubscriptionInfo{
+			ID:          cred.ID,
+			Label:       cred.Label,
+			AccountType: cfg.AccountType,
+			Status:      SubscriptionStatus(cred.Status),
+			LastUsedAt:  cred.LastUsedAt,
+			CreatedBy:   cred.CreatedBy,
+			CreatedAt:   cred.CreatedAt,
+		})
 	}
 	return subs, nil
 }
