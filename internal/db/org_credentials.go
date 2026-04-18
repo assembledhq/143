@@ -34,7 +34,7 @@ func (e *ErrCredentialLabelTaken) Error() string {
 }
 
 // credentialColumns is the standard SELECT column list for org_credentials queries.
-const credentialColumns = "id, org_id, provider, label, config, status, last_verified_at, last_used_at, created_by, created_at, updated_at"
+const credentialColumns = "id, org_id, provider, label, config, status, last_verified_at, last_used_at, created_by, created_at, updated_at" // #nosec G101 -- SQL column list, not credentials
 
 // OrgCredentialStore manages org-level API credentials (e.g. Anthropic API keys, OpenAI keys).
 // These are distinct from integrations (which store third-party platform connections like GitHub,
