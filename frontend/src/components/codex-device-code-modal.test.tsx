@@ -111,6 +111,30 @@ describe("CodexDeviceCodeModal", () => {
     }, { timeout: 5000 });
   });
 
+  it("shows error state when polling reports an auth error", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "error", message: "authentication denied by user" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    // Wait for the polling interval to fire and resolve.
+    await waitFor(() => {
+      expect(screen.getByText(/authentication denied by user/i)).toBeInTheDocument();
+    }, { timeout: 5000 });
+
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+  });
+
   it("shows expired state and Try again button", async () => {
     server.use(
       http.post(INITIATE_URL, () => {
