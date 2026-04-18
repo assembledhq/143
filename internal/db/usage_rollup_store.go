@@ -465,6 +465,7 @@ func (s *UsageRollupStore) RollupRange(ctx context.Context, orgID uuid.UUID, sta
 
 // GetActiveOrgIDs returns the distinct org IDs that have container usage events
 // or token usage in the given [start, end) window.
+// lint:allow-no-orgid reason="explicitly cross-org; enumerates orgs for rollup"
 func (s *UsageRollupStore) GetActiveOrgIDs(ctx context.Context, start, end time.Time) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT org_id FROM container_usage_events
@@ -494,6 +495,7 @@ func (s *UsageRollupStore) GetActiveOrgIDs(ctx context.Context, start, end time.
 }
 
 // RollupAllOrgs rolls up the given hour for all orgs that have activity.
+// lint:allow-no-orgid reason="explicitly cross-org; iterates all orgs to roll up"
 func (s *UsageRollupStore) RollupAllOrgs(ctx context.Context, hour time.Time) error {
 	hour = hour.Truncate(time.Hour).UTC()
 	hourEnd := hour.Add(time.Hour)
@@ -971,6 +973,7 @@ func (s *UsageRollupStore) GetTokenTotals(ctx context.Context, orgID uuid.UUID, 
 // Returns the zero time if the table is empty. This is used to seed the
 // reaper's rollup watermark on startup so it doesn't redundantly re-roll
 // hours that were already materialized before the process restarted.
+// lint:allow-no-orgid reason="cross-org scheduler watermark; returns a system-wide timestamp"
 func (s *UsageRollupStore) GetLatestRollupHour(ctx context.Context) (time.Time, error) {
 	var latest *time.Time
 	// Use ORDER BY + LIMIT 1 instead of MAX() so the idx_usage_hourly_org_hour
@@ -990,6 +993,7 @@ func (s *UsageRollupStore) GetLatestRollupHour(ctx context.Context) (time.Time, 
 }
 
 // DeleteOlderThan removes rollup rows older than the given cutoff.
+// lint:allow-no-orgid reason="cross-org retention cleanup of usage_hourly"
 func (s *UsageRollupStore) DeleteOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx, `DELETE FROM usage_hourly WHERE hour_utc < @cutoff`,
 		pgx.NamedArgs{"cutoff": cutoff})

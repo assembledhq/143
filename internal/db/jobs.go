@@ -71,17 +71,18 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, queue, jobTyp
 		RETURNING id`
 
 	err = q.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":    orgID,
-		"queue":     queue,
-		"job_type":  jobType,
-		"payload":   payloadJSON,
-		"priority":  priority,
+		"org_id":     orgID,
+		"queue":      queue,
+		"job_type":   jobType,
+		"payload":    payloadJSON,
+		"priority":   priority,
 		"dedupe_key": dedupeKey,
 	}).Scan(&id)
 	return id, err
 }
 
 // DeleteExpiredCompleted removes completed/failed jobs older than the given number of days.
+// lint:allow-no-orgid reason="system-wide retention cleanup across all orgs"
 func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int) (int64, error) {
 	var deleted int64
 	err := s.db.QueryRow(ctx,

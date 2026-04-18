@@ -34,6 +34,7 @@ func (s *SessionViewStore) Upsert(ctx context.Context, userID, sessionID, orgID 
 
 // BatchGetLastViewed returns a map of session_id → last_viewed_at for the
 // given user and set of session IDs.
+// lint:allow-no-orgid reason="per-user view state; user_id is globally unique and session_ids come from org-scoped context"
 func (s *SessionViewStore) BatchGetLastViewed(ctx context.Context, userID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
 	if len(sessionIDs) == 0 {
 		return nil, nil

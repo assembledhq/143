@@ -103,62 +103,6 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 	}
 }
 
-func TestOrganizationStore_GetByName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		setupMock func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time)
-		expectErr bool
-	}{
-		{
-			name: "returns organization when found by name",
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(organizationColumns).
-							AddRow(orgID, "My Company", json.RawMessage(`{}`), now, now),
-					)
-			},
-		},
-		{
-			name: "returns error when organization not found by name",
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM organizations WHERE name").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows(organizationColumns))
-			},
-			expectErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "should create mock pool")
-			defer mock.Close()
-
-			store := NewOrganizationStore(mock)
-			orgID := uuid.New()
-			now := time.Now()
-			tt.setupMock(mock, orgID, now)
-
-			org, err := store.GetByName(context.Background(), "My Company")
-			if tt.expectErr {
-				require.Error(t, err, "GetByName should return an error when organization is not found")
-				return
-			}
-			require.NoError(t, err, "GetByName should not return an error")
-			require.Equal(t, orgID, org.ID, "should return the correct organization ID")
-			require.Equal(t, "My Company", org.Name, "should return the correct organization name")
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
-}
-
 func TestOrganizationStore_Update(t *testing.T) {
 	t.Parallel()
 

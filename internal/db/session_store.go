@@ -28,16 +28,16 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Statuses           []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
-	Limit              int
-	CursorTime         *time.Time // Cursor-based pagination: created_at of the last item.
-	CursorID           *uuid.UUID // Cursor-based pagination: id of the last item.
-	AdHocOnly          bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID       uuid.UUID  // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID  uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
-	Search             string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived    bool       // When true, include archived sessions in the results.
-	OnlyArchived       bool       // When true, return only archived sessions.
+	Statuses          []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
+	Limit             int
+	CursorTime        *time.Time // Cursor-based pagination: created_at of the last item.
+	CursorID          *uuid.UUID // Cursor-based pagination: id of the last item.
+	AdHocOnly         bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID      uuid.UUID  // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
+	Search            string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived   bool       // When true, include archived sessions in the results.
+	OnlyArchived      bool       // When true, return only archived sessions.
 }
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -203,25 +203,25 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	}
 
 	args := pgx.NamedArgs{
-		"issue_id":              issueID,
-		"org_id":                run.OrgID,
-		"agent_type":            run.AgentType,
-		"status":                run.Status,
-		"autonomy_level":        run.AutonomyLevel,
-		"token_mode":            run.TokenMode,
-		"complexity_tier":       run.ComplexityTier,
-		"parent_session_id":     run.ParentSessionID,
-		"revision_context":      run.RevisionContext,
-		"pm_plan_id":            run.PMPlanID,
-		"title":                 run.Title,
-		"pm_approach":           run.PMApproach,
-		"pm_reasoning":          run.PMReasoning,
-		"project_task_id":       run.ProjectTaskID,
-		"model_override":        run.ModelOverride,
-		"triggered_by_user_id":  run.TriggeredByUserID,
-		"target_branch":         run.TargetBranch,
-		"repository_id":         run.RepositoryID,
-		"automation_run_id":     run.AutomationRunID,
+		"issue_id":             issueID,
+		"org_id":               run.OrgID,
+		"agent_type":           run.AgentType,
+		"status":               run.Status,
+		"autonomy_level":       run.AutonomyLevel,
+		"token_mode":           run.TokenMode,
+		"complexity_tier":      run.ComplexityTier,
+		"parent_session_id":    run.ParentSessionID,
+		"revision_context":     run.RevisionContext,
+		"pm_plan_id":           run.PMPlanID,
+		"title":                run.Title,
+		"pm_approach":          run.PMApproach,
+		"pm_reasoning":         run.PMReasoning,
+		"project_task_id":      run.ProjectTaskID,
+		"model_override":       run.ModelOverride,
+		"triggered_by_user_id": run.TriggeredByUserID,
+		"target_branch":        run.TargetBranch,
+		"repository_id":        run.RepositoryID,
+		"automation_run_id":    run.AutomationRunID,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -569,9 +569,9 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	query := `UPDATE sessions SET working_branch = @working_branch WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":              sessionID,
-		"org_id":          orgID,
-		"working_branch":  branch,
+		"id":             sessionID,
+		"org_id":         orgID,
+		"working_branch": branch,
 	})
 	return err
 }
@@ -579,6 +579,7 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 // ListStalePendingSessions returns pending sessions created before the given
 // cutoff. These sessions have been stuck in pending for too long and should be
 // failed with an explanatory error.
+// lint:allow-no-orgid reason="cross-org reaper scan for stuck pending sessions"
 func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
@@ -601,6 +602,7 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 // ListStaleIdleSessions returns idle sessions that have been inactive longer
 // than the idle timeout. These sessions should be transitioned to completed
 // but their snapshots are preserved for later resumption.
+// lint:allow-no-orgid reason="cross-org reaper scan for idle sessions"
 func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
@@ -624,6 +626,7 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 // exceeded the maximum snapshot age and should be cleaned up from storage.
 // Note: intentionally does NOT filter by deleted_at IS NULL — we want to
 // clean up snapshots even for soft-deleted sessions to free storage.
+// lint:allow-no-orgid reason="cross-org reaper scan for expired session snapshots"
 func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
