@@ -16,6 +16,20 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 **Multi-tenancy**: Every table has an `org_id` column (FK to `organizations`). Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug.
 
+Two lints enforce this, both run in CI via `make lint-tenancy`:
+
+- **`cmd/lint-schema`** — scans `migrations/*.up.sql` (down migrations are not scanned by design — they restore prior state). Every `CREATE TABLE` must declare `org_id uuid NOT NULL REFERENCES organizations(id)`. Schema-qualified (`public.foo`) and double-quoted (`"foo"`) table names are recognized and normalized for allowlist/display. Exemptions (rare: root tables, FK-scoped child tables, infra tables) are declared in the `allowedNoOrgID` map in `cmd/lint-schema/main.go` with a short justification, or inline via `-- lint:no-org-id reason="..."` anywhere inside the `CREATE TABLE ( ... )` statement (header line or a dedicated comment line in the body). The `reason="..."` clause is required. Default to adding `org_id` over allowlisting; defense-in-depth beats transitive scoping.
+- **`cmd/lint-stores`** — scans exported methods on `*XxxStore` types under `internal/db/`. The linter only polices receivers whose type declaration it actually finds in the scanned files, so a helper type elsewhere that happens to end in `Store` will not be caught. Each method must either take an `orgID uuid.UUID` parameter (the name must end in `orgid` case-insensitively, e.g. `orgID`/`OrgID`/`org_id`/`srcOrgID`) or receive a `*models.X` carrier whose struct has an `OrgID` field — either declared directly or inherited via an embedded type within the `models` package (the lint pre-scans `internal/models/*.go` and resolves embeddings to a fixed point). Methods that are legitimately cross-org (pre-auth lookups, system cleanup, scheduler scans) opt out with a doc comment on the line above `func`; a bare marker without a `reason="..."` clause is itself a lint violation:
+
+  ```go
+  // lint:allow-no-orgid reason="pre-auth login lookup by email"
+  func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, error) { ... }
+  ```
+
+When writing a new store method: add `orgID uuid.UUID` as the first arg after `ctx`, filter every SQL clause by `org_id`, and pass `middleware.OrgIDFromContext(r.Context())` from the handler. Do NOT add `lint:allow-no-orgid` unless the method truly must run across orgs.
+
+A **git pre-commit hook** (`.githooks/pre-commit`, installed by `./setup.sh` or `make hooks-install`) runs these lints against staged files before every commit so violations surface in seconds instead of after a CI round-trip. Bypass with `git commit --no-verify` only for WIP snapshots; CI enforces the same rules regardless.
+
 **API response format**: Lists return `{data: [...], meta: {next_cursor}}` with cursor-based pagination. Errors return `{error: {code, message, details}}`. All routes under `/api/v1/`.
 
 **Enum response fields use typed strings**: For model fields that represent enums (especially API response fields like provider/status/state/type), define a dedicated typed string in `internal/models` with named constants and a `Validate() error` method. Prefer `IntegrationProvider`/`IntegrationStatus`-style types over raw `string` fields. When writing new enum-like fields, add table-driven validation tests.

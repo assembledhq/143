@@ -252,6 +252,7 @@ func (s *AutomationStore) SoftDelete(ctx context.Context, orgID, automationID uu
 // priority is ordered ASC because the UI exposes lower numbers as higher
 // importance (Critical=0, High=25, Medium=50, Low=75). Sorting DESC would
 // silently invert the user's intent and run Low before Critical.
+// lint:allow-no-orgid reason="scheduler tick claims due automations across all orgs"
 func (s *AutomationStore) ListDueForSchedule(ctx context.Context, tx pgx.Tx, now time.Time) ([]models.Automation, error) {
 	query := fmt.Sprintf(`SELECT %s FROM automations
 		WHERE enabled = true AND deleted_at IS NULL
@@ -622,6 +623,7 @@ func (s *AutomationRunStore) CompletePendingNoopIfAutomationActive(ctx context.C
 // reaper out to one UPDATE per org, so every reap query carries an explicit
 // org_id filter — defense-in-depth against a bug elsewhere causing cross-org
 // state mutation, and it lets the reaper log per-org counts for audit clarity.
+// lint:allow-no-orgid reason="scheduler reaper enumerates orgs with stuck runs across all tenants"
 func (s *AutomationRunStore) ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error) {
 	cutoff := time.Now().Add(-threshold)
 	rows, err := s.db.Query(ctx,

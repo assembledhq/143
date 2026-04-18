@@ -35,6 +35,8 @@ func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSessi
 	return row.Scan(&session.ID, &session.CreatedAt)
 }
 
+// GetByToken returns the active session matching the opaque token, if any.
+// lint:allow-no-orgid reason="pre-auth session lookup; token is opaque and identifies the org"
 func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models.AuthSession, error) {
 	query := `
 		SELECT id, user_id, org_id, token, expires_at, created_at
@@ -48,12 +50,16 @@ func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.AuthSession])
 }
 
+// DeleteByToken removes the session for the given opaque token (logout).
+// lint:allow-no-orgid reason="logout by opaque token"
 func (s *AuthSessionStore) DeleteByToken(ctx context.Context, token string) error {
 	query := `DELETE FROM auth_sessions WHERE token = @token`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"token": token})
 	return err
 }
 
+// DeleteByUserID removes every session belonging to the given user.
+// lint:allow-no-orgid reason="user_id is globally unique; sessions are cascade-deleted when a user is removed"
 func (s *AuthSessionStore) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
 	query := `DELETE FROM auth_sessions WHERE user_id = @user_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"user_id": userID})

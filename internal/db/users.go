@@ -63,6 +63,8 @@ func (s *UserStore) GetByID(ctx context.Context, orgID, userID uuid.UUID) (model
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+// GetByGitHubID looks up a user by their GitHub user id (cross-org).
+// lint:allow-no-orgid reason="pre-auth login lookup; GitHub id is globally unique"
 func (s *UserStore) GetByGitHubID(ctx context.Context, githubID int64) (models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
@@ -77,6 +79,7 @@ func (s *UserStore) GetByGitHubID(ctx context.Context, githubID int64) (models.U
 }
 
 // GetByEmail looks up a user by email address (cross-org, email is globally unique).
+// lint:allow-no-orgid reason="pre-auth login lookup; email is globally unique"
 func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
@@ -91,6 +94,7 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 }
 
 // GetByGoogleID looks up a user by Google subject ID.
+// lint:allow-no-orgid reason="pre-auth login lookup; Google subject id is globally unique"
 func (s *UserStore) GetByGoogleID(ctx context.Context, googleID string) (models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
