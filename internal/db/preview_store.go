@@ -28,11 +28,13 @@ func NewPreviewStore(db TxStarter) *PreviewStore {
 }
 
 // Begin starts a transaction.
+// lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PreviewStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return s.db.Begin(ctx)
 }
 
 // WithTx returns a new PreviewStore that uses the given transaction.
+// lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
 	return &PreviewStore{db: tx}
 }
@@ -261,6 +263,7 @@ func (s *PreviewStore) CountActivePreviewsByUser(ctx context.Context, orgID, use
 }
 
 // CountActivePreviewsByWorker counts active previews on a worker node.
+// lint:allow-no-orgid reason="cross-org worker capacity stats for scheduling"
 func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNodeID string) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
@@ -275,6 +278,7 @@ func (s *PreviewStore) CountActivePreviewsByWorker(ctx context.Context, workerNo
 }
 
 // ListExpiredPreviews returns active previews whose hard TTL has passed.
+// lint:allow-no-orgid reason="cross-org cleanup scan for expired previews"
 func (s *PreviewStore) ListExpiredPreviews(ctx context.Context, cutoff time.Time) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
 		WHERE status IN %s
@@ -289,6 +293,7 @@ func (s *PreviewStore) ListExpiredPreviews(ctx context.Context, cutoff time.Time
 }
 
 // ListIdlePreviews returns active previews with no activity since the cutoff.
+// lint:allow-no-orgid reason="cross-org cleanup scan for idle previews"
 func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
 		WHERE status IN %s
@@ -307,6 +312,7 @@ func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time
 // =============================================================================
 
 // CreatePreviewService inserts a new preview service record.
+// lint:allow-no-orgid reason="preview_services is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreatePreviewService(ctx context.Context, svc *models.PreviewService) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_services (
@@ -384,6 +390,7 @@ func (s *PreviewStore) ListServicesByPreview(ctx context.Context, orgID, preview
 // =============================================================================
 
 // CreatePreviewInfrastructure inserts a new infrastructure record.
+// lint:allow-no-orgid reason="preview_infrastructure is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreatePreviewInfrastructure(ctx context.Context, infra *models.PreviewInfrastructure) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_infrastructure (
@@ -450,6 +457,7 @@ func (s *PreviewStore) ListInfraByPreview(ctx context.Context, orgID, previewIns
 // =============================================================================
 
 // CreateSnapshot inserts a new screenshot snapshot.
+// lint:allow-no-orgid reason="preview_snapshots is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreateSnapshot(ctx context.Context, snap *models.PreviewSnapshot) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_snapshots (
@@ -606,11 +614,11 @@ func (s *PreviewStore) CreateAccessSession(ctx context.Context, sess *models.Pre
 		) RETURNING %s`, previewAccessSessionColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":               sess.OrgID,
-		"user_id":              sess.UserID,
-		"preview_instance_id":  sess.PreviewInstanceID,
-		"session_token_hash":   sess.SessionTokenHash,
-		"expires_at":           sess.ExpiresAt,
+		"org_id":              sess.OrgID,
+		"user_id":             sess.UserID,
+		"preview_instance_id": sess.PreviewInstanceID,
+		"session_token_hash":  sess.SessionTokenHash,
+		"expires_at":          sess.ExpiresAt,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview access session: %w", err)
@@ -643,6 +651,7 @@ func (s *PreviewStore) GetAccessSessionByToken(ctx context.Context, orgID uuid.U
 // without org scoping. Used by the preview gateway during bootstrap exchange,
 // where the org is not yet known. Safe because token hashes are derived from
 // 32 cryptographically random bytes.
+// lint:allow-no-orgid reason="pre-auth gateway bootstrap; token hash is opaque and identifies the org"
 func (s *PreviewStore) GetAccessSessionByTokenUnscoped(ctx context.Context, tokenHash string) (*models.PreviewAccessSession, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
 		WHERE session_token_hash = @hash`, previewAccessSessionColumns)
@@ -760,6 +769,7 @@ func (s *PreviewStore) TouchCache(ctx context.Context, orgID, id uuid.UUID) erro
 
 // ListCacheByWorker returns cache entries for a worker, ordered by last_used_at
 // for LRU eviction.
+// lint:allow-no-orgid reason="cross-org worker LRU eviction scan"
 func (s *PreviewStore) ListCacheByWorker(ctx context.Context, workerNodeID string) ([]models.PreviewStartupCache, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
 		WHERE worker_node_id = @worker ORDER BY last_used_at ASC`, previewStartupCacheColumns)
@@ -810,15 +820,15 @@ func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.P
 		RETURNING %s`, prPreviewStateColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":                      state.OrgID,
-		"repo_id":                     state.RepoID,
-		"pr_number":                   state.PRNumber,
-		"github_comment_id":           state.GitHubCommentID,
-		"last_preview_instance_id":    state.LastPreviewInstanceID,
-		"last_screenshot_blob_path":   state.LastScreenshotBlobPath,
-		"last_visual_diff_blob_path":  state.LastVisualDiffBlobPath,
-		"base_snapshot_key":           state.BaseSnapshotKey,
-		"status":                      state.Status,
+		"org_id":                     state.OrgID,
+		"repo_id":                    state.RepoID,
+		"pr_number":                  state.PRNumber,
+		"github_comment_id":          state.GitHubCommentID,
+		"last_preview_instance_id":   state.LastPreviewInstanceID,
+		"last_screenshot_blob_path":  state.LastScreenshotBlobPath,
+		"last_visual_diff_blob_path": state.LastVisualDiffBlobPath,
+		"base_snapshot_key":          state.BaseSnapshotKey,
+		"status":                     state.Status,
 	})
 	if err != nil {
 		return fmt.Errorf("upsert pr preview state: %w", err)

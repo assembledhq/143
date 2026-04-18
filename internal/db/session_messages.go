@@ -61,6 +61,7 @@ func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionI
 
 // Delete removes a session message by ID. Used to clean up orphaned messages
 // when a follow-up operation (e.g. job enqueue) fails after message creation.
+// lint:allow-no-orgid reason="message id is a globally unique bigint; used only to clean up a message the caller just created"
 func (s *SessionMessageStore) Delete(ctx context.Context, id int64) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE id = @id`, pgx.NamedArgs{"id": id})
 	return err

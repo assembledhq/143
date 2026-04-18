@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Pre-commit hook for 143: enforce multi-tenancy guardrails + gofmt before code
+# leaves the developer's machine. Installed via `make hooks-install`.
+#
+# To skip (rare): `git commit --no-verify`.
+# To uninstall:   `make hooks-uninstall`.
+set -euo pipefail
+
+# Only check files staged for this commit.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Exit fast when no staged files (e.g. empty commit).
+if [[ -z "$staged" ]]; then
+  exit 0
+fi
+
+has_go=0
+has_migration=0
+has_store=0
+
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  case "$f" in
+    *.go)                        has_go=1 ;;
+  esac
+  case "$f" in
+    migrations/*.up.sql)         has_migration=1 ;;
+    # Store-lint depends on both the DB layer AND the model structs it
+    # treats as carriers (verified by presence of an OrgID field), so a
+    # change to either must re-run the lint.
+    internal/db/*.go)            has_store=1 ;;
+    internal/models/*.go)        has_store=1 ;;
+  esac
+done <<< "$staged"
+
+repo_root=$(git rev-parse --show-toplevel)
+bin_dir="$repo_root/bin"
+mkdir -p "$bin_dir"
+
+# ensure_tool builds ./cmd/<name> to bin/<name> when the binary is missing
+# or older than any source under cmd/<name>. Using compiled binaries keeps
+# the hook snappy — `go run` re-links on every invocation.
+ensure_tool() {
+  local name="$1"
+  local out="$bin_dir/$name"
+  local src_dir="$repo_root/cmd/$name"
+
+  local rebuild=0
+  if [[ ! -x "$out" ]]; then
+    rebuild=1
+  else
+    # Rebuild if any source file is newer than the binary.
+    while IFS= read -r src; do
+      if [[ "$src" -nt "$out" ]]; then
+        rebuild=1
+        break
+      fi
+    done < <(find "$src_dir" -type f -name '*.go')
+  fi
+
+  if [[ $rebuild -eq 1 ]]; then
+    printf '  [pre-commit] building %s ... ' "$name"
+    if ! build_out=$(go build -o "$out" "./cmd/$name" 2>&1); then
+      echo "FAIL"
+      echo "$build_out" | sed 's/^/    /' >&2
+      return 1
+    fi
+    echo "OK"
+  fi
+}
+
+fail=0
+run_check() {
+  local label="$1"
+  shift
+  printf '  [pre-commit] %s ... ' "$label"
+  if out=$("$@" 2>&1); then
+    echo "OK"
+  else
+    echo "FAIL"
+    echo "$out" | sed 's/^/    /'
+    fail=1
+  fi
+}
+
+if [[ $has_migration -eq 1 ]]; then
+  if ensure_tool lint-schema; then
+    run_check "lint-schema" "$bin_dir/lint-schema"
+  else
+    fail=1
+  fi
+fi
+
+if [[ $has_store -eq 1 ]]; then
+  if ensure_tool lint-stores; then
+    run_check "lint-stores" "$bin_dir/lint-stores"
+  else
+    fail=1
+  fi
+fi
+
+if [[ $has_go -eq 1 ]]; then
+  # gofmt: format-check staged Go files only, quickly.
+  staged_go=$(echo "$staged" | grep '\.go$' || true)
+  if [[ -n "$staged_go" ]]; then
+    printf '  [pre-commit] gofmt ... '
+    # shellcheck disable=SC2086
+    unformatted=$(gofmt -l $staged_go)
+    if [[ -z "$unformatted" ]]; then
+      echo "OK"
+    else
+      echo "FAIL"
+      echo "    The following files are not gofmt-clean:" >&2
+      echo "$unformatted" | sed 's/^/      /' >&2
+      echo "    Fix with: gofmt -w ${unformatted//$'\n'/ }" >&2
+      fail=1
+    fi
+  fi
+fi
+
+if [[ $fail -ne 0 ]]; then
+  echo ""
+  echo "Pre-commit checks failed. Fix the issues above and re-stage." >&2
+  echo "To bypass (rare, e.g. WIP): git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0

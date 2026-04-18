@@ -19,6 +19,7 @@ func NewInvitationStore(db DBTX) *InvitationStore {
 }
 
 // Begin starts a transaction using the underlying DB handle.
+// lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *InvitationStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
@@ -48,6 +49,7 @@ func (s *InvitationStore) Create(ctx context.Context, inv *models.Invitation) er
 
 // GetByToken looks up an invitation by token regardless of status.
 // The caller inspects the Status and ExpiresAt fields to return the correct error.
+// lint:allow-no-orgid reason="invite acceptance is pre-membership; token identifies the target org"
 func (s *InvitationStore) GetByToken(ctx context.Context, token string) (models.Invitation, error) {
 	query := fmt.Sprintf(`SELECT %s FROM invitations WHERE token = @token`, invitationSelectColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"token": token})
@@ -83,6 +85,7 @@ func (s *InvitationStore) ListPendingByOrgWithInviter(ctx context.Context, orgID
 }
 
 // Accept marks the invitation as accepted.
+// lint:allow-no-orgid reason="token-based acceptance; invitation id is globally unique and already token-validated"
 func (s *InvitationStore) Accept(ctx context.Context, id uuid.UUID) error {
 	query := `UPDATE invitations SET status = 'accepted', accepted_at = now() WHERE id = @id AND status = 'pending'`
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{"id": id})

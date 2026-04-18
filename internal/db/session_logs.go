@@ -91,6 +91,7 @@ func (s *SessionLogStore) ListByThread(ctx context.Context, orgID, threadID uuid
 }
 
 // DeleteExpired removes session logs older than the given number of days.
+// lint:allow-no-orgid reason="cross-org retention cleanup across all orgs"
 func (s *SessionLogStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {
 	var deleted int64
 	err := s.db.QueryRow(ctx,

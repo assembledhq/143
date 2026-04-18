@@ -18,6 +18,8 @@ func NewOrganizationStore(db DBTX) *OrganizationStore {
 	return &OrganizationStore{db: db}
 }
 
+// Create inserts a new organization row.
+// lint:allow-no-orgid reason="organizations is the root tenant table; this row IS the org"
 func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization) error {
 	query := `
 		INSERT INTO organizations (name, settings)
@@ -33,6 +35,8 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 	return row.Scan(&org.ID, &org.CreatedAt, &org.UpdatedAt)
 }
 
+// GetByID returns the organization with the given id.
+// lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `
 		SELECT id, name, settings, created_at, updated_at
@@ -46,19 +50,8 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }
 
-func (s *OrganizationStore) GetByName(ctx context.Context, name string) (models.Organization, error) {
-	query := `
-		SELECT id, name, settings, created_at, updated_at
-		FROM organizations
-		WHERE name = @name`
-
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"name": name})
-	if err != nil {
-		return models.Organization{}, fmt.Errorf("query organization by name: %w", err)
-	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
-}
-
+// Update mutates the organization identified by org.ID.
+// lint:allow-no-orgid reason="organizations is the root tenant table; org.ID IS the org"
 func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization) error {
 	query := `
 		UPDATE organizations
