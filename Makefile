@@ -170,14 +170,31 @@ lint-bootstrap:
 # Point git at .githooks/. The pre-commit hook runs lint-schema / lint-stores
 # (scoped to the staged files) and gofmt before every commit. Skip with
 # `git commit --no-verify` or disable with `make hooks-uninstall`.
+#
+# Refuses to clobber a pre-existing core.hooksPath pointing elsewhere (a
+# monorepo parent, a custom dev setup) — override intentionally by running
+# `git config core.hooksPath .githooks` by hand.
 hooks-install:
 	@git rev-parse --git-dir >/dev/null 2>&1 || { echo "Not a git repo"; exit 1; }
-	git config core.hooksPath .githooks
-	@echo "Installed: git will now run .githooks/pre-commit on every commit."
+	@existing=$$(git config --get core.hooksPath 2>/dev/null || true); \
+	if [ -z "$$existing" ] || [ "$$existing" = ".githooks" ]; then \
+	  git config core.hooksPath .githooks; \
+	  echo "Installed: git will now run .githooks/pre-commit on every commit."; \
+	else \
+	  echo "ERROR: core.hooksPath is already set to '$$existing'." >&2; \
+	  echo "Refusing to overwrite. To use 143's hooks anyway, run:" >&2; \
+	  echo "  git config core.hooksPath .githooks" >&2; \
+	  exit 1; \
+	fi
 
 hooks-uninstall:
-	@git config --unset core.hooksPath || true
-	@echo "Uninstalled: git will use the default .git/hooks/ path."
+	@existing=$$(git config --get core.hooksPath 2>/dev/null || true); \
+	if [ "$$existing" = ".githooks" ]; then \
+	  git config --unset core.hooksPath; \
+	  echo "Uninstalled: git will use the default .git/hooks/ path."; \
+	else \
+	  echo "core.hooksPath is '$$existing' (not .githooks) — leaving alone."; \
+	fi
 
 # ── Secrets management (SOPS + age) ─────────────────────────────────
 # Optional — only needed if you want encrypted secrets committed to git.

@@ -221,12 +221,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8.5 Install git pre-commit hooks
+# 8.5 Install git pre-commit hooks (unless core.hooksPath is already set
+#     elsewhere — e.g. a monorepo parent or a custom dev setup).
 # ---------------------------------------------------------------------------
 if [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
-  info "Installing git pre-commit hooks (tenancy lints + gofmt)..."
-  git config core.hooksPath .githooks
-  info "Hooks installed. Skip a commit's hooks with: git commit --no-verify"
+  existing_hooks_path=$(git config --get core.hooksPath 2>/dev/null || true)
+  if [ -z "$existing_hooks_path" ] || [ "$existing_hooks_path" = ".githooks" ]; then
+    info "Installing git pre-commit hooks (tenancy lints + gofmt)..."
+    git config core.hooksPath .githooks
+    info "Hooks installed. Skip a commit's hooks with: git commit --no-verify"
+  else
+    warn "core.hooksPath is already set to '$existing_hooks_path' — leaving alone."
+    warn "To use 143's hooks, run: git config core.hooksPath .githooks"
+  fi
 else
   warn "Not a git repo — skipping hook install."
 fi

@@ -11,9 +11,10 @@
 //
 // To exempt a table:
 //  1. Add it to allowedNoOrgID with a short justification; OR
-//  2. Add an inline comment on the line of the CREATE TABLE that includes a
-//     `reason="<why>"` clause:
+//  2. Add an inline comment anywhere inside the `CREATE TABLE ... (...)`
+//     statement that includes a `reason="<why>"` clause:
 //     `-- lint:no-org-id reason="<why>"`
+//     The comment may appear on the header line or inside the column list.
 //
 // Run via `make lint-schema` or directly: `go run ./cmd/lint-schema`.
 package main
@@ -46,22 +47,35 @@ var allowedNoOrgID = map[string]string{
 	"project_source_issues":       "join of projects and issues (both org-scoped)",
 }
 
+// identPattern matches a single SQL identifier: either an unquoted
+// ASCII identifier or a double-quoted identifier (which may contain
+// spaces, dots, etc. that would otherwise be syntactically significant).
+const identPattern = `(?:[a-zA-Z_][a-zA-Z0-9_]*|"[^"]+")`
+
+// qualifiedIdentPattern matches an optionally schema-qualified identifier
+// like `foo`, `public.foo`, or `public."foo bar"`.
+const qualifiedIdentPattern = identPattern + `(?:\.` + identPattern + `)?`
+
 var (
-	// Match `CREATE TABLE <name> (`, optionally with IF NOT EXISTS.
+	// Match `CREATE TABLE <name> (`, optionally with IF NOT EXISTS, supporting
+	// schema-qualified (`public.foo`) and double-quoted (`"foo bar"`) names.
 	// Skip PARTITION OF (inherits org_id from parent) and CREATE TABLE ... AS
 	// SELECT (not a schema definition for tenant rows).
-	createTableRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(`)
+	createTableRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(` + qualifiedIdentPattern + `)\s*\(`)
 
 	// Detect partition children like `CREATE TABLE foo_default PARTITION OF foo DEFAULT;`
-	partitionOfRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+PARTITION\s+OF\s+`)
+	partitionOfRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdentPattern + `\s+PARTITION\s+OF\s+`)
 
 	// Detect `CREATE TABLE ... AS SELECT` (backup/temp tables).
-	createTableAsRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+`)
+	createTableAsRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?` + qualifiedIdentPattern + `\s+AS\s+`)
 
-	// Inline escape hatch on a CREATE TABLE line. The reason="..." clause is
-	// required so the justification stays alongside the exception:
+	// Inline escape hatch anywhere inside the CREATE TABLE statement. The
+	// reason="..." clause is required so the justification stays alongside
+	// the exception:
 	//   CREATE TABLE foo ( -- lint:no-org-id reason="global registry"
-	inlineEscapeRE = regexp.MustCompile(`--\s*lint:no-org-id\s+reason="[^"]+"`)
+	//     ...
+	//   );
+	inlineEscapeRE = regexp.MustCompile(`--[^\n]*lint:no-org-id\s+reason="[^"]+"`)
 )
 
 type violation struct {
@@ -119,16 +133,24 @@ func scan(file, src string) []violation {
 	// Walk all CREATE TABLE matches, filtering out partitions and AS SELECT.
 	for _, m := range createTableRE.FindAllStringSubmatchIndex(src, -1) {
 		start := m[0]
-		line := src[start:findLineEnd(src, start)]
+		headerLine := src[start:findLineEnd(src, start)]
 
-		if partitionOfRE.MatchString(line) || createTableAsRE.MatchString(line) {
-			continue
-		}
-		if inlineEscapeRE.MatchString(line) {
+		if partitionOfRE.MatchString(headerLine) || createTableAsRE.MatchString(headerLine) {
 			continue
 		}
 
-		table := src[m[2]:m[3]]
+		openParen := m[1] - 1
+		closeParen := findMatchingClose(src, openParen)
+		// The full statement text — header + body — is the escape-hatch
+		// search window, so the comment may live on a dedicated line
+		// inside the body rather than sharing the header line.
+		statement := src[start : closeParen+1]
+		if inlineEscapeRE.MatchString(statement) {
+			continue
+		}
+
+		rawName := src[m[2]:m[3]]
+		table := normalizeTableName(rawName)
 		if _, ok := allowedNoOrgID[table]; ok {
 			continue
 		}
@@ -137,7 +159,7 @@ func scan(file, src string) []violation {
 			continue
 		}
 
-		body := extractTableBody(src, m[1]-1) // m[1]-1 = index of the '('
+		body := src[openParen+1 : closeParen]
 		if hasOrgIDColumn(body) {
 			continue
 		}
@@ -151,9 +173,20 @@ func scan(file, src string) []violation {
 	return out
 }
 
-// extractTableBody returns the contents between the matching parentheses of a
-// CREATE TABLE statement, starting at the opening '(' byte.
-func extractTableBody(src string, openParen int) string {
+// normalizeTableName strips any schema qualifier and surrounding double
+// quotes so `public."foo"` and `"foo"` both normalize to `foo` for
+// allowlist lookup and violation display.
+func normalizeTableName(raw string) string {
+	if i := strings.LastIndex(raw, "."); i >= 0 {
+		raw = raw[i+1:]
+	}
+	return strings.Trim(raw, `"`)
+}
+
+// findMatchingClose returns the index of the `)` that balances the `(` at
+// openParen. Falls back to len(src)-1 if the statement is unterminated so
+// callers get a best-effort body string instead of a panic.
+func findMatchingClose(src string, openParen int) int {
 	depth := 0
 	for i := openParen; i < len(src); i++ {
 		switch src[i] {
@@ -162,11 +195,11 @@ func extractTableBody(src string, openParen int) string {
 		case ')':
 			depth--
 			if depth == 0 {
-				return src[openParen+1 : i]
+				return i
 			}
 		}
 	}
-	return src[openParen+1:]
+	return len(src) - 1
 }
 
 // hasOrgIDColumn returns true if the column list declares an org_id column.

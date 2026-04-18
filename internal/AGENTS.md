@@ -4,12 +4,12 @@
 
 Two automated lints run in `make lint-tenancy` (and in CI on every PR that touches backend or migrations):
 
-1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` without an `org_id uuid NOT NULL REFERENCES organizations(id)` column will fail CI. If a table is genuinely cross-org, allowlist it in `cmd/lint-schema/main.go` with a one-line reason — don't paper over with the inline `-- lint:no-org-id` escape hatch unless it's a one-off.
+1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` without an `org_id uuid NOT NULL REFERENCES organizations(id)` column will fail CI. Schema-qualified (`public.foo`) and double-quoted (`"foo"`) table names are recognized and normalized. If a table is genuinely cross-org, allowlist it in `cmd/lint-schema/main.go` with a one-line reason — don't paper over with the inline `-- lint:no-org-id reason="..."` escape hatch unless it's a one-off. The inline escape may appear anywhere inside the `CREATE TABLE ( ... )` statement (header line or a dedicated comment line in the body).
 
 2. **Store lint** (`cmd/lint-stores`). Every exported method on `*XxxStore` under `internal/db/` must either:
    - take `orgID uuid.UUID` explicitly (preferred). The parameter name must end in `orgid` case-insensitively (`orgID`, `OrgID`, `org_id`, `srcOrgID`, `targetOrgID`), or
-   - take a `*models.X` / `models.X` carrier whose struct **literally declares an `OrgID` field**. The lint pre-scans `internal/models/*.go` to verify; a future model that drops `OrgID` will start failing the lint at every Create/Upsert call site, or
-   - be annotated with `// lint:allow-no-orgid reason="..."` on the line directly above `func`.
+   - take a `*models.X` / `models.X` carrier that has an `OrgID` field — either declared directly on the struct **or** inherited via an embedded type (e.g. `models.Session` embeds `BaseEntity`, and `BaseEntity` declares `OrgID`). The lint pre-scans `internal/models/*.go` and resolves embeddings to a fixed point; only embedding within the `models` package counts (cross-package embeddings are not followed), or
+   - be annotated with `// lint:allow-no-orgid reason="..."` on the line directly above `func`. A bare `// lint:allow-no-orgid` without a `reason="..."` clause is itself a lint violation — the reason must travel with the exception.
 
 When you write a new store method, default to the first option. The flow from HTTP handler to DB is:
 

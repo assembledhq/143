@@ -21,13 +21,53 @@ has_store=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   case "$f" in
-    *.go)                    has_go=1 ;;
+    *.go)                        has_go=1 ;;
   esac
   case "$f" in
-    migrations/*.up.sql)     has_migration=1 ;;
-    internal/db/*.go)        has_store=1 ;;
+    migrations/*.up.sql)         has_migration=1 ;;
+    # Store-lint depends on both the DB layer AND the model structs it
+    # treats as carriers (verified by presence of an OrgID field), so a
+    # change to either must re-run the lint.
+    internal/db/*.go)            has_store=1 ;;
+    internal/models/*.go)        has_store=1 ;;
   esac
 done <<< "$staged"
+
+repo_root=$(git rev-parse --show-toplevel)
+bin_dir="$repo_root/bin"
+mkdir -p "$bin_dir"
+
+# ensure_tool builds ./cmd/<name> to bin/<name> when the binary is missing
+# or older than any source under cmd/<name>. Using compiled binaries keeps
+# the hook snappy — `go run` re-links on every invocation.
+ensure_tool() {
+  local name="$1"
+  local out="$bin_dir/$name"
+  local src_dir="$repo_root/cmd/$name"
+
+  local rebuild=0
+  if [[ ! -x "$out" ]]; then
+    rebuild=1
+  else
+    # Rebuild if any source file is newer than the binary.
+    while IFS= read -r src; do
+      if [[ "$src" -nt "$out" ]]; then
+        rebuild=1
+        break
+      fi
+    done < <(find "$src_dir" -type f -name '*.go')
+  fi
+
+  if [[ $rebuild -eq 1 ]]; then
+    printf '  [pre-commit] building %s ... ' "$name"
+    if ! build_out=$(go build -o "$out" "./cmd/$name" 2>&1); then
+      echo "FAIL"
+      echo "$build_out" | sed 's/^/    /' >&2
+      return 1
+    fi
+    echo "OK"
+  fi
+}
 
 fail=0
 run_check() {
@@ -44,11 +84,19 @@ run_check() {
 }
 
 if [[ $has_migration -eq 1 ]]; then
-  run_check "lint-schema" go run ./cmd/lint-schema
+  if ensure_tool lint-schema; then
+    run_check "lint-schema" "$bin_dir/lint-schema"
+  else
+    fail=1
+  fi
 fi
 
 if [[ $has_store -eq 1 ]]; then
-  run_check "lint-stores" go run ./cmd/lint-stores
+  if ensure_tool lint-stores; then
+    run_check "lint-stores" "$bin_dir/lint-stores"
+  else
+    fail=1
+  fi
 fi
 
 if [[ $has_go -eq 1 ]]; then

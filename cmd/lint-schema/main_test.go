@@ -94,6 +94,76 @@ func TestScan(t *testing.T) {
 			wantLen:  1,
 			wantName: "widgets",
 		},
+		{
+			name: "flags schema-qualified table missing org_id",
+			sql: `CREATE TABLE public.widgets (
+    id   uuid PRIMARY KEY,
+    name text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "widgets",
+		},
+		{
+			name: "accepts schema-qualified table with org_id",
+			sql: `CREATE TABLE public.widgets (
+    id     uuid PRIMARY KEY,
+    org_id uuid NOT NULL REFERENCES organizations(id),
+    name   text NOT NULL
+);`,
+			wantLen: 0,
+		},
+		{
+			name: "normalizes schema-qualified name against allowlist",
+			sql: `CREATE TABLE public.nodes (
+    id   uuid PRIMARY KEY,
+    host text NOT NULL
+);`,
+			wantLen: 0,
+		},
+		{
+			name: "flags double-quoted table missing org_id",
+			sql: `CREATE TABLE "widgets" (
+    id   uuid PRIMARY KEY,
+    name text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "widgets",
+		},
+		{
+			name: "flags schema-qualified and quoted name missing org_id",
+			sql: `CREATE TABLE public."widgets" (
+    id uuid PRIMARY KEY
+);`,
+			wantLen:  1,
+			wantName: "widgets",
+		},
+		{
+			name: "accepts in-body escape hatch on its own line",
+			sql: `CREATE TABLE registry (
+    -- lint:no-org-id reason="global cache"
+    key   text PRIMARY KEY,
+    value jsonb
+);`,
+			wantLen: 0,
+		},
+		{
+			name: "accepts in-body escape hatch after a column",
+			sql: `CREATE TABLE registry (
+    key   text PRIMARY KEY,
+    value jsonb -- lint:no-org-id reason="global cache"
+);`,
+			wantLen: 0,
+		},
+		{
+			name: "still rejects in-body escape without reason clause",
+			sql: `CREATE TABLE registry (
+    -- lint:no-org-id
+    key   text PRIMARY KEY,
+    value jsonb
+);`,
+			wantLen:  1,
+			wantName: "registry",
+		},
 	}
 
 	for _, tt := range tests {

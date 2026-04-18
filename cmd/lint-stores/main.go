@@ -30,7 +30,7 @@ import (
 )
 
 const (
-	allowComment     = "lint:allow-no-orgid"
+	allowMarker      = "lint:allow-no-orgid"
 	defaultStoresDir = "internal/db"
 	defaultModelsDir = "internal/models"
 	orgIDFieldName   = "OrgID"
@@ -41,6 +41,12 @@ const (
 // `srcOrgID`, `targetOrgID`. Names like `organizerID` deliberately do NOT
 // match — substring matching on "org" was too permissive.
 var orgIDParamNameRE = regexp.MustCompile(`(?i)org_?id$`)
+
+// allowCommentRE matches a properly-formed opt-out: the marker followed by
+// a `reason="<non-empty>"` clause. A bare `// lint:allow-no-orgid` is NOT
+// accepted — the reason must travel with the exception so drive-by opt-outs
+// stay documented (mirrors the schema lint's inline escape requirement).
+var allowCommentRE = regexp.MustCompile(`lint:allow-no-orgid\s+reason="[^"]+"`)
 
 func main() {
 	dir := defaultStoresDir
@@ -70,6 +76,12 @@ func main() {
 	var violations []string
 	scanned := 0
 
+	// First pass: parse every file and collect all `*XxxStore` type
+	// declarations so checkFunc can restrict its attention to methods whose
+	// receiver is an actual declared store (defense against a future helper
+	// type whose name happens to end in "Store").
+	parsed := make([]*ast.File, 0, len(files))
+	stores := map[string]bool{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -84,13 +96,17 @@ func main() {
 		if err != nil {
 			fatal("parse %s: %v", f, err)
 		}
+		parsed = append(parsed, file)
+		collectStoreTypes(file, stores)
+	}
 
+	for _, file := range parsed {
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
-			v := checkFunc(fset, fn, carriers)
+			v := checkFunc(fset, fn, carriers, stores)
 			if v != "" {
 				violations = append(violations, v)
 			}
@@ -111,20 +127,25 @@ func main() {
 	fmt.Fprintln(os.Stderr, "  orgID uuid.UUID (preferred), or via a *models.X carrier whose")
 	fmt.Fprintln(os.Stderr, "  struct declares an OrgID field.")
 	fmt.Fprintln(os.Stderr, "If the method is legitimately cross-org (pre-auth, system cleanup),")
-	fmt.Fprintln(os.Stderr, "add a comment above it:")
+	fmt.Fprintln(os.Stderr, "add a comment above it (the reason clause is required):")
 	fmt.Fprintln(os.Stderr, `  // lint:allow-no-orgid reason="..."`)
 	os.Exit(1)
 }
 
 // loadOrgIDCarriers parses every Go file in modelsDir and returns the set of
-// struct type names that declare a field literally named "OrgID". These are
-// the only types accepted as `*models.X` carriers by the lint.
+// struct type names that declare (or inherit via embedding) a field literally
+// named "OrgID". These are the only types accepted as `*models.X` carriers
+// by the lint.
+//
+// Inheritance resolution is transitive: if `Session` embeds `BaseEntity` and
+// `BaseEntity` declares `OrgID`, then `Session` is a carrier. Resolution
+// runs to a fixed point so long embedding chains resolve correctly.
 func loadOrgIDCarriers(modelsDir string) (map[string]bool, error) {
 	files, err := filepath.Glob(filepath.Join(modelsDir, "*.go"))
 	if err != nil {
 		return nil, fmt.Errorf("glob: %w", err)
 	}
-	carriers := map[string]bool{}
+	structs := map[string]*ast.StructType{}
 	fset := token.NewFileSet()
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
@@ -153,16 +174,59 @@ func loadOrgIDCarriers(modelsDir string) (map[string]bool, error) {
 				if !ok || st.Fields == nil {
 					continue
 				}
-				if structHasOrgIDField(st) {
-					carriers[ts.Name.Name] = true
-				}
+				structs[ts.Name.Name] = st
+			}
+		}
+	}
+
+	carriers := map[string]bool{}
+	// Seed with structs that directly declare OrgID.
+	for name, st := range structs {
+		if structHasDirectOrgIDField(st) {
+			carriers[name] = true
+		}
+	}
+	// Propagate via embedded fields until fixed point. A struct that embeds
+	// any known carrier becomes a carrier itself.
+	for changed := true; changed; {
+		changed = false
+		for name, st := range structs {
+			if carriers[name] {
+				continue
+			}
+			if structEmbedsCarrier(st, carriers) {
+				carriers[name] = true
+				changed = true
 			}
 		}
 	}
 	return carriers, nil
 }
 
-func structHasOrgIDField(st *ast.StructType) bool {
+// collectStoreTypes records every top-level type declaration whose name ends
+// in "Store" into `out`. Used to bound the store-method check to types that
+// actually exist in the scanned package.
+func collectStoreTypes(file *ast.File, out map[string]bool) {
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			if strings.HasSuffix(ts.Name.Name, "Store") {
+				out[ts.Name.Name] = true
+			}
+		}
+	}
+}
+
+// structHasDirectOrgIDField reports whether st declares a field literally
+// named "OrgID" on the struct itself (i.e. not reached via embedding).
+func structHasDirectOrgIDField(st *ast.StructType) bool {
 	for _, field := range st.Fields.List {
 		for _, name := range field.Names {
 			if name.Name == orgIDFieldName {
@@ -173,33 +237,73 @@ func structHasOrgIDField(st *ast.StructType) bool {
 	return false
 }
 
+// structEmbedsCarrier reports whether st has an embedded field (one with no
+// explicit name) whose type name is already known to be a carrier. Handles
+// both `Embedded` and `*Embedded` forms; only considers embeddings that
+// resolve within the same `models` package (no cross-package resolution).
+func structEmbedsCarrier(st *ast.StructType, carriers map[string]bool) bool {
+	for _, field := range st.Fields.List {
+		// Embedded fields have no explicit name.
+		if len(field.Names) != 0 {
+			continue
+		}
+		name := embeddedTypeName(field.Type)
+		if name != "" && carriers[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// embeddedTypeName returns the local type name of an embedded field, or "" if
+// the field embeds a type from another package (which we don't attempt to
+// resolve). `Foo` and `*Foo` both return "Foo"; `other.Foo` returns "".
+func embeddedTypeName(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		return embeddedTypeName(star.X)
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
 // checkFunc returns a violation string if fn is a non-compliant exported
-// *Store method, or "" otherwise.
-func checkFunc(fset *token.FileSet, fn *ast.FuncDecl, carriers map[string]bool) string {
-	// Must be a method on a *XxxStore receiver.
+// method on a known store type, or "" otherwise. `stores` is the set of
+// `*XxxStore` type names declared in the scanned files — methods whose
+// receiver isn't in that set are skipped, so we only police real stores.
+func checkFunc(fset *token.FileSet, fn *ast.FuncDecl, carriers, stores map[string]bool) string {
+	// Must be a method on a *XxxStore receiver declared in the scanned files.
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return ""
 	}
 	recv := receiverTypeName(fn.Recv.List[0].Type)
-	if !strings.HasSuffix(recv, "Store") {
+	if !stores[recv] {
 		return ""
 	}
 	// Only check exported methods.
 	if !fn.Name.IsExported() {
 		return ""
 	}
-	// Respect the opt-out comment.
-	if hasAllowComment(fn.Doc) {
+
+	pos := fset.Position(fn.Pos())
+	// A malformed opt-out (marker without reason="...") is itself a violation:
+	// bare `// lint:allow-no-orgid` would silently disable the check otherwise.
+	bare, proper := classifyAllowComment(fn.Doc)
+	if proper {
 		return ""
+	}
+	if bare {
+		return fmt.Sprintf(`%s:%d: (%s).%s has a bare %q comment; the reason="..." clause is required`,
+			pos.Filename, pos.Line, recv, fn.Name.Name, allowMarker)
 	}
 
 	if hasOrgScope(fn.Type.Params, carriers) {
 		return ""
 	}
 
-	pos := fset.Position(fn.Pos())
 	return fmt.Sprintf("%s:%d: (%s).%s is missing org scope (add orgID uuid.UUID, pass a *models.X carrier with an OrgID field, or add %q)",
-		pos.Filename, pos.Line, recv, fn.Name.Name, allowComment)
+		pos.Filename, pos.Line, recv, fn.Name.Name, allowMarker+` reason="..."`)
 }
 
 func receiverTypeName(expr ast.Expr) string {
@@ -280,16 +384,23 @@ func isCarrierType(expr ast.Expr, carriers map[string]bool) bool {
 	return carriers[sel.Sel.Name]
 }
 
-func hasAllowComment(doc *ast.CommentGroup) bool {
+// classifyAllowComment inspects the doc comment for the opt-out marker.
+// Returns (bare, proper): bare=true when the marker appears without a
+// reason="..." clause (a malformed opt-out), proper=true when a properly-
+// formed marker is present. Both false means no opt-out was present.
+func classifyAllowComment(doc *ast.CommentGroup) (bare, proper bool) {
 	if doc == nil {
-		return false
+		return false, false
 	}
 	for _, c := range doc.List {
-		if strings.Contains(c.Text, allowComment) {
-			return true
+		if allowCommentRE.MatchString(c.Text) {
+			return false, true
+		}
+		if strings.Contains(c.Text, allowMarker) {
+			bare = true
 		}
 	}
-	return false
+	return bare, false
 }
 
 func fatal(format string, args ...any) {

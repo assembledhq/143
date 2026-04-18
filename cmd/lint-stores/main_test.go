@@ -15,8 +15,12 @@ func TestCheckFunc(t *testing.T) {
 	t.Parallel()
 
 	// All carrier-bearing tests use type Foo, which is registered as a known
-	// carrier. The "unknown carrier" case below uses Bar, which is not.
+	// carrier. The "unknown carrier" cases below use Bar, which is not.
 	carriers := map[string]bool{"Foo": true}
+	// FooStore is the only known store type for this table; methods on other
+	// receivers (including types that happen to end in "Store" but aren't
+	// declared in the scanned files) are ignored.
+	stores := map[string]bool{"FooStore": true}
 
 	tests := []struct {
 		name    string
@@ -152,6 +156,42 @@ type FooStore struct{}
 func (s *FooStore) Get(ctx context.Context, a, orgID uuid.UUID) {}`,
 			wantHit: false,
 		},
+		{
+			name: "rejects models.X value carrier when X is NOT a known carrier",
+			src: `package x
+import (
+  "context"
+  "pkg/models"
+)
+type FooStore struct{}
+func (s *FooStore) Create(ctx context.Context, e models.Bar) {}`,
+			wantHit: true,
+		},
+		{
+			name: "rejects bare // lint:allow-no-orgid without reason clause",
+			src: `package x
+import "context"
+type FooStore struct{}
+// lint:allow-no-orgid
+func (s *FooStore) GetByToken(ctx context.Context, token string) {}`,
+			wantHit: true,
+		},
+		{
+			name: "rejects lint:allow-no-orgid with empty reason clause",
+			src: `package x
+import "context"
+type FooStore struct{}
+// lint:allow-no-orgid reason=""
+func (s *FooStore) GetByToken(ctx context.Context, token string) {}`,
+			wantHit: true,
+		},
+		{
+			name: "ignores methods on types ending in Store that are NOT declared in the scanned files",
+			src: `package x
+import "context"
+func (s *ExternalStore) Something(ctx context.Context, x string) {}`,
+			wantHit: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -168,7 +208,7 @@ func (s *FooStore) Get(ctx context.Context, a, orgID uuid.UUID) {}`,
 				if !ok {
 					continue
 				}
-				if v := checkFunc(fset, fn, carriers); v != "" {
+				if v := checkFunc(fset, fn, carriers, stores); v != "" {
 					hits = append(hits, v)
 				}
 			}
@@ -204,6 +244,34 @@ type WithoutOrgID struct {
 type AlsoWithOrgID struct {
 	OrgID uuid.UUID
 }
+
+type BaseEntity struct {
+	OrgID uuid.UUID
+	ID    uuid.UUID
+}
+
+// Embeds BaseEntity (which declares OrgID) and should resolve to a carrier.
+type ViaEmbedding struct {
+	BaseEntity
+	Name string
+}
+
+// Embeds *BaseEntity via pointer and should also resolve to a carrier.
+type ViaPointerEmbedding struct {
+	*BaseEntity
+	Name string
+}
+
+// Transitively embeds OrgID via ViaEmbedding -> BaseEntity.
+type TwoLevelEmbedding struct {
+	ViaEmbedding
+}
+
+// Embeds a type that does NOT carry OrgID — must NOT be a carrier.
+type EmbedsNonCarrier struct {
+	WithoutOrgID
+	Name string
+}
 `), 0o600), "write models.go")
 
 	// A test file in the same dir should be skipped.
@@ -219,6 +287,11 @@ type FromTestFile struct {
 
 	require.True(t, carriers["WithOrgID"], "WithOrgID should be a carrier")
 	require.True(t, carriers["AlsoWithOrgID"], "AlsoWithOrgID should be a carrier")
+	require.True(t, carriers["BaseEntity"], "BaseEntity should be a carrier")
+	require.True(t, carriers["ViaEmbedding"], "ViaEmbedding should inherit OrgID via embedding")
+	require.True(t, carriers["ViaPointerEmbedding"], "ViaPointerEmbedding should inherit OrgID via *embedding")
+	require.True(t, carriers["TwoLevelEmbedding"], "TwoLevelEmbedding should inherit OrgID transitively")
 	require.False(t, carriers["WithoutOrgID"], "WithoutOrgID should not be a carrier")
+	require.False(t, carriers["EmbedsNonCarrier"], "EmbedsNonCarrier should not be a carrier")
 	require.False(t, carriers["FromTestFile"], "test files should be skipped")
 }
