@@ -18,6 +18,8 @@ func NewOrganizationStore(db DBTX) *OrganizationStore {
 	return &OrganizationStore{db: db}
 }
 
+// Create inserts a new organization row.
+// lint:allow-no-orgid reason="organizations is the root tenant table; this row IS the org"
 func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization) error {
 	query := `
 		INSERT INTO organizations (name, settings)
@@ -48,6 +50,8 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }
 
+// Update mutates the organization identified by org.ID.
+// lint:allow-no-orgid reason="organizations is the root tenant table; org.ID IS the org"
 func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization) error {
 	query := `
 		UPDATE organizations

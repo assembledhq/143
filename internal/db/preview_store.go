@@ -312,6 +312,7 @@ func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time
 // =============================================================================
 
 // CreatePreviewService inserts a new preview service record.
+// lint:allow-no-orgid reason="preview_services is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreatePreviewService(ctx context.Context, svc *models.PreviewService) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_services (
@@ -389,6 +390,7 @@ func (s *PreviewStore) ListServicesByPreview(ctx context.Context, orgID, preview
 // =============================================================================
 
 // CreatePreviewInfrastructure inserts a new infrastructure record.
+// lint:allow-no-orgid reason="preview_infrastructure is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreatePreviewInfrastructure(ctx context.Context, infra *models.PreviewInfrastructure) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_infrastructure (
@@ -455,6 +457,7 @@ func (s *PreviewStore) ListInfraByPreview(ctx context.Context, orgID, previewIns
 // =============================================================================
 
 // CreateSnapshot inserts a new screenshot snapshot.
+// lint:allow-no-orgid reason="preview_snapshots is a child of preview_instances and is scoped via preview_instance_id FK; the parent row carries org_id"
 func (s *PreviewStore) CreateSnapshot(ctx context.Context, snap *models.PreviewSnapshot) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_snapshots (

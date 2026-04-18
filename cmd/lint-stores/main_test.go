@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,6 +13,10 @@ import (
 
 func TestCheckFunc(t *testing.T) {
 	t.Parallel()
+
+	// All carrier-bearing tests use type Foo, which is registered as a known
+	// carrier. The "unknown carrier" case below uses Bar, which is not.
+	carriers := map[string]bool{"Foo": true}
 
 	tests := []struct {
 		name    string
@@ -48,7 +54,29 @@ func (s *FooStore) List(ctx context.Context, OrgID uuid.UUID) {}`,
 			wantHit: false,
 		},
 		{
-			name: "accepts *models.X carrier",
+			name: "accepts srcOrgID uuid.UUID (suffix match)",
+			src: `package x
+import (
+  "context"
+  "github.com/google/uuid"
+)
+type FooStore struct{}
+func (s *FooStore) Copy(ctx context.Context, srcOrgID, destOrgID uuid.UUID) {}`,
+			wantHit: false,
+		},
+		{
+			name: "rejects organizerID uuid.UUID (not org_id)",
+			src: `package x
+import (
+  "context"
+  "github.com/google/uuid"
+)
+type FooStore struct{}
+func (s *FooStore) AssignOrganizer(ctx context.Context, organizerID uuid.UUID) {}`,
+			wantHit: true,
+		},
+		{
+			name: "accepts *models.X carrier when X has OrgID",
 			src: `package x
 import (
   "context"
@@ -59,7 +87,7 @@ func (s *FooStore) Create(ctx context.Context, e *models.Foo) {}`,
 			wantHit: false,
 		},
 		{
-			name: "accepts models.X value carrier",
+			name: "accepts models.X value carrier when X has OrgID",
 			src: `package x
 import (
   "context"
@@ -68,6 +96,17 @@ import (
 type FooStore struct{}
 func (s *FooStore) Create(ctx context.Context, e models.Foo) {}`,
 			wantHit: false,
+		},
+		{
+			name: "rejects *models.X when X is NOT a known OrgID-bearing carrier",
+			src: `package x
+import (
+  "context"
+  "pkg/models"
+)
+type FooStore struct{}
+func (s *FooStore) Create(ctx context.Context, e *models.Bar) {}`,
+			wantHit: true,
 		},
 		{
 			name: "respects opt-out comment",
@@ -129,7 +168,7 @@ func (s *FooStore) Get(ctx context.Context, a, orgID uuid.UUID) {}`,
 				if !ok {
 					continue
 				}
-				if v := checkFunc(fset, fn); v != "" {
+				if v := checkFunc(fset, fn, carriers); v != "" {
 					hits = append(hits, v)
 				}
 			}
@@ -141,4 +180,45 @@ func (s *FooStore) Get(ctx context.Context, a, orgID uuid.UUID) {}`,
 			}
 		})
 	}
+}
+
+func TestLoadOrgIDCarriers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models.go"), []byte(`package models
+
+import "github.com/google/uuid"
+
+type WithOrgID struct {
+	ID    uuid.UUID
+	OrgID uuid.UUID
+	Name  string
+}
+
+type WithoutOrgID struct {
+	ID   uuid.UUID
+	Name string
+}
+
+type AlsoWithOrgID struct {
+	OrgID uuid.UUID
+}
+`), 0o600), "write models.go")
+
+	// A test file in the same dir should be skipped.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "models_test.go"), []byte(`package models
+
+type FromTestFile struct {
+	OrgID string
+}
+`), 0o600), "write test file")
+
+	carriers, err := loadOrgIDCarriers(dir)
+	require.NoError(t, err)
+
+	require.True(t, carriers["WithOrgID"], "WithOrgID should be a carrier")
+	require.True(t, carriers["AlsoWithOrgID"], "AlsoWithOrgID should be a carrier")
+	require.False(t, carriers["WithoutOrgID"], "WithoutOrgID should not be a carrier")
+	require.False(t, carriers["FromTestFile"], "test files should be skipped")
 }

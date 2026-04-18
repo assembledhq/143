@@ -1,7 +1,12 @@
 // Command lint-stores enforces that every exported method on a *XxxStore
 // type under internal/db takes org_id into account — either as an explicit
 // `orgID uuid.UUID` parameter, or via a carrier struct (e.g. `*models.User`)
-// whose OrgID field is used internally.
+// whose `OrgID` field provides the scope.
+//
+// Carrier verification is real: the lint pre-scans `internal/models/*.go`
+// and only treats a `*models.X` parameter as scoped if the underlying
+// struct literally declares an `OrgID` field. A future model that omits
+// `OrgID` will trigger a violation when used as a carrier.
 //
 // Methods that truly cannot scope by org (pre-auth lookups, cross-org
 // system cleanup) must opt out with a comment directly above the func:
@@ -19,16 +24,37 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
 
-const allowComment = "lint:allow-no-orgid"
+const (
+	allowComment     = "lint:allow-no-orgid"
+	defaultStoresDir = "internal/db"
+	defaultModelsDir = "internal/models"
+	orgIDFieldName   = "OrgID"
+)
+
+// orgIDParamNameRE matches parameter names that end in "orgid" (case-
+// insensitive), with an optional underscore: `OrgID`, `orgID`, `org_id`,
+// `srcOrgID`, `targetOrgID`. Names like `organizerID` deliberately do NOT
+// match — substring matching on "org" was too permissive.
+var orgIDParamNameRE = regexp.MustCompile(`(?i)org_?id$`)
 
 func main() {
-	dir := "internal/db"
+	dir := defaultStoresDir
 	if len(os.Args) > 1 {
 		dir = os.Args[1]
+	}
+	modelsDir := defaultModelsDir
+	if len(os.Args) > 2 {
+		modelsDir = os.Args[2]
+	}
+
+	carriers, err := loadOrgIDCarriers(modelsDir)
+	if err != nil {
+		fatal("load carriers from %s: %v", modelsDir, err)
 	}
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
@@ -64,7 +90,7 @@ func main() {
 			if !ok {
 				continue
 			}
-			v := checkFunc(fset, fn)
+			v := checkFunc(fset, fn, carriers)
 			if v != "" {
 				violations = append(violations, v)
 			}
@@ -72,7 +98,7 @@ func main() {
 	}
 
 	if len(violations) == 0 {
-		fmt.Printf("lint-stores: OK — scanned %d file(s) under %s\n", scanned, dir)
+		fmt.Printf("lint-stores: OK — scanned %d file(s) under %s (%d carrier types loaded)\n", scanned, dir, len(carriers))
 		return
 	}
 
@@ -82,16 +108,74 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Every exported *Store method must accept org scope — either as")
-	fmt.Fprintln(os.Stderr, "  orgID uuid.UUID (preferred), or via a carrier struct (*models.X).")
+	fmt.Fprintln(os.Stderr, "  orgID uuid.UUID (preferred), or via a *models.X carrier whose")
+	fmt.Fprintln(os.Stderr, "  struct declares an OrgID field.")
 	fmt.Fprintln(os.Stderr, "If the method is legitimately cross-org (pre-auth, system cleanup),")
 	fmt.Fprintln(os.Stderr, "add a comment above it:")
 	fmt.Fprintln(os.Stderr, `  // lint:allow-no-orgid reason="..."`)
 	os.Exit(1)
 }
 
+// loadOrgIDCarriers parses every Go file in modelsDir and returns the set of
+// struct type names that declare a field literally named "OrgID". These are
+// the only types accepted as `*models.X` carriers by the lint.
+func loadOrgIDCarriers(modelsDir string) (map[string]bool, error) {
+	files, err := filepath.Glob(filepath.Join(modelsDir, "*.go"))
+	if err != nil {
+		return nil, fmt.Errorf("glob: %w", err)
+	}
+	carriers := map[string]bool{}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		// #nosec G304 -- f comes from filepath.Glob over internal/models; not user input.
+		src, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", f, err)
+		}
+		file, err := parser.ParseFile(fset, f, src, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", f, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok || st.Fields == nil {
+					continue
+				}
+				if structHasOrgIDField(st) {
+					carriers[ts.Name.Name] = true
+				}
+			}
+		}
+	}
+	return carriers, nil
+}
+
+func structHasOrgIDField(st *ast.StructType) bool {
+	for _, field := range st.Fields.List {
+		for _, name := range field.Names {
+			if name.Name == orgIDFieldName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkFunc returns a violation string if fn is a non-compliant exported
 // *Store method, or "" otherwise.
-func checkFunc(fset *token.FileSet, fn *ast.FuncDecl) string {
+func checkFunc(fset *token.FileSet, fn *ast.FuncDecl, carriers map[string]bool) string {
 	// Must be a method on a *XxxStore receiver.
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return ""
@@ -109,12 +193,12 @@ func checkFunc(fset *token.FileSet, fn *ast.FuncDecl) string {
 		return ""
 	}
 
-	if hasOrgScope(fn.Type.Params) {
+	if hasOrgScope(fn.Type.Params, carriers) {
 		return ""
 	}
 
 	pos := fset.Position(fn.Pos())
-	return fmt.Sprintf("%s:%d: (%s).%s is missing org scope (add orgID uuid.UUID, pass a *models.X carrier, or add %q)",
+	return fmt.Sprintf("%s:%d: (%s).%s is missing org scope (add orgID uuid.UUID, pass a *models.X carrier with an OrgID field, or add %q)",
 		pos.Filename, pos.Line, recv, fn.Name.Name, allowComment)
 }
 
@@ -133,10 +217,12 @@ func receiverTypeName(expr ast.Expr) string {
 }
 
 // hasOrgScope returns true if params contain either:
-//  1. a parameter whose name contains "org" (case-insensitive) with type uuid.UUID, OR
-//  2. a pointer-to-struct or struct-value parameter from a package (a "carrier"),
-//     used by Create/Upsert-style methods that receive the whole entity.
-func hasOrgScope(params *ast.FieldList) bool {
+//  1. a uuid.UUID parameter whose name matches orgIDParamNameRE
+//     (e.g. `orgID`, `OrgID`, `org_id`, `srcOrgID`); OR
+//  2. a pointer-to or value `models.X` parameter where X is a known carrier
+//     (loaded from internal/models/*.go and verified to declare an OrgID
+//     field) — used by Create/Upsert methods that receive the whole entity.
+func hasOrgScope(params *ast.FieldList, carriers map[string]bool) bool {
 	if params == nil {
 		return false
 	}
@@ -144,13 +230,13 @@ func hasOrgScope(params *ast.FieldList) bool {
 		// A field can declare multiple names for one type: `a, b uuid.UUID`.
 		if isUUIDType(field.Type) {
 			for _, name := range field.Names {
-				if strings.Contains(strings.ToLower(name.Name), "org") {
+				if orgIDParamNameRE.MatchString(name.Name) {
 					return true
 				}
 			}
 			continue
 		}
-		if isCarrierType(field.Type) {
+		if isCarrierType(field.Type, carriers) {
 			return true
 		}
 	}
@@ -170,13 +256,15 @@ func isUUIDType(expr ast.Expr) bool {
 	return pkg.Name == "uuid" && sel.Sel.Name == "UUID"
 }
 
-// isCarrierType reports whether the type looks like a struct carrier whose
-// OrgID field is used internally. Heuristic: *pkg.Type or pkg.Type where pkg
-// is "models" or the type name starts with an uppercase letter (user struct).
-func isCarrierType(expr ast.Expr) bool {
+// isCarrierType reports whether the type expression is a `*models.X` or
+// `models.X` parameter where X is a known carrier — i.e. its struct
+// declaration in internal/models contains an OrgID field. The carriers
+// set is built up-front by loadOrgIDCarriers; types not present return
+// false even if syntactically they look like a carrier.
+func isCarrierType(expr ast.Expr, carriers map[string]bool) bool {
 	// Unwrap pointer.
 	if star, ok := expr.(*ast.StarExpr); ok {
-		return isCarrierType(star.X)
+		return isCarrierType(star.X, carriers)
 	}
 	sel, ok := expr.(*ast.SelectorExpr)
 	if !ok {
@@ -186,9 +274,10 @@ func isCarrierType(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
-	// Accept carriers from the models package; that's where entity structs
-	// live in this repo and they conventionally have OrgID fields.
-	return pkg.Name == "models"
+	if pkg.Name != "models" {
+		return false
+	}
+	return carriers[sel.Sel.Name]
 }
 
 func hasAllowComment(doc *ast.CommentGroup) bool {

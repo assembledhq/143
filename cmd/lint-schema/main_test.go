@@ -42,12 +42,21 @@ func TestScan(t *testing.T) {
 			wantLen: 0,
 		},
 		{
-			name: "accepts inline escape hatch",
+			name: "accepts inline escape hatch with reason",
 			sql: `CREATE TABLE registry ( -- lint:no-org-id reason="global cache"
     key   text PRIMARY KEY,
     value jsonb
 );`,
 			wantLen: 0,
+		},
+		{
+			name: "rejects bare lint:no-org-id without reason clause",
+			sql: `CREATE TABLE registry ( -- lint:no-org-id
+    key   text PRIMARY KEY,
+    value jsonb
+);`,
+			wantLen:  1,
+			wantName: "registry",
 		},
 		{
 			name: "skips PARTITION OF children",

@@ -7,8 +7,8 @@ Two automated lints run in `make lint-tenancy` (and in CI on every PR that touch
 1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` without an `org_id uuid NOT NULL REFERENCES organizations(id)` column will fail CI. If a table is genuinely cross-org, allowlist it in `cmd/lint-schema/main.go` with a one-line reason — don't paper over with the inline `-- lint:no-org-id` escape hatch unless it's a one-off.
 
 2. **Store lint** (`cmd/lint-stores`). Every exported method on `*XxxStore` under `internal/db/` must either:
-   - take `orgID uuid.UUID` explicitly (preferred), or
-   - take a `*models.X` / `models.X` carrier whose `OrgID` field scopes the write, or
+   - take `orgID uuid.UUID` explicitly (preferred). The parameter name must end in `orgid` case-insensitively (`orgID`, `OrgID`, `org_id`, `srcOrgID`, `targetOrgID`), or
+   - take a `*models.X` / `models.X` carrier whose struct **literally declares an `OrgID` field**. The lint pre-scans `internal/models/*.go` to verify; a future model that drops `OrgID` will start failing the lint at every Create/Upsert call site, or
    - be annotated with `// lint:allow-no-orgid reason="..."` on the line directly above `func`.
 
 When you write a new store method, default to the first option. The flow from HTTP handler to DB is:

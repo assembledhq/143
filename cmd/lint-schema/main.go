@@ -4,9 +4,15 @@
 // column so every row can be scoped to a tenant. Tables without org_id are a
 // P0 data isolation risk — see AGENTS.md ("Multi-tenancy").
 //
+// Scope: only `migrations/*.up.sql` is scanned. Down migrations restore prior
+// state (and may legitimately re-create tables that predate the org_id rule),
+// so enforcing on them would block valid rollbacks. The forward direction is
+// where new schema is introduced and is therefore the only direction policed.
+//
 // To exempt a table:
 //  1. Add it to allowedNoOrgID with a short justification; OR
-//  2. Add an inline comment on the line of the CREATE TABLE:
+//  2. Add an inline comment on the line of the CREATE TABLE that includes a
+//     `reason="<why>"` clause:
 //     `-- lint:no-org-id reason="<why>"`
 //
 // Run via `make lint-schema` or directly: `go run ./cmd/lint-schema`.
@@ -52,9 +58,10 @@ var (
 	// Detect `CREATE TABLE ... AS SELECT` (backup/temp tables).
 	createTableAsRE = regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+`)
 
-	// Inline escape hatch on a CREATE TABLE line:
+	// Inline escape hatch on a CREATE TABLE line. The reason="..." clause is
+	// required so the justification stays alongside the exception:
 	//   CREATE TABLE foo ( -- lint:no-org-id reason="global registry"
-	inlineEscapeRE = regexp.MustCompile(`--\s*lint:no-org-id`)
+	inlineEscapeRE = regexp.MustCompile(`--\s*lint:no-org-id\s+reason="[^"]+"`)
 )
 
 type violation struct {
@@ -100,7 +107,8 @@ func main() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Every new table MUST have `org_id uuid NOT NULL REFERENCES organizations(id)`.")
 	fmt.Fprintln(os.Stderr, "To exempt a table, add it to allowedNoOrgID in cmd/lint-schema/main.go")
-	fmt.Fprintln(os.Stderr, "with a justification, or add `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
+	fmt.Fprintln(os.Stderr, "with a justification, or add `-- lint:no-org-id reason=\"...\"` (the reason")
+	fmt.Fprintln(os.Stderr, "clause is required) on the CREATE TABLE line.")
 	os.Exit(1)
 }
 
