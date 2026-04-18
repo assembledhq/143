@@ -320,6 +320,7 @@ export interface OrgSettings {
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
+  auto_archive_on_pr_close?: boolean;
 }
 
 export interface ProductContext {

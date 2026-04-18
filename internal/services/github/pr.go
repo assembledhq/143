@@ -466,6 +466,29 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}
 	}
 
+	// Auto-archive the linked session if the org has opted in.
+	if pr.SessionID != nil && s.orgs != nil {
+		org, err := s.orgs.GetByID(ctx, pr.OrgID)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to load org for auto-archive check")
+		} else {
+			var settings models.OrgSettings
+			if len(org.Settings) > 0 {
+				if err := json.Unmarshal(org.Settings, &settings); err != nil {
+					s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to parse org settings for auto-archive")
+				}
+			}
+			if settings.AutoArchiveOnPRClose {
+				if err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID); err != nil {
+					s.logger.Warn().Err(err).
+						Str("session_id", pr.SessionID.String()).
+						Str("pr_id", pr.ID.String()).
+						Msg("failed to auto-archive session on PR close")
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
