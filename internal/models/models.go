@@ -16,11 +16,11 @@ type Organization struct {
 }
 
 type User struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
-	Email       string    `db:"email" json:"email"`
-	Name        string    `db:"name" json:"name"`
-	Role        string    `db:"role" json:"role"`
+	ID           uuid.UUID `db:"id" json:"id"`
+	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
+	Email        string    `db:"email" json:"email"`
+	Name         string    `db:"name" json:"name"`
+	Role         string    `db:"role" json:"role"`
 	GitHubID     *int64    `db:"github_id" json:"github_id,omitempty"`
 	GitHubLogin  *string   `db:"github_login" json:"github_login,omitempty"`
 	AvatarURL    *string   `db:"avatar_url" json:"avatar_url,omitempty"`
@@ -39,13 +39,13 @@ type AuthSession struct {
 }
 
 type Integration struct {
-	ID           uuid.UUID       `db:"id" json:"id"`
-	OrgID        uuid.UUID       `db:"org_id" json:"org_id"`
+	ID           uuid.UUID           `db:"id" json:"id"`
+	OrgID        uuid.UUID           `db:"org_id" json:"org_id"`
 	Provider     IntegrationProvider `db:"provider" json:"provider"`
-	Config       json.RawMessage `db:"config" json:"-"` // never expose config in JSON (contains secrets)
-	Status       IntegrationStatus `db:"status" json:"status"`
-	LastSyncedAt *time.Time      `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	CreatedAt    time.Time       `db:"created_at" json:"created_at"`
+	Config       json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
+	Status       IntegrationStatus   `db:"status" json:"status"`
+	LastSyncedAt *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	CreatedAt    time.Time           `db:"created_at" json:"created_at"`
 }
 
 type Repository struct {
@@ -103,60 +103,60 @@ type Issue struct {
 
 // Session represents an attempt to fix an issue via a coding agent.
 type Session struct {
-	ID                   uuid.UUID       `db:"id" json:"id"`
-	IssueID              uuid.UUID       `db:"issue_id" json:"issue_id"`
-	OrgID                uuid.UUID       `db:"org_id" json:"org_id"`
-	AgentType            AgentType       `db:"agent_type" json:"agent_type"`
-	Status               string          `db:"status" json:"status"`
-	AutonomyLevel        string          `db:"autonomy_level" json:"autonomy_level"`
-	TokenMode            string          `db:"token_mode" json:"token_mode"`
-	ComplexityTier       *int            `db:"complexity_tier" json:"complexity_tier,omitempty"`
-	ConfidenceScore      *float64        `db:"confidence_score" json:"confidence_score,omitempty"`
-	ConfidenceReasoning  *string         `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
-	RiskFactors          []string        `db:"risk_factors" json:"risk_factors,omitempty"`
-	ContainerID          *string         `db:"container_id" json:"container_id,omitempty"`
-	StartedAt            *time.Time      `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt          *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
-	TokenUsage           json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
-	FailureExplanation   *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
-	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
+	ID                  uuid.UUID       `db:"id" json:"id"`
+	IssueID             uuid.UUID       `db:"issue_id" json:"issue_id"`
+	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
+	AgentType           AgentType       `db:"agent_type" json:"agent_type"`
+	Status              string          `db:"status" json:"status"`
+	AutonomyLevel       string          `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode           string          `db:"token_mode" json:"token_mode"`
+	ComplexityTier      *int            `db:"complexity_tier" json:"complexity_tier,omitempty"`
+	ConfidenceScore     *float64        `db:"confidence_score" json:"confidence_score,omitempty"`
+	ConfidenceReasoning *string         `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
+	RiskFactors         []string        `db:"risk_factors" json:"risk_factors,omitempty"`
+	ContainerID         *string         `db:"container_id" json:"container_id,omitempty"`
+	StartedAt           *time.Time      `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt         *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	TokenUsage          json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
+	FailureExplanation  *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory     *string         `db:"failure_category" json:"failure_category,omitempty"`
+	FailureNextSteps    []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
 	// FailureRetryAdvised uses plain bool (not *bool) because false is the
 	// meaningful default — a session that hasn't failed never advises retry.
 	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.
-	FailureRetryAdvised  bool            `db:"failure_retry_advised" json:"failure_retry_advised"`
-	ParentSessionID      *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
-	RevisionContext      json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
-	Error                *string         `db:"error" json:"error,omitempty"`
-	ResultSummary        *string         `db:"result_summary" json:"result_summary,omitempty"`
-	Diff                 *string         `db:"diff" json:"diff,omitempty"`
-	PMPlanID             *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
-	Title                *string         `db:"title" json:"title,omitempty"`
-	PMApproach           *string         `db:"pm_approach" json:"pm_approach,omitempty"`
-	PMReasoning          *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
-	ProjectTaskID        *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
-	ModelOverride        *string         `db:"model_override" json:"model_override,omitempty"`
-	TriggeredByUserID    *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
-	AgentSessionID       *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn          int             `db:"current_turn" json:"current_turn"`
-	LastActivityAt       *time.Time      `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	SandboxState         string          `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey          *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
-	TargetBranch         *string         `db:"target_branch" json:"target_branch,omitempty"`
-	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
-	RepositoryID         *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
-	DiffStats   json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"`   // nil for list queries (excluded to reduce payload size)
+	FailureRetryAdvised bool            `db:"failure_retry_advised" json:"failure_retry_advised"`
+	ParentSessionID     *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
+	RevisionContext     json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
+	Error               *string         `db:"error" json:"error,omitempty"`
+	ResultSummary       *string         `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string         `db:"diff" json:"diff,omitempty"`
+	PMPlanID            *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
+	Title               *string         `db:"title" json:"title,omitempty"`
+	PMApproach          *string         `db:"pm_approach" json:"pm_approach,omitempty"`
+	PMReasoning         *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
+	ProjectTaskID       *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
+	ModelOverride       *string         `db:"model_override" json:"model_override,omitempty"`
+	TriggeredByUserID   *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
+	AgentSessionID      *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int             `db:"current_turn" json:"current_turn"`
+	LastActivityAt      *time.Time      `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	SandboxState        string          `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey         *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	TargetBranch        *string         `db:"target_branch" json:"target_branch,omitempty"`
+	WorkingBranch       *string         `db:"working_branch" json:"working_branch,omitempty"`
+	RepositoryID        *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	DiffStats           json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
 	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
 	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
 	// field being non-nil unless the session was fetched individually.
-	DiffHistory   json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
-	InputManifest json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
-	ArchivedAt       *time.Time  `db:"archived_at" json:"archived_at,omitempty"`
-	ArchivedByUserID *uuid.UUID  `db:"archived_by_user_id" json:"archived_by_user_id,omitempty"`
-	AutomationRunID  *uuid.UUID  `db:"automation_run_id" json:"automation_run_id,omitempty"`
-	TeamID           *uuid.UUID  `db:"team_id" json:"team_id,omitempty"`
-	DeletedAt        *time.Time  `db:"deleted_at" json:"-"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	DiffHistory      json.RawMessage `db:"diff_history" json:"diff_history,omitempty"`
+	InputManifest    json.RawMessage `db:"input_manifest" json:"input_manifest,omitempty"`
+	ArchivedAt       *time.Time      `db:"archived_at" json:"archived_at,omitempty"`
+	ArchivedByUserID *uuid.UUID      `db:"archived_by_user_id" json:"archived_by_user_id,omitempty"`
+	AutomationRunID  *uuid.UUID      `db:"automation_run_id" json:"automation_run_id,omitempty"`
+	TeamID           *uuid.UUID      `db:"team_id" json:"team_id,omitempty"`
+	DeletedAt        *time.Time      `db:"deleted_at" json:"-"`
+	CreatedAt        time.Time       `db:"created_at" json:"created_at"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.
@@ -180,7 +180,7 @@ type SessionResult struct {
 // Validation represents validation results for an agent run.
 type Validation struct {
 	ID                  uuid.UUID       `db:"id" json:"id"`
-	SessionID          uuid.UUID       `db:"session_id" json:"session_id"`
+	SessionID           uuid.UUID       `db:"session_id" json:"session_id"`
 	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
 	Status              string          `db:"status" json:"status"`
 	DirectionCheck      string          `db:"direction_check" json:"direction_check"`
@@ -201,7 +201,7 @@ type Validation struct {
 // without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
 	ID             uuid.UUID  `db:"id" json:"id"`
-	SessionID     *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
+	SessionID      *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
 	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
 	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
@@ -264,32 +264,32 @@ type SessionMessage struct {
 // Each thread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
-	ID                 uuid.UUID  `db:"id" json:"id"`
-	SessionID          uuid.UUID  `db:"session_id" json:"session_id"`
-	OrgID              uuid.UUID  `db:"org_id" json:"org_id"`
-	AgentType          AgentType  `db:"agent_type" json:"agent_type"`
-	ModelOverride      *string    `db:"model_override" json:"model_override,omitempty"`
-	Label              string     `db:"label" json:"label"`
-	Instructions       *string    `db:"instructions" json:"instructions,omitempty"`
-	FileScope          []string   `db:"file_scope" json:"file_scope,omitempty"`
+	ID                 uuid.UUID    `db:"id" json:"id"`
+	SessionID          uuid.UUID    `db:"session_id" json:"session_id"`
+	OrgID              uuid.UUID    `db:"org_id" json:"org_id"`
+	AgentType          AgentType    `db:"agent_type" json:"agent_type"`
+	ModelOverride      *string      `db:"model_override" json:"model_override,omitempty"`
+	Label              string       `db:"label" json:"label"`
+	Instructions       *string      `db:"instructions" json:"instructions,omitempty"`
+	FileScope          []string     `db:"file_scope" json:"file_scope,omitempty"`
 	Status             ThreadStatus `db:"status" json:"status"`
-	AgentSessionID     *string    `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn        int        `db:"current_turn" json:"current_turn"`
-	LastActivityAt     *time.Time `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	ConfidenceScore    *float64   `db:"confidence_score" json:"confidence_score,omitempty"`
-	ResultSummary      *string    `db:"result_summary" json:"result_summary,omitempty"`
-	Diff               *string    `db:"diff" json:"diff,omitempty"`
-	FailureExplanation *string    `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory    *string    `db:"failure_category" json:"failure_category,omitempty"`
-	StartedAt          *time.Time `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt        *time.Time `db:"completed_at" json:"completed_at,omitempty"`
-	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
+	AgentSessionID     *string      `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn        int          `db:"current_turn" json:"current_turn"`
+	LastActivityAt     *time.Time   `db:"last_activity_at" json:"last_activity_at,omitempty"`
+	ConfidenceScore    *float64     `db:"confidence_score" json:"confidence_score,omitempty"`
+	ResultSummary      *string      `db:"result_summary" json:"result_summary,omitempty"`
+	Diff               *string      `db:"diff" json:"diff,omitempty"`
+	FailureExplanation *string      `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory    *string      `db:"failure_category" json:"failure_category,omitempty"`
+	StartedAt          *time.Time   `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt        *time.Time   `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt          time.Time    `db:"created_at" json:"created_at"`
 }
 
 // SessionQuestion represents a question the agent asks a human during a run.
 type SessionQuestion struct {
 	ID           uuid.UUID  `db:"id" json:"id"`
-	SessionID   uuid.UUID  `db:"session_id" json:"session_id"`
+	SessionID    uuid.UUID  `db:"session_id" json:"session_id"`
 	OrgID        uuid.UUID  `db:"org_id" json:"org_id"`
 	QuestionText string     `db:"question_text" json:"question_text"`
 	Options      []string   `db:"options" json:"options,omitempty"`
@@ -422,22 +422,22 @@ type SessionReviewComment struct {
 
 // ReviewComment represents a captured review comment on a 143-generated PR.
 type ReviewComment struct {
-	ID              uuid.UUID  `db:"id" json:"id"`
-	PullRequestID   uuid.UUID  `db:"pull_request_id" json:"pull_request_id"`
-	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
-	GitHubCommentID int64      `db:"github_comment_id" json:"github_comment_id"`
-	Reviewer        string     `db:"reviewer" json:"reviewer"`
-	Body            string     `db:"body" json:"body"`
-	DiffPath        *string    `db:"diff_path" json:"diff_path,omitempty"`
-	DiffPosition    *int       `db:"diff_position" json:"diff_position,omitempty"`
-	FilterStatus    string     `db:"filter_status" json:"filter_status"`
-	Category        *string    `db:"category" json:"category,omitempty"`
-	Actionable      bool       `db:"actionable" json:"actionable"`
-	Generalizable   bool       `db:"generalizable" json:"generalizable"`
-	GeneralizedRule *string    `db:"generalized_rule" json:"generalized_rule,omitempty"`
-	Summary         *string    `db:"summary" json:"summary,omitempty"`
-	Applied         bool       `db:"applied" json:"applied"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	ID              uuid.UUID `db:"id" json:"id"`
+	PullRequestID   uuid.UUID `db:"pull_request_id" json:"pull_request_id"`
+	OrgID           uuid.UUID `db:"org_id" json:"org_id"`
+	GitHubCommentID int64     `db:"github_comment_id" json:"github_comment_id"`
+	Reviewer        string    `db:"reviewer" json:"reviewer"`
+	Body            string    `db:"body" json:"body"`
+	DiffPath        *string   `db:"diff_path" json:"diff_path,omitempty"`
+	DiffPosition    *int      `db:"diff_position" json:"diff_position,omitempty"`
+	FilterStatus    string    `db:"filter_status" json:"filter_status"`
+	Category        *string   `db:"category" json:"category,omitempty"`
+	Actionable      bool      `db:"actionable" json:"actionable"`
+	Generalizable   bool      `db:"generalizable" json:"generalizable"`
+	GeneralizedRule *string   `db:"generalized_rule" json:"generalized_rule,omitempty"`
+	Summary         *string   `db:"summary" json:"summary,omitempty"`
+	Applied         bool      `db:"applied" json:"applied"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
 }
 
 // Memory represents a learned convention or rule for a repo or org.

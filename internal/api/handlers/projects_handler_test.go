@@ -200,7 +200,7 @@ func TestProjectHandler_Update(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
 
-	// Update (24 named args: 19 original + 4 schedule fields + similar_projects)
+	// Update (25 named args: 19 original + 4 schedule fields + similar_projects + team_id)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),

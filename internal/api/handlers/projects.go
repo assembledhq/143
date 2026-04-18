@@ -214,6 +214,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ScheduleEnabled    *bool   `json:"schedule_enabled"`
 		ScheduleInterval   *int    `json:"schedule_interval"`
 		ScheduleUnit       *string `json:"schedule_unit"`
+		TeamID             *string `json:"team_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -230,6 +231,16 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 		return
+	}
+
+	var teamID *uuid.UUID
+	if req.TeamID != nil && *req.TeamID != "" {
+		parsed, err := uuid.Parse(*req.TeamID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
+			return
+		}
+		teamID = &parsed
 	}
 
 	execMode := models.ProjectExecModeSequential
@@ -323,6 +334,7 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ScheduleUnit:       scheduleUnit,
 		NextRunAt:          nextRunAt,
 		CreatedBy:          &user.ID,
+		TeamID:             teamID,
 	}
 
 	if err := h.projectStore.Create(r.Context(), &project); err != nil {
@@ -364,6 +376,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ScheduleEnabled    *bool   `json:"schedule_enabled"`
 		ScheduleInterval   *int    `json:"schedule_interval"`
 		ScheduleUnit       *string `json:"schedule_unit"`
+		TeamID             *string `json:"team_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -445,6 +458,18 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		// When disabling schedule, clear next_run_at.
 		if !*req.ScheduleEnabled && wasEnabled {
 			project.NextRunAt = nil
+		}
+	}
+	if req.TeamID != nil {
+		if *req.TeamID == "" {
+			project.TeamID = nil
+		} else {
+			parsed, err := uuid.Parse(*req.TeamID)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
+				return
+			}
+			project.TeamID = &parsed
 		}
 	}
 

@@ -27,7 +27,7 @@ type ProjectFilters struct {
 	Cursor       string
 	RepositoryID uuid.UUID
 	Search       string    // When non-empty, filter projects by title or goal (case-insensitive substring match).
-	ProposedByPM *bool    // When non-nil, filter by proposed_by_pm flag.
+	ProposedByPM *bool     // When non-nil, filter by proposed_by_pm flag.
 	TeamID       uuid.UUID // When non-zero, filter projects by team.
 }
 

@@ -84,12 +84,12 @@ func TestSessionHandler_List(t *testing.T) {
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -170,12 +170,12 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -267,12 +267,12 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 0, nil, "none", nil,
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -317,7 +317,7 @@ func TestDecodeSessionCursor_Invalid(t *testing.T) {
 		cursor string
 	}{
 		{name: "not base64", cursor: "!!!invalid!!!"},
-		{name: "missing comma", cursor: "bm9jb21tYQ=="},                                                     // "nocomma"
+		{name: "missing comma", cursor: "bm9jb21tYQ=="},                                                 // "nocomma"
 		{name: "bad timestamp", cursor: "YmFkdGltZSwwMTIzNDU2Ny04OWFiLWNkZWYtMDEyMy00NTY3ODlhYmNkZWY="}, // "badtime,..."
 	}
 
@@ -359,7 +359,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, 0, nil, "none", nil,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
 			),
 		)
 
@@ -429,12 +429,12 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
 							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -512,7 +512,7 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (17 named args)
+	// Mock agent run create (19 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -560,7 +560,7 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (17 named args)
+	// Mock agent run create (19 named args)
 	runID := uuid.New()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1146,12 +1146,12 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1237,12 +1237,12 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1301,12 +1301,12 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1329,12 +1329,12 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1419,7 +1419,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(issueID, now, now))
 
-				// Mock session create (17 named args)
+				// Mock session create (19 named args)
 				mock.ExpectQuery("INSERT INTO sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1626,12 +1626,12 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, nil,
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1689,12 +1689,12 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, nil,
 				&userID, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -1873,12 +1873,12 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", nil,
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -1916,12 +1916,12 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2001,12 +2001,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2028,12 +2028,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2072,12 +2072,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 2, &now, "running", nil,
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2120,12 +2120,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 0, nil, "none", nil,
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2164,7 +2164,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 3, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
-							nil, // input_manifest
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2195,7 +2195,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, // triggered_by_user_id
 							nil, 2, &now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
-							nil, // input_manifest
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2226,12 +2226,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2257,12 +2257,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil,
 							nil, // triggered_by_user_id
 							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
-							nil, // target_branch
-							nil, // working_branch
-							nil, // repository_id
-							nil, // diff_stats
-							nil, // diff_history
-							nil, // input_manifest
+							nil,      // target_branch
+							nil,      // working_branch
+							nil,      // repository_id
+							nil,      // diff_stats
+							nil,      // diff_history
+							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
 							nil, // automation_run_id
 							nil, // team_id
@@ -2588,12 +2588,12 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, nil,
 				nil,                      // triggered_by_user_id
 				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, // target_branch
-				nil, // working_branch
-				nil, // repository_id
-				nil, // diff_stats
-				nil, // diff_history
-				nil, // input_manifest
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -2658,7 +2658,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -2713,7 +2713,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -2811,7 +2811,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil,
 				nil, 0, nil, "none", nil,
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -2882,7 +2882,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 1, &now, "running", nil,
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -2937,7 +2937,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id
@@ -3016,7 +3016,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 				nil, // triggered_by_user_id
 				nil, 1, &now, "running", nil,
 				nil, nil, nil, nil, nil,
-				nil, // input_manifest
+				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil, // automation_run_id
 				nil, // team_id

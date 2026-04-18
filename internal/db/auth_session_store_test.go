@@ -36,24 +36,24 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, // project_task_id
-		nil, // model_override
-		nil, // triggered_by_user_id
-		nil, // agent_session_id
-		0,   // current_turn
-		nil, // last_activity_at
-		"none", // sandbox_state
-		nil,    // snapshot_key
-		nil,    // target_branch
-		nil,    // working_branch
-		nil,    // repository_id
-		nil,    // diff_stats
-		nil,    // diff_history
-		nil,    // input_manifest
+		nil,      // project_task_id
+		nil,      // model_override
+		nil,      // triggered_by_user_id
+		nil,      // agent_session_id
+		0,        // current_turn
+		nil,      // last_activity_at
+		"none",   // sandbox_state
+		nil,      // snapshot_key
+		nil,      // target_branch
+		nil,      // working_branch
+		nil,      // repository_id
+		nil,      // diff_stats
+		nil,      // diff_history
+		nil,      // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
-		nil,    // automation_run_id
-		nil,    // team_id
-		nil,    // deleted_at
+		nil, // automation_run_id
+		nil, // team_id
+		nil, // deleted_at
 		now,
 	}
 }

@@ -59,7 +59,7 @@ func TestProjectStore_Create(t *testing.T) {
 
 	// Create wraps insert + join-table writes in a transaction.
 	mock.ExpectBegin()
-	// Create has 26 named args (including agent_type, model_override, schedule, and similar_projects fields)
+	// Create has 27 named args (incl. agent_type, model_override, schedule fields, similar_projects, team_id)
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(27)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
@@ -273,7 +273,7 @@ func TestProjectStore_Update(t *testing.T) {
 	orgID := uuid.New()
 	projectID := uuid.New()
 
-	// Update has 24 named args (including schedule and similar_projects fields)
+	// Update has 25 named args (incl. schedule, similar_projects, team_id)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(anyArgs(25)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

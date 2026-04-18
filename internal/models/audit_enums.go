@@ -90,12 +90,12 @@ const (
 	AuditActionTeamInvitationAccepted AuditAction = "team.invitation_accepted"
 
 	// Org-level teams actions (distinct from team member management above)
-	AuditActionOrgTeamCreated     AuditAction = "org_team.created"
-	AuditActionOrgTeamUpdated     AuditAction = "org_team.updated"
-	AuditActionOrgTeamDeleted     AuditAction = "org_team.deleted"
-	AuditActionOrgTeamMemberAdded AuditAction = "org_team.member_added"
+	AuditActionOrgTeamCreated       AuditAction = "org_team.created"
+	AuditActionOrgTeamUpdated       AuditAction = "org_team.updated"
+	AuditActionOrgTeamDeleted       AuditAction = "org_team.deleted"
+	AuditActionOrgTeamMemberAdded   AuditAction = "org_team.member_added"
 	AuditActionOrgTeamMemberRemoved AuditAction = "org_team.member_removed"
-	AuditActionOrgTeamGitHubSynced AuditAction = "org_team.github_synced"
+	AuditActionOrgTeamGitHubSynced  AuditAction = "org_team.github_synced"
 
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"

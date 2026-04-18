@@ -324,9 +324,20 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		AgentType     string `json:"agent_type"`
 		AutonomyLevel string `json:"autonomy_level"`
 		TokenMode     string `json:"token_mode"`
+		TeamID        string `json:"team_id"`
 	}
 	// Ignore decode errors — body is optional, fields default below.
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	var teamID *uuid.UUID
+	if body.TeamID != "" {
+		parsed, err := uuid.Parse(body.TeamID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
+			return
+		}
+		teamID = &parsed
+	}
 
 	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
@@ -383,6 +394,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel:     autonomyLevel,
 		TokenMode:         tokenMode,
 		TriggeredByUserID: triggeredByUserID,
+		TeamID:            teamID,
 	}
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
@@ -1040,6 +1052,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode     string   `json:"token_mode"`
 		RepositoryID  string   `json:"repository_id"`
 		Branch        string   `json:"branch"`
+		TeamID        string   `json:"team_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1050,6 +1063,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if body.Message == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
+	}
+
+	var manualTeamID *uuid.UUID
+	if body.TeamID != "" {
+		parsed, err := uuid.Parse(body.TeamID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
+			return
+		}
+		manualTeamID = &parsed
 	}
 
 	// Resolve repository for the manual session so the orchestrator can
@@ -1179,6 +1202,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		PMApproach:        &title,
 		TargetBranch:      targetBranch,
 		RepositoryID:      repoID,
+		TeamID:            manualTeamID,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)

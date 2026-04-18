@@ -66,19 +66,10 @@ func (s *TeamStore) Update(ctx context.Context, orgID, teamID uuid.UUID, name, s
 	return nil
 }
 
-// Delete removes a team. Memberships cascade-delete.
+// Delete removes a team. Memberships cascade-delete; sessions and projects
+// have their team_id cleared by the FK ON DELETE SET NULL.
 func (s *TeamStore) Delete(ctx context.Context, orgID, teamID uuid.UUID) error {
-	// Clear team_id references on sessions and projects before deleting the team.
-	query := `
-		WITH clear_sessions AS (
-			UPDATE sessions SET team_id = NULL WHERE team_id = @id AND org_id = @org_id
-		),
-		clear_projects AS (
-			UPDATE projects SET team_id = NULL WHERE team_id = @id AND org_id = @org_id
-		)
-		DELETE FROM teams WHERE id = @id AND org_id = @org_id`
-
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	ct, err := s.db.Exec(ctx, `DELETE FROM teams WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
 		"id":     teamID,
 		"org_id": orgID,
 	})
@@ -389,6 +380,12 @@ func upsertGitHubTeam(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, ght GitHu
 		},
 	).Scan(&teamID)
 	if err == nil {
+		zerolog.Ctx(ctx).Info().
+			Str("team", ght.Name).
+			Str("slug", ght.GitHubTeamSlug).
+			Int64("github_team_id", ght.GitHubTeamID).
+			Str("team_id", teamID.String()).
+			Msg("adopted manually-created team into GitHub sync (slug match)")
 		return teamID, false, nil
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
