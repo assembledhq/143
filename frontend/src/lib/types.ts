@@ -1012,3 +1012,51 @@ export interface UsageBreakdownRow {
   total_llm_cost_usd: number;
   percentage: number;
 }
+
+// Automation types
+export type AutomationScheduleType = 'interval' | 'cron';
+export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
+
+export interface Automation {
+  id: string;
+  org_id: string;
+  repository_id?: string;
+  name: string;
+  goal: string;
+  scope?: string;
+  agent_type?: string;
+  model_override?: string;
+  execution_mode: string;
+  max_concurrent: number;
+  base_branch: string;
+  schedule_type: AutomationScheduleType;
+  interval_value?: number;
+  interval_unit?: 'hours' | 'days' | 'weeks';
+  cron_expression?: string;
+  timezone: string;
+  next_run_at?: string;
+  last_run_at?: string;
+  enabled: boolean;
+  created_by?: string;
+  paused_by?: string;
+  paused_at?: string;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  automation_id: string;
+  triggered_at: string;
+  triggered_by: 'schedule' | 'manual';
+  triggered_by_user_id?: string;
+  scheduled_time?: string;
+  goal_snapshot: string;
+  config_snapshot?: Record<string, unknown>;
+  status: AutomationRunStatus;
+  completed_at?: string;
+  result_summary?: string;
+  created_at: string;
+  updated_at: string;
+}

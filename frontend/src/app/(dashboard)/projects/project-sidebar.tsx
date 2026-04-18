@@ -15,14 +15,12 @@ import type { Project } from "@/lib/types";
 const filterTabs = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
-  { value: "scheduled", label: "Scheduled" },
   { value: "draft", label: "Draft" },
   { value: "completed", label: "Done" },
 ];
 
 function filterProjects(projects: Project[], filter: string | null): Project[] {
   if (!filter || filter === "all") return projects;
-  if (filter === "scheduled") return projects.filter((p) => p.schedule_enabled);
   return projects.filter((p) => p.status === filter);
 }
 
@@ -47,10 +45,10 @@ export function ProjectSidebar() {
   const allProjects = data?.data ?? [];
   const currentFilter = activeFilter ?? "all";
 
-  const { activeCount, scheduledCount } = useMemo(() => ({
-    activeCount: allProjects.filter((p) => p.status === "active").length,
-    scheduledCount: allProjects.filter((p) => p.schedule_enabled).length,
-  }), [allProjects]);
+  const activeCount = useMemo(
+    () => allProjects.filter((p) => p.status === "active").length,
+    [allProjects],
+  );
 
   const filteredProjects = useMemo(
     () => filterProjects(allProjects, activeFilter),
@@ -103,18 +101,14 @@ export function ProjectSidebar() {
         >
           <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
             {filterTabs.map((tab) => {
-              const count =
-                tab.value === "active" ? activeCount
-                : tab.value === "scheduled" ? scheduledCount
-                : 0;
+              const count = tab.value === "active" ? activeCount : 0;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
                   {tab.label}
                   {count > 0 && (
-                    <span className={cn(
-                      "rounded-full text-white text-xs leading-none px-1.5 py-0.5",
-                      tab.value === "scheduled" ? "bg-purple-500" : "bg-primary"
-                    )}>{count}</span>
+                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">
+                      {count}
+                    </span>
                   )}
                 </TabsTrigger>
               );

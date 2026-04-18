@@ -1,6 +1,6 @@
 # 48 — Automations: First-Class, Team-Owned Recurring Agents
 
-> **Status:** Proposal | **Date:** 2026-04-15
+> **Status:** Phase 1-2 complete, Phase 3 pending | **Date:** 2026-04-15
 >
 > **Supersedes:** [31-automations-tab.md](31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](32-project-cadence-and-lifecycle.md) (evergreen projects)
 >
@@ -562,24 +562,24 @@ Templates pre-fill name, goal, and schedule. User picks a repo and clicks create
 
 ## 10. Implementation Phases
 
-### Phase 1: Data model + API + migration (Stages 1-2)
+### Phase 1: Data model + API + migration (Stages 1-2) ✅ Completed 2026-04-16
 
-1. Create `automations` table + `automation_runs` table + add `automation_run_id` FK to sessions (Migration Stage 1).
-2. Backfill existing `schedule_enabled=true` projects to automations (Migration Stage 2).
-3. Implement CRUD API endpoints with cursor-based pagination.
-4. Implement bulk pause/resume/delete endpoint.
-5. Update scheduler with `SELECT ... FOR UPDATE SKIP LOCKED` claim loop, idempotency checks, and `max_concurrent` enforcement (§6.1).
-6. Add cron expression validation using `gorhill/cronexpr` (§6.2).
-7. Dual-write period: scheduler reads from both automations and projects (Migration Stage 3).
+1. ~~Create `automations` table + `automation_runs` table + add `automation_run_id` FK to sessions (Migration Stage 1).~~
+2. ~~Backfill existing `schedule_enabled=true` projects to automations (Migration Stage 2).~~
+3. ~~Implement CRUD API endpoints with cursor-based pagination.~~
+4. ~~Implement bulk pause/resume/delete endpoint.~~
+5. ~~Update scheduler with `SELECT ... FOR UPDATE SKIP LOCKED` claim loop, idempotency checks, and `max_concurrent` enforcement (§6.1).~~
+6. ~~Add cron expression validation using `gorhill/cronexpr` (§6.2).~~
+7. ~~Dual-write period: scheduler reads from both automations and projects (Migration Stage 3).~~
 
-### Phase 2: Frontend
+### Phase 2: Frontend ✅ Completed 2026-04-16
 
-1. Add `/automations` nav item and list page.
-2. Build `/automations/new` with templates (loaded from `automation-templates.ts`).
-3. Build `/automations/:id` with runs timeline (including failed run states + retry) and settings.
-4. Remove schedule UI from project creation and project settings.
-5. Remove "Scheduled" filter from project sidebar.
-6. Add cursor-based pagination to run list ("Load more").
+1. ~~Add `/automations` nav item and list page.~~
+2. ~~Build `/automations/new` with templates (loaded from `automation-templates.ts`).~~
+3. ~~Build `/automations/:id` with runs timeline (including failed run states + retry) and settings.~~
+4. ~~Remove schedule UI from project creation and project settings.~~
+5. ~~Remove "Scheduled" filter from project sidebar.~~
+6. ~~Add cursor-based pagination to run list ("Load more").~~
 
 ### Phase 3: Team features + trends + cleanup
 
