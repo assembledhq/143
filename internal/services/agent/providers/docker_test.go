@@ -315,6 +315,8 @@ func TestDockerProvider_EnsureNetwork(t *testing.T) {
 			require.Equal(t, "143-sandbox", name)
 			require.Equal(t, "bridge", options.Driver)
 			require.Equal(t, "143", options.Labels["managed-by"])
+			require.Equal(t, "false", options.Options["com.docker.network.bridge.enable_icc"],
+				"sandbox network must disable inter-container chatter")
 			return network.CreateResponse{ID: "net-id"}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
@@ -424,6 +426,9 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, int64(4096*1024*1024), capturedHostConfig.Resources.Memory, "container should have 4GB memory")
 		require.NotNil(t, capturedHostConfig.Resources.PidsLimit, "container should have PID limit")
 		require.Equal(t, int64(256), *capturedHostConfig.Resources.PidsLimit, "container should have PID limit of 256")
+
+		require.Equal(t, []string{"1.1.1.1", "8.8.8.8"}, capturedHostConfig.DNS,
+			"container should bypass Docker embedded DNS — gVisor netstack can't reach 127.0.0.11")
 
 		// Verify sandbox result
 		require.Equal(t, "abc123", sb.ID, "sandbox ID should match container ID")
@@ -968,7 +973,11 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
-			capturedCmd = config.Cmd
+			// Capture only the first exec (the git clone). The second is a
+			// post-clone `git remote set-url` that scrubs the token.
+			if capturedCmd == nil {
+				capturedCmd = config.Cmd
+			}
 			return container.ExecCreateResponse{ID: "exec-inject"}, nil
 		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
@@ -1058,14 +1067,14 @@ func TestDockerProvider_ShellInjection(t *testing.T) {
 func TestDockerProvider_CloneRepo(t *testing.T) {
 	t.Parallel()
 
-	t.Run("clones repository with auth token", func(t *testing.T) {
+	t.Run("clones repository with auth token and scrubs token from .git/config", func(t *testing.T) {
 		t.Parallel()
 
-		var capturedCmd string
+		var capturedCmds []string
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
-			capturedCmd = strings.Join(config.Cmd, " ")
+			capturedCmds = append(capturedCmds, strings.Join(config.Cmd, " "))
 			return container.ExecCreateResponse{ID: "exec-clone"}, nil
 		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
@@ -1076,10 +1085,18 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 
 		err := p.CloneRepo(context.Background(), sb, "https://github.com/org/repo.git", "main", "ghp_test123")
 		require.NoError(t, err, "CloneRepo should not return an error")
-		require.Contains(t, capturedCmd, "git clone", "should run git clone command")
-		require.Contains(t, capturedCmd, "--depth 1", "should do shallow clone")
-		require.Contains(t, capturedCmd, "--branch 'main'", "should clone the specified branch")
-		require.Contains(t, capturedCmd, "x-access-token:ghp_test123@", "should include auth token in URL")
+		require.Len(t, capturedCmds, 2, "should run clone then remote set-url")
+
+		cloneCmd := capturedCmds[0]
+		require.Contains(t, cloneCmd, "git clone", "should run git clone command")
+		require.Contains(t, cloneCmd, "--depth 1", "should do shallow clone")
+		require.Contains(t, cloneCmd, "--branch 'main'", "should clone the specified branch")
+		require.Contains(t, cloneCmd, "x-access-token:ghp_test123@", "should include auth token in URL")
+
+		scrubCmd := capturedCmds[1]
+		require.Contains(t, scrubCmd, "remote set-url origin", "should reset origin to scrub token")
+		require.Contains(t, scrubCmd, "https://github.com/org/repo.git", "should reset to bare URL")
+		require.NotContains(t, scrubCmd, "ghp_test123", "scrub command must not reintroduce the token")
 	})
 
 	t.Run("clones without token when empty", func(t *testing.T) {
