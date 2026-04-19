@@ -45,6 +45,7 @@ type PRService struct {
 	orgs            *db.OrganizationStore
 	prTemplates     *db.PRTemplateStore
 	llmClient       llm.Client
+	audit           *db.AuditEmitter
 	logger          zerolog.Logger
 	baseURL         string
 	httpClient      *http.Client
@@ -94,6 +95,11 @@ func (s *PRService) SetLLMClient(client llm.Client) {
 // SetUserStore sets the user store for fetching user info during PR creation.
 func (s *PRService) SetUserStore(store *db.UserStore) {
 	s.users = store
+}
+
+// SetAuditEmitter sets the audit emitter used for webhook-triggered audit events.
+func (s *PRService) SetAuditEmitter(audit *db.AuditEmitter) {
+	s.audit = audit
 }
 
 // SetOrgStore sets the organization store for fetching org settings.
@@ -463,6 +469,31 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		// PR was closed without merging.
 		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
+		}
+	}
+
+	// Auto-archive the linked session if the org has opted in.
+	if pr.SessionID != nil && s.orgs != nil {
+		if org, err := s.orgs.GetByID(ctx, pr.OrgID); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to load org for auto-archive check")
+		} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to parse org settings for auto-archive")
+		} else if settings.AutoArchiveOnPRClose {
+			if err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID); err != nil {
+				s.logger.Warn().Err(err).
+					Str("session_id", pr.SessionID.String()).
+					Str("pr_id", pr.ID.String()).
+					Msg("failed to auto-archive session on PR close")
+			} else if s.audit != nil {
+				sessionIDStr := pr.SessionID.String()
+				s.audit.EmitWebhookAction(ctx, db.WebhookActionParams{
+					OrgID:        pr.OrgID,
+					ProviderName: "github",
+					Action:       models.AuditActionSessionArchived,
+					ResourceType: models.AuditResourceSession,
+					ResourceID:   &sessionIDStr,
+				})
+			}
 		}
 	}
 

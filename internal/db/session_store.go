@@ -663,6 +663,17 @@ func (s *SessionStore) Archive(ctx context.Context, orgID, sessionID, userID uui
 	return nil
 }
 
+// ArchiveSystem archives a session without a user actor (e.g. webhook-driven auto-archive).
+// archived_by_user_id is left NULL, and an already-archived session is a no-op rather than an error.
+func (s *SessionStore) ArchiveSystem(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions SET archived_at = now(), archived_by_user_id = NULL, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	return err
+}
+
 // Unarchive removes the archived flag from a session, restoring it to default views.
 func (s *SessionStore) Unarchive(ctx context.Context, orgID, sessionID uuid.UUID) error {
 	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, updated_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`

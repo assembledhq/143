@@ -27,6 +27,7 @@ function PRAuthorshipSettings() {
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
+  const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
 
   const mutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
@@ -35,7 +36,7 @@ function PRAuthorshipSettings() {
 
   return (
     <section className="space-y-3">
-      <h2 className="text-xs font-medium text-foreground">Pull request defaults</h2>
+      <h2 className="text-xs font-medium text-foreground">Pull requests</h2>
       <Card>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -79,6 +80,24 @@ function PRAuthorshipSettings() {
             <Label htmlFor="pr-draft-default" className="cursor-pointer">
               Create PRs as drafts by default
             </Label>
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="auto-archive-on-pr-close"
+                checked={currentAutoArchive}
+                onChange={(e) =>
+                  mutation.mutate({ settings: { auto_archive_on_pr_close: e.target.checked } })
+                }
+              />
+              <Label htmlFor="auto-archive-on-pr-close" className="cursor-pointer">
+                Auto-archive after PR merge or close
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground pl-6">
+              Automatically archive sessions when their associated pull request is merged or closed.
+            </p>
           </div>
         </CardContent>
       </Card>
