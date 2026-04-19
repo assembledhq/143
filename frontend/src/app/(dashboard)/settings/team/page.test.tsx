@@ -345,4 +345,116 @@ describe('TeamSettingsPage', () => {
     const avatarFallbacks = document.querySelectorAll('.h-8.w-8.rounded-full');
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('submits a github_username invite via the fallback input when GitHub is not connected', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    expect(
+      await screen.findByText('Connect a GitHub App to search for users.'),
+    ).toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText('octocat');
+    await user.type(input, '@octocat');
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        github_username: 'octocat',
+        role: 'member',
+      });
+    });
+  });
+
+  it('validates GitHub username required on submit', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    expect(
+      await screen.findByText('Enter a GitHub username.'),
+    ).toBeInTheDocument();
+    expect(createInvitationMock).not.toHaveBeenCalled();
+  });
+
+  it('shows GitHub user suggestions and submits selected username when connected', async () => {
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
+    searchGitHubUsersMock.mockResolvedValue({
+      data: [{ login: 'octocat', avatar_url: 'https://example.com/a.png' }],
+      meta: {},
+    });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    const commandInput = await screen.findByPlaceholderText(
+      'Search GitHub users...',
+    );
+    await user.type(commandInput, 'octo');
+
+    const suggestion = await screen.findByText('@octocat');
+    await user.click(suggestion);
+
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        github_username: 'octocat',
+        role: 'member',
+      });
+    });
+  }, 15000);
+
+  it('shows "no users found" fallback when GitHub search returns empty', async () => {
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
+    searchGitHubUsersMock.mockResolvedValue({ data: [], meta: {} });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    const commandInput = await screen.findByPlaceholderText(
+      'Search GitHub users...',
+    );
+    await user.type(commandInput, 'ghost');
+
+    await waitFor(() => {
+      expect(screen.getByText(/No users found\./)).toBeInTheDocument();
+    });
+  }, 15000);
+
+  it('renders pending invitation using GitHub username when email is null', async () => {
+    listInvitationsMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'inv-2',
+          email: null,
+          github_username: 'octocat',
+          role: 'member',
+          status: 'pending',
+          invited_by: { id: 'user-1', name: 'Admin User' },
+          expires_at: '2026-03-01T00:00:00Z',
+          created_at: '2026-02-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('@octocat')).toBeInTheDocument();
+    });
+  });
 });
