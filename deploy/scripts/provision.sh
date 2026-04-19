@@ -219,6 +219,8 @@ PULL_APP
     ssh "${SSH_OPTS[@]}" root@"$HOST" << 'PULL_WORKER'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
+      # Ensure the shared sandbox egress network exists (idempotent).
+      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --label managed-by=143 143-sandbox'
 PULL_WORKER
     ;;
   db|logging)

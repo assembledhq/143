@@ -49,6 +49,11 @@ runcmd:
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
 
+  # Create the shared sandbox egress network (idempotent). The worker also
+  # self-heals this at startup, but pre-creating it on bootstrap means the
+  # first health check never has to.
+  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --label managed-by=143 143-sandbox'
+
   # Apply kernel tuning
   - sysctl -p /etc/sysctl.d/99-worker.conf
 
