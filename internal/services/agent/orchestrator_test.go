@@ -88,10 +88,8 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 
 // mockCodexAuthProvider implements agent.CodexAuthProvider.
 type mockCodexAuthProvider struct {
-	cfg        *models.OpenAIChatGPTConfig
-	err        error
-	refreshCfg *models.OpenAIChatGPTConfig
-	refreshErr error
+	cfg *models.OpenAIChatGPTConfig
+	err error
 }
 
 func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
@@ -99,17 +97,6 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 		return nil, m.err
 	}
 	return m.cfg, nil
-}
-
-func (m *mockCodexAuthProvider) RefreshToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
-	if m.refreshErr != nil {
-		return nil, m.refreshErr
-	}
-	if m.refreshCfg != nil {
-		return m.refreshCfg, nil
-	}
-	// Default: delegate to the same config as GetValidToken.
-	return m.cfg, m.err
 }
 
 type mockCredentialProvider struct {
@@ -1497,7 +1484,7 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestRunAgent_CodexAuthRefreshFallsBackToGetValidToken(t *testing.T) {
+func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1509,25 +1496,23 @@ func TestRunAgent_CodexAuthRefreshFallsBackToGetValidToken(t *testing.T) {
 	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
 		cfg: &models.OpenAIChatGPTConfig{
-			AccessToken:  "fallback-access-token",
-			RefreshToken: "fallback-refresh-token",
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
 			ExpiresAt:    time.Now().Add(1 * time.Hour),
 		},
-		refreshErr: errors.New("refresh_token_reused"),
 	}
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err, "run should succeed when RefreshToken fails but GetValidToken works")
+	require.NoError(t, err)
 
-	// Verify auth.json was written with the fallback token.
 	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
 	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
 	tokens, ok := authJSON["tokens"].(map[string]interface{})
 	require.True(t, ok, "auth.json should have tokens object")
-	require.Equal(t, "fallback-access-token", tokens["access_token"], "auth.json should contain the fallback token from GetValidToken")
+	require.Equal(t, "access-token", tokens["access_token"], "auth.json should contain the token from GetValidToken")
 }
 
 func TestRunAgent_CancelReturnsToIdle(t *testing.T) {

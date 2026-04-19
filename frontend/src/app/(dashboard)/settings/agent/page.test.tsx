@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import AgentPage from './page';
-import type { UserCredentialSummary, ResolvedCredential, ListResponse, Organization, SingleResponse } from '@/lib/types';
+import type { UserCredentialSummary, ResolvedCredential, CodexSubscription, ListResponse, Organization, SingleResponse } from '@/lib/types';
 
 const { useAuthMock } = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
@@ -48,9 +48,11 @@ const mockOrgSettings: SingleResponse<Organization> = {
 function setupHandlers({
   team = mockTeamDefaults,
   resolved = mockResolved,
+  subscriptions = [] as CodexSubscription[],
 }: {
   team?: UserCredentialSummary[];
   resolved?: ResolvedCredential[];
+  subscriptions?: CodexSubscription[];
 } = {}) {
   server.use(
     http.get('/api/v1/settings/credentials/team', () => {
@@ -67,6 +69,9 @@ function setupHandlers({
     }),
     http.get('/api/v1/settings/codex-auth/status', () => {
       return HttpResponse.json({ data: { status: 'none' } });
+    }),
+    http.get('/api/v1/settings/codex-auth/subscriptions', () => {
+      return HttpResponse.json({ data: subscriptions, meta: {} } satisfies ListResponse<CodexSubscription>);
     }),
   );
 }
@@ -145,8 +150,14 @@ describe('AgentPage', () => {
     expect(screen.getByText('Save organization settings')).toBeInTheDocument();
   });
 
-  it('shows Connected badge when ChatGPT auth is completed', async () => {
-    setupHandlers({ team: [], resolved: [] });
+  it('shows Active subscription when a Codex subscription is connected', async () => {
+    const subscription: CodexSubscription = {
+      id: 'sub-1',
+      label: 'Team A',
+      status: 'active',
+      account_type: 'pro',
+    };
+    setupHandlers({ team: [], resolved: [], subscriptions: [subscription] });
     server.use(
       http.get('/api/v1/settings/codex-auth/status', () => {
         return HttpResponse.json({ data: { status: 'completed' } });
@@ -163,8 +174,9 @@ describe('AgentPage', () => {
 
     renderWithProviders(<AgentPage />);
 
-    expect(await screen.findByText('Connected')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(await screen.findByText('Active')).toBeInTheDocument();
+    expect(screen.getByText('Team A')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add subscription' })).toBeInTheDocument();
   });
 
   it('saves org settings with single mutation', async () => {

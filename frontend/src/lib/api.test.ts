@@ -713,7 +713,7 @@ describe('api client', () => {
         }),
       );
 
-      await api.codexAuth.disconnect();
+      await api.codexAuth.disconnectAll();
       expect(called).toBe(true);
     });
   });
