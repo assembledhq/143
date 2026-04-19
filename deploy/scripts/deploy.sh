@@ -208,7 +208,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # that the old schema doesn't have yet.
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up
+    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
   fi
 
   # Recreate non-health-service containers (vector, caddy, frontend, etc.)
