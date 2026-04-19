@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // EventType is the named event type sent over an SSE stream.
@@ -37,7 +38,22 @@ func NewWriter(w http.ResponseWriter) *Writer {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// Clear the per-connection write deadline so Server.WriteTimeout does not
+	// kill long-lived SSE streams mid-response. Without this, HTTP/2 clients
+	// see the terminated stream as ERR_HTTP2_PROTOCOL_ERROR.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+
 	return &Writer{w: w, flusher: flusher}
+}
+
+// WriteHeartbeat writes an SSE comment line that browsers silently ignore but
+// that keeps the underlying TCP/HTTP2 connection active through idle-timeout
+// proxies.
+func (sw *Writer) WriteHeartbeat() error {
+	if _, err := fmt.Fprint(sw.w, ": ping\n\n"); err != nil {
+		return fmt.Errorf("sse: write heartbeat: %w", err)
+	}
+	return nil
 }
 
 // WriteEvent marshals data as JSON and writes a named SSE event.

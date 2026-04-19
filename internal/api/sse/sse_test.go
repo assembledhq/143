@@ -94,3 +94,16 @@ func TestFlush(t *testing.T) {
 	// Should not panic
 	sw.Flush()
 }
+
+func TestWriteHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw)
+
+	err := sw.WriteHeartbeat()
+	require.NoError(t, err)
+	// SSE comment lines start with a colon; browsers ignore them.
+	require.Equal(t, ": ping\n\n", rec.Body.String())
+}
