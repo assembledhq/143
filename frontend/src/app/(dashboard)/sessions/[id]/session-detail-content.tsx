@@ -368,7 +368,11 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
 function ValidationTab({ sessionId }: { sessionId: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", sessionId, "validation"],
-    queryFn: () => api.sessions.getValidation(sessionId),
+    queryFn: () => api.sessions.getValidation(sessionId).catch((err) => {
+      // 404 means no validation exists yet — treat as empty data, not an error.
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
   });
 
   if (isLoading) {
@@ -457,7 +461,11 @@ const prStatusColor: Record<string, string> = {
 function PRCard({ sessionId }: { sessionId: string }) {
   const { data: prData, isLoading: prLoading } = useQuery({
     queryKey: ["session", sessionId, "pr"],
-    queryFn: () => api.sessions.getPR(sessionId),
+    queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
+      // 404 means no PR exists yet — treat as empty data, not an error.
+      if (err?.code === "NOT_FOUND") return { data: null };
+      throw err;
+    }),
   });
 
   const pr = prData?.data;
@@ -788,10 +796,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   });
 
   // Fetch the linked issue to display its description as the initial prompt.
+  // Manual sessions have no issue — issue_id comes back as the zero UUID.
+  const hasIssue = !!session.issue_id && session.issue_id !== "00000000-0000-0000-0000-000000000000";
   const { data: issueData } = useQuery({
     queryKey: ["issue", session.issue_id],
     queryFn: () => api.issues.get(session.issue_id),
-    enabled: !!session.issue_id,
+    enabled: hasIssue,
   });
 
   // Merge fetched logs with streamed logs, deduplicating by ID.
