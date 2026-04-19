@@ -9,6 +9,8 @@ const {
   removeMemberMock,
   createInvitationMock,
   revokeInvitationMock,
+  githubInviteStatusMock,
+  searchGitHubUsersMock,
   currentUserMock,
 } = vi.hoisted(() => ({
   listMembersMock: vi.fn().mockResolvedValue({
@@ -52,6 +54,8 @@ const {
   removeMemberMock: vi.fn().mockResolvedValue(undefined),
   createInvitationMock: vi.fn().mockResolvedValue({ data: {} }),
   revokeInvitationMock: vi.fn().mockResolvedValue(undefined),
+  githubInviteStatusMock: vi.fn().mockResolvedValue({ data: { connected: false } }),
+  searchGitHubUsersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
   currentUserMock: {
     id: 'user-1',
     email: 'admin@example.com',
@@ -69,6 +73,8 @@ vi.mock('@/lib/api', () => ({
       removeMember: removeMemberMock,
       createInvitation: createInvitationMock,
       revokeInvitation: revokeInvitationMock,
+      githubInviteStatus: githubInviteStatusMock,
+      searchGitHubUsers: searchGitHubUsersMock,
     },
     auth: {
       me: vi.fn().mockResolvedValue({ data: { id: 'user-1', email: 'admin@example.com', name: 'Admin User', role: 'admin' } }),
@@ -91,6 +97,8 @@ describe('TeamSettingsPage', () => {
     removeMemberMock.mockClear();
     createInvitationMock.mockClear();
     revokeInvitationMock.mockClear();
+    githubInviteStatusMock.mockClear();
+    searchGitHubUsersMock.mockClear();
     currentUserMock.id = 'user-1';
     currentUserMock.email = 'admin@example.com';
     currentUserMock.name = 'Admin User';
@@ -144,7 +152,7 @@ describe('TeamSettingsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
-    expect(screen.getByLabelText('Email')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send invite' })).toBeInTheDocument();
   });
 
@@ -153,7 +161,7 @@ describe('TeamSettingsPage', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
-    const emailInput = await screen.findByLabelText('Email');
+    const emailInput = await screen.findByRole('textbox', { name: 'Email' });
     expect(emailInput).toHaveClass('h-9');
   });
 
@@ -175,14 +183,14 @@ describe('TeamSettingsPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Email')).toBeInTheDocument();
+      expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
     });
 
-    await user.type(screen.getByLabelText('Email'), 'newuser@test.com');
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'newuser@test.com');
     await user.click(screen.getByRole('button', { name: 'Send invite' }));
 
     await waitFor(() => {
-      expect(createInvitationMock).toHaveBeenCalledWith('newuser@test.com', 'member');
+      expect(createInvitationMock).toHaveBeenCalledWith({ email: 'newuser@test.com', role: 'member' });
     });
   });
 
@@ -336,5 +344,117 @@ describe('TeamSettingsPage', () => {
     // The avatar fallback shows the first letter of the name
     const avatarFallbacks = document.querySelectorAll('.h-8.w-8.rounded-full');
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('submits a github_username invite via the fallback input when GitHub is not connected', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    expect(
+      await screen.findByText('Connect a GitHub App to search for users.'),
+    ).toBeInTheDocument();
+
+    const input = screen.getByPlaceholderText('octocat');
+    await user.type(input, '@octocat');
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        github_username: 'octocat',
+        role: 'member',
+      });
+    });
+  });
+
+  it('validates GitHub username required on submit', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    expect(
+      await screen.findByText('Enter a GitHub username.'),
+    ).toBeInTheDocument();
+    expect(createInvitationMock).not.toHaveBeenCalled();
+  });
+
+  it('shows GitHub user suggestions and submits selected username when connected', async () => {
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
+    searchGitHubUsersMock.mockResolvedValue({
+      data: [{ login: 'octocat', avatar_url: 'https://example.com/a.png' }],
+      meta: {},
+    });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    const commandInput = await screen.findByPlaceholderText(
+      'Search GitHub users...',
+    );
+    await user.type(commandInput, 'octo');
+
+    const suggestion = await screen.findByText('@octocat');
+    await user.click(suggestion);
+
+    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        github_username: 'octocat',
+        role: 'member',
+      });
+    });
+  }, 15000);
+
+  it('shows "no users found" fallback when GitHub search returns empty', async () => {
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
+    searchGitHubUsersMock.mockResolvedValue({ data: [], meta: {} });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+
+    const commandInput = await screen.findByPlaceholderText(
+      'Search GitHub users...',
+    );
+    await user.type(commandInput, 'ghost');
+
+    await waitFor(() => {
+      expect(screen.getByText(/No users found\./)).toBeInTheDocument();
+    });
+  }, 15000);
+
+  it('renders pending invitation using GitHub username when email is null', async () => {
+    listInvitationsMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'inv-2',
+          email: null,
+          github_username: 'octocat',
+          role: 'member',
+          status: 'pending',
+          invited_by: { id: 'user-1', name: 'Admin User' },
+          expires_at: '2026-03-01T00:00:00Z',
+          created_at: '2026-02-01T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('@octocat')).toBeInTheDocument();
+    });
   });
 });

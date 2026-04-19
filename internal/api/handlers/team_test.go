@@ -618,10 +618,11 @@ func TestTeamHandler_AcceptInvitation(t *testing.T) {
 			body: map[string]string{"token": "valid-token"},
 			invitations: &mockTeamInvitationStore{
 				getByTokenFn: func(_ context.Context, _ string) (models.Invitation, error) {
+					email := "new@b.com"
 					return models.Invitation{
 						Status:    "pending",
 						OrgID:     orgID,
-						Email:     "new@b.com",
+						Email:     &email,
 						ExpiresAt: time.Now().Add(24 * time.Hour),
 					}, nil
 				},

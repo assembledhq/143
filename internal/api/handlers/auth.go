@@ -27,13 +27,13 @@ import (
 )
 
 type AuthHandler struct {
-	cfg              *config.Config
-	orgStore         *db.OrganizationStore
-	userStore        *db.UserStore
-	sessionStore     *db.AuthSessionStore
-	invitationStore  *db.InvitationStore
-	userCredentials  *db.UserCredentialStore
-	audit            *db.AuditEmitter
+	cfg             *config.Config
+	orgStore        *db.OrganizationStore
+	userStore       *db.UserStore
+	sessionStore    *db.AuthSessionStore
+	invitationStore *db.InvitationStore
+	userCredentials *db.UserCredentialStore
+	audit           *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging auth events.
@@ -317,7 +317,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	if invCookie, cookieErr := r.Cookie("pending_invitation"); cookieErr == nil && invCookie.Value != "" {
 		// Clear the cookie regardless of outcome.
 		http.SetCookie(w, &http.Cookie{Name: "pending_invitation", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-		inv, invOrgID, invRole, invErr := h.validateInvitation(r.Context(), invCookie.Value, email)
+		inv, invOrgID, invRole, invErr := h.validateInvitation(r.Context(), invCookie.Value, email, ghUser.Login)
 		if invErr == nil {
 			orgID = invOrgID
 			role = invRole
@@ -473,7 +473,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	if invCookie, cookieErr := r.Cookie("pending_invitation"); cookieErr == nil && invCookie.Value != "" {
 		http.SetCookie(w, &http.Cookie{Name: "pending_invitation", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-		inv, invOrgID, invRole, invErr := h.validateInvitation(r.Context(), invCookie.Value, gUser.Email)
+		inv, invOrgID, invRole, invErr := h.validateInvitation(r.Context(), invCookie.Value, gUser.Email, "")
 		if invErr == nil {
 			orgID = invOrgID
 			role = invRole
@@ -883,7 +883,7 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 	txInvitationStore := db.NewInvitationStore(tx)
 	txUserStore := db.NewUserStore(tx)
 
-	inv, orgID, role, invErr := h.validateInvitationWithStore(ctx, txInvitationStore, token, email)
+	inv, orgID, role, invErr := h.validateInvitationWithStore(ctx, txInvitationStore, token, email, "")
 	if invErr != nil {
 		return nil, invErr, nil
 	}
@@ -918,13 +918,16 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 }
 
 // validateInvitation looks up and validates an invitation token.
-// It checks that the invitation is pending, not expired, and the email matches.
-// Returns the invitation, org ID, role, and any error.
-func (h *AuthHandler) validateInvitation(ctx context.Context, token, email string) (models.Invitation, uuid.UUID, string, *invitationError) {
-	return h.validateInvitationWithStore(ctx, h.invitationStore, token, email)
+// It checks that the invitation is pending, not expired, and that either the
+// email or the GitHub login of the signing-in user matches the invitation.
+// For an email-only invitation, the email must match. For a GitHub-only
+// invitation, the GitHub login must match. If both identifiers are set on the
+// invitation, either a matching email or a matching GitHub login is accepted.
+func (h *AuthHandler) validateInvitation(ctx context.Context, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
+	return h.validateInvitationWithStore(ctx, h.invitationStore, token, email, githubLogin)
 }
 
-func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email string) (models.Invitation, uuid.UUID, string, *invitationError) {
+func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitationStore invitationLookupStore, token, email, githubLogin string) (models.Invitation, uuid.UUID, string, *invitationError) {
 	if invitationStore == nil {
 		return models.Invitation{}, uuid.Nil, "", &invitationError{http.StatusInternalServerError, "INVITE_LOOKUP_FAILED", "failed to look up invitation"}
 	}
@@ -945,8 +948,10 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 		return inv, uuid.Nil, "", &invitationError{http.StatusGone, "INVITE_EXPIRED", "this invitation has expired"}
 	}
 
-	if !strings.EqualFold(inv.Email, email) {
-		return inv, uuid.Nil, "", &invitationError{http.StatusBadRequest, "EMAIL_MISMATCH", "email does not match the invitation"}
+	emailMatches := inv.Email != nil && email != "" && strings.EqualFold(*inv.Email, email)
+	githubMatches := inv.GitHubUsername != nil && githubLogin != "" && strings.EqualFold(*inv.GitHubUsername, githubLogin)
+	if !emailMatches && !githubMatches {
+		return inv, uuid.Nil, "", &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
 	}
 
 	return inv, inv.OrgID, inv.Role, nil
