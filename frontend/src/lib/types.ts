@@ -479,6 +479,18 @@ export interface CodexDeviceAuth {
   expires_in: number;
 }
 
+export type CodexSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+
+export interface CodexSubscription {
+  id: string;
+  label: string;
+  account_type?: string;
+  status: CodexSubscriptionStatus;
+  last_used_at?: string;
+  created_by?: string;
+  created_at?: string;
+}
+
 export interface InvitationResponse {
   id: string;
   email: string;

@@ -555,7 +555,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			// Codex (ChatGPT) OAuth device code auth
 			r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 			r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
-			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.Disconnect)
+			r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
+			r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
+			r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
 
 			// Usage timeseries, breakdown, and export (admin-only)
 			r.Get("/api/v1/usage/timeseries", usageHandler.GetTimeseries)
