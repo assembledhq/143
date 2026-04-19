@@ -8,6 +8,12 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 # Overall flow
 
+## Identity and organization context
+
+- The current product is single-organization per user, but the intended long-term identity model is **one user identity, many organization memberships**. A user represents the human account (email, GitHub ID, Google ID); membership represents access to an organization and carries the user's role for that org.
+- All product data remains scoped to exactly one `org_id`. Multi-organization support should change how the active org is resolved for a request, not introduce cross-org views by default.
+- The detailed future design lives in [future/49-multi-organization-membership.md](future/49-multi-organization-membership.md). The key product guardrail is that single-org users should see no new UI or onboarding complexity.
+
 ## Autopilot workspace UX
 
 - `Autopilot` is the primary operating surface. It leads with one recommendation hero, a compact evidence row, and a summary-first `Your Direction` section so users can understand what the system sees and what it wants to do next without reading a dense settings form.
