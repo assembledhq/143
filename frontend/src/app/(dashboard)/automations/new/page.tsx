@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
 import { NoReposWarning } from "@/components/no-repos-warning";
+import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 import { cn } from "@/lib/utils";
 import { automationTemplates } from "@/lib/automation-templates";
 
@@ -62,13 +64,13 @@ export default function NewAutomationPage() {
   const createMutation = useMutation({
     mutationFn: () =>
       api.automations.create({
-        name,
-        goal,
-        repository_id: repoId || undefined,
-        scope: scope || undefined,
+        name: name.trim(),
+        goal: goal.trim(),
+        repository_id: repoId,
+        scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
-        base_branch: baseBranch,
+        base_branch: baseBranch.trim() || undefined,
         priority,
       }),
     onSuccess: (res) => {
@@ -78,193 +80,221 @@ export default function NewAutomationPage() {
 
   if (repos.length === 0 && reposData) {
     return (
-      <div className="max-w-2xl mx-auto px-6 py-8">
-        <h1 className="text-lg font-semibold mb-4">New Automation</h1>
-        <NoReposWarning />
-      </div>
+      <PageContainer size="default">
+        <div className="space-y-6">
+          <PageHeader
+            title="New automation"
+            description="Recurring agents that run on a schedule for your team."
+          />
+          <NoReposWarning />
+        </div>
+      </PageContainer>
     );
   }
 
+  const canSubmit =
+    name.trim().length > 0 && goal.trim().length > 0 && repoId.length > 0;
+
   return (
-    <div className="max-w-2xl mx-auto px-6 py-8">
-      <h1 className="text-lg font-semibold text-foreground mb-6">New Automation</h1>
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title="New automation"
+          description="Recurring agents that run on a schedule for your team."
+        />
 
-      {/* Templates */}
-      <div className="mb-6">
-        <Label className="text-xs text-muted-foreground mb-2 block">
-          Start from a template
-        </Label>
-        <div className="flex flex-wrap gap-2">
-          {automationTemplates.map((t) => {
-            const Icon = t.icon;
-            return (
-              <Button
-                key={t.id}
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => applyTemplate(t.id)}
-                className={cn(
-                  "rounded-full h-7 px-3 text-xs",
-                  name === t.name && "border-primary bg-primary/5"
-                )}
-              >
-                <Icon className="h-3.5 w-3.5 mr-1.5" />
-                {t.name}
-              </Button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="space-y-4">
-        {/* Name */}
-        <div>
-          <Label htmlFor="name">Name</Label>
-          <Input
-            id="name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Find flaky tests"
-          />
-        </div>
-
-        {/* Goal */}
-        <div>
-          <Label htmlFor="goal">Goal</Label>
-          <Textarea
-            id="goal"
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            placeholder="Describe what the automation should do each run..."
-            rows={3}
-          />
-        </div>
-
-        {/* Scope (optional) */}
-        <div>
-          <Label htmlFor="scope">
-            Scope <span className="text-muted-foreground font-normal">(optional)</span>
+        {/* Templates */}
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">
+            Start from a template
           </Label>
-          <Input
-            id="scope"
-            value={scope}
-            onChange={(e) => setScope(e.target.value)}
-            placeholder="e.g. src/payments/, tests/"
-          />
-        </div>
-
-        {/* Repository */}
-        <div>
-          <Label>Repository</Label>
-          <Select value={repoId} onValueChange={setSelectedRepoId}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select repo" />
-            </SelectTrigger>
-            <SelectContent>
-              {repos.map((repo) => (
-                <SelectItem key={repo.id} value={repo.id}>
-                  {repo.full_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Schedule */}
-        <div>
-          <Label id="schedule-label">Schedule</Label>
-          <div
-            className="flex items-center gap-2 mt-1"
-            role="group"
-            aria-labelledby="schedule-label"
-          >
-            <span className="text-sm text-muted-foreground">Run every</span>
-            <Input
-              id="interval-value"
-              aria-label="Interval value"
-              type="number"
-              min={1}
-              max={365}
-              value={intervalValue}
-              onChange={(e) => {
-                const parsed = parseInt(e.target.value, 10);
-                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-              }}
-              className="w-20"
-            />
-            <Select
-              value={intervalUnit}
-              onValueChange={(v) => {
-                // Validated against the SelectItem values below; if the tuple
-                // ever drifts from the Select options, fall back rather than
-                // coercing an unexpected value through `as`.
-                if (v === "hours" || v === "days" || v === "weeks") {
-                  setIntervalUnit(v);
-                }
-              }}
-            >
-              <SelectTrigger className="w-28" aria-label="Interval unit">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="hours">hours</SelectItem>
-                <SelectItem value="days">days</SelectItem>
-                <SelectItem value="weeks">weeks</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex flex-wrap gap-2">
+            {automationTemplates.map((t) => {
+              const Icon = t.icon;
+              return (
+                <Button
+                  key={t.id}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => applyTemplate(t.id)}
+                  className={cn(
+                    "rounded-full h-7 px-3 text-xs",
+                    name === t.name && "border-primary bg-primary/5"
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5 mr-1.5" />
+                  {t.name}
+                </Button>
+              );
+            })}
           </div>
         </div>
 
-        {/* Advanced settings */}
-        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <CollapsibleTrigger className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors py-2">
-            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", advancedOpen && "rotate-180")} />
-            Advanced
-          </CollapsibleTrigger>
-          <CollapsibleContent className="space-y-4 pt-2">
-            <div>
-              <Label htmlFor="baseBranch">Base branch</Label>
+        {/* Main form */}
+        <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+          <div className="space-y-1.5">
+            <Label htmlFor="name">Name</Label>
+            <Input
+              id="name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Find flaky tests"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="goal">Goal</Label>
+            <Textarea
+              id="goal"
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              placeholder="Describe what the automation should do each run..."
+              rows={3}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="scope">
+              Scope{" "}
+              <span className="text-muted-foreground font-normal">
+                (optional)
+              </span>
+            </Label>
+            <Input
+              id="scope"
+              value={scope}
+              onChange={(e) => setScope(e.target.value)}
+              placeholder="e.g. src/payments/, tests/"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Repository</Label>
+            <Select value={repoId} onValueChange={setSelectedRepoId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a repository" />
+              </SelectTrigger>
+              <SelectContent>
+                {repos.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label id="schedule-label">Schedule</Label>
+            <div
+              className="flex items-center gap-2"
+              role="group"
+              aria-labelledby="schedule-label"
+            >
+              <span className="text-sm text-muted-foreground">Run every</span>
               <Input
-                id="baseBranch"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                placeholder="main"
+                id="interval-value"
+                aria-label="Interval value"
+                type="number"
+                min={1}
+                max={365}
+                value={intervalValue}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  setIntervalValue(
+                    Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
+                  );
+                }}
+                className="w-20"
               />
-            </div>
-            <div>
-              <Label>Priority</Label>
-              <Select value={String(priority)} onValueChange={(v) => setPriority(parseInt(v, 10))}>
-                <SelectTrigger>
+              <Select
+                value={intervalUnit}
+                onValueChange={(v) => {
+                  // Validated against the SelectItem values below; if the tuple
+                  // ever drifts from the Select options, fall back rather than
+                  // coercing an unexpected value through `as`.
+                  if (v === "hours" || v === "days" || v === "weeks") {
+                    setIntervalUnit(v);
+                  }
+                }}
+              >
+                <SelectTrigger className="w-28" aria-label="Interval unit">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="0">Critical</SelectItem>
-                  <SelectItem value="25">High</SelectItem>
-                  <SelectItem value="50">Medium</SelectItem>
-                  <SelectItem value="75">Low</SelectItem>
+                  <SelectItem value="hours">hours</SelectItem>
+                  <SelectItem value="days">days</SelectItem>
+                  <SelectItem value="weeks">weeks</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-          </CollapsibleContent>
-        </Collapsible>
+          </div>
 
-        {/* Submit */}
-        <Button
-          onClick={() => createMutation.mutate()}
-          disabled={!name || !goal || createMutation.isPending}
-          className="w-full"
-        >
-          {createMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Create automation
-        </Button>
+          {/* Advanced settings */}
+          <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+            <CollapsibleTrigger className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1">
+              <ChevronDown
+                className={cn(
+                  "h-3.5 w-3.5 transition-transform",
+                  advancedOpen && "rotate-180",
+                )}
+              />
+              Advanced options
+            </CollapsibleTrigger>
+            <CollapsibleContent className="space-y-4 pt-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="baseBranch">Base branch</Label>
+                <Input
+                  id="baseBranch"
+                  value={baseBranch}
+                  onChange={(e) => setBaseBranch(e.target.value)}
+                  placeholder="main"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Priority</Label>
+                <Select
+                  value={String(priority)}
+                  onValueChange={(v) => setPriority(parseInt(v, 10))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">Critical</SelectItem>
+                    <SelectItem value="25">High</SelectItem>
+                    <SelectItem value="50">Medium</SelectItem>
+                    <SelectItem value="75">Low</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
 
-        {createMutation.isError && (
-          <p className="text-sm text-destructive">
-            Failed to create automation. Please try again.
-          </p>
-        )}
+          {/* Submit */}
+          <div className="flex items-center gap-3 pt-2">
+            <Button
+              onClick={() => createMutation.mutate()}
+              disabled={!canSubmit || createMutation.isPending}
+            >
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                "Create automation"
+              )}
+            </Button>
+            {createMutation.isError && (
+              <p className="text-xs text-destructive">
+                Failed to create automation. Please try again.
+              </p>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }
