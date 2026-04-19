@@ -183,6 +183,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+		}
+	}
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
@@ -575,6 +581,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
 			r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
 			r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
+			r.Get("/api/v1/team/github/status", teamHandler.GitHubInviteStatus)
+			r.Get("/api/v1/team/github/users", teamHandler.SearchGitHubUsers)
 		})
 	})
 

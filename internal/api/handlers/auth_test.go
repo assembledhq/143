@@ -517,13 +517,13 @@ func TestAuthHandler_Register_InvitationClaimFailureReturnsGone(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id, org_id, email, role, invited_by, token, status, expires_at, created_at, accepted_at FROM invitations WHERE token = @token").
+	mock.ExpectQuery("SELECT id, org_id, email, github_username, role, invited_by, token, status, expires_at, created_at, accepted_at FROM invitations WHERE token = @token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{
-				"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
+				"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
 			}).AddRow(
-				invitationID, orgID, "invitee@example.com", "member", uuid.New(), "test-token", "pending", time.Now().Add(time.Hour), time.Now(), nil,
+				invitationID, orgID, strPtr("invitee@example.com"), nil, "member", uuid.New(), "test-token", "pending", time.Now().Add(time.Hour), time.Now(), nil,
 			),
 		)
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted', accepted_at = now\\(\\) WHERE id = @id AND status = 'pending'").
@@ -680,7 +680,7 @@ func TestAuthHandler_Register_WithInvitation_NotFound(t *testing.T) {
 	defer mock.Close()
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
-	invitationColumns := []string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
+	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
 	// GetByEmail returns no user
 	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
@@ -721,8 +721,8 @@ func TestAuthHandler_Register_WithInvitation_Expired(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", "member", uuid.New(), "expired-token", "pending", time.Now().Add(-1*time.Hour), time.Now().Add(-48*time.Hour), nil),
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "expired-token", "pending", time.Now().Add(-1*time.Hour), time.Now().Add(-48*time.Hour), nil),
 		)
 	mock.ExpectRollback()
 
@@ -753,8 +753,8 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "someone-else@example.com", "member", uuid.New(), "mismatch-token", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(uuid.New(), uuid.New(), strPtr("someone-else@example.com"), nil, "member", uuid.New(), "mismatch-token", "pending", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -765,7 +765,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 
 	handler.Register(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "EMAIL_MISMATCH")
+	require.Contains(t, w.Body.String(), "INVITE_MISMATCH")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -785,8 +785,8 @@ func TestAuthHandler_Register_WithInvitation_AlreadyAccepted(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", "member", uuid.New(), "used-token", "accepted", time.Now().Add(time.Hour), time.Now(), nil),
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "used-token", "accepted", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -817,8 +817,8 @@ func TestAuthHandler_Register_WithInvitation_Revoked(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", "member", uuid.New(), "revoked-token", "revoked", time.Now().Add(time.Hour), time.Now(), nil),
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "revoked-token", "revoked", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -855,8 +855,8 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(invitationID, orgID, "invitee@example.com", "member", uuid.New(), "valid-token", "pending", time.Now().Add(24*time.Hour), time.Now(), nil),
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invitationID, orgID, strPtr("invitee@example.com"), nil, "member", uuid.New(), "valid-token", "pending", time.Now().Add(24*time.Hour), time.Now(), nil),
 		)
 	// Accept invitation
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
@@ -981,7 +981,7 @@ func TestAuthHandler_Register_WithInvitation_ClearsCookie(t *testing.T) {
 	defer mock.Close()
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
-	invitationColumns := []string{"id", "org_id", "email", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
+	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
 	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
 		WithArgs(pgxmock.AnyArg()).
@@ -1017,29 +1017,41 @@ func TestValidateInvitation(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
+	email1 := "user@example.com"
+	emailCorrect := "correct@example.com"
+	ghLogin := "octocat"
 
 	tests := []struct {
-		name       string
-		token      string
-		email      string
-		invitation *models.Invitation
-		lookupErr  error
-		expectErr  bool
-		expectCode string
+		name        string
+		token       string
+		email       string
+		githubLogin string
+		invitation  *models.Invitation
+		lookupErr   error
+		expectErr   bool
+		expectCode  string
 	}{
 		{
 			name:       "valid pending invitation",
 			token:      "valid-token",
 			email:      "user@example.com",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "user@example.com", Role: "member", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &email1, Role: "member", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
 			expectErr:  false,
 		},
 		{
 			name:       "case-insensitive email match",
 			token:      "valid-token",
 			email:      "User@Example.COM",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "user@example.com", Role: "admin", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &email1, Role: "admin", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
 			expectErr:  false,
+		},
+		{
+			name:        "github login match on github-only invitation",
+			token:       "gh-token",
+			email:       "",
+			githubLogin: "octocat",
+			invitation:  &models.Invitation{ID: uuid.New(), OrgID: orgID, GitHubUsername: &ghLogin, Role: "member", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
+			expectErr:   false,
 		},
 		{
 			name:       "token not found",
@@ -1061,7 +1073,7 @@ func TestValidateInvitation(t *testing.T) {
 			name:       "non-pending status (accepted)",
 			token:      "used-token",
 			email:      "user@example.com",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "user@example.com", Role: "member", Status: "accepted", ExpiresAt: time.Now().Add(time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &email1, Role: "member", Status: "accepted", ExpiresAt: time.Now().Add(time.Hour)},
 			expectErr:  true,
 			expectCode: "INVITE_INVALID",
 		},
@@ -1069,7 +1081,7 @@ func TestValidateInvitation(t *testing.T) {
 			name:       "non-pending status (revoked)",
 			token:      "revoked-token",
 			email:      "user@example.com",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "user@example.com", Role: "member", Status: "revoked", ExpiresAt: time.Now().Add(time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &email1, Role: "member", Status: "revoked", ExpiresAt: time.Now().Add(time.Hour)},
 			expectErr:  true,
 			expectCode: "INVITE_INVALID",
 		},
@@ -1077,7 +1089,7 @@ func TestValidateInvitation(t *testing.T) {
 			name:       "expired invitation",
 			token:      "expired-token",
 			email:      "user@example.com",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "user@example.com", Role: "member", Status: "pending", ExpiresAt: time.Now().Add(-1 * time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &email1, Role: "member", Status: "pending", ExpiresAt: time.Now().Add(-1 * time.Hour)},
 			expectErr:  true,
 			expectCode: "INVITE_EXPIRED",
 		},
@@ -1085,9 +1097,9 @@ func TestValidateInvitation(t *testing.T) {
 			name:       "email mismatch",
 			token:      "mismatch-token",
 			email:      "wrong@example.com",
-			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: "correct@example.com", Role: "member", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
+			invitation: &models.Invitation{ID: uuid.New(), OrgID: orgID, Email: &emailCorrect, Role: "member", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)},
 			expectErr:  true,
-			expectCode: "EMAIL_MISMATCH",
+			expectCode: "INVITE_MISMATCH",
 		},
 	}
 
@@ -1105,7 +1117,7 @@ func TestValidateInvitation(t *testing.T) {
 			}
 
 			handler := &AuthHandler{}
-			inv, retOrgID, role, invErr := handler.validateInvitationWithStore(context.Background(), store, tt.token, tt.email)
+			inv, retOrgID, role, invErr := handler.validateInvitationWithStore(context.Background(), store, tt.token, tt.email, tt.githubLogin)
 
 			if tt.expectErr {
 				require.NotNil(t, invErr, "should return an error")
@@ -1124,7 +1136,7 @@ func TestValidateInvitation_NilStore(t *testing.T) {
 	t.Parallel()
 
 	handler := &AuthHandler{}
-	_, _, _, invErr := handler.validateInvitationWithStore(context.Background(), nil, "token", "email@test.com")
+	_, _, _, invErr := handler.validateInvitationWithStore(context.Background(), nil, "token", "email@test.com", "")
 	require.NotNil(t, invErr)
 	require.Equal(t, "INVITE_LOOKUP_FAILED", invErr.code)
 }

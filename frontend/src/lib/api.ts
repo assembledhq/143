@@ -397,9 +397,15 @@ export const api = {
     removeMember: (id: string) => del<void>(`/api/v1/team/members/${id}`),
     listInvitations: () =>
       get<import('./types').ListResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations'),
-    createInvitation: (email: string, role: string) =>
-      post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', { email, role }),
+    createInvitation: (body: { email?: string; github_username?: string; role: string }) =>
+      post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
+    githubInviteStatus: () =>
+      get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
+    searchGitHubUsers: (q: string) =>
+      get<import('./types').ListResponse<import('./types').GitHubUserSuggestion>>(
+        `/api/v1/team/github/users?q=${encodeURIComponent(q)}`,
+      ),
   },
   projects: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean }) => {

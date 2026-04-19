@@ -493,7 +493,8 @@ export interface CodexSubscription {
 
 export interface InvitationResponse {
   id: string;
-  email: string;
+  email?: string | null;
+  github_username?: string | null;
   role: string;
   status: string;
   invited_by: {
@@ -502,6 +503,15 @@ export interface InvitationResponse {
   };
   expires_at: string;
   created_at: string;
+}
+
+export interface GitHubInviteStatus {
+  connected: boolean;
+}
+
+export interface GitHubUserSuggestion {
+  login: string;
+  avatar_url?: string;
 }
 
 export interface CredentialSummary {
