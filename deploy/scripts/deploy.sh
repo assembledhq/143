@@ -108,6 +108,7 @@ fi
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "COMPOSE_FILE=$COMPOSE_FILE" "HEALTH_SERVICE=$HEALTH_SERVICE" "ROLE=$ROLE" "IMAGE_TAG=$TAG" \
   bash << 'REMOTE'
+  set -euo pipefail
   cd /opt/143
 
   recreate_other_services() {
