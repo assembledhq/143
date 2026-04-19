@@ -741,10 +741,13 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 	}
 	stats := models.AutomationRunStats{Since: since, Until: until}
 
-	// FILTER clauses keep the pivot readable. avg_duration_seconds uses
-	// EXTRACT(EPOCH FROM ...) which gracefully handles NULL — avg() ignores
-	// NULLs, so buckets with no completed runs collapse to NULL and we
-	// coalesce to 0.
+	// FILTER clauses keep the pivot readable. avg_duration_seconds filters
+	// on the same status set the Go-side weighted re-aggregation uses
+	// (completed/completed_noop/failed) — skipped rows also get completed_at
+	// set by the worker handler, so "WHERE completed_at IS NOT NULL" would
+	// pull them into the bucket mean while the Go weight excludes them, and
+	// the window-wide avg would drift whenever an automation accumulates
+	// skipped runs.
 	const bucketQuery = `
 		SELECT
 			date_trunc('day', triggered_at AT TIME ZONE 'UTC') AS bucket,
@@ -757,7 +760,8 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 			count(*) FILTER (WHERE status = 'pending') AS pending,
 			coalesce(
 				avg(EXTRACT(EPOCH FROM (completed_at - triggered_at)))
-					FILTER (WHERE completed_at IS NOT NULL),
+					FILTER (WHERE status IN ('completed', 'completed_noop', 'failed')
+						AND completed_at IS NOT NULL),
 				0
 			) AS avg_duration_seconds
 		FROM automation_runs

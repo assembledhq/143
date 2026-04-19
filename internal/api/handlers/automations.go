@@ -438,6 +438,30 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
+		// Up-front: a schedule_type *switch* must carry the new type's
+		// companion fields in the same PATCH. Without this, we'd happily
+		// mutate the in-memory model and only surface the error downstream
+		// at ComputeNextRunAt, with a less precise message. Same-type
+		// PATCHes (e.g. updating interval_value on an interval row) still
+		// flow through the per-field blocks below.
+		if *req.ScheduleType != automation.ScheduleType {
+			switch *req.ScheduleType {
+			case models.AutomationScheduleInterval:
+				if req.IntervalValue == nil {
+					writeError(w, r, http.StatusBadRequest, "MISSING_INTERVAL_VALUE", "switching to schedule_type=interval requires interval_value")
+					return
+				}
+				if req.IntervalUnit == nil || *req.IntervalUnit == "" {
+					writeError(w, r, http.StatusBadRequest, "MISSING_INTERVAL_UNIT", "switching to schedule_type=interval requires interval_unit")
+					return
+				}
+			case models.AutomationScheduleCron:
+				if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
+					writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "switching to schedule_type=cron requires cron_expression")
+					return
+				}
+			}
+		}
 		automation.ScheduleType = *req.ScheduleType
 		scheduleChanged = true
 	}

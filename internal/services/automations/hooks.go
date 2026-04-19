@@ -19,7 +19,7 @@ import (
 // an interface here (rather than taking *db.AutomationRunStore) so hook tests
 // don't have to stand up a Postgres pool.
 type automationRunStore interface {
-	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string, completedAt *time.Time, resultSummary *string) error
+	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error)
 }
 
 // AutomationHooks implements agent.AutomationRunUpdater by mapping a session's
@@ -38,6 +38,11 @@ func NewAutomationHooks(runs automationRunStore, logger zerolog.Logger) *Automat
 // the automation_run stays "running" until the session reaches a terminal
 // state, matching the reaper contract (stuck pending/running rows get failed
 // after the threshold).
+//
+// Transition is conditional on the current automation_run status being
+// "running" so that if both the orchestrator's success path and failRun fire
+// for the same session (or the reaper has already written a terminal status),
+// a second call here cannot overwrite an already-terminal row.
 func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Session, status string) error {
 	if run.AutomationRunID == nil {
 		return nil
@@ -57,8 +62,17 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 
 	now := time.Now()
 	summary := deriveSummary(run, status)
-	if err := h.runs.UpdateStatus(ctx, run.OrgID, *run.AutomationRunID, runStatus, &now, summary); err != nil {
+	transitioned, err := h.runs.TransitionStatusIf(ctx, run.OrgID, *run.AutomationRunID, models.AutomationRunStatusRunning, runStatus, &now, summary)
+	if err != nil {
 		return fmt.Errorf("update automation run status: %w", err)
+	}
+	if !transitioned {
+		// Row was already non-running (terminal, or never claimed by the
+		// worker handler). No-op — the earlier writer's status stands.
+		h.logger.Debug().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Str("attempted_status", runStatus).
+			Msg("automation run already non-running; hook update skipped")
 	}
 	return nil
 }

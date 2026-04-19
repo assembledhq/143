@@ -13,33 +13,36 @@ import (
 )
 
 type fakeAutomationRunStore struct {
-	calls []fakeUpdateCall
-	err   error
+	calls        []fakeTransitionCall
+	err          error
+	transitioned bool // what TransitionStatusIf returns for the bool result
 }
 
-type fakeUpdateCall struct {
+type fakeTransitionCall struct {
 	orgID         uuid.UUID
 	runID         uuid.UUID
-	status        string
+	fromStatus    string
+	toStatus      string
 	completedAt   *time.Time
 	resultSummary *string
 }
 
-func (f *fakeAutomationRunStore) UpdateStatus(_ context.Context, orgID, runID uuid.UUID, status string, completedAt *time.Time, resultSummary *string) error {
-	f.calls = append(f.calls, fakeUpdateCall{
+func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+	f.calls = append(f.calls, fakeTransitionCall{
 		orgID:         orgID,
 		runID:         runID,
-		status:        status,
+		fromStatus:    fromStatus,
+		toStatus:      toStatus,
 		completedAt:   completedAt,
 		resultSummary: resultSummary,
 	})
-	return f.err
+	return f.transitioned, f.err
 }
 
 func TestAutomationHooks_OnSessionComplete_NoAutomationRunID_NoOp(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeAutomationRunStore{}
+	store := &fakeAutomationRunStore{transitioned: true}
 	h := NewAutomationHooks(store, zerolog.Nop())
 
 	session := &models.Session{OrgID: uuid.New()}
@@ -51,7 +54,7 @@ func TestAutomationHooks_OnSessionComplete_NoAutomationRunID_NoOp(t *testing.T) 
 func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeAutomationRunStore{}
+	store := &fakeAutomationRunStore{transitioned: true}
 	h := NewAutomationHooks(store, zerolog.Nop())
 
 	runID := uuid.New()
@@ -69,7 +72,9 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 	call := store.calls[0]
 	require.Equal(t, orgID, call.orgID)
 	require.Equal(t, runID, call.runID)
-	require.Equal(t, models.AutomationRunStatusCompleted, call.status)
+	require.Equal(t, models.AutomationRunStatusRunning, call.fromStatus,
+		"hook must gate on current status=running so a terminal row is never overwritten")
+	require.Equal(t, models.AutomationRunStatusCompleted, call.toStatus)
 	require.NotNil(t, call.completedAt)
 	require.NotNil(t, call.resultSummary)
 	require.Equal(t, summary, *call.resultSummary)
@@ -78,7 +83,7 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 func TestAutomationHooks_OnSessionComplete_FailedPrefersErrorWhenNoSummary(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeAutomationRunStore{}
+	store := &fakeAutomationRunStore{transitioned: true}
 	h := NewAutomationHooks(store, zerolog.Nop())
 
 	runID := uuid.New()
@@ -92,14 +97,15 @@ func TestAutomationHooks_OnSessionComplete_FailedPrefersErrorWhenNoSummary(t *te
 	err := h.OnSessionComplete(context.Background(), session, "failed")
 	require.NoError(t, err)
 	require.Len(t, store.calls, 1)
-	require.Equal(t, models.AutomationRunStatusFailed, store.calls[0].status)
+	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
+	require.Equal(t, models.AutomationRunStatusFailed, store.calls[0].toStatus)
 	require.Equal(t, errMsg, *store.calls[0].resultSummary)
 }
 
 func TestAutomationHooks_OnSessionComplete_IgnoresNonTerminal(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeAutomationRunStore{}
+	store := &fakeAutomationRunStore{transitioned: true}
 	h := NewAutomationHooks(store, zerolog.Nop())
 
 	runID := uuid.New()
@@ -113,4 +119,27 @@ func TestAutomationHooks_OnSessionComplete_IgnoresNonTerminal(t *testing.T) {
 		require.NoError(t, err, "status %q should no-op", status)
 	}
 	require.Empty(t, store.calls, "non-terminal statuses must not touch the run row")
+}
+
+// TestAutomationHooks_OnSessionComplete_AlreadyTerminalIsSafeNoOp verifies
+// that if the hook fires twice (e.g. both RunAgent step 14 and failRun dispatch
+// a completion update), the second call sees transitioned=false because the
+// row is no longer "running" — and the hook must return cleanly instead of
+// overwriting the first writer's terminal status.
+func TestAutomationHooks_OnSessionComplete_AlreadyTerminalIsSafeNoOp(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeAutomationRunStore{transitioned: false}
+	h := NewAutomationHooks(store, zerolog.Nop())
+
+	runID := uuid.New()
+	session := &models.Session{
+		OrgID:           uuid.New(),
+		AutomationRunID: &runID,
+	}
+
+	err := h.OnSessionComplete(context.Background(), session, "failed")
+	require.NoError(t, err, "a lost-race transition must not surface as an error")
+	require.Len(t, store.calls, 1, "the hook still attempts the conditional transition")
+	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
 }

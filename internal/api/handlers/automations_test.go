@@ -345,6 +345,12 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "invalid exec mode", body: map[string]any{"execution_mode": "x"}, code: http.StatusBadRequest},
 		{name: "invalid priority", body: map[string]any{"priority": 999}, code: http.StatusBadRequest},
 		{name: "cron invalid expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "nope"}, code: http.StatusBadRequest},
+		// Up-front switch validation: a type switch must include its
+		// companion fields in the same PATCH. Before this check, the handler
+		// would happily mutate the in-memory model and surface a less
+		// precise error downstream at ComputeNextRunAt.
+		{name: "switch to cron without expression", body: map[string]any{"schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "switch to cron with blank expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "   "}, code: http.StatusBadRequest},
 		{name: "blank base branch", body: map[string]any{"base_branch": "  "}, code: http.StatusBadRequest},
 		{name: "invalid interval value", body: map[string]any{"interval_value": -1}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"interval_unit": "bogus"}, code: http.StatusBadRequest},
@@ -1165,6 +1171,20 @@ func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
 	rr3 := httptest.NewRecorder()
 	h.Stats(rr3, req3)
 	require.Equal(t, http.StatusBadRequest, rr3.Code)
+
+	// Malformed until -> 400 INVALID_UNTIL. The handler parses until before
+	// since, so a junk until short-circuits before the window-size and
+	// since-ordering checks can fire — this pins that precedence so a future
+	// reordering doesn't silently fall through to a confusing INVALID_WINDOW.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	url4 := "/api/v1/automations/" + id.String() + "/stats?until=not-a-date"
+	req4 := newAutomationRequest(t, http.MethodGet, url4, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr4 := httptest.NewRecorder()
+	h.Stats(rr4, req4)
+	require.Equal(t, http.StatusBadRequest, rr4.Code)
+	require.Contains(t, rr4.Body.String(), "INVALID_UNTIL")
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
