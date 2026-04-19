@@ -59,7 +59,7 @@ function fillGaps(
     until.getUTCDate(),
   ));
   // `until` is an exclusive upper bound (matches the backend's half-open
-   // window), so stop strictly before `end`.
+  // window), so stop strictly before `end`.
   while (cur < end) {
     const key = cur.toISOString().slice(0, 10);
     const b = byDay.get(key);

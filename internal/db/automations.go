@@ -673,37 +673,6 @@ func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runI
 	return tag.RowsAffected() > 0, nil
 }
 
-// CompletePendingNoopIfAutomationActive moves a pending run to completed_noop
-// only if its parent automation still exists. This protects runs cancelled by
-// SoftDelete/BulkSoftDelete from being rewritten by a queued worker job.
-func (s *AutomationRunStore) CompletePendingNoopIfAutomationActive(ctx context.Context, orgID, automationID, runID uuid.UUID, completedAt *time.Time, resultSummary *string) (bool, error) {
-	query := `UPDATE automation_runs AS r
-		SET status = @status,
-		    completed_at = @completed_at,
-		    result_summary = @result_summary,
-		    updated_at = now()
-		FROM automations AS a
-		WHERE r.id = @id
-		  AND r.org_id = @org_id
-		  AND r.automation_id = @automation_id
-		  AND r.status = 'pending'
-		  AND a.id = r.automation_id
-		  AND a.org_id = r.org_id
-		  AND a.deleted_at IS NULL`
-	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":             runID,
-		"org_id":         orgID,
-		"automation_id":  automationID,
-		"status":         models.AutomationRunStatusCompletedNoop,
-		"completed_at":   completedAt,
-		"result_summary": resultSummary,
-	})
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
-}
-
 // ListOrgsWithStuckRuns returns the distinct org_ids that have at least one
 // pending/running run older than threshold. The scheduler uses this to fan the
 // reaper out to one UPDATE per org, so every reap query carries an explicit

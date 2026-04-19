@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 
+	"github.com/rs/zerolog"
+
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -79,13 +81,15 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 
 // marshalAuditDetails JSON-encodes a details map. Returns nil (which the audit
 // writer treats as SQL NULL) for empty input so we don't spam audit rows with
-// "{}" blobs that the UI would have to special-case.
-func marshalAuditDetails(details map[string]any) json.RawMessage {
+// "{}" blobs that the UI would have to special-case. Marshal failures are
+// logged so silent audit data loss surfaces during incident review.
+func marshalAuditDetails(logger zerolog.Logger, details map[string]any) json.RawMessage {
 	if len(details) == 0 {
 		return nil
 	}
 	b, err := json.Marshal(details)
 	if err != nil {
+		logger.Error().Err(err).Interface("details", details).Msg("marshal audit details")
 		return nil
 	}
 	return b

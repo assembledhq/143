@@ -714,42 +714,6 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAutomationRunStore_CompletePendingNoopIfAutomationActive(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		rowsAffected int64
-		expected     bool
-	}{
-		{name: "updates pending run for active automation", rowsAffected: 1, expected: true},
-		{name: "leaves skipped or deleted automation run unchanged", rowsAffected: 0, expected: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
-			defer mock.Close()
-
-			store := NewAutomationRunStore(mock)
-			now := time.Now()
-			summary := "noop"
-
-			mock.ExpectExec(`UPDATE automation_runs AS r\s+SET status = @status.*FROM automations AS a.*r.status = 'pending'.*a.deleted_at IS NULL`).
-				WithArgs(anyArgs(6)...).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
-
-			updated, err := store.CompletePendingNoopIfAutomationActive(context.Background(), uuid.New(), uuid.New(), uuid.New(), &now, &summary)
-			require.NoError(t, err)
-			require.Equal(t, tt.expected, updated)
-			require.NoError(t, mock.ExpectationsWereMet())
-		})
-	}
-}
-
 func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	t.Parallel()
 

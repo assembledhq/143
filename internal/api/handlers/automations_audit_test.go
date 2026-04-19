@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
@@ -124,15 +125,17 @@ func TestAutomationAuditDiff_RepositoryIDTransitions(t *testing.T) {
 func TestMarshalAuditDetails(t *testing.T) {
 	t.Parallel()
 
+	logger := zerolog.Nop()
+
 	t.Run("empty map returns nil", func(t *testing.T) {
 		t.Parallel()
-		require.Nil(t, marshalAuditDetails(map[string]any{}))
-		require.Nil(t, marshalAuditDetails(nil))
+		require.Nil(t, marshalAuditDetails(logger, map[string]any{}))
+		require.Nil(t, marshalAuditDetails(logger, nil))
 	})
 
 	t.Run("valid payload round-trips", func(t *testing.T) {
 		t.Parallel()
-		got := marshalAuditDetails(map[string]any{"name": "x", "count": 3})
+		got := marshalAuditDetails(logger, map[string]any{"name": "x", "count": 3})
 		require.NotNil(t, got)
 		var decoded map[string]any
 		require.NoError(t, json.Unmarshal(got, &decoded))

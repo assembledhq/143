@@ -60,7 +60,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 		return nil
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	summary := deriveSummary(run, status)
 	transitioned, err := h.runs.TransitionStatusIf(ctx, run.OrgID, *run.AutomationRunID, models.AutomationRunStatusRunning, runStatus, &now, summary)
 	if err != nil {

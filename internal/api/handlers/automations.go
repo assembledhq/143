@@ -180,6 +180,18 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reject cross-typed schedule fields up front rather than silently dropping
+	// them: a cron payload that also includes interval_value almost certainly
+	// reflects a client bug, and silent normalisation would mask it.
+	if scheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+		return
+	}
+	if scheduleType == models.AutomationScheduleInterval && req.CronExpression != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
+		return
+	}
+
 	// Interval fields are only meaningful for interval schedules; cron schedules
 	// persist them as NULL. The DB CHECK constraint
 	// (chk_automations_schedule_fields) also enforces this XOR relationship.
@@ -309,7 +321,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	idStr := automation.ID.String()
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationCreated, models.AuditResourceAutomation, &idStr, nil, nil,
-		marshalAuditDetails(automationAuditSnapshot(&automation)))
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -433,17 +445,32 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Handle schedule changes — recompute next_run_at.
 	scheduleChanged := false
+
+	// Determine the effective schedule type for this PATCH so we can reject
+	// cross-typed companion fields before mutating the model. The previous
+	// behaviour silently dropped mismatched fields (e.g. cron_expression sent
+	// against an interval automation) which masked client bugs.
+	effectiveScheduleType := automation.ScheduleType
 	if req.ScheduleType != nil {
 		if err := models.ValidateAutomationScheduleType(*req.ScheduleType); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
-		// Up-front: a schedule_type *switch* must carry the new type's
-		// companion fields in the same PATCH. Without this, we'd happily
-		// mutate the in-memory model and only surface the error downstream
-		// at ComputeNextRunAt, with a less precise message. Same-type
-		// PATCHes (e.g. updating interval_value on an interval row) still
-		// flow through the per-field blocks below.
+		effectiveScheduleType = *req.ScheduleType
+	}
+	if effectiveScheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+		return
+	}
+	if effectiveScheduleType == models.AutomationScheduleInterval && req.CronExpression != nil && strings.TrimSpace(*req.CronExpression) != "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
+		return
+	}
+
+	if req.ScheduleType != nil {
+		// A schedule_type *switch* must carry the new type's companion fields
+		// in the same PATCH. Without this, we'd surface the error downstream
+		// at ComputeNextRunAt with a less precise message.
 		if *req.ScheduleType != automation.ScheduleType {
 			switch *req.ScheduleType {
 			case models.AutomationScheduleInterval:
@@ -455,11 +482,17 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 					writeError(w, r, http.StatusBadRequest, "MISSING_INTERVAL_UNIT", "switching to schedule_type=interval requires interval_unit")
 					return
 				}
+				// Switching away from cron: clear the cron field so the row
+				// satisfies chk_automations_schedule_fields.
+				automation.CronExpression = nil
 			case models.AutomationScheduleCron:
 				if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
 					writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "switching to schedule_type=cron requires cron_expression")
 					return
 				}
+				// Switching away from interval: clear interval fields.
+				automation.IntervalValue = nil
+				automation.IntervalUnit = nil
 			}
 		}
 		automation.ScheduleType = *req.ScheduleType
@@ -497,17 +530,6 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		scheduleChanged = true
 	}
 
-	// Normalise the automation's schedule fields so the type matches its
-	// companion columns. On a type switch, clearing the unused side keeps the
-	// DB CHECK happy and prevents ComputeNextRunAt from accidentally reading
-	// stale fields of the opposite kind.
-	if automation.ScheduleType == models.AutomationScheduleInterval {
-		automation.CronExpression = nil
-	} else if automation.ScheduleType == models.AutomationScheduleCron {
-		automation.IntervalValue = nil
-		automation.IntervalUnit = nil
-	}
-
 	// Interval schedules ignore timezone. Enforce after all partial updates so
 	// a change to either field alone is still caught (matches the DB CHECK).
 	if automation.ScheduleType == models.AutomationScheduleInterval && automation.Timezone != "UTC" {
@@ -539,7 +561,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			"changes": changes,
 		}
 		emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationUpdated, models.AuditResourceAutomation, &idStr, nil, nil,
-			marshalAuditDetails(details))
+			marshalAuditDetails(h.logger, details))
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
@@ -568,7 +590,7 @@ func (h *AutomationHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	idStr := automationID.String()
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationDeleted, models.AuditResourceAutomation, &idStr, nil, nil,
-		marshalAuditDetails(automationAuditSnapshot(&automation)))
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -605,7 +627,7 @@ func (h *AutomationHandler) Pause(w http.ResponseWriter, r *http.Request) {
 
 	idStr := automationID.String()
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationPaused, models.AuditResourceAutomation, &idStr, nil, nil,
-		marshalAuditDetails(automationAuditSnapshot(&automation)))
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -650,7 +672,7 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 
 	idStr := automationID.String()
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationResumed, models.AuditResourceAutomation, &idStr, nil, nil,
-		marshalAuditDetails(automationAuditSnapshot(&automation)))
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -762,7 +784,7 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		"via":    "manual",
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationRunTriggered, models.AuditResourceAutomation, &idStr, nil, nil,
-		marshalAuditDetails(details))
+		marshalAuditDetails(h.logger, details))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationRun]{Data: run})
 }
 
@@ -837,7 +859,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	// that share the same request_id. A per-automation name lookup would cost
 	// an extra round-trip per ID; the resource_id is enough to let the UI
 	// hydrate on demand.
-	bulkDetails := marshalAuditDetails(map[string]any{"via": "bulk"})
+	bulkDetails := marshalAuditDetails(h.logger, map[string]any{"via": "bulk"})
 	for _, id := range affected {
 		idStr := id.String()
 		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, bulkDetails)
