@@ -543,11 +543,20 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Poll for new logs.
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	// Send a keepalive comment on idle streams so intermediary proxies and
+	// browsers don't time out connections that have no log traffic.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if err := sw.WriteHeartbeat(); err != nil {
+				return
+			}
+			sw.Flush()
 		case <-ticker.C:
 			run, err := h.runStore.GetByID(r.Context(), orgID, runID)
 			if err != nil {
