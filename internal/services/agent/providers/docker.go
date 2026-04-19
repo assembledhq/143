@@ -170,6 +170,13 @@ func (d *DockerProvider) ensureNetwork(ctx context.Context) error {
 	_, err := d.client.NetworkCreate(ctx, d.network, network.CreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{"managed-by": "143"},
+		// Disable inter-container chatter so one sandbox can't TCP-connect
+		// to another on the same bridge. Existing networks created before
+		// this was added are NOT updated — Docker rejects option changes on
+		// existing networks, so the host provisioning path handles migration.
+		Options: map[string]string{
+			"com.docker.network.bridge.enable_icc": "false",
+		},
 	})
 	if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("create network %q: %w", d.network, err)
@@ -219,7 +226,12 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			Memory:    int64(cfg.MemoryLimitMB) * 1024 * 1024,
 			PidsLimit: &pidsLimit,
 		},
-		NetworkMode:    container.NetworkMode(d.network),
+		NetworkMode: container.NetworkMode(d.network),
+		// Bypass Docker's embedded DNS resolver at 127.0.0.11. gVisor's
+		// netstack can't reliably reach it on user-defined bridge networks,
+		// so DNS lookups from inside the sandbox silently fail under runsc.
+		// Public resolvers work from gVisor's stack directly.
+		DNS:            []string{"1.1.1.1", "8.8.8.8"},
 		CapDrop:        []string{"ALL"},
 		CapAdd:         []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, // minimum caps for sudo
 		ReadonlyRootfs: false,
@@ -296,6 +308,21 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("clone repo: git exited with code %d", exitCode)
+	}
+
+	// Strip the token out of .git/config. git clone embeds the whole
+	// authenticated URL (including x-access-token:TOKEN@github.com) into
+	// the origin remote, so `cat .git/config` from inside the sandbox
+	// leaks the short-lived installation token. Resetting the remote to
+	// the bare URL keeps push/pull working via GITHUB_TOKEN + credential
+	// helpers without leaving the token at rest on disk.
+	if token != "" {
+		resetCmd := fmt.Sprintf("git -C '%s' remote set-url origin '%s'",
+			shellEscape(sb.WorkDir), shellEscape(repoURL))
+		var resetErr bytes.Buffer
+		if code, err := d.Exec(ctx, sb, resetCmd, io.Discard, &resetErr); err != nil || code != 0 {
+			return fmt.Errorf("scrub clone token from .git/config (exit %d): %w: %s", code, err, resetErr.String())
+		}
 	}
 
 	d.logger.Info().
