@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-coverage migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -118,6 +118,21 @@ test-race:
 test-coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
+
+# Mirror the PR backend job: no -race, coverage on, no absolute floor.
+test-pr:
+	go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+
+# Patch coverage gate vs origin/main (mirrors the PR diff-cover step).
+# Requires: pip install 'diff_cover==10.2.0' && go install github.com/boumenot/gocover-cobertura@v1.4.0
+test-coverage-diff: test-pr
+	gocover-cobertura < coverage.out > coverage.xml
+	diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
+
+# Mirror the merge-to-main backend job: race detector on + absolute floor check.
+test-main:
+	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
+	go tool cover -func=coverage.out
 
 migrate-up:
 	go run cmd/migrate/main.go up
