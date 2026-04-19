@@ -94,9 +94,22 @@ jobs:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'pull_request'
+        with:
+          python-version: '3.x'
+
+      - name: Install diff-cover tooling (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          pip install 'diff_cover==10.2.0'
+          go install github.com/boumenot/gocover-cobertura@v1.4.0
 
       - name: Run go vet and migrations
         run: |
@@ -104,12 +117,24 @@ jobs:
           go run cmd/migrate/main.go up
           wait
 
-      - name: Run tests with coverage
+      - name: Run tests (PR — no race)
+        if: github.event_name == 'pull_request'
         run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=120s
+          go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+          gocover-cobertura < coverage.out > coverage.xml
+
+      - name: Patch coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        run: diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
+
+      - name: Run tests with race + coverage (main only)
+        if: github.event_name == 'push'
+        run: |
+          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
           go tool cover -func=coverage.out
 
-      - name: Check backend coverage floor
+      - name: Check backend coverage floor (main only)
+        if: github.event_name == 'push'
         run: |
           COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
           echo "Total coverage: ${COVERAGE}%"
@@ -122,6 +147,7 @@ jobs:
           fi
 
       - name: Upload coverage artifact
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: backend-coverage
@@ -157,18 +183,56 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        if: github.event_name == 'pull_request'
+        with:
+          python-version: '3.x'
+
+      - name: Install diff-cover (PR only)
+        if: github.event_name == 'pull_request'
+        run: pip install 'diff_cover==10.2.0'
+
       - run: npm ci
 
-      - name: Run tests with coverage
+      - name: Run affected tests (PR)
+        if: github.event_name == 'pull_request'
         timeout-minutes: 10
-        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary
+        run: npx vitest run --changed=origin/main --passWithNoTests --coverage --coverage.reporter=lcov --coverage.reporter=json-summary
 
-      - name: Check frontend coverage floor
+      - name: Patch coverage gate (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ ! -f coverage/lcov.info ]; then
+            # vitest --changed found no affected tests, so no coverage was emitted.
+            # Fail if the diff includes frontend source files — uncovered changes shouldn't merge silently.
+            CHANGED_SOURCES=$(cd .. && git diff --name-only origin/main...HEAD \
+              | grep -E '^frontend/src/.*\.(ts|tsx)$' \
+              | grep -v '\.test\.' || true)
+            if [ -n "$CHANGED_SOURCES" ]; then
+              echo "::error::Frontend source files changed but no tests cover them:"
+              echo "$CHANGED_SOURCES"
+              exit 1
+            fi
+            echo "::notice::No frontend source files in diff; skipping patch-coverage gate."
+            exit 0
+          fi
+          diff-cover coverage/lcov.info --compare-branch=origin/main --fail-under=80
+
+      - name: Run full tests with coverage (main only)
+        if: github.event_name == 'push'
+        timeout-minutes: 10
+        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=lcov
+
+      - name: Check frontend coverage floor (main only)
+        if: github.event_name == 'push'
         run: |
           COVERAGE=$(cat coverage/coverage-summary.json | node -e "
             const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
@@ -184,6 +248,7 @@ jobs:
           fi
 
       - name: Upload coverage artifact
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: frontend-coverage
