@@ -10,10 +10,14 @@ import type { CodexDeviceAuth } from "@/lib/types";
 export function CodexDeviceCodeModal({
   onClose,
   onConnected,
+  label,
 }: {
   onClose: () => void;
   onConnected?: () => void;
+  label?: string;
 }) {
+  // Capture the label at mount time so it stays stable throughout the auth flow.
+  const [stableLabel] = useState(() => label);
   const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
   const [status, setStatus] = useState<string>("initiating");
   const [error, setError] = useState("");
@@ -32,16 +36,18 @@ export function CodexDeviceCodeModal({
     try {
       setStatus("initiating");
       setError("");
-      const resp = await api.codexAuth.initiate();
+      const resp = await api.codexAuth.initiate(stableLabel);
       setDeviceAuth(resp.data);
       setTimeLeft(resp.data.expires_in);
       setStatus("pending");
     } catch (err) {
       captureError(err, { feature: "codex-auth" });
-      setError("Failed to start authentication. Please try again.");
+      const message =
+        err instanceof Error && err.message ? err.message : "Failed to start authentication. Please try again.";
+      setError(message);
       setStatus("error");
     }
-  }, []);
+  }, [stableLabel]);
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -55,7 +61,7 @@ export function CodexDeviceCodeModal({
 
     pollRef.current = setInterval(async () => {
       try {
-        const resp = await api.codexAuth.status();
+        const resp = await api.codexAuth.status(stableLabel);
         if (resp.data.status === "completed") {
           setStatus("completed");
           if (pollRef.current) clearInterval(pollRef.current);
@@ -88,7 +94,7 @@ export function CodexDeviceCodeModal({
       if (timerRef.current) clearInterval(timerRef.current);
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
     };
-  }, [status]);
+  }, [status, stableLabel]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;

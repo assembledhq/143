@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
+import { api } from "@/lib/api";
 import { CodexDeviceCodeModal } from "./codex-device-code-modal";
 
 const INITIATE_URL = "/api/v1/settings/codex-auth/initiate";
@@ -47,8 +48,23 @@ describe("CodexDeviceCodeModal", () => {
     render(<CodexDeviceCodeModal onClose={vi.fn()} />);
 
     await waitFor(() => {
+      expect(screen.getByText("Nope")).toBeInTheDocument();
+    });
+  });
+
+  it("falls back to a generic error message when the thrown error has no message", async () => {
+    // Simulate the edge case where the API layer throws an Error with an empty
+    // message (e.g. the server response had no body and no status text). The
+    // modal should render its generic fallback instead of an empty string.
+    const spy = vi.spyOn(api.codexAuth, "initiate").mockRejectedValueOnce(new Error(""));
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
       expect(screen.getByText(/failed to start authentication/i)).toBeInTheDocument();
     });
+
+    spy.mockRestore();
   });
 
   it("calls onClose when Cancel is clicked", async () => {
@@ -93,6 +109,30 @@ describe("CodexDeviceCodeModal", () => {
     await waitFor(() => {
       expect(screen.getByText(/connected successfully/i)).toBeInTheDocument();
     }, { timeout: 5000 });
+  });
+
+  it("shows error state when polling reports an auth error", async () => {
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, () => {
+        return HttpResponse.json({ data: { status: "error", message: "authentication denied by user" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    // Wait for the polling interval to fire and resolve.
+    await waitFor(() => {
+      expect(screen.getByText(/authentication denied by user/i)).toBeInTheDocument();
+    }, { timeout: 5000 });
+
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 
   it("shows expired state and Try again button", async () => {

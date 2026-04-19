@@ -14,7 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-var credColumns = []string{"id", "org_id", "provider", "config", "status", "last_verified_at", "created_at", "updated_at"}
+var credColumns = []string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 
 func TestOrgCredentialStore_Upsert(t *testing.T) {
 	t.Parallel()
@@ -30,9 +30,8 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test", BaseURL: ""},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-						AddRow(uuid.New(), time.Now(), time.Now()))
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 			},
 		},
 		{
@@ -40,9 +39,8 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.OpenAIConfig{APIKey: "sk-test", APIType: "chat"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
-						AddRow(uuid.New(), time.Now(), time.Now()))
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 			},
 		},
 		{
@@ -50,7 +48,7 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery("INSERT INTO org_credentials").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
@@ -97,7 +95,7 @@ func TestOrgCredentialStore_Get(t *testing.T) {
 				mock.ExpectQuery("SELECT .* FROM org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
-						AddRow(uuid.New(), uuid.New(), "anthropic", configData, "active", nil, time.Now(), time.Now()))
+						AddRow(uuid.New(), uuid.New(), "anthropic", "", configData, "active", nil, nil, nil, time.Now(), time.Now()))
 			},
 		},
 		{
@@ -153,8 +151,8 @@ func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 				mock.ExpectQuery("SELECT .* FROM org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
-						AddRow(uuid.New(), uuid.New(), "anthropic", anthropicData, "active", nil, time.Now(), time.Now()).
-						AddRow(uuid.New(), uuid.New(), "openai", openaiData, "active", nil, time.Now(), time.Now()))
+						AddRow(uuid.New(), uuid.New(), "anthropic", "", anthropicData, "active", nil, nil, nil, time.Now(), time.Now()).
+						AddRow(uuid.New(), uuid.New(), "openai", "", openaiData, "active", nil, nil, nil, time.Now(), time.Now()))
 			},
 			expected: 2,
 		},
@@ -204,7 +202,7 @@ func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM org_credentials").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(credColumns).
-			AddRow(uuid.New(), uuid.New(), "anthropic", anthropicData, "active", nil, time.Now(), time.Now()))
+			AddRow(uuid.New(), uuid.New(), "anthropic", "", anthropicData, "active", nil, nil, nil, time.Now(), time.Now()))
 
 	summaries, err := store.ListSummaries(context.Background(), uuid.New())
 	require.NoError(t, err, "ListSummaries should not return an error")
@@ -301,4 +299,67 @@ func TestOrgCredentialStore_UpdateStatus(t *testing.T) {
 	err = store.UpdateStatus(context.Background(), uuid.New(), models.ProviderAnthropic, "active")
 	require.NoError(t, err, "UpdateStatus should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns active credential with oldest last_used_at",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				configData := crypto.DevEncrypt([]byte(`{"access_token":"abc","refresh_token":"def","account_id":"acct","id_token":"tok","expires_at":"2030-01-01T00:00:00Z"}`))
+				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns).
+						AddRow(uuid.New(), uuid.New(), "openai_chatgpt", "work", configData, "active", nil, nil, nil, time.Now(), time.Now()))
+			},
+		},
+		{
+			name: "no active credentials",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns))
+			},
+			expectErr: true,
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			cred, err := store.ClaimNextRoundRobin(context.Background(), uuid.New(), models.ProviderOpenAIChatGPT)
+			if tt.expectErr {
+				require.Error(t, err, "ClaimNextRoundRobin should return an error")
+				return
+			}
+			require.NoError(t, err, "ClaimNextRoundRobin should not return an error")
+			require.NotNil(t, cred, "ClaimNextRoundRobin should return a credential")
+			require.Equal(t, models.ProviderOpenAIChatGPT, cred.Provider, "credential should have correct provider")
+			require.Equal(t, "active", cred.Status, "returned credential should be active")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }

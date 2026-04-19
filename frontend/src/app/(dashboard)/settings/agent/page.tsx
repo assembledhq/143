@@ -2,7 +2,7 @@
 
 import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, KeyRound, Sparkles, Shield } from "lucide-react";
+import { CheckCircle2, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
@@ -37,6 +37,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import type {
   UserCredentialSummary,
   ResolvedCredential,
+  CodexSubscription,
   ListResponse,
   Organization,
   OrgSettings,
@@ -96,6 +97,13 @@ export default function AgentPage() {
   });
   const codexAuthStatus = codexAuthStatusResp?.data;
 
+  const { data: codexSubscriptionsResp } = useQuery<ListResponse<CodexSubscription>>({
+    queryKey: ["codex-subscriptions"],
+    queryFn: () => api.codexAuth.listSubscriptions(),
+  });
+  const codexSubscriptions = codexSubscriptionsResp?.data ?? [];
+  const activeSubscriptions = codexSubscriptions.filter((s) => s.status === "active");
+
   /* ---------- Org settings queries (admin-gated) ---------- */
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -121,6 +129,8 @@ export default function AgentPage() {
   const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
   const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [newSubscriptionLabel, setNewSubscriptionLabel] = useState("");
+  const [removingSubscriptionId, setRemovingSubscriptionId] = useState<string | null>(null);
   const [orgSaveStatus, setOrgSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   const [autonomyLevelOverride, setAutonomyLevelOverride] = useState<string | null>(null);
@@ -140,7 +150,7 @@ export default function AgentPage() {
   }, [agentConfig.codex, agentDefaultsResponse?.data]);
 
   const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
-    hasCodexAPIKey && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
+    hasCodexAPIKey && activeSubscriptions.length === 0 && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
   const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
 
   // Single mutation for all org settings (agent config + execution)
@@ -158,10 +168,15 @@ export default function AgentPage() {
     },
   });
 
-  const disconnectMutation = useMutation({
-    mutationFn: () => api.codexAuth.disconnect(),
+  const removeSubscriptionMutation = useMutation({
+    mutationFn: (id: string) => api.codexAuth.removeSubscription(id),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
       queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+      setRemovingSubscriptionId(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "codex-subscription-remove" });
     },
   });
 
@@ -195,30 +210,54 @@ export default function AgentPage() {
 
   /* ---------- Render helpers ---------- */
 
-  /** Shared ChatGPT auth status — used by both personal and org Codex sections. */
+  /** Shared ChatGPT auth status — shows list of subscriptions with add/remove. */
   function renderChatGPTAuthStatus(): ReactNode {
     return (
-      <div className="flex items-center gap-2">
-        {codexAuthStatus?.status === "completed" ? (
-          <>
-            <Badge variant="outline" className="border-green-600 text-green-600">
-              <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-              Connected
-            </Badge>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => disconnectMutation.mutate()}
-              disabled={disconnectMutation.isPending}
-            >
-              {disconnectMutation.isPending ? "Disconnecting..." : "Disconnect"}
-            </Button>
-          </>
-        ) : (
-          <Button size="sm" onClick={() => setShowDeviceCodeModal(true)}>
-            Sign in with ChatGPT
-          </Button>
+      <div className="space-y-3">
+        {activeSubscriptions.length > 0 && (
+          <div className="space-y-2">
+            <Label className="text-xs text-muted-foreground">
+              Connected subscriptions ({activeSubscriptions.length}) &mdash; usage is distributed via round-robin
+            </Label>
+            {activeSubscriptions.map((sub) => (
+              <div key={sub.id} className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="border-green-600 text-green-600">
+                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                    Active
+                  </Badge>
+                  <span className="text-sm font-medium">{sub.label || "Default"}</span>
+                  {sub.account_type && (
+                    <span className="text-xs text-muted-foreground">({sub.account_type})</span>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => setRemovingSubscriptionId(sub.id)}
+                  aria-label={`Remove subscription ${sub.label || "Default"}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
         )}
+
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="Subscription label (e.g. Team A)"
+            value={newSubscriptionLabel}
+            onChange={(e) => setNewSubscriptionLabel(e.target.value.slice(0, 100))}
+            maxLength={100}
+            className="max-w-xs text-sm"
+          />
+          <Button size="sm" onClick={() => setShowDeviceCodeModal(true)} disabled={showDeviceCodeModal}>
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            Add subscription
+          </Button>
+        </div>
       </div>
     );
   }
@@ -598,13 +637,39 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Remove Subscription Dialog */}
+      <AlertDialog open={!!removingSubscriptionId} onOpenChange={(open) => !open && setRemovingSubscriptionId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove subscription</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to disconnect this ChatGPT subscription? Agents will no longer use it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (removingSubscriptionId) removeSubscriptionMutation.mutate(removingSubscriptionId);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Codex Device Code Modal (shared across personal + org) */}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
-          onClose={() => setShowDeviceCodeModal(false)}
+          label={newSubscriptionLabel.trim() || undefined}
+          onClose={() => { setShowDeviceCodeModal(false); setNewSubscriptionLabel(""); }}
           onConnected={() => {
             queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+            queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
             setShowDeviceCodeModal(false);
+            setNewSubscriptionLabel("");
           }}
         />
       )}

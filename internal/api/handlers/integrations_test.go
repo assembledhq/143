@@ -213,8 +213,8 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	handler.client = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -511,8 +511,8 @@ func TestIntegrationHandler_HandleSentryOAuthCallback_SavesCredentialAndIntegrat
 	handler.client = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -862,8 +862,8 @@ func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegrat
 	handler.client = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1312,8 +1312,8 @@ func TestIntegrationHandler_ConnectNotion_Success(t *testing.T) {
 
 	// Expect credential upsert.
 	mock.ExpectQuery("INSERT INTO org_credentials").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	// Expect integration check (none exists).
 	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
