@@ -686,7 +686,14 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			50, now, now, nil,
 		))
 
-	// 3. Create the session.
+	// 3. Atomically claim pending → running BEFORE creating the session, so
+	// a duplicate handler that loses this race never reaches the sessions or
+	// jobs tables.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// 4. Create the session.
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -695,12 +702,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(sessionID, now))
 
-	// 4. Transition the run to running.
-	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	// 5. Enqueue run_agent.
+	// 5. Enqueue run_agent (with dedupe key on the session ID).
 	mock.ExpectQuery(`INSERT INTO jobs`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -710,6 +712,66 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationRunHandler_LosesRaceClaimingPendingRow proves the at-least-
+// once-delivery safety net: when two workers race to claim the same pending
+// run, the loser's TransitionStatusIf returns affected=0, the handler must
+// bail before creating any session or enqueuing any run_agent job.
+func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	repoID := uuid.New()
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err)
+
+	// 1. Run still appears pending to this worker (its GetByID happened
+	// before the other worker's UPDATE landed).
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, now, now,
+		))
+
+	// 2. Automation lookup succeeds.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			nil, nil, "sequential", 1, "main",
+			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			nil, nil, true, nil, nil, nil,
+			50, now, now, nil,
+		))
+
+	// 3. The conditional transition finds the row already non-pending (the
+	// other worker won) and reports zero rows affected. The handler MUST
+	// stop here — no session create, no job enqueue.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err, "lost-race must return cleanly so the job is acked")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"no session insert and no job enqueue may follow a lost transition race")
 }
 
 func TestAutomationRunHandler_SkipsWhenRunNotPending(t *testing.T) {
@@ -781,9 +843,11 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationDeleted(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
 
-	// Run gets marked skipped.
-	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	// Run gets marked skipped via the conditional pending → skipped
+	// transition. We explicitly assert the WHERE includes status = @from_status
+	// so a regression to unconditional UPDATE would fail this test.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
@@ -831,9 +895,9 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			50, now, now, nil,
 		))
 
-	// Run gets marked skipped.
-	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	// Run gets marked skipped via the conditional pending → skipped transition.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())

@@ -287,11 +287,19 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 // job pipeline. Completion bubbles back via AutomationRunUpdater on the
 // Orchestrator (see services/automations/hooks.go).
 //
-// The handler owes the automation_run row a deterministic status transition:
-// pending → running (normal) or pending → skipped (automation deleted/paused)
-// or pending → failed (session create failed). Leaving the row in pending
-// would eventually trip the reaper, but the reaper's hour-long threshold is
-// too slow to give the UI useful feedback.
+// Concurrency contract: the handler relies on TransitionStatusIf to make every
+// status transition out of `pending` atomic. Two workers handed a duplicate
+// job (at-least-once delivery, retry-after-crash) both reach the conditional
+// transition; whichever lands its UPDATE first wins, the loser sees
+// transitioned=false and bails. This is what prevents two sessions from being
+// created against the same automation_run row.
+//
+// Terminal status guarantee: by the time this handler returns, the
+// automation_run row is in exactly one of {pending (lost race / unchanged),
+// running (we own the session), skipped (automation deleted/paused), failed
+// (session create failed)}. Leaving the row in pending after we've made
+// changes would force the reaper to clean up, and the reaper's hour-long
+// threshold is too slow to give the UI useful feedback.
 func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -323,9 +331,10 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			Logger()
 		log.Info().Msg("running automation_run job")
 
-		// Confirm the run is still pending. If SoftDelete (skipped), the
-		// reaper (failed), or an earlier retry has already moved it, this
-		// handler is a no-op.
+		// Fast-path early-exit: if the row is already non-pending we can skip
+		// all the downstream work (automation lookup, session build) without
+		// changing correctness. The atomic transitions below are still the
+		// source of truth — this is purely an optimisation for retries.
 		run, err := stores.AutomationRuns.GetByID(ctx, orgID, automationID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch automation run: %w", err)
@@ -346,7 +355,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			now := time.Now()
 			summary := "automation deleted before run could start"
-			if updateErr := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusSkipped, &now, &summary); updateErr != nil {
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); updateErr != nil {
 				return fmt.Errorf("mark run skipped after automation deletion: %w", updateErr)
 			}
 			return nil
@@ -359,9 +368,23 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		if !automation.Enabled {
 			now := time.Now()
 			summary := "automation paused before run could start"
-			if err := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
+			if _, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
 				return fmt.Errorf("mark run skipped after pause: %w", err)
 			}
+			return nil
+		}
+
+		// Atomic claim: pending → running. Performed BEFORE session creation
+		// so a duplicate worker that loses the race never reaches the Sessions
+		// or Jobs stores at all. Once we own the row (transitioned=true), any
+		// later failure path uses TransitionStatusIf(running → ...) so we
+		// don't accidentally overwrite a status another path already wrote.
+		transitioned, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusRunning, nil, nil)
+		if err != nil {
+			return fmt.Errorf("transition run to running: %w", err)
+		}
+		if !transitioned {
+			log.Info().Msg("skipping automation_run: lost race claiming pending row")
 			return nil
 		}
 
@@ -394,33 +417,30 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			AutomationRunID:   &runID,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
-			// Session creation failed — surface the error back to the run so
-			// the UI reflects the dispatch failure immediately instead of
-			// waiting for the reaper.
+			// Session creation failed after we claimed the row — flip
+			// running → failed so the UI reflects the dispatch failure
+			// immediately. Conditional transition guards against the (rare)
+			// case that the orchestrator's completion hook somehow already
+			// fired and moved the row.
 			now := time.Now()
 			summary := fmt.Sprintf("failed to create agent session: %s", err)
-			if updateErr := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
 				log.Error().Err(updateErr).Msg("failed to mark run failed after session create failure")
 			}
 			return fmt.Errorf("create session: %w", err)
 		}
 
-		// Transition pending → running. Leaving completed_at and
-		// result_summary nil: UpdateStatus writes both columns every call,
-		// which is fine here because they were already NULL on the pending
-		// row. Downstream failures (crashed worker, lost agent job) fall to
-		// the hour-threshold reaper; the orchestrator's completion hook
-		// (AutomationRunUpdater.OnSessionComplete) flips the row to
-		// completed/failed when the session ends.
-		if err := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusRunning, nil, nil); err != nil {
-			return fmt.Errorf("transition run to running: %w", err)
-		}
-
+		// Dedupe key on the run_agent enqueue: if this handler is invoked
+		// twice for the same automation_run (only possible if the conditional
+		// transition above somehow returned true twice — defense in depth),
+		// the job store rejects the second insert and the second handler
+		// returns cleanly without a duplicate agent run.
+		dedupeKey := fmt.Sprintf("run_agent:%s", session.ID.String())
 		agentPayload := map[string]string{
 			"session_id": session.ID.String(),
 			"org_id":     orgID.String(),
 		}
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, nil); err != nil {
+		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, &dedupeKey); err != nil {
 			return fmt.Errorf("enqueue run_agent: %w", err)
 		}
 

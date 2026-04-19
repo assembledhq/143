@@ -873,9 +873,36 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	// BulkUpdateEnabled wraps the UPDATE in a tx so cron rows can be fixed up
+	// in the same atomic step. The UPDATE returns the full automation row
+	// (not just id) because the caller needs schedule_type to decide whether
+	// a cron fixup is required.
+	now := time.Now()
+	a1 := models.Automation{
+		ID: uuid.New(), OrgID: uuid.New(), Name: "a1", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: false, CreatedAt: now, UpdatedAt: now,
+	}
+	a2 := a1
+	a2.ID = uuid.New()
+	a2.Name = "a2"
+	pauseRows := pgxmock.NewRows(automationTestColumns()).
+		AddRow(a1.ID, a1.OrgID, a1.RepositoryID, a1.Name, a1.Goal, a1.Scope,
+			a1.AgentType, a1.ModelOverride, a1.ExecutionMode, a1.MaxConcurrent, a1.BaseBranch,
+			a1.ScheduleType, a1.IntervalValue, a1.IntervalUnit, a1.CronExpression, a1.Timezone,
+			a1.NextRunAt, a1.LastRunAt, a1.Enabled, a1.CreatedBy, a1.PausedBy, a1.PausedAt,
+			a1.Priority, a1.CreatedAt, a1.UpdatedAt, a1.DeletedAt).
+		AddRow(a2.ID, a2.OrgID, a2.RepositoryID, a2.Name, a2.Goal, a2.Scope,
+			a2.AgentType, a2.ModelOverride, a2.ExecutionMode, a2.MaxConcurrent, a2.BaseBranch,
+			a2.ScheduleType, a2.IntervalValue, a2.IntervalUnit, a2.CronExpression, a2.Timezone,
+			a2.NextRunAt, a2.LastRunAt, a2.Enabled, a2.CreatedBy, a2.PausedBy, a2.PausedAt,
+			a2.Priority, a2.CreatedAt, a2.UpdatedAt, a2.DeletedAt)
+
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(testAnyArgs(5)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()).AddRow(uuid.New()))
+		WillReturnRows(pauseRows)
+	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	body := map[string]any{"action": "pause", "automation_ids": []string{uuid.New().String(), uuid.New().String()}}

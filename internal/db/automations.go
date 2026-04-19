@@ -300,6 +300,17 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgI
 	return count, err
 }
 
+// CronFixupFailure describes a cron-scheduled automation whose next_run_at
+// could not be recomputed during a bulk resume. The row is still flipped to
+// enabled=true (the SQL UPDATE has already committed by the time the caller
+// sees this), but its next_run_at stays NULL so the scheduler will not fire
+// it. Callers should surface these so the user knows why a "resumed"
+// automation isn't running.
+type CronFixupFailure struct {
+	AutomationID uuid.UUID
+	Reason       string
+}
+
 // BulkUpdateEnabled sets enabled state for multiple automations. When pausing,
 // next_run_at is cleared so the scheduler skips paused rows. When resuming,
 // next_run_at is recomputed so the row doesn't sit dead with a NULL next_run_at
@@ -312,16 +323,19 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgI
 // both branches in a single tx avoids a half-resumed state visible to the
 // scheduler between statements.
 //
-// Returns the IDs actually affected (scoped to org_id and not-yet-deleted) so
-// callers can emit audit events only for rows that really changed — IDs from
-// another tenant or stale/deleted rows are silently filtered by the WHERE
-// clause and must not leak into the audit log.
+// Returns:
+//   - affectedIDs: rows actually mutated (scoped to org_id and not-yet-deleted)
+//     so callers can emit audit events only for rows that really changed.
+//   - cronFixupFailures: cron rows whose next_run_at could not be computed.
+//     The row is still resumed but its next_run_at is NULL, so the scheduler
+//     will skip it. Callers should log/surface these — silently dropping them
+//     would leave a "resumed" automation that never fires.
 //
 // Fails closed on empty automationIDs so a caller who forgot to populate the
 // list can't silently pause or resume every automation in the org.
-func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) ([]uuid.UUID, error) {
+func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) (affectedIDs []uuid.UUID, cronFixupFailures []CronFixupFailure, err error) {
 	if len(automationIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var pausedBy *uuid.UUID
@@ -334,7 +348,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin bulk-update-enabled tx: %w", err)
+		return nil, nil, fmt.Errorf("begin bulk-update-enabled tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -369,15 +383,15 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		"ids":       automationIDs,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	affected, err := scanAutomations(rows)
 	rows.Close()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	affectedIDs := make([]uuid.UUID, 0, len(affected))
+	affectedIDs = make([]uuid.UUID, 0, len(affected))
 	now := time.Now()
 	for i := range affected {
 		a := &affected[i]
@@ -389,9 +403,13 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		}
 		next, computeErr := a.ComputeNextRunAt(now)
 		if computeErr != nil {
-			// Skip the row rather than poisoning the whole bulk: a malformed
-			// cron row should be surfaced via the scheduler's next-tick error
-			// log rather than aborting an otherwise valid bulk resume.
+			// Record the failure so the caller can surface it. Don't abort
+			// the bulk: a single malformed cron shouldn't block resuming
+			// every other automation in the request.
+			cronFixupFailures = append(cronFixupFailures, CronFixupFailure{
+				AutomationID: a.ID,
+				Reason:       computeErr.Error(),
+			})
 			continue
 		}
 		if _, err := tx.Exec(ctx,
@@ -399,14 +417,14 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 				WHERE id = @id AND org_id = @org_id`,
 			pgx.NamedArgs{"id": a.ID, "org_id": orgID, "next_run_at": next},
 		); err != nil {
-			return nil, fmt.Errorf("update cron next_run_at: %w", err)
+			return nil, nil, fmt.Errorf("update cron next_run_at: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return affectedIDs, nil
+	return affectedIDs, cronFixupFailures, nil
 }
 
 // BulkSoftDelete soft-deletes multiple automations and cancels their pending
@@ -631,6 +649,28 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 		"result_summary": resultSummary,
 	})
 	return err
+}
+
+// TransitionStatusIf updates the run's status only if its current status equals
+// fromStatus. Returns true when the row was actually updated. Use this to make
+// the worker handler's pending → running transition safe under at-least-once
+// job delivery: two workers each holding a duplicate job will both pass the
+// "is pending?" check, so the transition itself must be the source of truth.
+func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+	query := `UPDATE automation_runs SET status = @to_status, completed_at = @completed_at, result_summary = @result_summary, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = @from_status`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":             runID,
+		"org_id":         orgID,
+		"from_status":    fromStatus,
+		"to_status":      toStatus,
+		"completed_at":   completedAt,
+		"result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // CompletePendingNoopIfAutomationActive moves a pending run to completed_noop

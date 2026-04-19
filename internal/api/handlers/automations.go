@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 // automationListDefaultLimit and automationListMaxLimit must match the
@@ -32,6 +33,7 @@ type AutomationHandler struct {
 	jobStore           *db.JobStore
 	audit              *db.AuditEmitter
 	pool               db.TxStarter // needed for transactional RunNow
+	logger             zerolog.Logger
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
@@ -65,6 +67,14 @@ func (h *AutomationHandler) SetRepositoryStore(repoStore automationRepoLookup) {
 // and enqueue the job atomically.
 func (h *AutomationHandler) SetPool(pool db.TxStarter) {
 	h.pool = pool
+}
+
+// SetLogger wires a logger used for non-fatal diagnostics that should reach
+// stderr but not change the HTTP response (e.g. cron-fixup failures during
+// bulk resume — the row was still resumed but its next_run_at could not be
+// recomputed).
+func (h *AutomationHandler) SetLogger(logger zerolog.Logger) {
+	h.logger = logger
 }
 
 func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -756,7 +766,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	var affected []uuid.UUID
 	switch req.Action {
 	case "pause":
-		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
+		ids, _, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to pause automations", err)
 			return
@@ -764,10 +774,20 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		affected = ids
 		auditAction = models.AuditActionAutomationPaused
 	case "resume":
-		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
+		ids, fixupFailures, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to resume automations", err)
 			return
+		}
+		// Cron-fixup failures: the row was resumed but its next_run_at is
+		// NULL, so the scheduler will skip it. Log per-automation so an
+		// operator chasing "why isn't this firing?" can grep by ID.
+		for _, f := range fixupFailures {
+			h.logger.Warn().
+				Str("automation_id", f.AutomationID.String()).
+				Str("org_id", orgID.String()).
+				Str("reason", f.Reason).
+				Msg("cron automation resumed without a computable next_run_at; scheduler will skip it until cron_expression is fixed")
 		}
 		affected = ids
 		auditAction = models.AuditActionAutomationResumed

@@ -245,9 +245,10 @@ func TestAutomationStore_BulkUpdateEnabled_EmptyIDsNoop(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationStore(mock)
-	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
 	require.NoError(t, err)
 	require.Empty(t, affected)
+	require.Empty(t, fixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -272,9 +273,10 @@ func TestAutomationStore_BulkUpdateEnabled_Pause(t *testing.T) {
 		WillReturnRows(addAutomationRow(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1), a2))
 	mock.ExpectCommit()
 
-	affected, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, false, &userID)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, false, &userID)
 	require.NoError(t, err)
 	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "pause path never fixes up cron rows")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -306,9 +308,10 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	// No cron fixup expected for interval-only rows.
 	mock.ExpectCommit()
 
-	affected, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "interval-only resume produces no cron fixups")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -343,9 +346,53 @@ func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixup(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	affected, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "valid cron expression should fix up cleanly")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure verifies that
+// a malformed cron expression on a resumed row does not abort the bulk and
+// produces a CronFixupFailure entry the caller can surface to the operator.
+// Without this signal the row would be enabled=true with next_run_at=NULL
+// and silently never fire — the worst kind of "automation bug".
+func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	// Cron expression that ValidateCronExpression / ComputeNextRunAt rejects.
+	// We rely on the model's parser to fail rather than constructing an error
+	// path manually — keeps this test honest about which inputs trip it.
+	expr := "this is definitely not a cron expression"
+	a1 := models.Automation{
+		ID: ids[0], OrgID: orgID, Name: "broken-cron",
+		ScheduleType:   "cron",
+		CronExpression: &expr,
+		Timezone:       "UTC",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1))
+	// No follow-up UPDATE expected — the per-row fixup is skipped on parse error.
+	mock.ExpectCommit()
+
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	require.NoError(t, err, "a single malformed cron must not abort the bulk")
+	require.ElementsMatch(t, ids, affected, "row was still resumed in the SQL UPDATE")
+	require.Len(t, fixupFailures, 1, "operator must be told the cron next_run_at couldn't be computed")
+	require.Equal(t, ids[0], fixupFailures[0].AutomationID)
+	require.NotEmpty(t, fixupFailures[0].Reason)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
