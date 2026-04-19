@@ -523,7 +523,7 @@ func TestAuthHandler_Register_InvitationClaimFailureReturnsGone(t *testing.T) {
 			pgxmock.NewRows([]string{
 				"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at",
 			}).AddRow(
-				invitationID, orgID, "invitee@example.com", nil, "member", uuid.New(), "test-token", "pending", time.Now().Add(time.Hour), time.Now(), nil,
+				invitationID, orgID, strPtr("invitee@example.com"), nil, "member", uuid.New(), "test-token", "pending", time.Now().Add(time.Hour), time.Now(), nil,
 			),
 		)
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted', accepted_at = now\\(\\) WHERE id = @id AND status = 'pending'").
@@ -722,7 +722,7 @@ func TestAuthHandler_Register_WithInvitation_Expired(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", nil, "member", uuid.New(), "expired-token", "pending", time.Now().Add(-1*time.Hour), time.Now().Add(-48*time.Hour), nil),
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "expired-token", "pending", time.Now().Add(-1*time.Hour), time.Now().Add(-48*time.Hour), nil),
 		)
 	mock.ExpectRollback()
 
@@ -754,7 +754,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "someone-else@example.com", nil, "member", uuid.New(), "mismatch-token", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+				AddRow(uuid.New(), uuid.New(), strPtr("someone-else@example.com"), nil, "member", uuid.New(), "mismatch-token", "pending", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -765,7 +765,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 
 	handler.Register(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	require.Contains(t, w.Body.String(), "EMAIL_MISMATCH")
+	require.Contains(t, w.Body.String(), "INVITE_MISMATCH")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -786,7 +786,7 @@ func TestAuthHandler_Register_WithInvitation_AlreadyAccepted(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", nil, "member", uuid.New(), "used-token", "accepted", time.Now().Add(time.Hour), time.Now(), nil),
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "used-token", "accepted", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -818,7 +818,7 @@ func TestAuthHandler_Register_WithInvitation_Revoked(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(uuid.New(), uuid.New(), "new@example.com", nil, "member", uuid.New(), "revoked-token", "revoked", time.Now().Add(time.Hour), time.Now(), nil),
+				AddRow(uuid.New(), uuid.New(), strPtr("new@example.com"), nil, "member", uuid.New(), "revoked-token", "revoked", time.Now().Add(time.Hour), time.Now(), nil),
 		)
 	mock.ExpectRollback()
 
@@ -856,7 +856,7 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
-				AddRow(invitationID, orgID, "invitee@example.com", nil, "member", uuid.New(), "valid-token", "pending", time.Now().Add(24*time.Hour), time.Now(), nil),
+				AddRow(invitationID, orgID, strPtr("invitee@example.com"), nil, "member", uuid.New(), "valid-token", "pending", time.Now().Add(24*time.Hour), time.Now(), nil),
 		)
 	// Accept invitation
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").

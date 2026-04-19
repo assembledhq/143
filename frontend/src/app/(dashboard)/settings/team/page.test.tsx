@@ -9,6 +9,8 @@ const {
   removeMemberMock,
   createInvitationMock,
   revokeInvitationMock,
+  githubInviteStatusMock,
+  searchGitHubUsersMock,
   currentUserMock,
 } = vi.hoisted(() => ({
   listMembersMock: vi.fn().mockResolvedValue({
@@ -52,6 +54,8 @@ const {
   removeMemberMock: vi.fn().mockResolvedValue(undefined),
   createInvitationMock: vi.fn().mockResolvedValue({ data: {} }),
   revokeInvitationMock: vi.fn().mockResolvedValue(undefined),
+  githubInviteStatusMock: vi.fn().mockResolvedValue({ data: { connected: false } }),
+  searchGitHubUsersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
   currentUserMock: {
     id: 'user-1',
     email: 'admin@example.com',
@@ -69,6 +73,8 @@ vi.mock('@/lib/api', () => ({
       removeMember: removeMemberMock,
       createInvitation: createInvitationMock,
       revokeInvitation: revokeInvitationMock,
+      githubInviteStatus: githubInviteStatusMock,
+      searchGitHubUsers: searchGitHubUsersMock,
     },
     auth: {
       me: vi.fn().mockResolvedValue({ data: { id: 'user-1', email: 'admin@example.com', name: 'Admin User', role: 'admin' } }),
@@ -91,6 +97,8 @@ describe('TeamSettingsPage', () => {
     removeMemberMock.mockClear();
     createInvitationMock.mockClear();
     revokeInvitationMock.mockClear();
+    githubInviteStatusMock.mockClear();
+    searchGitHubUsersMock.mockClear();
     currentUserMock.id = 'user-1';
     currentUserMock.email = 'admin@example.com';
     currentUserMock.name = 'Admin User';
@@ -144,7 +152,7 @@ describe('TeamSettingsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
-    expect(screen.getByLabelText('Email')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send invite' })).toBeInTheDocument();
   });
 
@@ -153,7 +161,7 @@ describe('TeamSettingsPage', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
-    const emailInput = await screen.findByLabelText('Email');
+    const emailInput = await screen.findByRole('textbox', { name: 'Email' });
     expect(emailInput).toHaveClass('h-9');
   });
 
@@ -175,14 +183,14 @@ describe('TeamSettingsPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
 
     await waitFor(() => {
-      expect(screen.getByLabelText('Email')).toBeInTheDocument();
+      expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
     });
 
-    await user.type(screen.getByLabelText('Email'), 'newuser@test.com');
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'newuser@test.com');
     await user.click(screen.getByRole('button', { name: 'Send invite' }));
 
     await waitFor(() => {
-      expect(createInvitationMock).toHaveBeenCalledWith('newuser@test.com', 'member');
+      expect(createInvitationMock).toHaveBeenCalledWith({ email: 'newuser@test.com', role: 'member' });
     });
   });
 

@@ -102,7 +102,7 @@ func TestInvitationStore_GetByToken(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(id, orgID, "user@example.com", nil, "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(id, orgID, strPtr("user@example.com"), nil, "member", invitedBy, "tok_xyz", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	inv, err := store.GetByToken(context.Background(), "tok_xyz")
@@ -147,8 +147,8 @@ func TestInvitationStore_ListPendingByOrg(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(invitationColumns).
-				AddRow(uuid.New(), orgID, "a@example.com", nil, "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
-				AddRow(uuid.New(), orgID, "b@example.com", nil, "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
+				AddRow(uuid.New(), orgID, strPtr("a@example.com"), nil, "member", uuid.New(), "tok_a", "pending", now.Add(72*time.Hour), now, nil).
+				AddRow(uuid.New(), orgID, strPtr("b@example.com"), nil, "admin", uuid.New(), "tok_b", "pending", now.Add(72*time.Hour), now, nil),
 		)
 
 	invs, err := store.ListPendingByOrg(context.Background(), orgID)
