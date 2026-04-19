@@ -203,6 +203,7 @@ case "$ROLE" in
     ;;
   *)
     ssh "${SSH_OPTS[@]}" root@"$HOST" << PULL
+      set -euo pipefail
       su - deploy -c 'echo "${GHCR_TOKEN}" | docker login ghcr.io -u deploy --password-stdin'
 PULL
     ;;
@@ -211,12 +212,14 @@ esac
 case "$ROLE" in
   app)
     ssh "${SSH_OPTS[@]}" root@"$HOST" << 'PULL_APP'
+      set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-frontend:latest'
 PULL_APP
     ;;
   worker)
     ssh "${SSH_OPTS[@]}" root@"$HOST" << 'PULL_WORKER'
+      set -euo pipefail
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
       # Ensure the shared sandbox egress network exists (idempotent).
@@ -240,6 +243,7 @@ esac
 echo "--- Step 5/5: Starting services ---"
 COMPOSE_FILE_REMOTE="$COMPOSE_FILE"
 ssh "${SSH_OPTS[@]}" root@"$HOST" << START
+  set -euo pipefail
   su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE up -d'
 START
 
@@ -247,6 +251,7 @@ START
 if [ "$ROLE" = "app" ]; then
   echo "Waiting for API health check..."
   ssh "${SSH_OPTS[@]}" root@"$HOST" << HEALTHCHECK
+    set -euo pipefail
     for i in \$(seq 1 30); do
       if curl -sf http://localhost:80/api/healthz > /dev/null 2>&1; then
         echo "Health check passed."
@@ -258,7 +263,7 @@ if [ "$ROLE" = "app" ]; then
       fi
       sleep 2
     done
-    su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE exec -T api /bin/migrate up'
+    su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE exec -T api /bin/migrate up' < /dev/null
 HEALTHCHECK
 fi
 
