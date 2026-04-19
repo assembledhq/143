@@ -20,10 +20,6 @@ import {
   PanelRightOpen,
   PanelRightClose,
   Clock,
-  Timer,
-  User as UserIcon,
-  Bot,
-  Cpu,
   MessageSquare,
   Paperclip,
   X,
@@ -258,89 +254,60 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
         />
       )}
 
-      {/* Session vitals — primary info row */}
-      <Card>
-        <CardContent className="px-3 py-2.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
-              {isActive && (
-                <span className="relative mr-1.5 flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                </span>
-              )}
-              {status.label}
-            </span>
-            <span className="h-3.5 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-xs">
-              <Cpu className="h-3 w-3 text-muted-foreground" />
-              <span className="font-medium">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
-            </span>
-            <span className="h-3.5 w-px bg-border" />
-            <span className="inline-flex items-center gap-1.5 text-xs">
-              {session.pm_plan_id && !session.triggered_by_user_id ? (
-                <Bot className="h-3 w-3 text-primary" />
-              ) : (
-                <UserIcon className="h-3 w-3 text-muted-foreground" />
-              )}
-              <span className="font-medium">{triggeredByLabel}</span>
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="space-y-1">
-        {/* Timestamps — secondary reference data */}
-        <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs text-muted-foreground px-1">
-          {/* Hide duration for failed/cancelled sessions with no meaningful runtime */}
-          {!((session.status === "failed" || session.status === "cancelled") &&
-            !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
-            <span className="inline-flex items-center gap-1.5">
-              <Timer className="h-3 w-3" />
-              {session.status === "pending"
-                ? formatDuration(session.created_at)
-                : isActive
-                  ? formatDuration(session.started_at)
-                  : formatDuration(session.started_at, session.completed_at)}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1.5">
-            {!isActive && session.completed_at ? (
-              session.status === "failed" ? (
-                <>
-                  <XCircle className="h-3 w-3" />
-                  Failed {formatTimeAgo(session.completed_at)}
-                </>
-              ) : session.status === "cancelled" ? (
-                <>
-                  <MinusCircle className="h-3 w-3" />
-                  Cancelled {formatTimeAgo(session.completed_at)}
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="h-3 w-3" />
-                  Completed {formatTimeAgo(session.completed_at)}
-                </>
-              )
-            ) : session.started_at ? (
-              <>
-                <Clock className="h-3 w-3" />
-                Started {formatTimeAgo(session.started_at)}
-              </>
-            ) : (
-              <>
-                <Clock className="h-3 w-3" />
-                Queued {formatTimeAgo(session.created_at)}
-              </>
+      {/* Session vitals — identity row (status + agent + who triggered) */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
+          <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
+            {isActive && (
+              <span className="relative mr-1.5 flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+              </span>
             )}
+            {status.label}
+          </span>
+          <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
+            <span className="font-medium text-foreground">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
+            <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+            <span>{triggeredByLabel}</span>
           </span>
         </div>
 
-        <AuditLogTrigger
-          filters={{ session_id: session.id }}
-          members={members}
-          title="Session activity"
-        />
+        {/* Timestamps + audit — secondary reference data, single unified row */}
+        <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
+          {!((session.status === "failed" || session.status === "cancelled") &&
+            !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+            <>
+              <span>
+                {session.status === "pending"
+                  ? formatDuration(session.created_at)
+                  : isActive
+                    ? formatDuration(session.started_at)
+                    : formatDuration(session.started_at, session.completed_at)}
+              </span>
+              <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+            </>
+          )}
+          <span>
+            {!isActive && session.completed_at ? (
+              session.status === "failed"
+                ? <>Failed {formatTimeAgo(session.completed_at)}</>
+                : session.status === "cancelled"
+                  ? <>Cancelled {formatTimeAgo(session.completed_at)}</>
+                  : <>Completed {formatTimeAgo(session.completed_at)}</>
+            ) : session.started_at ? (
+              <>Started {formatTimeAgo(session.started_at)}</>
+            ) : (
+              <>Queued {formatTimeAgo(session.created_at)}</>
+            )}
+          </span>
+          <AuditLogTrigger
+            filters={{ session_id: session.id }}
+            members={members}
+            title="Session activity"
+            variant="inline"
+          />
+        </div>
       </div>
 
       {/* PM context */}
