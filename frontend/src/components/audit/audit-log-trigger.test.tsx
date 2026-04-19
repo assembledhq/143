@@ -72,6 +72,55 @@ describe('AuditLogTrigger', () => {
     });
   });
 
+  it('inline variant: renders a leading separator dot and no icon', async () => {
+    auditLogListMock.mockResolvedValue({
+      data: [{
+        id: 'audit-inline',
+        actor_type: 'user',
+        user_id: 'user-1',
+        action: 'session.created',
+        created_at: new Date(Date.now() - 2 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    const { container } = renderWithProviders(
+      <AuditLogTrigger filters={{ session_id: 'sess-1' }} members={mockMembers} variant="inline" />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Updated.*ago by Alice/)).toBeInTheDocument();
+    });
+
+    const separator = container.querySelector('span[aria-hidden="true"]');
+    expect(separator?.textContent).toBe('·');
+    expect(container.querySelector('svg')).toBeNull();
+  });
+
+  it('default variant: renders the Clock icon and no separator', async () => {
+    auditLogListMock.mockResolvedValue({
+      data: [{
+        id: 'audit-default',
+        actor_type: 'user',
+        user_id: 'user-1',
+        action: 'session.created',
+        created_at: new Date(Date.now() - 2 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    const { container } = renderWithProviders(
+      <AuditLogTrigger filters={{ session_id: 'sess-1' }} members={mockMembers} />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Updated.*ago by Alice/)).toBeInTheDocument();
+    });
+
+    expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
+    expect(container.querySelector('svg')).not.toBeNull();
+  });
+
   it('renders system actor label for non-user actors', async () => {
     auditLogListMock.mockResolvedValue({
       data: [{
