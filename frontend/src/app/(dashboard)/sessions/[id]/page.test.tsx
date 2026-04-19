@@ -136,11 +136,20 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     const updatedTrigger = await screen.findByRole('button', { name: /Updated.*ago by/i });
-    const metadataStack = updatedTrigger.parentElement;
+    const metadataRow = updatedTrigger.parentElement;
 
-    expect(metadataStack?.className).toContain('space-y-1');
-    expect(updatedTrigger.className).toContain('px-1');
+    // The audit trigger now shares the timestamps flex row so "Failed X ago"
+    // and "Updated X ago by Y" sit on the same baseline.
+    expect(metadataRow?.className).toContain('flex');
+    expect(metadataRow?.className).toContain('items-center');
+    expect(metadataRow?.textContent).toMatch(/Failed.*ago/);
+
+    // Inline variant: zero horizontal padding, muted color, preceded by a
+    // decorative middle-dot separator marked aria-hidden.
+    expect(updatedTrigger.className).toContain('px-0');
     expect(updatedTrigger.className).toContain('text-muted-foreground');
+    expect(updatedTrigger.previousElementSibling?.getAttribute('aria-hidden')).toBe('true');
+    expect(updatedTrigger.previousElementSibling?.textContent).toBe('·');
   });
 
   it('shows error state when session not found', async () => {
