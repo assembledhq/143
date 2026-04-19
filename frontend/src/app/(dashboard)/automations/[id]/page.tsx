@@ -25,6 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
@@ -178,12 +180,12 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const updateMutation = useMutation({
     mutationFn: () =>
       api.automations.update(automation.id, {
-        name,
-        goal,
-        scope: scope || undefined,
+        name: name.trim(),
+        goal: goal.trim(),
+        scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
-        base_branch: baseBranch,
+        base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["automation", automation.id] });
@@ -191,23 +193,26 @@ function SettingsTab({ automation }: { automation: Automation }) {
   });
 
   return (
-    <div className="space-y-4">
-      <div>
+    <div className="space-y-4 rounded-lg border border-border bg-card p-5">
+      <div className="space-y-1.5">
         <Label htmlFor="name">Name</Label>
         <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
       </div>
-      <div>
+      <div className="space-y-1.5">
         <Label htmlFor="goal">Goal</Label>
         <Textarea id="goal" value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} />
       </div>
-      <div>
-        <Label htmlFor="scope">Scope</Label>
+      <div className="space-y-1.5">
+        <Label htmlFor="scope">
+          Scope{" "}
+          <span className="text-muted-foreground font-normal">(optional)</span>
+        </Label>
         <Input id="scope" value={scope} onChange={(e) => setScope(e.target.value)} />
       </div>
-      <div>
+      <div className="space-y-1.5">
         <Label id="schedule-label">Schedule</Label>
         <div
-          className="flex items-center gap-2 mt-1"
+          className="flex items-center gap-2"
           role="group"
           aria-labelledby="schedule-label"
         >
@@ -240,11 +245,11 @@ function SettingsTab({ automation }: { automation: Automation }) {
           </Select>
         </div>
       </div>
-      <div>
+      <div className="space-y-1.5">
         <Label htmlFor="baseBranch">Base branch</Label>
         <Input id="baseBranch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 pt-2">
         <Button
           onClick={() => updateMutation.mutate()}
           disabled={updateMutation.isPending}
@@ -313,23 +318,36 @@ export default function AutomationDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8 text-center text-sm text-muted-foreground">
-        Loading...
-      </div>
+      <PageContainer size="default">
+        <div className="text-center py-12 text-sm text-muted-foreground">
+          Loading...
+        </div>
+      </PageContainer>
     );
   }
 
   if (!automation) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8 text-center text-sm text-muted-foreground">
-        Automation not found.
-      </div>
+      <PageContainer size="default">
+        <div className="space-y-6">
+          <PageHeader
+            title="Automation not found"
+            description="This automation does not exist or has been deleted."
+          />
+        </div>
+      </PageContainer>
     );
   }
 
   const schedule = automation.schedule_type === "cron" && automation.cron_expression
     ? `cron: ${automation.cron_expression}`
     : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}`;
+
+  const headerDescription = automation.enabled
+    ? automation.next_run_at
+      ? `${schedule} · Next: ${new Date(automation.next_run_at).toLocaleString()}`
+      : schedule
+    : `${schedule} · Paused`;
 
   // Surface the most recent failure across the header mutations. These are
   // user-initiated actions (pause/resume/run now/delete) so silent failure is
@@ -343,88 +361,77 @@ export default function AutomationDetailPage() {
     null;
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8">
-      {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <div className="flex items-center gap-2.5 mb-1">
-            <RefreshCw className={cn("h-5 w-5", automation.enabled ? "text-blue-500" : "text-muted-foreground")} />
-            <h1 className="text-lg font-semibold text-foreground">{automation.name}</h1>
-          </div>
-          <div className="flex items-center gap-3 text-sm text-muted-foreground">
-            <span>{schedule}</span>
-            {automation.next_run_at && automation.enabled && (
-              <>
-                <span>&middot;</span>
-                <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
-              </>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {automation.enabled ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => pauseMutation.mutate()}
-              disabled={pauseMutation.isPending}
-            >
-              {pauseMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title={automation.name}
+          description={headerDescription}
+          action={
+            <div className="flex items-center gap-2">
+              {automation.enabled ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => pauseMutation.mutate()}
+                  disabled={pauseMutation.isPending}
+                >
+                  {pauseMutation.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  ) : (
+                    <Pause className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  Pause
+                </Button>
               ) : (
-                <Pause className="h-3.5 w-3.5 mr-1.5" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => resumeMutation.mutate()}
+                  disabled={resumeMutation.isPending}
+                >
+                  {resumeMutation.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5 mr-1.5" />
+                  )}
+                  Resume
+                </Button>
               )}
-              Pause
-            </Button>
-          ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => resumeMutation.mutate()}
-              disabled={resumeMutation.isPending}
-            >
-              {resumeMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-              ) : (
-                <Play className="h-3.5 w-3.5 mr-1.5" />
-              )}
-              Resume
-            </Button>
-          )}
-          <Button
-            size="sm"
-            onClick={handleRunNow}
-            disabled={runNowMutation.isPending}
-          >
-            {runNowMutation.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            ) : (
-              <Play className="h-3.5 w-3.5 mr-1.5" />
-            )}
-            Run now
-          </Button>
-        </div>
+              <Button
+                size="sm"
+                onClick={handleRunNow}
+                disabled={runNowMutation.isPending}
+              >
+                {runNowMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 mr-1.5" />
+                )}
+                Run now
+              </Button>
+            </div>
+          }
+        />
+
+        {headerError && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {headerError}
+          </div>
+        )}
+
+        <Tabs defaultValue="runs">
+          <TabsList>
+            <TabsTrigger value="runs">Runs</TabsTrigger>
+            <TabsTrigger value="settings">Settings</TabsTrigger>
+          </TabsList>
+          <TabsContent value="runs" className="mt-4">
+            <RunsTab automationId={automationId} />
+          </TabsContent>
+          <TabsContent value="settings" className="mt-4">
+            <SettingsTab automation={automation} />
+          </TabsContent>
+        </Tabs>
       </div>
-
-      {headerError && (
-        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          {headerError}
-        </div>
-      )}
-
-      {/* Tabs */}
-      <Tabs defaultValue="runs">
-        <TabsList>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
-        </TabsList>
-        <TabsContent value="runs" className="mt-4">
-          <RunsTab automationId={automationId} />
-        </TabsContent>
-        <TabsContent value="settings" className="mt-4">
-          <SettingsTab automation={automation} />
-        </TabsContent>
-      </Tabs>
-    </div>
+    </PageContainer>
   );
 }

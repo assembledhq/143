@@ -14,6 +14,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { PageContainer } from "@/components/page-container";
+import { PageHeader } from "@/components/page-header";
 
 function formatSchedule(a: Automation): string {
   if (a.schedule_type === "cron" && a.cron_expression) {
@@ -154,66 +156,66 @@ export default function AutomationsPage() {
   const paused = useMemo(() => automations.filter((a) => !a.enabled), [automations]);
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-lg font-semibold text-foreground">Automations</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Recurring agents that run on a schedule for your team.
-          </p>
-        </div>
-        <Button asChild size="sm">
-          <Link href="/automations/new">
-            <Plus className="h-4 w-4 mr-1.5" />
-            New
-          </Link>
-        </Button>
+    <PageContainer size="default">
+      <div className="space-y-6">
+        <PageHeader
+          title="Automations"
+          description="Recurring agents that run on a schedule for your team."
+          action={
+            <Button asChild size="sm">
+              <Link href="/automations/new">
+                <Plus className="h-4 w-4 mr-1.5" />
+                New
+              </Link>
+            </Button>
+          }
+        />
+
+        {isLoading && (
+          <div className="text-center py-12 text-sm text-muted-foreground">
+            Loading automations...
+          </div>
+        )}
+
+        {!isLoading && automations.length === 0 && (
+          <div className="text-center py-16 space-y-3">
+            <RefreshCw className="h-8 w-8 mx-auto text-muted-foreground/40" />
+            <p className="text-sm text-muted-foreground">No automations yet</p>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/automations/new">
+                <Plus className="h-4 w-4 mr-1.5" />
+                Create your first automation
+              </Link>
+            </Button>
+          </div>
+        )}
+
+        {enabled.length > 0 && (
+          <section className="space-y-3">
+            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Enabled ({enabled.length})
+            </h2>
+            <div className="space-y-2">
+              {enabled.map((a) => (
+                <AutomationCard key={a.id} automation={a} />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {paused.length > 0 && (
+          <section className="space-y-3">
+            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              Paused ({paused.length})
+            </h2>
+            <div className="space-y-2">
+              {paused.map((a) => (
+                <AutomationCard key={a.id} automation={a} />
+              ))}
+            </div>
+          </section>
+        )}
       </div>
-
-      {isLoading && (
-        <div className="text-center py-12 text-sm text-muted-foreground">
-          Loading automations...
-        </div>
-      )}
-
-      {!isLoading && automations.length === 0 && (
-        <div className="text-center py-16 space-y-3">
-          <RefreshCw className="h-8 w-8 mx-auto text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">No automations yet</p>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/automations/new">
-              <Plus className="h-4 w-4 mr-1.5" />
-              Create your first automation
-            </Link>
-          </Button>
-        </div>
-      )}
-
-      {enabled.length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
-            Enabled ({enabled.length})
-          </h2>
-          <div className="space-y-2">
-            {enabled.map((a) => (
-              <AutomationCard key={a.id} automation={a} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {paused.length > 0 && (
-        <div>
-          <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
-            Paused ({paused.length})
-          </h2>
-          <div className="space-y-2">
-            {paused.map((a) => (
-              <AutomationCard key={a.id} automation={a} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+    </PageContainer>
   );
 }
