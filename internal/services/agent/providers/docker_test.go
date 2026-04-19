@@ -1115,6 +1115,15 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 
 		err := p.CloneRepo(context.Background(), sb, "https://github.com/org/repo.git", "main", "")
 		require.Error(t, err, "CloneRepo should return an error")
-		require.Contains(t, err.Error(), "clone repo", "error should contain expected message")
+		require.Contains(t, err.Error(), "git exited with code 128", "error should contain git exit code")
 	})
+}
+
+func TestRedactToken(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "fatal: ***@github.com/org/repo.git not found",
+		redactToken("fatal: ghp_secret@github.com/org/repo.git not found", "ghp_secret"))
+	require.Equal(t, "fatal: repo not found",
+		redactToken("fatal: repo not found", ""))
 }

@@ -290,12 +290,17 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 
 	cmd := fmt.Sprintf("git clone --depth 1 --branch '%s' '%s' '%s'",
 		shellEscape(branch), shellEscape(authURL), shellEscape(sb.WorkDir))
-	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, io.Discard)
+	var stderr bytes.Buffer
+	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, &stderr)
 	if err != nil {
-		return fmt.Errorf("clone repo: %w", err)
+		return fmt.Errorf("exec git clone: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("clone repo: git exited with code %d", exitCode)
+		msg := redactToken(strings.TrimSpace(stderr.String()), token)
+		if msg == "" {
+			return fmt.Errorf("git exited with code %d (no stderr)", exitCode)
+		}
+		return fmt.Errorf("git exited with code %d: %s", exitCode, msg)
 	}
 
 	d.logger.Info().
@@ -598,4 +603,13 @@ func (l *lineSplitter) flush() {
 // shellEscape escapes single quotes in a string for safe use in shell commands.
 func shellEscape(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// redactToken removes an auth token from a string so it is safe to surface in
+// error messages or logs.
+func redactToken(s, token string) string {
+	if token != "" {
+		s = strings.ReplaceAll(s, token, "***")
+	}
+	return s
 }
