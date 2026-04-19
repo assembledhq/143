@@ -23,14 +23,16 @@ import (
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
-	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
+	"github.com/assembledhq/143/internal/services/preview"
+	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -116,19 +118,28 @@ func main() {
 		logger.Info().Str("model", cfg.PlatformLLMModel).Msg("Platform LLM client initialized for internal features")
 	}
 
-	// Create file reader for sandbox file browsing (optional — gracefully degrades
-	// to a no-op reader if Docker is not available).
+	// Create Docker client for file browsing and preview provider (optional —
+	// gracefully degrades when Docker is not available).
 	var fileReader sandbox.FileReader
-	if apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation()); dockerErr == nil {
+	var pvProvider preview.PreviewCapableProvider
+	var snapshotExec preview.SnapshotExecutor
+	apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	if dockerErr == nil {
 		defer apiDockerCli.Close()
 		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
+
+		// Build preview provider so the preview subsystem can start/stop
+		// sandbox previews.
+		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger)
+		pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+		snapshotExec = sandboxExec
 	} else {
-		logger.Warn().Err(dockerErr).Msg("Docker not available for API file browsing — repo explorer will be disabled")
+		logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		fileReader = sandbox.NoOpFileReader{}
 	}
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
-	router, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry)
+	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -247,6 +258,24 @@ func main() {
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
 		cancel() // stop worker
+		if recycleWorker != nil {
+			recycleWorker.Stop()
+		}
+		if inspectorCloser != nil {
+			if err := inspectorCloser.Close(); err != nil {
+				logger.Error().Err(err).Msg("preview inspector shutdown failed")
+			}
+		}
+		// Gateway carries long-lived WebSocket (HMR) proxies; give it a
+		// longer drain window than the main API server so in-flight preview
+		// sessions close cleanly instead of being severed mid-frame.
+		gwShutdownCtx, gwShutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer gwShutdownCancel()
+		if gwSrv != nil {
+			if err := gwSrv.Shutdown(gwShutdownCtx); err != nil {
+				logger.Error().Err(err).Msg("preview gateway shutdown failed")
+			}
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

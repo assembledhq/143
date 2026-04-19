@@ -136,29 +136,19 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestPreviewHandler_StartPreview_MissingConfig(t *testing.T) {
+func TestPreviewHandler_StartPreview_DefaultConfig(t *testing.T) {
 	t.Parallel()
-	h := newPreviewTestHandlerWithManager()
 
-	sessionID := uuid.New()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/preview",
-		strings.NewReader(`{"base_commit_sha":"abc123"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req = previewTestContext(req)
+	cfg := defaultPreviewConfig()
 
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", sessionID.String())
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	require.Equal(t, "default", cfg.Name, "default preview config should use the default profile name")
+	require.Equal(t, "app", cfg.Primary, "default preview config should set the primary service")
+	require.Equal(t, []string{"npm", "start"}, cfg.Services["app"].Command, "default preview config should run npm start")
+	require.Equal(t, 3000, cfg.Services["app"].Port, "default preview config should expose the default Node port")
+	require.Equal(t, "/", cfg.Services["app"].Ready.HTTPPath, "default preview config should include a readiness probe path")
 
-	w := httptest.NewRecorder()
-	h.StartPreview(w, req)
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-
-	var resp models.ErrorResponse
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
-	require.Equal(t, "MISSING_CONFIG", resp.Error.Code)
+	errs := preview.ValidateConfig(cfg)
+	require.Empty(t, errs, "default preview config should satisfy preview validation")
 }
 
 func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
@@ -308,10 +298,20 @@ func TestPreviewHandler_ExecuteInteraction_TooManySteps(t *testing.T) {
 // =============================================================================
 
 // mockPreviewProvider is a no-op provider for handler tests.
-type mockPreviewProvider struct{}
+type mockPreviewProvider struct {
+	startHandle *preview.PreviewHandle
+	startConfig *models.PreviewConfig
+}
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig) (*preview.PreviewHandle, error) {
-	return nil, nil
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
+	m.startConfig = cfg
+	if m.startHandle != nil {
+		return m.startHandle, nil
+	}
+	return &preview.PreviewHandle{
+		Handle:      "handle-new",
+		PrimaryPort: 3000,
+	}, nil
 }
 func (m *mockPreviewProvider) StopPreview(_ context.Context, _ string) error { return nil }
 func (m *mockPreviewProvider) DialPreview(_ context.Context, _ string) (preview.PreviewStream, error) {
@@ -323,9 +323,10 @@ func (m *mockPreviewProvider) PreviewStatus(_ context.Context, _ string) (*previ
 
 func newPreviewHandlerWithMock(mock pgxmock.PgxPoolIface) *PreviewHandler {
 	store := db.NewPreviewStore(mock)
+	provider := &mockPreviewProvider{}
 	mgr := preview.NewManager(preview.ManagerConfig{
 		Store:        store,
-		Provider:     &mockPreviewProvider{},
+		Provider:     provider,
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "test-worker",
 	})
@@ -354,7 +355,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "error", "created_at", "updated_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -378,11 +379,34 @@ var handlerPreviewSnapshotTestCols = []string{
 }
 
 func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
+	recycleConfig, err := json.Marshal(models.PreviewConfig{
+		Name:    "my-preview",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {
+				Command: []string{"npm", "run", "dev"},
+				Port:    3000,
+				Ready:   models.ReadinessProbe{HTTPPath: "/"},
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	recycleSandbox, err := json.Marshal(agent.Sandbox{
+		ID:       "sandbox-1",
+		Provider: "docker",
+		WorkDir:  "/workspace",
+	})
+	if err != nil {
+		panic(err)
+	}
+
 	return []any{
 		previewID, sessionID, orgID, userID, "bootstrap", "my-preview", "ready",
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, "", now, now,
+		"/", 512, 500, recycleConfig, recycleSandbox, "", now, now, now, nil,
 	}
 }
 
@@ -400,7 +424,8 @@ func TestNewPreviewHandler(t *testing.T) {
 		WorkerNodeID: "w1",
 	})
 
-	h := NewPreviewHandler(mgr, store, zerolog.Nop())
+	sessionStore := db.NewSessionStore(mock)
+	h := NewPreviewHandler(mgr, store, sessionStore, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
@@ -800,7 +825,7 @@ func TestPreviewHandler_RestartPreview_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// RestartPreview calls StopPreview -> GetPreviewInstance.
+	// RestartPreview should recycle the active preview in place.
 	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -808,15 +833,21 @@ func TestPreviewHandler_RestartPreview_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// StopPreviewWithRevocation
-	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE preview_instances SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
-	mock.ExpectCommit()
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/preview/restart", nil)
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
@@ -824,6 +855,7 @@ func TestPreviewHandler_RestartPreview_Success(t *testing.T) {
 
 	h.RestartPreview(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
+	require.JSONEq(t, `{"data":{"status":"restarting"}}`, w.Body.String(), "restart endpoint should acknowledge the recycle")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

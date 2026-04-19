@@ -29,7 +29,7 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "error", "created_at", "updated_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 }
 
 var previewServiceTestCols = []string{
@@ -74,7 +74,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", "starting",
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, "", now, now,
+		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
 	}
 }
 
@@ -114,10 +114,12 @@ func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 		LastPath:       "/",
 		MemoryLimitMB:  512,
 		CPULimitMillis: 500,
+		RecycleConfig:  json.RawMessage(`{"version":"3"}`),
+		RecycleSandbox: json.RawMessage(`{"id":"sandbox-1"}`),
 	}
 
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(17)...).
+		WithArgs(previewAnyArgs(19)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(generatedID, sessionID, orgID, userID, now)...),
@@ -587,12 +589,15 @@ func TestPreviewStore_CountAndDeleteSnapshots(t *testing.T) {
 	require.Equal(t, 15, count)
 
 	// Delete oldest
-	mock.ExpectExec("DELETE FROM preview_snapshots WHERE id IN").
+	mock.ExpectQuery("DELETE FROM preview_snapshots WHERE id IN").
 		WithArgs(previewAnyArgs(3)...).
-		WillReturnResult(pgxmock.NewResult("DELETE", 5))
+		WillReturnRows(pgxmock.NewRows([]string{"blob_ref"}).
+			AddRow("/tmp/blobs/snap1.png").
+			AddRow("/tmp/blobs/snap2.png"))
 
-	err = store.DeleteOldestSnapshots(context.Background(), orgID, previewID, 10)
+	blobRefs, err := store.DeleteOldestSnapshots(context.Background(), orgID, previewID, 10)
 	require.NoError(t, err)
+	require.Equal(t, []string{"/tmp/blobs/snap1.png", "/tmp/blobs/snap2.png"}, blobRefs)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -906,6 +911,39 @@ func TestPreviewStore_UpsertStartupCache(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewStore_UpsertStartupCache_PreservesWorkerScopedConflictTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	entry := &models.PreviewStartupCache{
+		OrgID:        orgID,
+		RepoID:       repoID,
+		SnapshotKey:  "key",
+		BlobPath:     "/cache/snap.tar.zst",
+		SizeBytes:    1024,
+		WorkerNodeID: "worker-1",
+	}
+
+	mock.ExpectQuery(`INSERT INTO preview_startup_cache(.|\n)+ON CONFLICT \(org_id, repo_id, snapshot_key, worker_node_id\)`).
+		WithArgs(previewAnyArgs(6)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewStartupCacheTestCols).
+				AddRow(uuid.New(), orgID, repoID, "key", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
+		)
+
+	err = store.UpsertStartupCache(context.Background(), entry)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewStore_FindMatchingCache(t *testing.T) {
 	t.Parallel()
 
@@ -918,8 +956,8 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 			name: "returns cache hit",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
-				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key").
-					WithArgs(previewAnyArgs(3)...).
+				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key.+worker_node_id").
+					WithArgs(previewAnyArgs(4)...).
 					WillReturnRows(
 						pgxmock.NewRows(previewStartupCacheTestCols).
 							AddRow(uuid.New(), uuid.New(), uuid.New(), "key",
@@ -930,8 +968,8 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 		{
 			name: "returns error on cache miss",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key").
-					WithArgs(previewAnyArgs(3)...).
+				mock.ExpectQuery("SELECT .+ FROM preview_startup_cache.+snapshot_key.+worker_node_id").
+					WithArgs(previewAnyArgs(4)...).
 					WillReturnRows(pgxmock.NewRows(previewStartupCacheTestCols))
 			},
 			expectErr: true,
@@ -949,7 +987,7 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 			store := NewPreviewStore(mock)
 			tt.setupMock(mock)
 
-			entry, err := store.FindMatchingCache(context.Background(), uuid.New(), uuid.New(), "key")
+			entry, err := store.FindMatchingCache(context.Background(), uuid.New(), uuid.New(), "key", "w1")
 			if tt.expectErr {
 				require.Error(t, err)
 				return
@@ -1240,6 +1278,34 @@ func TestPreviewStore_ListIdlePreviews(t *testing.T) {
 	require.Len(t, previews, 1)
 	require.Equal(t, previewID, previews[0].ID)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_ListActivePreviewsRecycledBefore(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = @worker_node_id.+recycled_at < @recycled_before.+ORDER BY recycled_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	previews, err := store.ListActivePreviewsRecycledBefore(context.Background(), "worker-1", now.Add(-time.Hour))
+	require.NoError(t, err, "ListActivePreviewsRecycledBefore should return matching previews")
+	require.Len(t, previews, 1, "ListActivePreviewsRecycledBefore should return one matching preview")
+	require.Equal(t, previewID, previews[0].ID, "ListActivePreviewsRecycledBefore should return the expected preview")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_UpdateServicePID(t *testing.T) {

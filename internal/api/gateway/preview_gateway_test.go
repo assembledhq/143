@@ -1,11 +1,21 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -171,7 +181,7 @@ func TestInjectSecurityHeaders(t *testing.T) {
 	h := make(http.Header)
 	gw.injectSecurityHeaders(h)
 
-	require.Contains(t, h.Get("X-Frame-Options"), "ALLOW-FROM https://app.143.dev")
+	// X-Frame-Options ALLOW-FROM is deprecated; only CSP frame-ancestors is set.
 	require.Contains(t, h.Get("Content-Security-Policy"), "frame-ancestors https://app.143.dev")
 	require.Equal(t, "no-referrer", h.Get("Referrer-Policy"))
 	require.Equal(t, "nosniff", h.Get("X-Content-Type-Options"))
@@ -212,6 +222,153 @@ func TestNewGateway(t *testing.T) {
 	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
 	require.NotNil(t, gw)
 	require.Equal(t, "https://app.143.dev", gw.appOrigin)
+}
+
+func TestInjectScriptsIntoHTML_GzipResponse(t *testing.T) {
+	t.Parallel()
+
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, err := writer.Write([]byte("<html><head></head><body>Hello</body></html>"))
+	require.NoError(t, err, "gzip writer should accept the test HTML")
+	require.NoError(t, writer.Close(), "gzip writer should close cleanly")
+
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader(compressed.Bytes())),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	resp.Header.Set("Content-Encoding", "gzip")
+
+	err = gw.injectScriptsIntoHTML(resp, uuid.New())
+	require.NoError(t, err, "injectScriptsIntoHTML should handle gzip-encoded HTML")
+	require.Equal(t, "gzip", resp.Header.Get("Content-Encoding"), "gzip encoding should be preserved after injection")
+
+	reader, err := gzip.NewReader(resp.Body)
+	require.NoError(t, err, "gzip reader should open the modified response body")
+	body, err := io.ReadAll(reader)
+	require.NoError(t, err, "should read the modified gzip response body")
+	require.NoError(t, reader.Close(), "gzip reader should close cleanly")
+	require.Contains(t, string(body), activityHeartbeatScript, "modified HTML should include the injected activity heartbeat script")
+	require.Contains(t, string(body), preview.ComponentResolverScript, "modified HTML should include the component resolver script")
+}
+
+func TestInjectScriptsIntoHTML_OversizedCompressedBodyPassesThroughUnchanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		contentEncoding string
+		compress        func(t *testing.T, body []byte) []byte
+		decompress      func(t *testing.T, body []byte) []byte
+	}{
+		{
+			name:            "gzip",
+			contentEncoding: "gzip",
+			compress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				var compressed bytes.Buffer
+				writer := gzip.NewWriter(&compressed)
+				_, err := writer.Write(body)
+				require.NoError(t, err, "gzip writer should accept the oversized HTML body")
+				require.NoError(t, writer.Close(), "gzip writer should close cleanly")
+				return compressed.Bytes()
+			},
+			decompress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				reader, err := gzip.NewReader(bytes.NewReader(body))
+				require.NoError(t, err, "gzip reader should open the passthrough response body")
+				decompressed, err := io.ReadAll(reader)
+				require.NoError(t, err, "gzip reader should return the full passthrough body")
+				require.NoError(t, reader.Close(), "gzip reader should close cleanly")
+				return decompressed
+			},
+		},
+		{
+			name:            "deflate",
+			contentEncoding: "deflate",
+			compress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				var compressed bytes.Buffer
+				writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+				require.NoError(t, err, "deflate writer should be created")
+				_, err = writer.Write(body)
+				require.NoError(t, err, "deflate writer should accept the oversized HTML body")
+				require.NoError(t, writer.Close(), "deflate writer should close cleanly")
+				return compressed.Bytes()
+			},
+			decompress: func(t *testing.T, body []byte) []byte {
+				t.Helper()
+
+				reader := flate.NewReader(bytes.NewReader(body))
+				decompressed, err := io.ReadAll(reader)
+				require.NoError(t, err, "deflate reader should return the full passthrough body")
+				require.NoError(t, reader.Close(), "deflate reader should close cleanly")
+				return decompressed
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+			oversizedHTML := []byte("<html><head></head><body>" + strings.Repeat("a", int(maxHTMLBodySize)+1024) + "</body></html>")
+			originalCompressed := tt.compress(t, oversizedHTML)
+
+			resp := &http.Response{
+				Header: make(http.Header),
+				Body:   io.NopCloser(bytes.NewReader(originalCompressed)),
+			}
+			resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+			resp.Header.Set("Content-Encoding", tt.contentEncoding)
+
+			err := gw.injectScriptsIntoHTML(resp, uuid.New())
+			require.NoError(t, err, "injectScriptsIntoHTML should preserve oversized compressed HTML")
+			require.Equal(t, tt.contentEncoding, resp.Header.Get("Content-Encoding"), "compressed passthrough should preserve the original content encoding")
+
+			passthroughCompressed, err := io.ReadAll(resp.Body)
+			require.NoError(t, err, "response body should remain readable after passthrough")
+			require.Equal(t, originalCompressed, passthroughCompressed, "oversized compressed HTML should be served byte-for-byte unchanged")
+
+			passthroughHTML := tt.decompress(t, passthroughCompressed)
+			require.Equal(t, oversizedHTML, passthroughHTML, "oversized compressed HTML should remain complete after passthrough")
+			require.NotContains(t, string(passthroughHTML), activityHeartbeatScript, "oversized passthrough responses should skip script injection")
+		})
+	}
+}
+
+func TestInjectScriptsIntoHTML_UnsupportedEncodingSkipsInjectionWithoutMutatingResponse(t *testing.T) {
+	t.Parallel()
+
+	gw := NewGateway(GatewayConfig{AppOrigin: "https://app.143.dev"})
+	var compressed bytes.Buffer
+	writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	require.NoError(t, err, "deflate writer should be created")
+	_, err = writer.Write([]byte("<html><head></head><body>Hello</body></html>"))
+	require.NoError(t, err, "deflate writer should accept the test HTML")
+	require.NoError(t, writer.Close(), "deflate writer should close cleanly")
+
+	original := compressed.Bytes()
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader(original)),
+	}
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	resp.Header.Set("Content-Encoding", "br")
+
+	err = gw.injectScriptsIntoHTML(resp, uuid.New())
+	require.NoError(t, err, "injectScriptsIntoHTML should pass through unsupported encodings unchanged")
+	require.Equal(t, "br", resp.Header.Get("Content-Encoding"), "unsupported encodings should remain unchanged")
+
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, readErr, "response body should remain readable when injection is skipped")
+	require.Equal(t, original, body, "unsupported encoded bodies should not be mutated")
 }
 
 func TestGateway_ServeHTTP_InvalidHost(t *testing.T) {
@@ -280,7 +437,7 @@ func TestGateway_ServeHTTP_Proxy_InvalidCookie(t *testing.T) {
 	previewID := uuid.New()
 	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
-	req.AddCookie(&http.Cookie{Name: "__Host-preview_session", Value: "invalid!!!"})
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: "invalid!!!"})
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)
@@ -301,10 +458,81 @@ func TestGateway_ServeHTTP_Proxy_CookieMismatch(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
-	req.AddCookie(&http.Cookie{Name: "__Host-preview_session", Value: cookieVal})
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
 	w := httptest.NewRecorder()
 
 	gw.ServeHTTP(w, req)
 	require.Equal(t, http.StatusForbidden, w.Code)
 	require.Contains(t, w.Body.String(), "does not match")
+}
+
+func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now()
+	expiresAt := now.Add(10 * time.Minute)
+	secret := []byte("test-secret")
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:  store,
+		Logger: zerolog.Nop(),
+	})
+	gw := NewGateway(GatewayConfig{
+		Store:        store,
+		Manager:      manager,
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+
+	cookieVal := encodeCookieValue(secret, orgID, previewID, accessSessionID)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, nil, now, now),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	firstReq.Host = previewID.String() + ".preview.143.dev"
+	firstReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	firstResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(firstResp, firstReq)
+	require.Equal(t, http.StatusNoContent, firstResp.Code, "first request should succeed and populate the cache")
+
+	revokedAt := now.Add(30 * time.Second)
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, &revokedAt, now, now),
+		)
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	secondReq.Host = previewID.String() + ".preview.143.dev"
+	secondReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	secondResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(secondResp, secondReq)
+	require.Equal(t, http.StatusUnauthorized, secondResp.Code, "gateway should reject a session revoked after it was cached")
+	require.Contains(t, secondResp.Body.String(), "preview session has been revoked", "gateway should return the revoked-session error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
