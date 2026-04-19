@@ -35,6 +35,8 @@ type DockerClient interface {
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
+	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
+	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 }
 
 // DockerProvider implements SandboxProvider using Docker containers
@@ -79,10 +81,15 @@ func NewDockerProvider(cli DockerClient, logger zerolog.Logger, opts ...DockerPr
 
 // HealthCheck verifies Docker daemon connectivity and, for non-runc runtimes,
 // that the configured runtime is functional by running a test container.
+// It also ensures the sandbox egress network exists, creating it if missing.
 func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 	// Always verify we can reach the Docker daemon.
 	if _, err := d.client.Ping(ctx); err != nil {
 		return fmt.Errorf("docker health check: cannot connect to Docker daemon: %w", err)
+	}
+
+	if err := d.ensureNetwork(ctx); err != nil {
+		return fmt.Errorf("docker health check: %w", err)
 	}
 
 	if d.runtime == "runc" {
@@ -141,6 +148,33 @@ func (d *DockerProvider) HealthCheck(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// ensureNetwork verifies the configured sandbox network exists on the Docker
+// host, creating a plain bridge network if it does not. This is idempotent:
+// concurrent calls that race past the inspect will converge because the
+// daemon rejects duplicate names with a conflict error, which we treat as
+// success. Host-level egress rules (iptables DOCKER-USER chain) are applied
+// out of band during host provisioning; this only guarantees attach works.
+func (d *DockerProvider) ensureNetwork(ctx context.Context) error {
+	if d.network == "" {
+		return nil
+	}
+	if _, err := d.client.NetworkInspect(ctx, d.network, network.InspectOptions{}); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect network %q: %w", d.network, err)
+	}
+
+	d.logger.Info().Str("network", d.network).Msg("sandbox network missing; creating bridge network")
+	_, err := d.client.NetworkCreate(ctx, d.network, network.CreateOptions{
+		Driver: "bridge",
+		Labels: map[string]string{"managed-by": "143"},
+	})
+	if err != nil && !cerrdefs.IsConflict(err) && !cerrdefs.IsAlreadyExists(err) {
+		return fmt.Errorf("create network %q: %w", d.network, err)
+	}
+	return nil
 }
 
 // Name returns the provider identifier.

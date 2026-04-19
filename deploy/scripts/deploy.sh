@@ -194,6 +194,11 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
+    # Ensure the shared sandbox egress network exists (idempotent). Older hosts
+    # provisioned before this was added won't have it, and session creation
+    # will fail until it does.
+    docker network inspect 143-sandbox >/dev/null 2>&1 || \
+      docker network create --driver bridge --label managed-by=143 143-sandbox
   fi
 
   # Run migrations BEFORE restarting the app so the DB schema is ready when

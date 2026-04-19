@@ -32,6 +32,8 @@ type mockDockerClient struct {
 	containerExecCreateFn  func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	containerExecAttachFn  func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	containerExecInspectFn func(ctx context.Context, execID string) (container.ExecInspect, error)
+	networkInspectFn       func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
+	networkCreateFn        func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
 }
 
 func (m *mockDockerClient) Ping(ctx context.Context) (types.Ping, error) {
@@ -101,6 +103,22 @@ func (m *mockDockerClient) ContainerExecInspect(ctx context.Context, execID stri
 		return m.containerExecInspectFn(ctx, execID)
 	}
 	return container.ExecInspect{ExitCode: 0}, nil
+}
+
+func (m *mockDockerClient) NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+	if m.networkInspectFn != nil {
+		return m.networkInspectFn(ctx, networkID, options)
+	}
+	// Default: pretend the network already exists so HealthCheck tests that
+	// don't care about the network don't have to wire create up.
+	return network.Inspect{Name: networkID}, nil
+}
+
+func (m *mockDockerClient) NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+	if m.networkCreateFn != nil {
+		return m.networkCreateFn(ctx, name, options)
+	}
+	return network.CreateResponse{ID: "test-net-id"}, nil
 }
 
 // mockConn implements net.Conn for testing HijackedResponse.
@@ -260,6 +278,99 @@ func TestDockerProvider_HealthCheck(t *testing.T) {
 		require.Contains(t, err.Error(), "health check")
 		require.Contains(t, err.Error(), "failed to start test container")
 		require.True(t, removeCalled, "ContainerRemove should be called for cleanup even on start failure")
+	})
+}
+
+func TestDockerProvider_EnsureNetwork(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips create when network already exists", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.networkInspectFn = func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+			require.Equal(t, "143-sandbox", networkID)
+			return network.Inspect{Name: networkID}, nil
+		}
+		mock.networkCreateFn = func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+			t.Fatal("NetworkCreate should not be called when network already exists")
+			return network.CreateResponse{}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err)
+	})
+
+	t.Run("creates missing network on health check", func(t *testing.T) {
+		t.Parallel()
+
+		var createCalled bool
+		mock := &mockDockerClient{}
+		mock.networkInspectFn = func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{}, cerrdefs.ErrNotFound
+		}
+		mock.networkCreateFn = func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+			createCalled = true
+			require.Equal(t, "143-sandbox", name)
+			require.Equal(t, "bridge", options.Driver)
+			require.Equal(t, "143", options.Labels["managed-by"])
+			return network.CreateResponse{ID: "net-id"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err)
+		require.True(t, createCalled, "NetworkCreate should be called when network is missing")
+	})
+
+	t.Run("treats conflict on create as success (concurrent workers)", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.networkInspectFn = func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{}, cerrdefs.ErrNotFound
+		}
+		mock.networkCreateFn = func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+			return network.CreateResponse{}, cerrdefs.ErrConflict
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.NoError(t, err, "conflict on create should be treated as success")
+	})
+
+	t.Run("propagates non-notfound inspect error", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.networkInspectFn = func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{}, fmt.Errorf("docker daemon is melting")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "inspect network")
+		require.Contains(t, err.Error(), "melting")
+	})
+
+	t.Run("propagates create error", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.networkInspectFn = func(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error) {
+			return network.Inspect{}, cerrdefs.ErrNotFound
+		}
+		mock.networkCreateFn = func(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+			return network.CreateResponse{}, fmt.Errorf("no bridge for you")
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithRuntime("runc"))
+
+		err := p.HealthCheck(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "create network")
+		require.Contains(t, err.Error(), "no bridge for you")
 	})
 }
 
