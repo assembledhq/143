@@ -52,6 +52,10 @@ type PreviewHandle struct {
 	// InfraCredentials maps infra_name → generated credentials.
 	// These are ephemeral and exist only for the lifetime of the preview.
 	InfraCredentials map[string]InfraCredential
+
+	// PartiallyReady is true when progressive preview is enabled and the
+	// primary service is ready but support services are still starting.
+	PartiallyReady bool
 }
 
 // InfraCredential holds the auto-generated credentials for a platform

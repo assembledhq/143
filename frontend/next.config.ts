@@ -6,6 +6,12 @@ const apiTarget = process.env.API_PROXY_TARGET || "http://localhost:8080";
 const nextConfig: NextConfig = {
   output: process.env.NODE_ENV === "production" ? "standalone" : undefined,
   allowedDevOrigins: ["*.ngrok.dev", "localhost", "127.0.0.1"],
+  env: {
+    NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:
+      process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
+      process.env.PREVIEW_ORIGIN_TEMPLATE ||
+      "http://{id}.preview.localhost:9090",
+  },
   async rewrites() {
     return [
       {

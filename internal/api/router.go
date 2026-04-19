@@ -2,6 +2,12 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -11,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
@@ -27,7 +34,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller) (*chi.Mux, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -72,7 +79,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		var err error
 		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
@@ -248,13 +255,98 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	sessionReviewCommentHandler.SetMessageAndJobStores(sessionMessageStore, jobStore)
 	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, fileReader, logger)
 
-	// Preview manager and handler.
+	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
+	var previewInspector preview.PreviewInspector
+	var inspectorCloser io.Closer // returned for graceful shutdown
+	if cfg.ChromeWSURL != "" {
+		// Convert env-friendly "{id}" placeholder to chromedp inspector's "{{.PreviewID}}" format.
+		inspectorURLTemplate := strings.Replace(cfg.PreviewOriginTemplate, "{id}", "{{.PreviewID}}", 1) + "{{.Path}}"
+		cdpInspector := preview.NewChromeDPInspector(preview.ChromeDPInspectorConfig{
+			RemoteURL:          cfg.ChromeWSURL,
+			PreviewURLTemplate: inspectorURLTemplate,
+		}, logger)
+		previewInspector = cdpInspector
+		inspectorCloser = cdpInspector
+	}
+
+	var previewSnapshotCache *preview.SnapshotCache
+	if cfg.PreviewSnapshotCacheDir != "" && snapshotExecutor != nil {
+		var scErr error
+		previewSnapshotCache, scErr = preview.NewSnapshotCache(preview.SnapshotCacheConfig{
+			Store:        previewStore,
+			Executor:     snapshotExecutor,
+			Logger:       logger,
+			WorkerNodeID: "local",
+			CacheDir:     cfg.PreviewSnapshotCacheDir,
+		})
+		if scErr != nil {
+			logger.Warn().Err(scErr).Msg("failed to initialize preview snapshot cache — caching disabled")
+			previewSnapshotCache = nil
+		}
+	}
+
+	var hmrWatcher *preview.HMRWatcher
+	if previewInspector != nil && cfg.PreviewHMRBlobDir != "" {
+		var hmrErr error
+		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
+			Inspector: previewInspector,
+			Store:     previewStore,
+			Logger:    logger,
+			BlobDir:   cfg.PreviewHMRBlobDir,
+		})
+		if hmrErr != nil {
+			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
+			hmrWatcher = nil
+		}
+	}
+
 	previewManager := preview.NewManager(preview.ManagerConfig{
-		Store:        previewStore,
-		Logger:       logger,
-		WorkerNodeID: "local", // MODE=all: single-node
+		Store:         previewStore,
+		SessionStore:  sessionStore,
+		Provider:      previewProvider,
+		Inspector:     previewInspector,
+		SnapshotCache: previewSnapshotCache,
+		HMRWatcher:    hmrWatcher,
+		Logger:        logger,
+		WorkerNodeID:  "local", // MODE=all: single-node
 	})
-	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, logger)
+
+	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
+		Manager: previewManager,
+		Logger:  logger,
+	})
+	recycleWorker.Start()
+
+	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
+	// gwSrv is stored so callers can shut it down gracefully.
+	var gwSrv *http.Server
+	if cfg.PreviewGatewayPort > 0 {
+		gw := gateway.NewGateway(gateway.GatewayConfig{
+			Store:                 previewStore,
+			Manager:               previewManager,
+			HMRWatcher:            hmrWatcher,
+			Logger:                logger,
+			AppOrigin:             cfg.FrontendURL,
+			CookieSecret:          []byte(cfg.SessionSecret),
+			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
+		})
+		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
+		logger.Info().Str("addr", addr).Msg("starting preview gateway")
+		gwSrv = &http.Server{Addr: addr, Handler: gw, ReadHeaderTimeout: 10 * time.Second}
+		// Use a listener to detect port-in-use errors synchronously before
+		// returning from NewRouter, rather than silently failing in a goroutine.
+		gwListener, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			return nil, nil, nil, nil, fmt.Errorf("preview gateway listen on %s: %w", addr, listenErr)
+		}
+		go func() {
+			if gwErr := gwSrv.Serve(gwListener); gwErr != nil && gwErr != http.ErrServerClosed {
+				logger.Error().Err(gwErr).Msg("preview gateway failed")
+			}
+		}()
+	}
+
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
@@ -587,5 +679,5 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 	})
 
-	return r, nil
+	return r, gwSrv, recycleWorker, inspectorCloser, nil
 }

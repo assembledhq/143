@@ -2,24 +2,48 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"golang.org/x/net/html"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/preview"
 )
+
+// sessionCacheEntry caches access session validation results to avoid
+// hitting the database on every proxied request (including static assets).
+type sessionCacheEntry struct {
+	validUntil time.Time // when this cache entry expires
+	revokedAt  *time.Time
+	expiresAt  time.Time
+}
+
+// sessionCache is a simple TTL cache for access session lookups.
+const sessionCacheTTL = 10 * time.Second
+
+// expiryExtendThreshold controls how often we extend the DB session expiry.
+// We only extend when the remaining time is below this threshold, avoiding
+// a DB write on every single request.
+const expiryExtendThreshold = 2 * time.Minute
 
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
@@ -27,19 +51,54 @@ import (
 type Gateway struct {
 	store        *db.PreviewStore
 	manager      *preview.Manager
+	hmrWatcher   *preview.HMRWatcher
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
+	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
+
+	// sessionCache avoids a DB round-trip on every proxied request.
+	sessionCacheMu sync.RWMutex
+	sessionCache   map[uuid.UUID]*sessionCacheEntry
 }
 
 // GatewayConfig holds initialization options.
 type GatewayConfig struct {
-	Store        *db.PreviewStore
-	Manager      *preview.Manager
-	Logger       zerolog.Logger
-	AppOrigin    string // e.g. "https://app.143.dev"
-	CookieSecret []byte // HMAC key for signing preview session cookies
+	Store                 *db.PreviewStore
+	Manager               *preview.Manager
+	HMRWatcher            *preview.HMRWatcher // optional; enables HMR screenshot capture
+	Logger                zerolog.Logger
+	AppOrigin             string // e.g. "https://app.143.dev"
+	CookieSecret          []byte // HMAC key for signing preview session cookies
+	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
+}
+
+// maxHTMLBodySize caps how much HTML we read into memory for script injection.
+// Kept conservative to avoid excessive memory usage with concurrent previews.
+const maxHTMLBodySize = 5 * 1024 * 1024 // 5 MB
+
+// cookieName returns the session cookie name — __Host-prefixed over HTTPS,
+// plain name over HTTP (localhost dev).
+func (g *Gateway) cookieName() string {
+	if g.secureCookie {
+		return "__Host-preview_session"
+	}
+	return "preview_session"
+}
+
+// evictCachedSession removes a session entry from the cache.
+func (g *Gateway) evictCachedSession(id uuid.UUID) {
+	g.sessionCacheMu.Lock()
+	defer g.sessionCacheMu.Unlock()
+	delete(g.sessionCache, id)
+}
+
+// putCachedSession stores a session entry in the cache.
+func (g *Gateway) putCachedSession(id uuid.UUID, entry *sessionCacheEntry) {
+	g.sessionCacheMu.Lock()
+	defer g.sessionCacheMu.Unlock()
+	g.sessionCache[id] = entry
 }
 
 // NewGateway creates a new preview gateway.
@@ -47,16 +106,19 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
 		store:        cfg.Store,
 		manager:      cfg.Manager,
+		hmrWatcher:   cfg.HMRWatcher,
 		logger:       cfg.Logger,
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
+		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
+		sessionCache: make(map[uuid.UUID]*sessionCacheEntry),
 		cspHeader: strings.Join([]string{
 			"default-src 'self' blob: data:",
 			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
 			"style-src 'self' 'unsafe-inline'",
 			"img-src 'self' data: blob:",
 			"font-src 'self' data:",
-			"connect-src 'self' wss://*.preview.143.dev",
+			"connect-src 'self' " + deriveWSConnectSrc(cfg.PreviewOriginTemplate),
 			"form-action 'self'",
 			"object-src 'none'",
 			"base-uri 'none'",
@@ -186,15 +248,7 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 	// Set the preview session cookie (HMAC-signed).
 	cookieValue := encodeCookieValue(g.cookieSecret, sess.OrgID, previewID, sess.ID)
-	http.SetCookie(w, &http.Cookie{
-		Name:     "__Host-preview_session",
-		Value:    cookieValue,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteStrictMode,
-		Expires:  sess.ExpiresAt,
-	})
+	http.SetCookie(w, previewSessionCookie(cookieValue, sess.ExpiresAt, g.secureCookie))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -209,13 +263,13 @@ func (g *Gateway) handleBootstrapExchange(w http.ResponseWriter, r *http.Request
 
 func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	// Read and validate the session cookie.
-	cookie, err := r.Cookie("__Host-preview_session")
+	cookie, err := r.Cookie(g.cookieName())
 	if err != nil {
 		http.Error(w, "preview session required — complete bootstrap first", http.StatusUnauthorized)
 		return
 	}
 
-	orgID, cookiePreviewID, _, err := decodeCookieValue(g.cookieSecret, cookie.Value)
+	orgID, cookiePreviewID, accessSessionID, err := decodeCookieValue(g.cookieSecret, cookie.Value)
 	if err != nil {
 		http.Error(w, "invalid preview session", http.StatusUnauthorized)
 		return
@@ -227,10 +281,78 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
+	// Re-check the access session in the database before honoring the cookie.
+	// The local cache is only a short-lived mirror of the latest DB state; we
+	// do not trust it across requests for revocation decisions.
+	now := time.Now()
+	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+	if err != nil {
+		g.evictCachedSession(accessSessionID)
+		http.Error(w, "preview session not found", http.StatusUnauthorized)
+		return
+	}
+	cached := &sessionCacheEntry{
+		validUntil: now.Add(sessionCacheTTL),
+		revokedAt:  sess.RevokedAt,
+		expiresAt:  sess.ExpiresAt,
+	}
+	g.putCachedSession(accessSessionID, cached)
+
+	if cached.revokedAt != nil {
+		g.evictCachedSession(accessSessionID)
+		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+		return
+	}
+	if now.After(cached.expiresAt) {
+		g.evictCachedSession(accessSessionID)
+		http.Error(w, "preview session has expired", http.StatusUnauthorized)
+		return
+	}
+
+	// Only extend the DB session expiry when close to expiration, avoiding
+	// a DB write on every single request.
+	if time.Until(cached.expiresAt) < expiryExtendThreshold {
+		newExpiry := now.Add(5 * time.Minute)
+		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
+			if errors.Is(err, db.ErrSessionRevoked) {
+				// Session was revoked between cache fill and extend — evict
+				// the stale cache entry and deny access immediately.
+				g.evictCachedSession(accessSessionID)
+				http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+				return
+			}
+			g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
+		} else {
+			refreshedCookie := encodeCookieValue(g.cookieSecret, orgID, previewID, accessSessionID)
+			http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
+			// Update the cache with the new expiry.
+			g.putCachedSession(accessSessionID, &sessionCacheEntry{
+				validUntil: now.Add(sessionCacheTTL),
+				revokedAt:  cached.revokedAt,
+				expiresAt:  newExpiry,
+			})
+		}
+	}
+
+	// Intercept heartbeat pings before recording activity so the heartbeat
+	// URL does not overwrite last_path (which is used for navigation restore).
+	if r.URL.Path == "/__143_heartbeat" {
+		// Still record access for idle timeout tracking.
+		if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	// Record activity for idle timeout tracking.
-	_ = g.manager.RecordAccess(r.Context(), orgID, previewID)
-	if r.URL.Path != "" && r.URL.Path != "/" {
-		_ = g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path)
+	if err := g.manager.RecordAccess(r.Context(), orgID, previewID); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+	}
+	if r.URL.Path != "" && r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/__143_") {
+		if err := g.manager.RecordLastPath(r.Context(), orgID, previewID, r.URL.Path); err != nil {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record last path")
+		}
 	}
 
 	// Check for WebSocket upgrade.
@@ -259,6 +381,20 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 		ModifyResponse: func(resp *http.Response) error {
 			g.injectSecurityHeaders(resp.Header)
 			stripSensitiveResponseHeaders(resp.Header)
+
+			// Inject scripts into HTML responses.
+			ct := resp.Header.Get("Content-Type")
+			if strings.HasPrefix(ct, "text/html") {
+				if err := g.injectScriptsIntoHTML(resp, previewID); err != nil {
+					g.logger.Warn().Err(err).
+						Str("preview_id", previewID.String()).
+						Msg("failed to inject scripts into HTML response")
+					// Non-fatal: the original response is already consumed,
+					// so we cannot fall back. The error is logged and we
+					// proceed with whatever body state we have.
+				}
+			}
+
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -292,8 +428,9 @@ func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID,
 	}
 	defer clientConn.Close()
 
-	// Forward the original request to the backend.
-	if err := r.Write(backendConn); err != nil {
+	// Forward a sanitized copy of the original request to the backend.
+	backendReq := cloneWebSocketRequestForBackend(r)
+	if err := backendReq.Write(backendConn); err != nil {
 		g.logger.Warn().Err(err).Msg("websocket: failed to forward upgrade request")
 		return
 	}
@@ -307,8 +444,14 @@ func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID,
 	// Bidirectional copy.
 	done := make(chan struct{})
 	go func() {
-		if _, err := io.Copy(clientConn, backendConn); err != nil {
-			g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
+		if g.hmrWatcher != nil {
+			// Tee backend→client traffic through the HMR watcher so it
+			// can detect HMR update messages and trigger screenshots.
+			g.copyWithHMRSnoop(clientConn, backendConn, previewID)
+		} else {
+			if _, err := io.Copy(clientConn, backendConn); err != nil {
+				g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
+			}
 		}
 		close(done)
 	}()
@@ -328,6 +471,24 @@ type previewTransport struct {
 	manager   *preview.Manager
 	orgID     uuid.UUID
 	previewID uuid.UUID
+}
+
+// connClosingBody wraps a response body so that closing it also closes the
+// underlying network connection. Without this, each proxied request would
+// leak a TCP connection because http.ReadResponse does not tie the body
+// lifetime to the connection.
+type connClosingBody struct {
+	io.ReadCloser
+	conn net.Conn
+}
+
+func (b *connClosingBody) Close() error {
+	bodyErr := b.ReadCloser.Close()
+	connErr := b.conn.Close()
+	if bodyErr != nil {
+		return bodyErr
+	}
+	return connErr
 }
 
 func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -351,8 +512,295 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	// The response body will close the connection when fully read.
+	// Wrap the response body so closing it also closes the underlying
+	// connection, preventing TCP connection leaks.
+	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: conn}
 	return resp, nil
+}
+
+// =============================================================================
+// Script injection
+// =============================================================================
+
+// activityHeartbeatScript is injected into HTML pages to send periodic
+// activity heartbeats while the preview tab is visible. This keeps the
+// idle timeout tracker accurate even when the user is just viewing (not
+// navigating) the preview.
+const activityHeartbeatScript = `
+(function() {
+  "use strict";
+  if (window.__143_heartbeat) return;
+  window.__143_heartbeat = true;
+
+  var INTERVAL_MS = 30000; // 30 seconds
+  var timer = null;
+
+  function sendHeartbeat() {
+    var img = new Image();
+    img.src = "/__143_heartbeat?t=" + Date.now();
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "visible") {
+      sendHeartbeat();
+      if (!timer) {
+        timer = setInterval(sendHeartbeat, INTERVAL_MS);
+      }
+    } else {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+  }
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  // Start immediately if already visible.
+  if (document.visibilityState === "visible") {
+    sendHeartbeat();
+    timer = setInterval(sendHeartbeat, INTERVAL_MS);
+  }
+})();
+`
+
+// injectScriptsIntoHTML reads the response body, injects the component
+// resolver and activity heartbeat scripts, and replaces the body with the
+// modified content. The Content-Length header is updated accordingly.
+func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID) error {
+	// Skip injection for responses that declare a Content-Length larger than
+	// our buffer limit. This avoids reading a partial body that we'd have to
+	// serve truncated (the rest would be lost since we close the body).
+	if resp.ContentLength > maxHTMLBodySize {
+		return nil
+	}
+
+	// Read the original body and decode it when the upstream still responded
+	// with a supported content encoding.
+	var bodyBytes []byte
+	var passthroughBody []byte
+	contentEncoding := strings.TrimSpace(strings.ToLower(resp.Header.Get("Content-Encoding")))
+	recompress := func(body []byte) ([]byte, error) {
+		return body, nil
+	}
+
+	switch contentEncoding {
+	case "", "identity":
+	case "gzip":
+		compressedBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read gzipped response body: %w", err)
+		}
+		passthroughBody = compressedBody
+
+		gr, err := gzip.NewReader(bytes.NewReader(compressedBody))
+		if err != nil {
+			return fmt.Errorf("gzip reader: %w", err)
+		}
+		bodyBytes, err = io.ReadAll(io.LimitReader(gr, maxHTMLBodySize+1))
+		_ = gr.Close()
+		if err != nil {
+			return fmt.Errorf("read gzipped body: %w", err)
+		}
+		recompress = func(body []byte) ([]byte, error) {
+			var buf bytes.Buffer
+			gw := gzip.NewWriter(&buf)
+			if _, err := gw.Write(body); err != nil {
+				return nil, fmt.Errorf("gzip write: %w", err)
+			}
+			if err := gw.Close(); err != nil {
+				return nil, fmt.Errorf("gzip close: %w", err)
+			}
+			return buf.Bytes(), nil
+		}
+	case "deflate":
+		compressedBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read deflate response body: %w", err)
+		}
+		passthroughBody = compressedBody
+
+		reader := flate.NewReader(bytes.NewReader(compressedBody))
+		bodyBytes, err = io.ReadAll(io.LimitReader(reader, maxHTMLBodySize+1))
+		_ = reader.Close()
+		if err != nil {
+			return fmt.Errorf("read deflate body: %w", err)
+		}
+		recompress = func(body []byte) ([]byte, error) {
+			var buf bytes.Buffer
+			writer, err := flate.NewWriter(&buf, flate.DefaultCompression)
+			if err != nil {
+				return nil, fmt.Errorf("deflate writer: %w", err)
+			}
+			if _, err := writer.Write(body); err != nil {
+				return nil, fmt.Errorf("deflate write: %w", err)
+			}
+			if err := writer.Close(); err != nil {
+				return nil, fmt.Errorf("deflate close: %w", err)
+			}
+			return buf.Bytes(), nil
+		}
+	default:
+		return nil
+	}
+
+	if bodyBytes == nil {
+		var err error
+		bodyBytes, err = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read body: %w", err)
+		}
+	}
+
+	// If the body exceeds the max size, skip injection but serve the
+	// complete body so the browser gets a valid (uninstrumented) page.
+	if int64(len(bodyBytes)) > maxHTMLBodySize {
+		outBytes := bodyBytes
+		if len(passthroughBody) > 0 {
+			outBytes = passthroughBody
+		} else {
+			recompressedBody, recompErr := recompress(bodyBytes)
+			if recompErr != nil {
+				resp.Header.Del("Content-Encoding")
+			} else {
+				outBytes = recompressedBody
+			}
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(outBytes))
+		resp.ContentLength = int64(len(outBytes))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(outBytes)))
+		return nil
+	}
+
+	// Build the script block to inject.
+	scriptBlock := "<script>" + preview.ComponentResolverScript + "</script>" +
+		"<script>" + activityHeartbeatScript + "</script>"
+
+	// Walk the HTML via tokenizer so we only match real end tags (not
+	// "</head>"/"</body>" appearing inside string literals, JS templates, or
+	// comments). Fall back to appending on parse failure.
+	newBody := injectBeforeEndTag(bodyBytes, scriptBlock)
+
+	newBody, err := recompress(newBody)
+	if err != nil {
+		return err
+	}
+	if contentEncoding == "" || contentEncoding == "identity" {
+		resp.Header.Del("Content-Encoding")
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(newBody))
+	resp.ContentLength = int64(len(newBody))
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+
+	return nil
+}
+
+// injectBeforeEndTag injects scriptBlock immediately before the first real
+// </head> or </body> end tag in the document, using an HTML tokenizer so we
+// don't match literal tag text appearing inside scripts, attribute values,
+// or comments. Falls back to appending scriptBlock when neither tag is
+// present (e.g., HTML fragments).
+func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
+	z := html.NewTokenizer(bytes.NewReader(body))
+	offset := -1
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			// End of input or parse error — no matching end tag found.
+			if offset == -1 {
+				return append(body, []byte(scriptBlock)...)
+			}
+			return spliceAt(body, offset, scriptBlock)
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			if string(name) == "head" {
+				// Offset is the position immediately before the `<` that
+				// started this token. Compute from remaining bytes.
+				raw := z.Raw()
+				tokenStart := len(body) - len(z.Buffered()) - len(raw)
+				return spliceAt(body, tokenStart, scriptBlock)
+			}
+			if string(name) == "body" && offset == -1 {
+				// Remember body offset as a fallback if no </head> appears.
+				raw := z.Raw()
+				offset = len(body) - len(z.Buffered()) - len(raw)
+			}
+		}
+	}
+}
+
+// spliceAt inserts insert at position idx in body and returns a new slice.
+func spliceAt(body []byte, idx int, insert string) []byte {
+	if idx < 0 || idx > len(body) {
+		return append(body, []byte(insert)...)
+	}
+	out := make([]byte, 0, len(body)+len(insert))
+	out = append(out, body[:idx]...)
+	out = append(out, []byte(insert)...)
+	out = append(out, body[idx:]...)
+	return out
+}
+
+// =============================================================================
+// WebSocket HMR snooping
+// =============================================================================
+
+// copyWithHMRSnoop copies data from src to dst while also passing each
+// chunk to the HMR watcher for pattern detection. This is a best-effort
+// approach — we forward raw TCP bytes (which may span multiple WebSocket
+// frames) to the watcher. We accumulate data across reads so that HMR
+// patterns split across read boundaries are still detected.
+//
+// NOTE: This operates on raw TCP bytes, not decoded WebSocket frames.
+// Server→client WebSocket frames are unmasked so substring matching works,
+// but frame headers (2-14 bytes) may cause false positives in rare cases.
+// This is acceptable for the HMR use case (screenshot on hot reload).
+func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.UUID) {
+	buf := make([]byte, 32*1024)
+	// Keep an overlap buffer so patterns split across read boundaries are
+	// still detected. 512 bytes covers the longest HMR pattern we match plus
+	// typical WebSocket frame-header padding (2-14 bytes).
+	var overlap []byte
+	const overlapSize = 512
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			// Combine overlap from previous read with current data for
+			// pattern matching, so patterns straddling reads are detected.
+			combined := data
+			if len(overlap) > 0 {
+				combined = append(overlap, data...)
+			}
+			g.hmrWatcher.OnWebSocketMessage(previewID, combined)
+			// Keep tail for next iteration.
+			if len(data) >= overlapSize {
+				overlap = make([]byte, overlapSize)
+				copy(overlap, data[len(data)-overlapSize:])
+			} else {
+				overlap = make([]byte, len(data))
+				copy(overlap, data)
+			}
+			// Write to the client.
+			if _, writeErr := dst.Write(data); writeErr != nil {
+				g.logger.Debug().Err(writeErr).
+					Str("preview_id", previewID.String()).
+					Msg("websocket: backend→client write ended")
+				return
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				g.logger.Debug().Err(readErr).
+					Str("preview_id", previewID.String()).
+					Msg("websocket: backend→client read ended")
+			}
+			return
+		}
+	}
 }
 
 // =============================================================================
@@ -360,7 +808,8 @@ func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // =============================================================================
 
 func (g *Gateway) injectSecurityHeaders(h http.Header) {
-	h.Set("X-Frame-Options", "ALLOW-FROM "+g.appOrigin)
+	// X-Frame-Options ALLOW-FROM is deprecated and ignored by modern browsers.
+	// The frame-ancestors CSP directive (set below) is the modern replacement.
 	h.Set("Content-Security-Policy", g.cspHeader)
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -378,10 +827,35 @@ func stripPreviewCookie(req *http.Request) {
 	cookies := req.Cookies()
 	req.Header.Del("Cookie")
 	for _, c := range cookies {
-		if c.Name != "__Host-preview_session" {
+		if c.Name != "__Host-preview_session" && c.Name != "preview_session" {
 			req.AddCookie(c)
 		}
 	}
+}
+
+func previewSessionCookie(value string, expiresAt time.Time, secure bool) *http.Cookie {
+	// The __Host- prefix requires Secure=true. When running over plain HTTP
+	// (e.g., local dev on http://...preview.localhost), drop the prefix so
+	// the browser will actually set the cookie.
+	name := "__Host-preview_session"
+	if !secure {
+		name = "preview_session"
+	}
+	return &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
+		Expires:  expiresAt,
+	}
+}
+
+func cloneWebSocketRequestForBackend(req *http.Request) *http.Request {
+	cloned := req.Clone(req.Context())
+	stripPreviewCookie(cloned)
+	return cloned
 }
 
 // =============================================================================
@@ -417,15 +891,15 @@ func decodeCookieValue(secret []byte, value string) (orgID, previewID, accessSes
 
 	orgID, err = uuid.Parse(parts[0])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid org_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	previewID, err = uuid.Parse(parts[1])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid preview_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	accessSessionID, err = uuid.Parse(parts[2])
 	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid access_session_id in cookie: %w", err)
+		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, fmt.Errorf("invalid cookie value")
 	}
 	return orgID, previewID, accessSessionID, nil
 }
@@ -444,4 +918,25 @@ func computeCookieHMAC(secret []byte, payload string) string {
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Connection"), "upgrade") &&
 		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// deriveWSConnectSrc converts a preview origin template like
+// "https://{id}.preview.143.dev" into a CSP connect-src value like
+// "wss://*.preview.143.dev". Falls back to a permissive wildcard if the
+// template is empty or unparseable.
+func deriveWSConnectSrc(template string) string {
+	if template == "" {
+		return "wss://*.preview.143.dev"
+	}
+	// Replace {id} with * for wildcard matching.
+	wildcard := strings.ReplaceAll(template, "{id}", "*")
+	parsed, err := url.Parse(wildcard)
+	if err != nil {
+		return "wss://*.preview.143.dev"
+	}
+	scheme := "wss"
+	if parsed.Scheme == "http" {
+		scheme = "ws"
+	}
+	return scheme + "://" + parsed.Host
 }

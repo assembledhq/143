@@ -2,11 +2,13 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,21 @@ type SandboxExecutor interface {
 // DockerPreviewProvider implements PreviewCapableProvider using Docker.
 // It manages infrastructure sidecars as Docker containers and application
 // services as processes inside the existing agent sandbox.
+//
+// SECURITY — network isolation:
+// All preview infrastructure containers are attached to a single shared
+// Docker bridge network (default "143-sandbox"). Bridge networks in Docker
+// permit inter-container communication by default, which means a preview
+// running AI-generated code can probe sibling previews or any other
+// container on the same network. This is acceptable for the common case of
+// a single-user, self-hosted deployment where all previews belong to the
+// same trust domain. For multi-tenant deployments, operators MUST either:
+//   - run a dedicated 143 server per tenant,
+//   - supply a per-org network via WithPreviewNetwork, or
+//   - (preferred) run Docker with per-preview networks via an out-of-band
+//     orchestrator (e.g., Kubernetes NetworkPolicies).
+//
+// See docker-compose.yml for the bridge-level warning and docs/design/overall.md.
 type DockerPreviewProvider struct {
 	client   DockerPreviewClient
 	executor SandboxExecutor
@@ -72,6 +89,9 @@ type previewState struct {
 
 	// cancelFn stops all service goroutines.
 	cancelFn context.CancelFunc
+
+	// wg tracks background goroutines so StopPreview can wait for them.
+	wg sync.WaitGroup
 
 	primaryPort int
 }
@@ -105,7 +125,7 @@ func NewDockerPreviewProvider(
 	p := &DockerPreviewProvider{
 		client:   client,
 		executor: executor,
-		network:  "143-preview-net",
+		network:  "143-sandbox",
 		logger:   logger,
 		previews: make(map[string]*previewState),
 	}
@@ -120,7 +140,10 @@ func NewDockerPreviewProvider(
 // =============================================================================
 
 func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
-	handle := generateHandle()
+	handle, err := generateHandle()
+	if err != nil {
+		return nil, fmt.Errorf("generate preview handle: %w", err)
+	}
 	// Use context.Background() so service processes outlive the StartPreview call.
 	// The cancelFn is stored in previewState and called by StopPreview.
 	svcCtx, cancelFn := context.WithCancel(context.Background())
@@ -135,6 +158,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	}
 
 	d.mu.Lock()
+	if _, exists := d.previews[handle]; exists {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("preview handle %q already exists (duplicate handle collision)", handle)
+	}
 	d.previews[handle] = state
 	d.mu.Unlock()
 
@@ -147,7 +174,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			return nil, fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
 		}
 
-		ih, err := d.provisionInfra(ctx, handle, name, infraCfg, tmpl)
+		ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
 		if err != nil {
 			d.cleanupState(handle)
 			return nil, fmt.Errorf("provision infrastructure %q: %w", name, err)
@@ -206,23 +233,86 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	state.primaryPort = primaryPort
 
 	// Phase 6: Wait for readiness probes.
-	for name, svcCfg := range cfg.Services {
-		timeout := 90 * time.Second
-		if svcCfg.Ready.TimeoutSeconds > 0 {
-			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+	//
+	// Progressive preview: when cfg.Progressive is true and this is a
+	// multi-service config, report readiness as soon as the primary service
+	// passes its probe. Support services continue starting in the background.
+	// The caller receives a PartiallyReady flag on the handle so the manager
+	// can set the correct status.
+	partiallyReady := false
+	if cfg.Progressive && len(cfg.Services) > 1 {
+		// Wait for primary first.
+		if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+			timeout := 90 * time.Second
+			if primaryCfg.Ready.TimeoutSeconds > 0 {
+				timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+			}
+			if err := d.waitForReadiness(ctx, sb, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+				d.cleanupState(handle)
+				return nil, fmt.Errorf("readiness probe for primary %q failed: %w", cfg.Primary, err)
+			}
+			d.mu.Lock()
+			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
+			d.mu.Unlock()
+			d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
+			partiallyReady = true
 		}
-		if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
-			d.cleanupState(handle)
-			return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+
+		// Wait for support services in the background.
+		state.wg.Add(1)
+		go func() {
+			defer state.wg.Done()
+			for name, svcCfg := range cfg.Services {
+				if name == cfg.Primary {
+					continue
+				}
+				timeout := 90 * time.Second
+				if svcCfg.Ready.TimeoutSeconds > 0 {
+					timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+				}
+				bgCtx, cancel := context.WithTimeout(svcCtx, timeout)
+				if err := d.waitForReadiness(bgCtx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+					d.logger.Warn().Err(err).Str("service", name).Msg("support service readiness failed (progressive)")
+					d.mu.Lock()
+					if ss, ok := state.services[name]; ok {
+						ss.status = models.PreviewServiceStatusFailed
+						ss.err = err.Error()
+					}
+					d.mu.Unlock()
+				} else {
+					d.mu.Lock()
+					if ss, ok := state.services[name]; ok {
+						ss.status = models.PreviewServiceStatusReady
+					}
+					d.mu.Unlock()
+					d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("support service ready (progressive)")
+				}
+				cancel()
+			}
+		}()
+	} else {
+		// Standard: wait for all services before reporting ready.
+		for name, svcCfg := range cfg.Services {
+			timeout := 90 * time.Second
+			if svcCfg.Ready.TimeoutSeconds > 0 {
+				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+			}
+			if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+				d.cleanupState(handle)
+				return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+			}
+			d.mu.Lock()
+			state.services[name].status = models.PreviewServiceStatusReady
+			d.mu.Unlock()
+			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 		}
-		state.services[name].status = models.PreviewServiceStatusReady
-		d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 	}
 
 	return &preview.PreviewHandle{
 		Handle:           handle,
 		PrimaryPort:      primaryPort,
 		InfraCredentials: infraCreds,
+		PartiallyReady:   partiallyReady,
 	}, nil
 }
 
@@ -239,8 +329,9 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 		return nil // already stopped — idempotent
 	}
 
-	// Cancel all service goroutines.
+	// Cancel all service goroutines and wait for background work to finish.
 	state.cancelFn()
+	state.wg.Wait()
 
 	// Tear down infrastructure containers.
 	for name, ih := range state.infra {
@@ -305,6 +396,7 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 
 	snap := &preview.PreviewStatusSnapshot{}
 
+	// Copy service state under lock to avoid races with background goroutines.
 	for name, ss := range state.services {
 		snap.Services = append(snap.Services, preview.ServiceSnapshot{
 			Name:   name,
@@ -359,12 +451,25 @@ func (d *DockerPreviewProvider) PreviewStatus(ctx context.Context, handle string
 
 func (d *DockerPreviewProvider) provisionInfra(
 	ctx context.Context,
+	sb *agent.Sandbox,
 	previewHandle, infraName string,
 	infraCfg models.InfrastructureConfig,
 	tmpl preview.InfraTemplate,
 ) (*preview.InfraHandle, error) {
-	cred := generateInfraCredential(infraName)
-	containerName := fmt.Sprintf("preview-%s-%s", infraName, previewHandle[:12])
+	networkName, err := d.resolveSandboxNetwork(ctx, sb.ID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sandbox network: %w", err)
+	}
+
+	cred, err := generateInfraCredential(infraName)
+	if err != nil {
+		return nil, fmt.Errorf("generate credential for %q: %w", infraName, err)
+	}
+	handlePrefix := previewHandle
+	if len(handlePrefix) > 12 {
+		handlePrefix = handlePrefix[:12]
+	}
+	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
 
 	env := d.buildInfraEnv(infraCfg.Template, cred)
 	memLimit := int64(tmpl.DefaultMemMB) * 1024 * 1024
@@ -381,11 +486,11 @@ func (d *DockerPreviewProvider) provisionInfra(
 				Memory:   memLimit,
 				NanoCPUs: cpuNanos,
 			},
-			NetworkMode: container.NetworkMode(d.network),
+			NetworkMode: container.NetworkMode(networkName),
 		},
 		&network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{
-				d.network: {Aliases: []string{containerName}},
+				networkName: {Aliases: []string{containerName}},
 			},
 		},
 		nil,
@@ -399,7 +504,9 @@ func (d *DockerPreviewProvider) provisionInfra(
 		// Cleanup the created container on start failure.
 		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true})
+		if rmErr := d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
+			d.logger.Warn().Err(rmErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
+		}
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
@@ -464,6 +571,8 @@ func (d *DockerPreviewProvider) waitForInfraHealth(ctx context.Context, containe
 			if err != nil {
 				continue
 			}
+			// Drain buffered output before closing to prevent fd leaks.
+			_, _ = io.Copy(io.Discard, attachResp.Reader)
 			attachResp.Close()
 
 			// Check exit code.
@@ -603,10 +712,26 @@ func (d *DockerPreviewProvider) startService(
 	d.mu.Unlock()
 
 	// Start the process in the background with a hard timeout.
+	state.wg.Add(1)
 	go func() {
+		defer state.wg.Done()
 		// Apply a hard timeout to prevent runaway service processes.
 		svcCtx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 		defer cancel()
+
+		// Detect the service PID after a short delay to allow the process to start.
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			pidCmd := fmt.Sprintf("lsof -ti :%d | head -1", svcCfg.Port)
+			var pidOut bytes.Buffer
+			if exitCode, err := d.executor.Exec(svcCtx, state.sandbox, pidCmd, &pidOut, io.Discard); err == nil && exitCode == 0 {
+				if pid, err := strconv.Atoi(strings.TrimSpace(pidOut.String())); err == nil && pid > 0 {
+					d.mu.Lock()
+					ss.pid = pid
+					d.mu.Unlock()
+				}
+			}
+		}()
 
 		exitCode, err := d.executor.ExecStream(svcCtx, state.sandbox, cmd, func(line []byte) {
 			// Log output for diagnostics. In a full implementation this
@@ -666,6 +791,9 @@ func (d *DockerPreviewProvider) getSandboxIP(ctx context.Context, containerID st
 	if err != nil {
 		return "", err
 	}
+	if inspect.NetworkSettings == nil {
+		return "", fmt.Errorf("container %s has no network settings", containerID)
+	}
 
 	// Look for the IP on the preview network first, fall back to any network.
 	if ep, ok := inspect.NetworkSettings.Networks[d.network]; ok && ep.IPAddress != "" {
@@ -678,6 +806,31 @@ func (d *DockerPreviewProvider) getSandboxIP(ctx context.Context, containerID st
 	}
 
 	return "", fmt.Errorf("no IP address found for container %s", containerID)
+}
+
+func (d *DockerPreviewProvider) resolveSandboxNetwork(ctx context.Context, containerID string) (string, error) {
+	inspect, err := d.client.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", err
+	}
+
+	if inspect.ContainerJSONBase != nil && inspect.HostConfig != nil {
+		if networkName := inspect.HostConfig.NetworkMode.NetworkName(); networkName != "" {
+			return networkName, nil
+		}
+	}
+	if inspect.NetworkSettings == nil {
+		return "", fmt.Errorf("container %s has no network settings", containerID)
+	}
+
+	if _, ok := inspect.NetworkSettings.Networks[d.network]; ok {
+		return d.network, nil
+	}
+	for networkName := range inspect.NetworkSettings.Networks {
+		return networkName, nil
+	}
+
+	return "", fmt.Errorf("no network found for container %s", containerID)
 }
 
 // =============================================================================
@@ -726,12 +879,16 @@ func resolveCredentialTemplate(template string, cred preview.InfraCredential) st
 	return r.Replace(template)
 }
 
-func generateInfraCredential(infraName string) preview.InfraCredential {
+func generateInfraCredential(infraName string) (preview.InfraCredential, error) {
+	password, err := preview.RandomHex(16)
+	if err != nil {
+		return preview.InfraCredential{}, fmt.Errorf("generate infra credential password: %w", err)
+	}
 	return preview.InfraCredential{
 		Username: fmt.Sprintf("preview_%s", infraName),
-		Password: preview.RandomHex(16),
+		Password: password,
 		Database: "preview_db",
-	}
+	}, nil
 }
 
 // =============================================================================
@@ -748,7 +905,7 @@ func (d *DockerPreviewProvider) cleanupState(handle string) {
 // Helpers
 // =============================================================================
 
-func generateHandle() string {
+func generateHandle() (string, error) {
 	return preview.RandomHex(16)
 }
 
