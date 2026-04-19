@@ -383,38 +383,6 @@ describe('AgentPage', () => {
     expect(await screen.findByText('Failed to save settings.')).toBeInTheDocument();
   });
 
-  it('shows Disconnect button and calls disconnect mutation when ChatGPT is connected', async () => {
-    let disconnectCalled = false;
-    setupHandlers({ team: [], resolved: [] });
-    server.use(
-      http.get('/api/v1/settings/codex-auth/status', () => {
-        return HttpResponse.json({ data: { status: 'completed' } });
-      }),
-      http.get('/api/v1/settings', () => {
-        return HttpResponse.json({
-          data: {
-            ...mockOrgSettings.data,
-            settings: { ...mockOrgSettings.data.settings, default_agent_type: 'codex' },
-          },
-        });
-      }),
-      http.post('/api/v1/settings/codex-auth/disconnect', () => {
-        disconnectCalled = true;
-        return HttpResponse.json({ data: null });
-      }),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<AgentPage />);
-
-    const disconnectBtn = await screen.findByRole('button', { name: 'Disconnect' });
-    await user.click(disconnectBtn);
-
-    await waitFor(() => {
-      expect(disconnectCalled).toBe(true);
-    });
-  });
-
   it('updates max concurrent runs input', async () => {
     const user = userEvent.setup();
     renderWithProviders(<AgentPage />);

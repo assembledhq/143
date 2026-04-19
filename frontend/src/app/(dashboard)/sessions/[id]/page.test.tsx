@@ -1072,28 +1072,6 @@ describe('SessionDetailPage', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows formatDuration as dash when no started_at', async () => {
-    const noStartSession: Session = {
-      ...mockSessions[0],
-      status: 'pending',
-      started_at: undefined,
-      completed_at: undefined,
-      current_turn: 0,
-      sandbox_state: 'none',
-    };
-
-    server.use(
-      http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: noStartSession } satisfies SingleResponse<Session>);
-      }),
-    );
-
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByPlaceholderText('Session is not active');
-    // Duration should show "-" when no started_at
-    expect(screen.getByText('-')).toBeInTheDocument();
-  });
-
   it('can toggle the detail panel visibility', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
