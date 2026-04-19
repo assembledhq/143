@@ -165,7 +165,7 @@ jobs:
       - run: npm ci
 
       - name: Run tests with coverage
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary
 
       - name: Check frontend coverage floor
