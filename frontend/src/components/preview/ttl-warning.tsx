@@ -83,11 +83,6 @@ export function TTLWarning({
 
   useEffect(() => {
     recycleAtRef.current = recycleScheduledAt ?? null;
-    setRecycleCountdown(
-      recycleScheduledAt
-        ? formatRecycleCountdown(recycleScheduledAt)
-        : { text: "", visible: false }
-    );
   }, [recycleScheduledAt]);
 
   // Update remaining time every second, but only when the warning is visible

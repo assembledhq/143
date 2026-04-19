@@ -257,7 +257,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
 	}
 
-	if err := os.Chmod(tmpPath, 0o640); err != nil {
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return fmt.Errorf("snapshot create: chmod: %w", err)
 	}
 	if err := os.Rename(tmpPath, blobPath); err != nil {
@@ -268,7 +268,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 
 	checksumHex := hex.EncodeToString(hasher.Sum(nil))
 	checksumPath := blobPath + ".sha256"
-	if err := atomicWriteFile(checksumPath, []byte(checksumHex), 0o640); err != nil {
+	if err := atomicWriteFile(checksumPath, []byte(checksumHex), 0o600); err != nil {
 		// If checksum write fails, remove the blob so future lookups don't
 		// return an unverifiable entry.
 		_ = os.Remove(blobPath)

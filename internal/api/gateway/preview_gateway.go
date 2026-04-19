@@ -87,22 +87,6 @@ func (g *Gateway) cookieName() string {
 	return "preview_session"
 }
 
-// getCachedSession returns the cached session entry if it exists and hasn't expired.
-// Expired entries are deleted on read to prevent unbounded memory growth.
-func (g *Gateway) getCachedSession(id uuid.UUID) *sessionCacheEntry {
-	g.sessionCacheMu.Lock()
-	defer g.sessionCacheMu.Unlock()
-	entry, ok := g.sessionCache[id]
-	if !ok {
-		return nil
-	}
-	if time.Now().After(entry.validUntil) {
-		delete(g.sessionCache, id)
-		return nil
-	}
-	return entry
-}
-
 // evictCachedSession removes a session entry from the cache.
 func (g *Gateway) evictCachedSession(id uuid.UUID) {
 	g.sessionCacheMu.Lock()

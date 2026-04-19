@@ -110,7 +110,7 @@ func TestProvisionInfra_UsesSandboxNetwork(t *testing.T) {
 					NetworkMode: container.NetworkMode("143-sandbox-custom"),
 				},
 			},
-			NetworkSettings: &types.NetworkSettings{
+			NetworkSettings: &container.NetworkSettings{
 				Networks: map[string]*network.EndpointSettings{
 					"143-sandbox-custom": {IPAddress: "172.18.0.5"},
 				},
