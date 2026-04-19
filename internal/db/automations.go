@@ -301,10 +301,16 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgI
 }
 
 // BulkUpdateEnabled sets enabled state for multiple automations. When pausing,
-// next_run_at is cleared so the scheduler skips paused rows. When resuming, an
-// interval automation's next_run_at is recomputed from now() so it doesn't sit
-// dead with a NULL next_run_at (which the scheduler's idx_automations_due
-// excludes).
+// next_run_at is cleared so the scheduler skips paused rows. When resuming,
+// next_run_at is recomputed so the row doesn't sit dead with a NULL next_run_at
+// (which the scheduler's idx_automations_due excludes).
+//
+// Interval schedules are advanced in-DB via Postgres' interval arithmetic.
+// Cron schedules can't be evaluated in SQL, so the resume path falls through to
+// a Go-side pass inside the same transaction: we scan the returning rows, pick
+// the cron ones, and update each with a locally-computed next_run_at. Keeping
+// both branches in a single tx avoids a half-resumed state visible to the
+// scheduler between statements.
 //
 // Returns the IDs actually affected (scoped to org_id and not-yet-deleted) so
 // callers can emit audit events only for rows that really changed — IDs from
@@ -326,15 +332,21 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		pausedAt = &now
 	}
 
-	// On resume, compute next_run_at = now() + interval. Postgres' interval
-	// arithmetic handles 'hours'/'days'/'weeks' literals natively. On pause,
-	// clear next_run_at so the scheduler doesn't fire a paused automation.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin bulk-update-enabled tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Interval: compute next_run_at = now() + interval directly in SQL.
+	// Cron: leave next_run_at NULL here and fix up below in Go.
+	// Pause: clear next_run_at so the scheduler skips the row.
 	var nextRunAtExpr string
 	if enabled {
 		nextRunAtExpr = `CASE
 			WHEN schedule_type = 'interval' AND interval_value IS NOT NULL AND interval_unit IS NOT NULL
 			THEN now() + (interval_value::text || ' ' || interval_unit)::interval
-			ELSE next_run_at
+			ELSE NULL
 		END`
 	} else {
 		nextRunAtExpr = `NULL`
@@ -347,9 +359,9 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			next_run_at = %s,
 			updated_at = now()
 		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
-		RETURNING id`, nextRunAtExpr)
+		RETURNING %s`, nextRunAtExpr, automationColumns)
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
 		"enabled":   enabled,
 		"paused_by": pausedBy,
@@ -359,8 +371,42 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return collectIDs(rows)
+	affected, err := scanAutomations(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	affectedIDs := make([]uuid.UUID, 0, len(affected))
+	now := time.Now()
+	for i := range affected {
+		a := &affected[i]
+		affectedIDs = append(affectedIDs, a.ID)
+
+		// Resume-side fixup for cron rows. On pause we leave next_run_at NULL.
+		if !enabled || a.ScheduleType != models.AutomationScheduleCron {
+			continue
+		}
+		next, computeErr := a.ComputeNextRunAt(now)
+		if computeErr != nil {
+			// Skip the row rather than poisoning the whole bulk: a malformed
+			// cron row should be surfaced via the scheduler's next-tick error
+			// log rather than aborting an otherwise valid bulk resume.
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE automations SET next_run_at = @next_run_at, updated_at = now()
+				WHERE id = @id AND org_id = @org_id`,
+			pgx.NamedArgs{"id": a.ID, "org_id": orgID, "next_run_at": next},
+		); err != nil {
+			return nil, fmt.Errorf("update cron next_run_at: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return affectedIDs, nil
 }
 
 // BulkSoftDelete soft-deletes multiple automations and cancels their pending
@@ -636,6 +682,116 @@ func (s *AutomationRunStore) ListOrgsWithStuckRuns(ctx context.Context, threshol
 	}
 	defer rows.Close()
 	return collectIDs(rows)
+}
+
+// GetStats returns per-day aggregates and window totals for an automation's
+// runs. The bucketing uses date_trunc('day', triggered_at) in UTC so every
+// client sees the same bucket boundaries regardless of their locale. Days
+// with zero runs are omitted from the result set — the UI fills gaps with
+// zeros so it stays O(days returned) instead of O(window size).
+//
+// since/until form a half-open interval [since, until); until=now() if zero.
+// Both bounds are required to be UTC times.
+func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID uuid.UUID, since, until time.Time) (models.AutomationRunStats, error) {
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+	if since.IsZero() {
+		since = until.Add(-30 * 24 * time.Hour)
+	}
+	stats := models.AutomationRunStats{Since: since, Until: until}
+
+	// FILTER clauses keep the pivot readable. avg_duration_seconds uses
+	// EXTRACT(EPOCH FROM ...) which gracefully handles NULL — avg() ignores
+	// NULLs, so buckets with no completed runs collapse to NULL and we
+	// coalesce to 0.
+	const bucketQuery = `
+		SELECT
+			date_trunc('day', triggered_at AT TIME ZONE 'UTC') AS bucket,
+			count(*) AS total,
+			count(*) FILTER (WHERE status = 'completed') AS completed,
+			count(*) FILTER (WHERE status = 'completed_noop') AS completed_noop,
+			count(*) FILTER (WHERE status = 'failed') AS failed,
+			count(*) FILTER (WHERE status = 'skipped') AS skipped,
+			count(*) FILTER (WHERE status = 'running') AS running,
+			count(*) FILTER (WHERE status = 'pending') AS pending,
+			coalesce(
+				avg(EXTRACT(EPOCH FROM (completed_at - triggered_at)))
+					FILTER (WHERE completed_at IS NOT NULL),
+				0
+			) AS avg_duration_seconds
+		FROM automation_runs
+		WHERE org_id = @org_id
+		  AND automation_id = @automation_id
+		  AND triggered_at >= @since
+		  AND triggered_at < @until
+		GROUP BY bucket
+		ORDER BY bucket ASC`
+
+	rows, err := s.db.Query(ctx, bucketQuery, pgx.NamedArgs{
+		"org_id":        orgID,
+		"automation_id": automationID,
+		"since":         since,
+		"until":         until,
+	})
+	if err != nil {
+		return stats, fmt.Errorf("query automation run stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var b models.AutomationRunStatsBucket
+		if err := rows.Scan(
+			&b.Bucket,
+			&b.Total,
+			&b.Completed,
+			&b.CompletedNoop,
+			&b.Failed,
+			&b.Skipped,
+			&b.Running,
+			&b.Pending,
+			&b.AvgDurationSeconds,
+		); err != nil {
+			return stats, fmt.Errorf("scan automation run stats: %w", err)
+		}
+		stats.Buckets = append(stats.Buckets, b)
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+
+	// Totals: summing the buckets is cheaper than a second query and keeps
+	// bucketed and window-wide numbers consistent by construction.
+	t := &stats.Totals
+	var durWeightedSum float64
+	var durCompletedCount int
+	for _, b := range stats.Buckets {
+		t.Total += b.Total
+		t.Completed += b.Completed
+		t.CompletedNoop += b.CompletedNoop
+		t.Failed += b.Failed
+		t.Skipped += b.Skipped
+		t.Running += b.Running
+		t.Pending += b.Pending
+		// Re-aggregate duration as a weighted mean over completed counts.
+		// avg_duration_seconds is over rows with completed_at set, which is
+		// (completed + completed_noop + failed) for that bucket. Using
+		// completed+noop+failed as the weight matches what the bucket mean
+		// was computed over.
+		completedLike := b.Completed + b.CompletedNoop + b.Failed
+		if completedLike > 0 {
+			durWeightedSum += b.AvgDurationSeconds * float64(completedLike)
+			durCompletedCount += completedLike
+		}
+	}
+	if denom := t.Completed + t.CompletedNoop + t.Failed; denom > 0 {
+		t.SuccessRate = float64(t.Completed+t.CompletedNoop) / float64(denom)
+	}
+	if durCompletedCount > 0 {
+		t.AvgDurationSeconds = durWeightedSum / float64(durCompletedCount)
+	}
+
+	return stats, nil
 }
 
 // ReapStuckRuns marks pending/running runs older than threshold as failed for

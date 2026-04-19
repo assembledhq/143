@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -619,46 +620,226 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
-func TestAutomationRunHandler_CompletesOnlyPendingActiveAutomationRun(t *testing.T) {
+// automationRunRowColumns returns the column list used by scanAutomationRun in
+// internal/db/automations.go — kept in sync locally so tests don't import a
+// test-only helper from another package.
+func automationRunRowColumns() []string {
+	return []string{
+		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
+		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"status", "completed_at", "result_summary", "created_at", "updated_at",
+	}
+}
+
+// automationRowColumns mirrors automationColumns in internal/db/automations.go.
+func automationRowColumns() []string {
+	return []string{
+		"id", "org_id", "repository_id", "name", "goal", "scope",
+		"agent_type", "model_override", "execution_mode", "max_concurrent", "base_branch",
+		"schedule_type", "interval_value", "interval_unit", "cron_expression", "timezone",
+		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
+		"priority", "created_at", "updated_at", "deleted_at",
+	}
+}
+
+func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		rowsAffected int64
-	}{
-		{name: "completes pending run for active automation", rowsAffected: 1},
-		{name: "preserves skipped run for deleted automation", rowsAffected: 0},
-	}
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	agentType := "codex"
+	repoID := uuid.New()
 
-			stores, mock := newTestStores(t)
-			defer mock.Close()
-			stores.Automations = db.NewAutomationStore(mock)
-			stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err)
 
-			orgID := uuid.New()
-			automationID := uuid.New()
-			runID := uuid.New()
-			payload, err := json.Marshal(map[string]string{
-				"org_id":            orgID.String(),
-				"automation_id":     automationID.String(),
-				"automation_run_id": runID.String(),
-			})
-			require.NoError(t, err, "payload should marshal")
+	// 1. Fetch the run.
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, now, now,
+		))
 
-			mock.ExpectExec(`UPDATE automation_runs AS r\s+SET status = @status.*FROM automations AS a.*r.status = 'pending'.*a.deleted_at IS NULL`).
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+	// 2. Fetch the automation.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			&agentType, nil, "sequential", 1, "main",
+			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			nil, nil, true, nil, nil, nil,
+			50, now, now, nil,
+		))
 
-			handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
-			err = handler(context.Background(), models.JobTypeAutomationRun, payload)
-			require.NoError(t, err, "handler should succeed even when the run was already skipped")
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
+	// 3. Create the session.
+	mock.ExpectQuery(`INSERT INTO sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(sessionID, now))
+
+	// 4. Transition the run to running.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// 5. Enqueue run_agent.
+	mock.ExpectQuery(`INSERT INTO jobs`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunHandler_SkipsWhenRunNotPending(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err)
+
+	// Run already running (e.g. a second worker picked it up after retry) →
+	// handler must not repeat session creation.
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", []byte("{}"),
+			models.AutomationRunStatusRunning, nil, nil, now, now,
+		))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunHandler_MarksSkippedWhenAutomationDeleted(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err)
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, now, now,
+		))
+
+	// Automation lookup returns no rows (soft-deleted).
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	// Run gets marked skipped.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err)
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, now, now,
+		))
+
+	// Automation exists but enabled=false.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, nil, "nightly", "cleanup", nil,
+			nil, nil, "sequential", 1, "main",
+			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			nil, nil, false, nil, nil, nil,
+			50, now, now, nil,
+		))
+
+	// Run gets marked skipped.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @status.+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestWorker_Register(t *testing.T) {

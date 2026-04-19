@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorhill/cronexpr"
 )
 
 // Automation is a recurring, team-owned agent process.
@@ -115,30 +116,68 @@ func ValidateAutomationScheduleType(t string) error {
 	}
 }
 
-// AutomationCronSupported gates every code path that would otherwise accept
-// a cron schedule. The DB CHECK allows 'cron' for forward compatibility, but
-// until a cron parser is wired (design doc 48 §6.2), nothing computes
-// next_run_at for cron rows — accepting one would create an automation that
-// silently never runs. Keep this flag as the single source of truth: flip it
-// to true in the same PR that lands cron parsing so no call site is missed.
-//
-// TODO(phase-3): flip to true and remove ValidateAutomationScheduleSupported's
-// cron branch once gorhill/cronexpr is integrated.
-const AutomationCronSupported = false
-
-// ValidateAutomationScheduleSupported is the runtime gate shared by Create
-// and Update: rejects schedule types that this build doesn't implement.
-// Use this instead of hand-rolled == AutomationScheduleCron checks in
-// handlers so that flipping AutomationCronSupported updates every call site
-// at once.
-func ValidateAutomationScheduleSupported(t string) error {
-	if err := ValidateAutomationScheduleType(t); err != nil {
-		return err
+// ValidateCronExpression parses the expression using gorhill/cronexpr so we
+// reject malformed schedules at write time instead of silently letting a row
+// sit un-scheduled. gorhill/cronexpr accepts both the standard 5-field form
+// and an extended 6-field (with seconds) form, plus @yearly/@monthly/@weekly/
+// @daily/@hourly aliases.
+func ValidateCronExpression(expr string) error {
+	if expr == "" {
+		return fmt.Errorf("cron_expression must not be empty")
 	}
-	if t == AutomationScheduleCron && !AutomationCronSupported {
-		return fmt.Errorf("cron schedules are not yet supported; use schedule_type=interval")
+	if _, err := cronexpr.Parse(expr); err != nil {
+		return fmt.Errorf("invalid cron expression: %w", err)
 	}
 	return nil
+}
+
+// NextCronRunTime returns the next fire time for the cron expression in the
+// given IANA timezone. Returns an error if the expression is malformed, the
+// timezone is unknown, or the cron has no future occurrences (e.g. a fixed-
+// date expression in the past).
+//
+// DST handling is delegated to cronexpr.Next which evaluates the schedule in
+// the provided location — ambiguous/nonexistent local times resolve to the
+// first valid occurrence.
+func NextCronRunTime(expr, timezone string, from time.Time) (time.Time, error) {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load timezone %q: %w", timezone, err)
+	}
+	parsed, err := cronexpr.Parse(expr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse cron expression: %w", err)
+	}
+	next := parsed.Next(from.In(loc))
+	if next.IsZero() {
+		return time.Time{}, fmt.Errorf("cron expression %q has no future occurrences after %s", expr, from.Format(time.RFC3339))
+	}
+	return next.UTC(), nil
+}
+
+// ComputeNextRunAt is the single entry point both the API and the scheduler
+// use to advance an automation's fire time. Centralising the branch on
+// schedule_type here means a future schedule kind (event-based, combined
+// interval+cron, etc.) only has to be added once.
+func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
+	switch a.ScheduleType {
+	case AutomationScheduleInterval:
+		if a.IntervalValue == nil || a.IntervalUnit == nil {
+			return time.Time{}, fmt.Errorf("interval schedule requires interval_value and interval_unit")
+		}
+		return NextRunTime(from, *a.IntervalValue, *a.IntervalUnit), nil
+	case AutomationScheduleCron:
+		if a.CronExpression == nil || *a.CronExpression == "" {
+			return time.Time{}, fmt.Errorf("cron schedule requires cron_expression")
+		}
+		tz := a.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		return NextCronRunTime(*a.CronExpression, tz, from)
+	default:
+		return time.Time{}, fmt.Errorf("unknown schedule_type: %q", a.ScheduleType)
+	}
 }
 
 func ValidateAutomationRunStatus(s string) error {
@@ -150,4 +189,47 @@ func ValidateAutomationRunStatus(s string) error {
 	default:
 		return fmt.Errorf("invalid automation run status: %q", s)
 	}
+}
+
+// AutomationRunStatsBucket is a per-day aggregate over automation_runs. Dates
+// are date_trunc('day', triggered_at AT TIME ZONE 'UTC') values rendered in
+// RFC3339 at the day boundary.
+//
+// AvgDurationSeconds is computed over rows with completed_at set; it is 0
+// when no run completed in the bucket.
+type AutomationRunStatsBucket struct {
+	Bucket             time.Time `json:"bucket"`
+	Total              int       `json:"total"`
+	Completed          int       `json:"completed"`
+	CompletedNoop      int       `json:"completed_noop"`
+	Failed             int       `json:"failed"`
+	Skipped            int       `json:"skipped"`
+	Running            int       `json:"running"`
+	Pending            int       `json:"pending"`
+	AvgDurationSeconds float64   `json:"avg_duration_seconds"`
+}
+
+// AutomationRunStatsTotals summarises the entire window covered by a stats
+// query. SuccessRate is (completed + completed_noop) / (completed +
+// completed_noop + failed), i.e. it excludes pending/running/skipped from
+// both numerator and denominator — skipped runs indicate the schedule fired
+// but the automation was paused, not a failure. It is 0 when no terminal
+// runs exist (denominator zero).
+type AutomationRunStatsTotals struct {
+	Total              int     `json:"total"`
+	Completed          int     `json:"completed"`
+	CompletedNoop      int     `json:"completed_noop"`
+	Failed             int     `json:"failed"`
+	Skipped            int     `json:"skipped"`
+	Running            int     `json:"running"`
+	Pending            int     `json:"pending"`
+	SuccessRate        float64 `json:"success_rate"`
+	AvgDurationSeconds float64 `json:"avg_duration_seconds"`
+}
+
+type AutomationRunStats struct {
+	Since   time.Time                  `json:"since"`
+	Until   time.Time                  `json:"until"`
+	Buckets []AutomationRunStatsBucket `json:"buckets"`
+	Totals  AutomationRunStatsTotals   `json:"totals"`
 }

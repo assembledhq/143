@@ -638,10 +638,6 @@ export interface Project {
   source_issue_ids?: string[];
   proposal_reasoning?: string;
   similar_projects?: ProposalOverlap[];
-  schedule_enabled: boolean;
-  schedule_interval: number;
-  schedule_unit: 'hours' | 'days' | 'weeks';
-  next_run_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -1082,4 +1078,35 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface AutomationRunStatsBucket {
+  bucket: string;
+  total: number;
+  completed: number;
+  completed_noop: number;
+  failed: number;
+  skipped: number;
+  running: number;
+  pending: number;
+  avg_duration_seconds: number;
+}
+
+export interface AutomationRunStatsTotals {
+  total: number;
+  completed: number;
+  completed_noop: number;
+  failed: number;
+  skipped: number;
+  running: number;
+  pending: number;
+  success_rate: number;
+  avg_duration_seconds: number;
+}
+
+export interface AutomationRunStats {
+  since: string;
+  until: string;
+  buckets: AutomationRunStatsBucket[];
+  totals: AutomationRunStatsTotals;
 }

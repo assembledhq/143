@@ -29,7 +29,6 @@ func projectColumns() []string {
 		"total_tasks", "completed_tasks", "failed_tasks",
 		"proposed_by_pm", "source_issue_ids", "proposal_reasoning", "similar_projects",
 		"agent_type", "model_override",
-		"schedule_enabled", "schedule_interval", "schedule_unit", "next_run_at",
 		"created_by", "deleted_at", "created_at", "updated_at", "completed_at",
 	}
 }
@@ -43,7 +42,6 @@ func newProjectRow(id, orgID, repoID uuid.UUID, status models.ProjectStatus, now
 		0, 0, 0,
 		false, []uuid.UUID{}, nil, json.RawMessage("[]"),
 		nil, nil, // agent_type, model_override
-		false, 1, "days", nil, // schedule_enabled, schedule_interval, schedule_unit, next_run_at
 		&createdBy, (*time.Time)(nil), now, now, nil,
 	}
 }
@@ -200,10 +198,9 @@ func TestProjectHandler_Update(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusDraft, now)...))
 
-	// Update (24 named args: 19 original + 4 schedule fields + similar_projects)
+	// Update (20 named args)
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -399,7 +396,6 @@ func TestProjectHandler_Create(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -281,12 +282,16 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 	}
 }
 
-// newAutomationRunHandler executes a single automation_run job.
+// newAutomationRunHandler executes a single automation_run job by creating a
+// Session owned by the run and dispatching it through the normal run_agent
+// job pipeline. Completion bubbles back via AutomationRunUpdater on the
+// Orchestrator (see services/automations/hooks.go).
 //
-// The actual agent invocation is not yet implemented (separation work first,
-// execution in a follow-up). The handler still must exist so the scheduler's
-// enqueued jobs do not pile up as "no handler registered" errors and so the
-// run row transitions out of `pending` deterministically each tick.
+// The handler owes the automation_run row a deterministic status transition:
+// pending → running (normal) or pending → skipped (automation deleted/paused)
+// or pending → failed (session create failed). Leaving the row in pending
+// would eventually trip the reaper, but the reaper's hour-long threshold is
+// too slow to give the UI useful feedback.
 func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -311,25 +316,118 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("parse automation ID: %w", err)
 		}
 
-		logger.Info().
+		log := logger.With().
 			Str("org_id", orgID.String()).
 			Str("automation_id", automationID.String()).
 			Str("run_id", runID.String()).
-			Msg("running automation_run job (stub: marking completed_noop)")
+			Logger()
+		log.Info().Msg("running automation_run job")
 
-		now := time.Now()
-		summary := "Automation execution is not yet implemented (Phase 3). This run was recorded but no agent was launched."
-		updated, err := stores.AutomationRuns.CompletePendingNoopIfAutomationActive(ctx, orgID, automationID, runID, &now, &summary)
+		// Confirm the run is still pending. If SoftDelete (skipped), the
+		// reaper (failed), or an earlier retry has already moved it, this
+		// handler is a no-op.
+		run, err := stores.AutomationRuns.GetByID(ctx, orgID, automationID, runID)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetch automation run: %w", err)
 		}
-		if !updated {
-			logger.Info().
-				Str("org_id", orgID.String()).
-				Str("automation_id", automationID.String()).
-				Str("run_id", runID.String()).
-				Msg("automation_run job skipped because run is no longer pending or automation is deleted")
+		if run.Status != models.AutomationRunStatusPending {
+			log.Info().Str("status", run.Status).Msg("skipping automation_run: row no longer pending")
+			return nil
 		}
+
+		automation, err := stores.Automations.GetByID(ctx, orgID, automationID)
+		if err != nil {
+			// GetByID filters deleted_at IS NULL, so ErrNoRows covers both
+			// "truly missing" and "soft-deleted" — mark skipped so the run
+			// doesn't sit pending forever. Any other error is treated as
+			// transient and returned so the job can be retried.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("fetch automation: %w", err)
+			}
+			now := time.Now()
+			summary := "automation deleted before run could start"
+			if updateErr := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusSkipped, &now, &summary); updateErr != nil {
+				return fmt.Errorf("mark run skipped after automation deletion: %w", updateErr)
+			}
+			return nil
+		}
+
+		// Paused automations: manual Run-now is refused at the API layer, so
+		// we only get here when a scheduled run slipped through before a
+		// pause landed. Mark skipped so the scheduler can fire cleanly on
+		// the next resume without a ghost run sitting pending.
+		if !automation.Enabled {
+			now := time.Now()
+			summary := "automation paused before run could start"
+			if err := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
+				return fmt.Errorf("mark run skipped after pause: %w", err)
+			}
+			return nil
+		}
+
+		agentType := models.DefaultDefaultAgentType
+		if automation.AgentType != nil && *automation.AgentType != "" {
+			candidate := models.AgentType(*automation.AgentType)
+			if err := candidate.Validate(); err == nil {
+				agentType = candidate
+			} else {
+				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
+			}
+		}
+
+		var targetBranch *string
+		if automation.BaseBranch != "" {
+			b := automation.BaseBranch
+			targetBranch = &b
+		}
+
+		session := &models.Session{
+			OrgID:             orgID,
+			AgentType:         agentType,
+			Status:            "pending",
+			AutonomyLevel:     "semi",
+			TokenMode:         "low",
+			ModelOverride:     automation.ModelOverride,
+			TriggeredByUserID: run.TriggeredByUserID,
+			TargetBranch:      targetBranch,
+			RepositoryID:      automation.RepositoryID,
+			AutomationRunID:   &runID,
+		}
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			// Session creation failed — surface the error back to the run so
+			// the UI reflects the dispatch failure immediately instead of
+			// waiting for the reaper.
+			now := time.Now()
+			summary := fmt.Sprintf("failed to create agent session: %s", err)
+			if updateErr := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after session create failure")
+			}
+			return fmt.Errorf("create session: %w", err)
+		}
+
+		// Transition pending → running. Leaving completed_at and
+		// result_summary nil: UpdateStatus writes both columns every call,
+		// which is fine here because they were already NULL on the pending
+		// row. Downstream failures (crashed worker, lost agent job) fall to
+		// the hour-threshold reaper; the orchestrator's completion hook
+		// (AutomationRunUpdater.OnSessionComplete) flips the row to
+		// completed/failed when the session ends.
+		if err := stores.AutomationRuns.UpdateStatus(ctx, orgID, runID, models.AutomationRunStatusRunning, nil, nil); err != nil {
+			return fmt.Errorf("transition run to running: %w", err)
+		}
+
+		agentPayload := map[string]string{
+			"session_id": session.ID.String(),
+			"org_id":     orgID.String(),
+		}
+		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, nil); err != nil {
+			return fmt.Errorf("enqueue run_agent: %w", err)
+		}
+
+		log.Info().
+			Str("session_id", session.ID.String()).
+			Str("agent_type", string(agentType)).
+			Msg("automation session dispatched")
 		return nil
 	}
 }

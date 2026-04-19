@@ -210,7 +210,8 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 	}{
 		{name: "missing name", body: map[string]any{"goal": "do a thing"}, code: http.StatusBadRequest},
 		{name: "missing goal", body: map[string]any{"name": "n"}, code: http.StatusBadRequest},
-		{name: "cron rejected", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron missing expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron invalid expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "not a cron"}, code: http.StatusBadRequest},
 		{name: "invalid schedule type", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "bogus"}, code: http.StatusBadRequest},
 		{name: "interval out of range", body: map[string]any{"name": "n", "goal": "g", "interval_value": 999}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"name": "n", "goal": "g", "interval_unit": "fortnights"}, code: http.StatusBadRequest},
@@ -343,7 +344,7 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "blank goal", body: map[string]any{"goal": "   "}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"execution_mode": "x"}, code: http.StatusBadRequest},
 		{name: "invalid priority", body: map[string]any{"priority": 999}, code: http.StatusBadRequest},
-		{name: "cron rejected", body: map[string]any{"schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron invalid expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "nope"}, code: http.StatusBadRequest},
 		{name: "blank base branch", body: map[string]any{"base_branch": "  "}, code: http.StatusBadRequest},
 		{name: "invalid interval value", body: map[string]any{"interval_value": -1}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"interval_unit": "bogus"}, code: http.StatusBadRequest},
@@ -464,7 +465,18 @@ func TestAutomationHandler_Delete_OK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	orgID := uuid.New()
 	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	// Delete reads the row first so the audit entry can record the name/schedule.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
 	// SoftDelete wraps the automation update and pending-run cancel in one tx.
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE automations SET deleted_at").
@@ -476,7 +488,7 @@ func TestAutomationHandler_Delete_OK(t *testing.T) {
 	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr := httptest.NewRecorder()
 	h.Delete(rr, req)
 	require.Equal(t, http.StatusNoContent, rr.Code)
@@ -491,6 +503,27 @@ func TestAutomationHandler_Delete_InvalidID(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.Delete(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAutomationHandler_Delete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	id := uuid.New()
+	// Delete reads the row first; a missing row short-circuits before SoftDelete.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Delete(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // --- Pause / Resume ---
@@ -989,6 +1022,124 @@ func TestAutomationHandler_GetRun_InvalidIDs(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.GetRun(rr2, req2)
 	require.Equal(t, http.StatusBadRequest, rr2.Code)
+}
+
+// --- Stats ---
+
+func TestAutomationHandler_Stats_OK(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	cols := []string{
+		"bucket", "total", "completed", "completed_noop", "failed",
+		"skipped", "running", "pending", "avg_duration_seconds",
+	}
+	day := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("FROM automation_runs").
+		WithArgs(testAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(day, 3, 2, 0, 1, 0, 0, 0, 90.0))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+id.String()+"/stats", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Stats_AutomationNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	id := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+id.String()+"/stats", nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestAutomationHandler_Stats_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/x/stats", nil, uuid.New(), uuid.New(), map[string]string{"id": "x"})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+
+	// since after until -> 400.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	url := "/api/v1/automations/" + id.String() + "/stats?since=2026-05-01T00:00:00Z&until=2026-04-01T00:00:00Z"
+	req := newAutomationRequest(t, http.MethodGet, url, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// window > 90 days -> 400.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	url2 := "/api/v1/automations/" + id.String() + "/stats?since=2026-01-01T00:00:00Z&until=2026-06-01T00:00:00Z"
+	req2 := newAutomationRequest(t, http.MethodGet, url2, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr2 := httptest.NewRecorder()
+	h.Stats(rr2, req2)
+	require.Equal(t, http.StatusBadRequest, rr2.Code)
+
+	// Malformed since -> 400 (no automation lookup because it happens after).
+	// The handler fetches automation first, so expect that lookup.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	url3 := "/api/v1/automations/" + id.String() + "/stats?since=not-a-date"
+	req3 := newAutomationRequest(t, http.MethodGet, url3, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr3 := httptest.NewRecorder()
+	h.Stats(rr3, req3)
+	require.Equal(t, http.StatusBadRequest, rr3.Code)
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // --- Setters ---

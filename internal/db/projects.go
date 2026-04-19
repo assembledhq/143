@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -37,7 +36,6 @@ const projectColumns = `id, org_id, repository_id, title, goal, scope, completio
 	total_tasks, completed_tasks, failed_tasks,
 	proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects,
 	agent_type, model_override,
-	schedule_enabled, schedule_interval, schedule_unit, next_run_at,
 	created_by, deleted_at, created_at, updated_at, completed_at`
 
 func scanProject(row pgx.Row) (models.Project, error) {
@@ -52,7 +50,6 @@ func scanProject(row pgx.Row) (models.Project, error) {
 		&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 		&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 		&p.AgentType, &p.ModelOverride,
-		&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
 		&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 	)
 	if err != nil {
@@ -88,7 +85,6 @@ func scanProjects(rows pgx.Rows) ([]models.Project, error) {
 			&p.TotalTasks, &p.CompletedTasks, &p.FailedTasks,
 			&p.ProposedByPM, &sourceIssueIDs, &p.ProposalReasoning, &p.SimilarProjects,
 			&p.AgentType, &p.ModelOverride,
-			&p.ScheduleEnabled, &p.ScheduleInterval, &p.ScheduleUnit, &p.NextRunAt,
 			&p.CreatedBy, &p.DeletedAt, &p.CreatedAt, &p.UpdatedAt, &p.CompletedAt,
 		)
 		if err != nil {
@@ -141,16 +137,14 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 			status, priority, execution_mode, max_concurrent, auto_merge, base_branch,
 			current_phase, lessons_learned, approach_history,
 			proposed_by_pm, source_issue_ids, proposal_reasoning, similar_projects, created_by,
-			agent_type, model_override,
-			schedule_enabled, schedule_interval, schedule_unit, next_run_at
+			agent_type, model_override
 		)
 		VALUES (
 			@org_id, @repository_id, @title, @goal, @scope, @completion_criteria,
 			@status, @priority, @execution_mode, @max_concurrent, @auto_merge, @base_branch,
 			@current_phase, @lessons_learned, @approach_history,
 			@proposed_by_pm, @source_issue_ids, @proposal_reasoning, @similar_projects, @created_by,
-			@agent_type, @model_override,
-			@schedule_enabled, @schedule_interval, @schedule_unit, @next_run_at
+			@agent_type, @model_override
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -177,10 +171,6 @@ func (s *ProjectStore) Create(ctx context.Context, p *models.Project) error {
 		"created_by":          p.CreatedBy,
 		"agent_type":          p.AgentType,
 		"model_override":      p.ModelOverride,
-		"schedule_enabled":    p.ScheduleEnabled,
-		"schedule_interval":   p.ScheduleInterval,
-		"schedule_unit":       p.ScheduleUnit,
-		"next_run_at":         p.NextRunAt,
 	})
 	if err := row.Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return err
@@ -296,8 +286,6 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 			approach_history = @approach_history,
 			similar_projects = @similar_projects,
 			total_tasks = @total_tasks, completed_tasks = @completed_tasks, failed_tasks = @failed_tasks,
-			schedule_enabled = @schedule_enabled, schedule_interval = @schedule_interval,
-			schedule_unit = @schedule_unit, next_run_at = @next_run_at,
 			completed_at = @completed_at, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
@@ -321,10 +309,6 @@ func (s *ProjectStore) Update(ctx context.Context, p *models.Project) error {
 		"total_tasks":         p.TotalTasks,
 		"completed_tasks":     p.CompletedTasks,
 		"failed_tasks":        p.FailedTasks,
-		"schedule_enabled":    p.ScheduleEnabled,
-		"schedule_interval":   p.ScheduleInterval,
-		"schedule_unit":       p.ScheduleUnit,
-		"next_run_at":         p.NextRunAt,
 		"completed_at":        p.CompletedAt,
 	})
 	return err
@@ -342,34 +326,6 @@ func (s *ProjectStore) UpdateProgress(ctx context.Context, orgID, projectID uuid
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"project_id": projectID,
 		"org_id":     orgID,
-	})
-	return err
-}
-
-// ListDueForSchedule returns active projects with scheduling enabled that are due to run.
-// lint:allow-no-orgid reason="cross-org scheduler scan for due projects"
-func (s *ProjectStore) ListDueForSchedule(ctx context.Context, now time.Time) ([]models.Project, error) {
-	query := fmt.Sprintf(`SELECT %s FROM projects
-		WHERE schedule_enabled = true AND status = 'active' AND deleted_at IS NULL AND next_run_at IS NOT NULL AND next_run_at <= @now
-		ORDER BY next_run_at ASC
-		LIMIT 100`, projectColumns)
-
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"now": now})
-	if err != nil {
-		return nil, fmt.Errorf("query due projects: %w", err)
-	}
-	defer rows.Close()
-
-	return scanProjects(rows)
-}
-
-// UpdateNextRunAt sets the next scheduled run time for a project.
-func (s *ProjectStore) UpdateNextRunAt(ctx context.Context, orgID, projectID uuid.UUID, nextRunAt time.Time) error {
-	query := `UPDATE projects SET next_run_at = @next_run_at, updated_at = now() WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":          projectID,
-		"org_id":      orgID,
-		"next_run_at": nextRunAt,
 	})
 	return err
 }
