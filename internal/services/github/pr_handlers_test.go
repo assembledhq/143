@@ -301,6 +301,118 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 }
 
+// organizationColumns matches OrganizationStore.GetByID's SELECT list.
+var organizationColumns = []string{"id", "name", "settings", "created_at", "updated_at"}
+
+func TestHandlePullRequestEvent_AutoArchiveOnCloseWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	sessionMock := newMockPool(t)
+	orgMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(sessionMock),
+		orgs:         db.NewOrganizationStore(orgMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(organizationColumns).
+				AddRow(orgID, "Test Org", json.RawMessage(`{"auto_archive_on_pr_close": true}`), now, now),
+		)
+	sessionMock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PullRequestEvent{
+		Action: "closed",
+		Number: 42,
+	}
+	event.PR.Merged = false
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err)
+	require.NoError(t, prMock.ExpectationsWereMet())
+	require.NoError(t, orgMock.ExpectationsWereMet(), "org settings should be fetched")
+	require.NoError(t, sessionMock.ExpectationsWereMet(), "session should be archived")
+}
+
+func TestHandlePullRequestEvent_AutoArchiveSkippedWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	sessionMock := newMockPool(t)
+	orgMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(sessionMock),
+		orgs:         db.NewOrganizationStore(orgMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(organizationColumns).
+				AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
+		)
+	// No session archive expected — pgxmock.ExpectationsWereMet passes only if
+	// no unmocked calls were made, but it does not fail on un-called expectations
+	// that we never set. Leaving sessionMock with zero expectations asserts that
+	// ArchiveSystem was not invoked.
+
+	event := PullRequestEvent{
+		Action: "closed",
+		Number: 42,
+	}
+	event.PR.Merged = false
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err)
+	require.NoError(t, prMock.ExpectationsWereMet())
+	require.NoError(t, orgMock.ExpectationsWereMet())
+	require.NoError(t, sessionMock.ExpectationsWereMet(), "no session archive should happen when toggle is off")
+}
+
 func TestHandlePullRequestEvent_NonClosedAction(t *testing.T) {
 	t.Parallel()
 
