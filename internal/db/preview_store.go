@@ -49,7 +49,7 @@ const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy'
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -270,6 +270,7 @@ func (s *PreviewStore) UpdatePreviewHandle(ctx context.Context, orgID, id uuid.U
 }
 
 // ListActivePreviews returns all active previews for a given worker node.
+// lint:allow-no-orgid reason="worker-scoped background sweep; scans across all orgs by design"
 func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID string) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
 		WHERE worker_node_id = @worker_node_id AND status IN %s
@@ -288,16 +289,72 @@ func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID stri
 // ListActivePreviewsRecycledBefore returns active previews on the given worker
 // whose last successful start/recycle was before the cutoff time. Used by the
 // recycler to avoid repeatedly restarting a long-lived row after its first recycle.
+// lint:allow-no-orgid reason="worker-scoped background recycler; scans across all orgs by design"
 func (s *PreviewStore) ListActivePreviewsRecycledBefore(ctx context.Context, workerNodeID string, recycledBefore time.Time) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
 		WHERE worker_node_id = @worker_node_id AND status IN %s AND recycled_at < @recycled_before
 		ORDER BY recycled_at ASC`, previewInstanceColumns, activeStatusFilter)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"worker_node_id": workerNodeID,
+		"worker_node_id":  workerNodeID,
 		"recycled_before": recycledBefore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list active previews recycled before: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
+	}
+	return result, nil
+}
+
+// ScheduleRecycle marks a preview for recycle in the future by stamping the
+// recycle_scheduled_at column. Safe to call only when the column is NULL —
+// the partial update avoids pushing the window out repeatedly if the
+// recycler sweeps more than once within the grace period.
+func (s *PreviewStore) ScheduleRecycle(ctx context.Context, orgID, previewID uuid.UUID, at time.Time) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances
+		 SET recycle_scheduled_at = @at, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND recycle_scheduled_at IS NULL`,
+		pgx.NamedArgs{"id": previewID, "org_id": orgID, "at": at},
+	)
+	if err != nil {
+		return false, fmt.Errorf("schedule recycle: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ClearRecycleSchedule resets the scheduled recycle timestamp back to NULL.
+// Called after the recycler performs (or cancels) the recycle.
+func (s *PreviewStore) ClearRecycleSchedule(ctx context.Context, orgID, previewID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances
+		 SET recycle_scheduled_at = NULL, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": previewID, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("clear recycle schedule: %w", err)
+	}
+	return nil
+}
+
+// ListPreviewsScheduledToRecycleBefore returns active previews on this worker
+// whose recycle_scheduled_at is at or before the cutoff — i.e., their grace
+// period has elapsed and the recycler should now restart them.
+// lint:allow-no-orgid reason="worker-scoped background recycler; scans across all orgs by design"
+func (s *PreviewStore) ListPreviewsScheduledToRecycleBefore(ctx context.Context, workerNodeID string, cutoff time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s
+		  AND recycle_scheduled_at IS NOT NULL AND recycle_scheduled_at <= @cutoff
+		ORDER BY recycle_scheduled_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"worker_node_id": workerNodeID,
+		"cutoff":         cutoff,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list previews scheduled to recycle: %w", err)
 	}
 	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
 	if err != nil {

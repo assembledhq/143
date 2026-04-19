@@ -622,7 +622,12 @@ func (m *Manager) validateSession(ctx context.Context, sess *models.PreviewAcces
 // ExtendTTL
 // =============================================================================
 
-// ExtendTTL extends the preview's hard TTL, up to DefaultMaxTTL from creation.
+// ExtendTTL extends the preview's hard TTL by DefaultHardTTL from now, capped
+// at DefaultMaxTTL after the original creation time. Callers may invoke this
+// any number of times, but the effective expiry will never exceed
+// CreatedAt + DefaultMaxTTL, so repeated calls cannot extend a preview
+// indefinitely. The background recycler's DefaultMaxUptime bounds total
+// process uptime independently.
 func (m *Manager) ExtendTTL(ctx context.Context, orgID, previewID uuid.UUID) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
@@ -630,6 +635,9 @@ func (m *Manager) ExtendTTL(ctx context.Context, orgID, previewID uuid.UUID) err
 	}
 
 	maxExpiry := instance.CreatedAt.Add(DefaultMaxTTL)
+	if !time.Now().Before(maxExpiry) {
+		return fmt.Errorf("preview has reached its maximum lifetime and cannot be extended further")
+	}
 	newExpiry := time.Now().Add(DefaultHardTTL)
 	if newExpiry.After(maxExpiry) {
 		newExpiry = maxExpiry
@@ -810,6 +818,12 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	if m.hmrWatcher != nil {
 		m.hmrWatcher.StopWatching(previewID)
 		m.hmrWatcher.StartWatching(previewID, orgID)
+	}
+
+	// Clear the grace-window marker so the UI stops showing the "recycling
+	// soon" warning after the restart completes.
+	if err := m.store.ClearRecycleSchedule(ctx, orgID, previewID); err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: failed to clear recycle schedule marker")
 	}
 
 	m.logger.Info().Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("preview recycled")

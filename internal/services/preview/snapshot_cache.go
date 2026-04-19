@@ -203,21 +203,13 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return fmt.Errorf("snapshot create: tar exited %d: %s", exitCode, stderr.String())
 	}
 
-	// 2. Read the tar.gz out of the sandbox.
-	// TODO: Stream directly from sandbox to disk instead of buffering in memory.
-	// The current ReadFile approach loads the entire tar.gz into memory, which
-	// can be problematic for large workspaces. A streaming CopyFileToPath method
-	// on SnapshotExecutor would avoid this memory pressure.
+	// 2. Stream the tar.gz from the sandbox directly into a worker-local
+	//    temp file. We tee through a SHA-256 hasher so the checksum is
+	//    computed without a second pass, and through a counting writer so
+	//    we can enforce the max blob size mid-stream rather than after
+	//    buffering the whole archive in memory.
 	const maxCreateBlobBytes int64 = 2 * 1024 * 1024 * 1024 // 2 GB (matches restore limit)
-	tarData, err := sc.executor.ReadFile(ctx, sb, snapshotTmpFile)
-	if err != nil {
-		return fmt.Errorf("snapshot create: read tar from sandbox: %w", err)
-	}
-	if int64(len(tarData)) > maxCreateBlobBytes {
-		return fmt.Errorf("snapshot create: tar too large (%d bytes, max %d)", len(tarData), maxCreateBlobBytes)
-	}
 
-	// 3. Write to worker local disk.
 	blobPath, err := sc.blobPath(snapshotKey)
 	if err != nil {
 		return fmt.Errorf("snapshot create: %w", err)
@@ -226,20 +218,64 @@ func (sc *SnapshotCache) CreateSnapshot(
 		return fmt.Errorf("snapshot create: mkdir: %w", err)
 	}
 
-	if err := atomicWriteFile(blobPath, tarData, 0o640); err != nil {
-		return fmt.Errorf("snapshot create: write blob: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(blobPath), ".snapshot-*.tmp")
+	if err != nil {
+		return fmt.Errorf("snapshot create: temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}
+	defer cleanupTmp()
+
+	hasher := sha256.New()
+	counter := &cappedCountingWriter{limit: maxCreateBlobBytes}
+	var tarStderr bytes.Buffer
+	// Multiwriter fans out each chunk to: temp file, SHA-256 hasher, size
+	// counter. If the counter trips, its Write returns an error that the
+	// executor will surface back here, short-circuiting the stream.
+	stream := io.MultiWriter(tmp, hasher, counter)
+
+	readCmd := fmt.Sprintf("cat %s", shellQuote(snapshotTmpFile))
+	exitCode, err = sc.executor.Exec(ctx, sb, readCmd, stream, &tarStderr)
+	// Close the tmp file regardless of outcome so we can rename (or remove) it.
+	if syncErr := tmp.Sync(); syncErr != nil && err == nil {
+		err = fmt.Errorf("sync temp blob: %w", syncErr)
+	}
+	if closeErr := tmp.Close(); closeErr != nil && err == nil {
+		err = fmt.Errorf("close temp blob: %w", closeErr)
+	}
+	if err != nil {
+		return fmt.Errorf("snapshot create: stream tar from sandbox: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("snapshot create: cat exited %d: %s", exitCode, tarStderr.String())
+	}
+	if counter.exceeded {
+		return fmt.Errorf("snapshot create: tar too large (>%d bytes max)", maxCreateBlobBytes)
 	}
 
-	// Compute and store a SHA-256 checksum alongside the blob for integrity
-	// verification on restore.
-	checksum := sha256.Sum256(tarData)
-	checksumHex := hex.EncodeToString(checksum[:])
+	if err := os.Chmod(tmpPath, 0o640); err != nil {
+		return fmt.Errorf("snapshot create: chmod: %w", err)
+	}
+	if err := os.Rename(tmpPath, blobPath); err != nil {
+		return fmt.Errorf("snapshot create: rename temp to final: %w", err)
+	}
+	// Rename succeeded — prevent deferred cleanup from removing the final file.
+	tmpPath = ""
+
+	checksumHex := hex.EncodeToString(hasher.Sum(nil))
 	checksumPath := blobPath + ".sha256"
 	if err := atomicWriteFile(checksumPath, []byte(checksumHex), 0o640); err != nil {
+		// If checksum write fails, remove the blob so future lookups don't
+		// return an unverifiable entry.
+		_ = os.Remove(blobPath)
 		return fmt.Errorf("snapshot create: write checksum: %w", err)
 	}
 
-	sizeBytes := int64(len(tarData))
+	sizeBytes := counter.count
 
 	// 4. Record in database.
 	entry := &models.PreviewStartupCache{
@@ -619,6 +655,25 @@ func totalSize(entries []models.PreviewStartupCache) int64 {
 		total += e.SizeBytes
 	}
 	return total
+}
+
+// cappedCountingWriter is an io.Writer that counts bytes written and fails
+// the Write once the cumulative total exceeds limit. This lets the caller
+// abort a streaming copy mid-flight instead of buffering the full payload
+// just to measure it.
+type cappedCountingWriter struct {
+	count    int64
+	limit    int64
+	exceeded bool
+}
+
+func (w *cappedCountingWriter) Write(p []byte) (int, error) {
+	w.count += int64(len(p))
+	if w.limit > 0 && w.count > w.limit {
+		w.exceeded = true
+		return len(p), fmt.Errorf("snapshot blob exceeds max size %d bytes", w.limit)
+	}
+	return len(p), nil
 }
 
 // atomicWriteFile writes data to a file atomically by first writing to a

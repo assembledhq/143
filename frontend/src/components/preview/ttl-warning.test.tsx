@@ -92,4 +92,53 @@ describe("TTLWarning", () => {
     });
     expect(screen.queryByText("Extend")).not.toBeInTheDocument();
   });
+
+  it("shows recycle countdown when recycleScheduledAt is within 2 minutes", async () => {
+    const farFuture = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const recycleSoon = new Date(Date.now() + 30 * 1000).toISOString();
+    renderWithProviders(
+      <TTLWarning
+        expiresAt={farFuture}
+        sessionId="sess-1"
+        recycleScheduledAt={recycleSoon}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("recycle-warning")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("recycle-warning")).toHaveTextContent(
+      /Restarting in/
+    );
+  });
+
+  it("hides recycle countdown when recycleScheduledAt is more than 2 minutes out", () => {
+    const farFuture = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const recycleFarFuture = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    renderWithProviders(
+      <TTLWarning
+        expiresAt={farFuture}
+        sessionId="sess-1"
+        recycleScheduledAt={recycleFarFuture}
+      />
+    );
+    expect(screen.queryByTestId("recycle-warning")).not.toBeInTheDocument();
+  });
+
+  it('shows "Restarting now" when recycleScheduledAt is in the past', async () => {
+    const farFuture = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const recyclePast = new Date(Date.now() - 5 * 1000).toISOString();
+    renderWithProviders(
+      <TTLWarning
+        expiresAt={farFuture}
+        sessionId="sess-1"
+        recycleScheduledAt={recyclePast}
+      />
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("recycle-warning")).toHaveTextContent(
+        /Restarting now/
+      );
+    });
+  });
 });

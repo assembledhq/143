@@ -512,11 +512,11 @@ describe("PreviewPanel component", () => {
       expect(screen.getAllByText("Starting").length).toBeGreaterThanOrEqual(1);
     });
 
-    // STATUS_ORDER = ["starting", "ready"], so starting = (1/2)*100 = 50%
+    // STATUS_ORDER = ["starting", "partially_ready", "ready"], so starting = (1/3)*100
     const progressBar = container.querySelector(
       ".bg-primary.rounded-full.transition-all",
     );
-    expect(progressBar).toHaveStyle({ width: "50%" });
+    expect(progressBar).toHaveStyle({ width: `${(1 / 3) * 100}%` });
   });
 
   /* ---------- Start mutation ---------- */
@@ -764,6 +764,60 @@ describe("PreviewPanel component", () => {
 
     await waitFor(() => {
       expect(mockRestart).toHaveBeenCalledWith("sess-1");
+    });
+  });
+
+  /* ---------- Bootstrap origin enforcement ---------- */
+
+  it("ignores bootstrap_ready messages from a foreign origin (no token is minted)", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus({ status: "ready", id: "prev-1" }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByTitle("Preview")).toBeInTheDocument();
+    });
+
+    // Dispatch a bootstrap_ready message whose origin does NOT match the
+    // preview's parsedOrigin (http://prev-1.preview.test). A malicious tab
+    // or misconfigured embed posting this event must not trigger token
+    // minting — that would leak access credentials cross-origin.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: PREVIEW_BOOTSTRAP_READY_EVENT },
+        origin: "https://evil.example.com",
+      }),
+    );
+
+    // Give the event loop a tick for any unintended mutation to fire.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(mockBootstrap).not.toHaveBeenCalled();
+  });
+
+  it("mints a token when bootstrap_ready arrives from the matching origin", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus({ status: "ready", id: "prev-1" }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByTitle("Preview")).toBeInTheDocument();
+    });
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: PREVIEW_BOOTSTRAP_READY_EVENT },
+        // Matches buildPreviewIframeSrc output for this test preview id.
+        origin: "http://prev-1.preview.test",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(mockBootstrap).toHaveBeenCalledWith("sess-1");
     });
   });
 });

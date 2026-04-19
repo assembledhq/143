@@ -33,6 +33,10 @@ export interface PreviewInstance {
   error?: string;
   created_at: string;
   updated_at: string;
+  // When set and in the future, the backend has flagged this preview for an
+  // imminent restart (recycle grace period). The frontend surfaces a warning
+  // so users can save state before the restart.
+  recycle_scheduled_at?: string;
 }
 
 export type PreviewServiceRole = "primary" | "support";

@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"golang.org/x/net/html"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/preview"
@@ -693,35 +694,10 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	scriptBlock := "<script>" + preview.ComponentResolverScript + "</script>" +
 		"<script>" + activityHeartbeatScript + "</script>"
 
-	body := string(bodyBytes)
-	bodyLower := strings.ToLower(body)
-	injected := false
-
-	// Prefer injecting before </head>.
-	// NOTE: This substring-based matching can produce incorrect results if
-	// "</head>" appears inside a string literal, JS template, or HTML comment
-	// rather than as the actual closing head tag. A proper fix would require
-	// an HTML parser, but we accept this limitation to avoid the dependency.
-	if idx := strings.Index(bodyLower, "</head>"); idx != -1 {
-		body = body[:idx] + scriptBlock + body[idx:]
-		injected = true
-	}
-
-	// Fallback: inject before </body>.
-	if !injected {
-		if idx := strings.Index(bodyLower, "</body>"); idx != -1 {
-			body = body[:idx] + scriptBlock + body[idx:]
-			injected = true
-		}
-	}
-
-	// Last resort: append to end of document.
-	if !injected {
-		body = body + scriptBlock
-	}
-
-	// Replace the response body.
-	newBody := []byte(body)
+	// Walk the HTML via tokenizer so we only match real end tags (not
+	// "</head>"/"</body>" appearing inside string literals, JS templates, or
+	// comments). Fall back to appending on parse failure.
+	newBody := injectBeforeEndTag(bodyBytes, scriptBlock)
 
 	newBody, err := recompress(newBody)
 	if err != nil {
@@ -736,6 +712,52 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
 
 	return nil
+}
+
+// injectBeforeEndTag injects scriptBlock immediately before the first real
+// </head> or </body> end tag in the document, using an HTML tokenizer so we
+// don't match literal tag text appearing inside scripts, attribute values,
+// or comments. Falls back to appending scriptBlock when neither tag is
+// present (e.g., HTML fragments).
+func injectBeforeEndTag(body []byte, scriptBlock string) []byte {
+	z := html.NewTokenizer(bytes.NewReader(body))
+	offset := -1
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			// End of input or parse error — no matching end tag found.
+			if offset == -1 {
+				return append(body, []byte(scriptBlock)...)
+			}
+			return spliceAt(body, offset, scriptBlock)
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			if string(name) == "head" {
+				// Offset is the position immediately before the `<` that
+				// started this token. Compute from remaining bytes.
+				raw := z.Raw()
+				tokenStart := len(body) - len(z.Buffered()) - len(raw)
+				return spliceAt(body, tokenStart, scriptBlock)
+			}
+			if string(name) == "body" && offset == -1 {
+				// Remember body offset as a fallback if no </head> appears.
+				raw := z.Raw()
+				offset = len(body) - len(z.Buffered()) - len(raw)
+			}
+		}
+	}
+}
+
+// spliceAt inserts insert at position idx in body and returns a new slice.
+func spliceAt(body []byte, idx int, insert string) []byte {
+	if idx < 0 || idx > len(body) {
+		return append(body, []byte(insert)...)
+	}
+	out := make([]byte, 0, len(body)+len(insert))
+	out = append(out, body[:idx]...)
+	out = append(out, []byte(insert)...)
+	out = append(out, body[idx:]...)
+	return out
 }
 
 // =============================================================================
@@ -754,10 +776,11 @@ func (g *Gateway) injectScriptsIntoHTML(resp *http.Response, previewID uuid.UUID
 // This is acceptable for the HMR use case (screenshot on hot reload).
 func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.UUID) {
 	buf := make([]byte, 32*1024)
-	// Keep a small overlap buffer so patterns split across read boundaries
-	// are still detected. 256 bytes covers any HMR pattern we match.
+	// Keep an overlap buffer so patterns split across read boundaries are
+	// still detected. 512 bytes covers the longest HMR pattern we match plus
+	// typical WebSocket frame-header padding (2-14 bytes).
 	var overlap []byte
-	const overlapSize = 256
+	const overlapSize = 512
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {

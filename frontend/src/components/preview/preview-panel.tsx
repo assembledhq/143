@@ -400,6 +400,7 @@ export function PreviewPanel({
           <TTLWarning
             expiresAt={instance.expires_at}
             sessionId={sessionId}
+            recycleScheduledAt={instance.recycle_scheduled_at}
           />
         )}
 

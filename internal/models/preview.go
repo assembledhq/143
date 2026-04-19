@@ -13,32 +13,33 @@ import (
 
 // PreviewInstance is the core preview lifecycle record.
 type PreviewInstance struct {
-	ID              uuid.UUID      `db:"id" json:"id"`
-	SessionID       uuid.UUID      `db:"session_id" json:"session_id"`
-	OrgID           uuid.UUID      `db:"org_id" json:"org_id"`
-	UserID          uuid.UUID      `db:"user_id" json:"user_id"`
-	ProfileName     string         `db:"profile_name" json:"profile_name"`
-	Name            string         `db:"name" json:"name"`
-	Status          PreviewStatus  `db:"status" json:"status"`
-	Provider        string         `db:"provider" json:"provider"`
-	WorkerNodeID    string         `db:"worker_node_id" json:"worker_node_id"`
-	PreviewHandle   string         `db:"preview_handle" json:"preview_handle"`
-	PrimaryService  string         `db:"primary_service" json:"primary_service"`
-	Port            int            `db:"port" json:"port"`
-	ConfigDigest    string         `db:"config_digest" json:"config_digest"`
-	BaseCommitSHA   string         `db:"base_commit_sha" json:"base_commit_sha"`
-	LastAccessedAt  time.Time      `db:"last_accessed_at" json:"last_accessed_at"`
-	ExpiresAt       time.Time      `db:"expires_at" json:"expires_at"`
-	StoppedAt       *time.Time     `db:"stopped_at" json:"stopped_at,omitempty"`
-	LastPath        string         `db:"last_path" json:"last_path"`
-	MemoryLimitMB   int             `db:"memory_limit_mb" json:"memory_limit_mb"`
-	CPULimitMillis  int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
-	RecycleConfig   json.RawMessage `db:"recycle_config" json:"-"`
-	RecycleSandbox  json.RawMessage `db:"recycle_sandbox" json:"-"`
-	Error           string          `db:"error" json:"error,omitempty"`
-	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
-	RecycledAt      time.Time       `db:"recycled_at" json:"recycled_at"`
+	ID                 uuid.UUID       `db:"id" json:"id"`
+	SessionID          uuid.UUID       `db:"session_id" json:"session_id"`
+	OrgID              uuid.UUID       `db:"org_id" json:"org_id"`
+	UserID             uuid.UUID       `db:"user_id" json:"user_id"`
+	ProfileName        string          `db:"profile_name" json:"profile_name"`
+	Name               string          `db:"name" json:"name"`
+	Status             PreviewStatus   `db:"status" json:"status"`
+	Provider           string          `db:"provider" json:"provider"`
+	WorkerNodeID       string          `db:"worker_node_id" json:"worker_node_id"`
+	PreviewHandle      string          `db:"preview_handle" json:"preview_handle"`
+	PrimaryService     string          `db:"primary_service" json:"primary_service"`
+	Port               int             `db:"port" json:"port"`
+	ConfigDigest       string          `db:"config_digest" json:"config_digest"`
+	BaseCommitSHA      string          `db:"base_commit_sha" json:"base_commit_sha"`
+	LastAccessedAt     time.Time       `db:"last_accessed_at" json:"last_accessed_at"`
+	ExpiresAt          time.Time       `db:"expires_at" json:"expires_at"`
+	StoppedAt          *time.Time      `db:"stopped_at" json:"stopped_at,omitempty"`
+	LastPath           string          `db:"last_path" json:"last_path"`
+	MemoryLimitMB      int             `db:"memory_limit_mb" json:"memory_limit_mb"`
+	CPULimitMillis     int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	RecycleConfig      json.RawMessage `db:"recycle_config" json:"-"`
+	RecycleSandbox     json.RawMessage `db:"recycle_sandbox" json:"-"`
+	Error              string          `db:"error" json:"error,omitempty"`
+	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time       `db:"updated_at" json:"updated_at"`
+	RecycledAt         time.Time       `db:"recycled_at" json:"recycled_at"`
+	RecycleScheduledAt *time.Time      `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.
@@ -113,31 +114,31 @@ type PreviewAccessSession struct {
 
 // PreviewStartupCache tracks filesystem snapshot metadata for fast startup.
 type PreviewStartupCache struct {
-	ID            uuid.UUID `db:"id" json:"id"`
-	OrgID         uuid.UUID `db:"org_id" json:"org_id"`
-	RepoID        uuid.UUID `db:"repo_id" json:"repo_id"`
-	SnapshotKey   string    `db:"snapshot_key" json:"snapshot_key"`
-	BlobPath      string    `db:"blob_path" json:"blob_path"`
-	SizeBytes     int64     `db:"size_bytes" json:"size_bytes"`
-	WorkerNodeID  string    `db:"worker_node_id" json:"worker_node_id"`
-	LastUsedAt    time.Time `db:"last_used_at" json:"last_used_at"`
-	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	ID           uuid.UUID `db:"id" json:"id"`
+	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID `db:"repo_id" json:"repo_id"`
+	SnapshotKey  string    `db:"snapshot_key" json:"snapshot_key"`
+	BlobPath     string    `db:"blob_path" json:"blob_path"`
+	SizeBytes    int64     `db:"size_bytes" json:"size_bytes"`
+	WorkerNodeID string    `db:"worker_node_id" json:"worker_node_id"`
+	LastUsedAt   time.Time `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
 // PRPreviewState tracks the PR comment lifecycle for preview integration.
 type PRPreviewState struct {
-	ID                       uuid.UUID       `db:"id" json:"id"`
-	OrgID                    uuid.UUID       `db:"org_id" json:"org_id"`
-	RepoID                   uuid.UUID       `db:"repo_id" json:"repo_id"`
-	PRNumber                 int             `db:"pr_number" json:"pr_number"`
-	GitHubCommentID          *int64          `db:"github_comment_id" json:"github_comment_id,omitempty"`
-	LastPreviewInstanceID    *uuid.UUID      `db:"last_preview_instance_id" json:"last_preview_instance_id,omitempty"`
-	LastScreenshotBlobPath   string          `db:"last_screenshot_blob_path" json:"last_screenshot_blob_path,omitempty"`
-	LastVisualDiffBlobPath   string          `db:"last_visual_diff_blob_path" json:"last_visual_diff_blob_path,omitempty"`
-	BaseSnapshotKey          string          `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
-	Status                   PRPreviewStatus `db:"status" json:"status"`
-	CreatedAt                time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt                time.Time       `db:"updated_at" json:"updated_at"`
+	ID                     uuid.UUID       `db:"id" json:"id"`
+	OrgID                  uuid.UUID       `db:"org_id" json:"org_id"`
+	RepoID                 uuid.UUID       `db:"repo_id" json:"repo_id"`
+	PRNumber               int             `db:"pr_number" json:"pr_number"`
+	GitHubCommentID        *int64          `db:"github_comment_id" json:"github_comment_id,omitempty"`
+	LastPreviewInstanceID  *uuid.UUID      `db:"last_preview_instance_id" json:"last_preview_instance_id,omitempty"`
+	LastScreenshotBlobPath string          `db:"last_screenshot_blob_path" json:"last_screenshot_blob_path,omitempty"`
+	LastVisualDiffBlobPath string          `db:"last_visual_diff_blob_path" json:"last_visual_diff_blob_path,omitempty"`
+	BaseSnapshotKey        string          `db:"base_snapshot_key" json:"base_snapshot_key,omitempty"`
+	Status                 PRPreviewStatus `db:"status" json:"status"`
+	CreatedAt              time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt              time.Time       `db:"updated_at" json:"updated_at"`
 }
 
 // =============================================================================
@@ -147,14 +148,14 @@ type PRPreviewState struct {
 // PreviewConfig is the parsed representation of a .143/preview.json file.
 // Internally, single-service configs are normalized to multi-service format.
 type PreviewConfig struct {
-	Version       string                       `json:"version"`
-	Name          string                       `json:"name"`
-	Primary       string                       `json:"primary"`
+	Version        string                          `json:"version"`
+	Name           string                          `json:"name"`
+	Primary        string                          `json:"primary"`
 	Services       map[string]ServiceConfig        `json:"services"`
 	Infrastructure map[string]InfrastructureConfig `json:"infrastructure,omitempty"`
-	Credentials   CredentialConfig             `json:"credentials"`
-	Network       NetworkConfig                `json:"network"`
-	Progressive   bool                         `json:"progressive,omitempty"`
+	Credentials    CredentialConfig                `json:"credentials"`
+	Network        NetworkConfig                   `json:"network"`
+	Progressive    bool                            `json:"progressive,omitempty"`
 }
 
 // ServiceConfig defines a single service within a preview.
@@ -235,12 +236,12 @@ type ScreenshotResult struct {
 
 // ConsoleMessage is a browser console message captured during inspection.
 type ConsoleMessage struct {
-	Level   string    `json:"level"` // "error", "warning", "log", "info"
-	Text    string    `json:"text"`
-	Source  string    `json:"source,omitempty"`
-	LineNo  int       `json:"line_no,omitempty"`
-	URL     string    `json:"url,omitempty"`
-	Time    time.Time `json:"time"`
+	Level  string    `json:"level"` // "error", "warning", "log", "info"
+	Text   string    `json:"text"`
+	Source string    `json:"source,omitempty"`
+	LineNo int       `json:"line_no,omitempty"`
+	URL    string    `json:"url,omitempty"`
+	Time   time.Time `json:"time"`
 }
 
 // ScreencastResult is the output of a screencast recording.
@@ -271,13 +272,13 @@ type InteractionResult struct {
 
 // StepResult is the outcome of a single interaction step.
 type StepResult struct {
-	StepIndex  int              `json:"step_index"`
-	Action     string           `json:"action"`
-	Success    bool             `json:"success"`
-	Error      string           `json:"error,omitempty"`
+	StepIndex  int               `json:"step_index"`
+	Action     string            `json:"action"`
+	Success    bool              `json:"success"`
+	Error      string            `json:"error,omitempty"`
 	Screenshot *ScreenshotResult `json:"screenshot,omitempty"`
-	Duration   time.Duration    `json:"duration"`
-	URL        string           `json:"url"`
+	Duration   time.Duration     `json:"duration"`
+	URL        string            `json:"url"`
 }
 
 // MultiViewportOpts configures a multi-viewport screenshot capture.
@@ -384,9 +385,9 @@ type DOMCaptureOpts struct {
 
 // DOMSnapshot is a serialized snapshot of the DOM tree.
 type DOMSnapshot struct {
-	HTML       string            `json:"html"`
-	Elements   []ElementInfo     `json:"elements,omitempty"`
-	CapturedAt time.Time         `json:"captured_at"`
+	HTML       string        `json:"html"`
+	Elements   []ElementInfo `json:"elements,omitempty"`
+	CapturedAt time.Time     `json:"captured_at"`
 }
 
 // =============================================================================
@@ -397,19 +398,19 @@ type DOMSnapshot struct {
 type PreviewStatusResponse struct {
 	Instance       *PreviewInstance        `json:"instance"`
 	Services       []PreviewService        `json:"services"`
-	Infrastructure []PreviewInfrastructure  `json:"infrastructure,omitempty"`
+	Infrastructure []PreviewInfrastructure `json:"infrastructure,omitempty"`
 }
 
 // PreviewDetectionResult is the API response for GET /repos/{owner}/{repo}/preview/detect.
 type PreviewDetectionResult struct {
-	Readiness          PreviewReadiness       `json:"readiness"`
-	ConfigName         string                 `json:"config_name,omitempty"`
-	Services           []string               `json:"services,omitempty"`
-	PrimaryService     string                 `json:"primary_service,omitempty"`
-	Infrastructure     []string               `json:"infrastructure,omitempty"`
-	MissingCredentials []MissingCredential    `json:"missing_credentials,omitempty"`
-	MissingDestinations []string              `json:"missing_destinations,omitempty"`
-	ValidationErrors   []string               `json:"validation_errors,omitempty"`
+	Readiness           PreviewReadiness    `json:"readiness"`
+	ConfigName          string              `json:"config_name,omitempty"`
+	Services            []string            `json:"services,omitempty"`
+	PrimaryService      string              `json:"primary_service,omitempty"`
+	Infrastructure      []string            `json:"infrastructure,omitempty"`
+	MissingCredentials  []MissingCredential `json:"missing_credentials,omitempty"`
+	MissingDestinations []string            `json:"missing_destinations,omitempty"`
+	ValidationErrors    []string            `json:"validation_errors,omitempty"`
 }
 
 // MissingCredential describes a credential set that needs admin setup.
@@ -424,17 +425,17 @@ type MissingCredential struct {
 
 // DesignModeFeedback is the structured message sent from Design Mode to the agent.
 type DesignModeFeedback struct {
-	Type        string        `json:"type"` // "design_mode_feedback" or "visual_edit" or "reorder"
-	Elements    []ElementInfo `json:"elements"`
-	Instruction string        `json:"instruction,omitempty"`
-	Annotations []Annotation  `json:"annotations,omitempty"`
-	ScreenshotRef string      `json:"screenshot_ref,omitempty"`
+	Type          string        `json:"type"` // "design_mode_feedback" or "visual_edit" or "reorder"
+	Elements      []ElementInfo `json:"elements"`
+	Instruction   string        `json:"instruction,omitempty"`
+	Annotations   []Annotation  `json:"annotations,omitempty"`
+	ScreenshotRef string        `json:"screenshot_ref,omitempty"`
 	// Visual edit fields.
-	StyleEdits []StyleEdit   `json:"style_edits,omitempty"`
+	StyleEdits []StyleEdit `json:"style_edits,omitempty"`
 	// Reorder-specific fields.
-	Direction string        `json:"direction,omitempty"` // "up", "down", "left", "right"
-	Parent    *ElementInfo  `json:"parent,omitempty"`
-	Siblings  []string      `json:"siblings,omitempty"`
+	Direction string       `json:"direction,omitempty"` // "up", "down", "left", "right"
+	Parent    *ElementInfo `json:"parent,omitempty"`
+	Siblings  []string     `json:"siblings,omitempty"`
 }
 
 // Annotation is an SVG annotation drawn on the Design Mode overlay.
@@ -445,10 +446,10 @@ type Annotation struct {
 
 // VisualEdit is the structured message sent from Visual Editing to the agent.
 type VisualEdit struct {
-	Element          ElementInfo        `json:"element"`
-	Changes          []StyleEdit        `json:"changes"`
-	BeforeScreenshot string             `json:"before_screenshot,omitempty"`
-	AfterScreenshot  string             `json:"after_screenshot,omitempty"`
+	Element          ElementInfo `json:"element"`
+	Changes          []StyleEdit `json:"changes"`
+	BeforeScreenshot string      `json:"before_screenshot,omitempty"`
+	AfterScreenshot  string      `json:"after_screenshot,omitempty"`
 }
 
 // StyleEdit is a single CSS property change from Visual Editing.
@@ -466,15 +467,15 @@ type StyleEdit struct {
 
 // PreviewAssertion is a single visual assertion the agent runs against the preview.
 type PreviewAssertion struct {
-	Type     string `json:"type"` // element_exists, element_text, element_style, element_count, no_console_errors, page_title, viewport_screenshot_match
-	Selector string `json:"selector,omitempty"`
-	Property string `json:"property,omitempty"`
-	Value    string `json:"value,omitempty"`
-	Contains string `json:"contains,omitempty"`
-	Visible  *bool  `json:"visible,omitempty"`
-	Min      *int   `json:"min,omitempty"`
-	Max      *int   `json:"max,omitempty"`
-	Region   *Rect  `json:"region,omitempty"`
+	Type        string `json:"type"` // element_exists, element_text, element_style, element_count, no_console_errors, page_title, viewport_screenshot_match
+	Selector    string `json:"selector,omitempty"`
+	Property    string `json:"property,omitempty"`
+	Value       string `json:"value,omitempty"`
+	Contains    string `json:"contains,omitempty"`
+	Visible     *bool  `json:"visible,omitempty"`
+	Min         *int   `json:"min,omitempty"`
+	Max         *int   `json:"max,omitempty"`
+	Region      *Rect  `json:"region,omitempty"`
 	Description string `json:"description,omitempty"` // for viewport_screenshot_match
 }
 
@@ -489,7 +490,7 @@ type AssertionResult struct {
 // AssertionResults is the aggregate outcome of running assertions.
 type AssertionResults struct {
 	Results []AssertionResult `json:"results"`
-	Passed  int              `json:"passed"`
-	Failed  int              `json:"failed"`
-	Total   int              `json:"total"`
+	Passed  int               `json:"passed"`
+	Failed  int               `json:"failed"`
+	Total   int               `json:"total"`
 }

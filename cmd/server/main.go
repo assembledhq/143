@@ -23,16 +23,16 @@ import (
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
-	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/codexauth"
-	"github.com/assembledhq/143/internal/services/preview"
-	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
+	"github.com/assembledhq/143/internal/services/preview"
+	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -266,13 +266,18 @@ func main() {
 				logger.Error().Err(err).Msg("preview inspector shutdown failed")
 			}
 		}
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
+		// Gateway carries long-lived WebSocket (HMR) proxies; give it a
+		// longer drain window than the main API server so in-flight preview
+		// sessions close cleanly instead of being severed mid-frame.
+		gwShutdownCtx, gwShutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer gwShutdownCancel()
 		if gwSrv != nil {
-			if err := gwSrv.Shutdown(shutdownCtx); err != nil {
+			if err := gwSrv.Shutdown(gwShutdownCtx); err != nil {
 				logger.Error().Err(err).Msg("preview gateway shutdown failed")
 			}
 		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error().Err(err).Msg("server shutdown failed")
 		}

@@ -50,6 +50,21 @@ type SandboxExecutor interface {
 // DockerPreviewProvider implements PreviewCapableProvider using Docker.
 // It manages infrastructure sidecars as Docker containers and application
 // services as processes inside the existing agent sandbox.
+//
+// SECURITY — network isolation:
+// All preview infrastructure containers are attached to a single shared
+// Docker bridge network (default "143-sandbox"). Bridge networks in Docker
+// permit inter-container communication by default, which means a preview
+// running AI-generated code can probe sibling previews or any other
+// container on the same network. This is acceptable for the common case of
+// a single-user, self-hosted deployment where all previews belong to the
+// same trust domain. For multi-tenant deployments, operators MUST either:
+//   - run a dedicated 143 server per tenant,
+//   - supply a per-org network via WithPreviewNetwork, or
+//   - (preferred) run Docker with per-preview networks via an out-of-band
+//     orchestrator (e.g., Kubernetes NetworkPolicies).
+//
+// See docker-compose.yml for the bridge-level warning and docs/design/overall.md.
 type DockerPreviewProvider struct {
 	client   DockerPreviewClient
 	executor SandboxExecutor
