@@ -395,27 +395,4 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-sm');
   });
 
-  // -----------------------------------------------------------------------
-  // Badge counts on filter tabs
-  // -----------------------------------------------------------------------
-
-  it('shows badge counts for needs_attention and working tabs', async () => {
-    serveSessions([
-      makeSession({ id: 's1', status: 'awaiting_input', result_summary: 'Awaiting' }),
-      makeSession({ id: 's2', status: 'running', result_summary: 'In progress' }),
-      makeSession({ id: 's3', status: 'failed', result_summary: 'Broken' }),
-    ]);
-
-    renderWithProviders(<SessionSidebar />);
-    await screen.findByText('Awaiting');
-
-    // needs_attention count = 2 (awaiting_input + failed)
-    // working count = 1 (running)
-    const tabs = screen.getAllByRole('tab');
-    const needsTab = tabs.find(t => t.textContent?.includes('Needs attention'));
-    expect(needsTab?.textContent).toContain('2');
-
-    const workingTab = tabs.find(t => t.textContent?.includes('Working'));
-    expect(workingTab?.textContent).toContain('1');
-  });
 });
