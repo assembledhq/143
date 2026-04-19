@@ -767,7 +767,7 @@ export interface AIImprovementResponse {
 
 // Audit log types
 export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
 
 export interface AuditLog {
   id: number;
