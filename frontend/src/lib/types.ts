@@ -1104,3 +1104,10 @@ export interface Team {
 export interface TeamWithMembers extends Team {
   members: User[];
 }
+
+export interface SyncTeamsResponse {
+  data: Team[];
+  synced: number;
+  skipped: number;
+  skipped_slugs: string[];
+}

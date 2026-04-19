@@ -43,7 +43,8 @@ type SessionHandler struct {
 	messageStore     *db.SessionMessageStore
 	threadStore      *db.SessionThreadStore
 	viewStore        *db.SessionViewStore
-	llmClient        llm.Client // optional, used for generating manual session titles
+	teamStore        *db.TeamStore // optional — enables cross-tenant team_id verification
+	llmClient        llm.Client    // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
@@ -62,6 +63,21 @@ func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 // SetViewStore injects the session view store for tracking unread sessions.
 func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
 	h.viewStore = vs
+}
+
+// SetTeamStore injects the team store so the handler can verify that any
+// incoming team_id belongs to the caller's org.
+func (h *SessionHandler) SetTeamStore(ts *db.TeamStore) {
+	h.teamStore = ts
+}
+
+// teamLookup returns the store as the teamLookup interface, or nil when unset.
+// Needed because a typed-nil *db.TeamStore is not equal to a nil interface.
+func (h *SessionHandler) teamLookup() teamLookup {
+	if h.teamStore == nil {
+		return nil
+	}
+	return h.teamStore
 }
 
 func NewSessionHandler(
@@ -329,14 +345,9 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// Ignore decode errors — body is optional, fields default below.
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	var teamID *uuid.UUID
-	if body.TeamID != "" {
-		parsed, err := uuid.Parse(body.TeamID)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
-			return
-		}
-		teamID = &parsed
+	teamID, ok := resolveTeamID(w, r, h.teamLookup(), orgID, body.TeamID)
+	if !ok {
+		return
 	}
 
 	agentType := models.AgentType(body.AgentType)
@@ -1065,14 +1076,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var manualTeamID *uuid.UUID
-	if body.TeamID != "" {
-		parsed, err := uuid.Parse(body.TeamID)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
-			return
-		}
-		manualTeamID = &parsed
+	manualTeamID, ok := resolveTeamID(w, r, h.teamLookup(), orgID, body.TeamID)
+	if !ok {
+		return
 	}
 
 	// Resolve repository for the manual session so the orchestrator can

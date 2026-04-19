@@ -295,8 +295,11 @@ func (s *TeamStore) SyncFromGitHub(ctx context.Context, orgID uuid.UUID, ghTeams
 		}
 
 		// Remove memberships for users no longer in the GitHub team.
+		// If GitHub reported members but none resolve to local users (e.g., users
+		// haven't onboarded yet), skip pruning so we don't wipe manually-added
+		// memberships. The earlier branch already handles the truly-empty case.
 		if len(localUserIDs) > 0 {
-			_, err = tx.Exec(ctx, `
+			if _, err := tx.Exec(ctx, `
 				DELETE FROM team_memberships
 				WHERE team_id = @team_id AND org_id = @org_id AND user_id != ALL(@user_ids)`,
 				pgx.NamedArgs{
@@ -304,13 +307,14 @@ func (s *TeamStore) SyncFromGitHub(ctx context.Context, orgID uuid.UUID, ghTeams
 					"org_id":   orgID,
 					"user_ids": localUserIDs,
 				},
-			)
+			); err != nil {
+				return fmt.Errorf("prune memberships for team %s: %w", ght.Name, err)
+			}
 		} else {
-			_, err = tx.Exec(ctx, `DELETE FROM team_memberships WHERE team_id = @team_id AND org_id = @org_id`,
-				pgx.NamedArgs{"team_id": teamID, "org_id": orgID})
-		}
-		if err != nil {
-			return fmt.Errorf("prune memberships for team %s: %w", ght.Name, err)
+			zerolog.Ctx(ctx).Warn().
+				Str("team", ght.Name).
+				Int("github_member_count", len(ght.MemberGitHubIDs)).
+				Msg("GitHub team has members but none resolve to local users; skipping membership prune to preserve manually-added members")
 		}
 	}
 

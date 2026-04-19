@@ -686,6 +686,6 @@ export const api = {
     removeMember: (teamId: string, userId: string) =>
       del(`/api/v1/teams/${teamId}/members/${userId}`),
     syncGitHub: (org?: string) =>
-      post<import('./types').ListResponse<import('./types').Team>>('/api/v1/teams/sync-github', org ? { org } : {}),
+      post<import('./types').SyncTeamsResponse>('/api/v1/teams/sync-github', org ? { org } : {}),
   },
 };

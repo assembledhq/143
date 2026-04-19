@@ -21,12 +21,28 @@ type ProjectHandler struct {
 	attachmentStore   *db.ProjectAttachmentStore
 	specStore         *db.ProjectSpecStore
 	jobStore          *db.JobStore
+	teamStore         *db.TeamStore // optional — enables cross-tenant team_id verification
 	audit             *db.AuditEmitter
 }
 
 // SetAuditEmitter injects the audit emitter for logging project events.
 func (h *ProjectHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
+}
+
+// SetTeamStore injects the team store so the handler can verify that any
+// incoming team_id belongs to the caller's org.
+func (h *ProjectHandler) SetTeamStore(ts *db.TeamStore) {
+	h.teamStore = ts
+}
+
+// teamLookup returns the store as the teamLookup interface, or nil when unset.
+// Needed because a typed-nil *db.TeamStore is not equal to a nil interface.
+func (h *ProjectHandler) teamLookup() teamLookup {
+	if h.teamStore == nil {
+		return nil
+	}
+	return h.teamStore
 }
 
 func NewProjectHandler(
@@ -233,14 +249,13 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var teamID *uuid.UUID
-	if req.TeamID != nil && *req.TeamID != "" {
-		parsed, err := uuid.Parse(*req.TeamID)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
-			return
-		}
-		teamID = &parsed
+	var teamIDRaw string
+	if req.TeamID != nil {
+		teamIDRaw = *req.TeamID
+	}
+	teamID, ok := resolveTeamID(w, r, h.teamLookup(), orgID, teamIDRaw)
+	if !ok {
+		return
 	}
 
 	execMode := models.ProjectExecModeSequential
@@ -461,16 +476,11 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.TeamID != nil {
-		if *req.TeamID == "" {
-			project.TeamID = nil
-		} else {
-			parsed, err := uuid.Parse(*req.TeamID)
-			if err != nil {
-				writeError(w, r, http.StatusBadRequest, "INVALID_TEAM_ID", "invalid team_id")
-				return
-			}
-			project.TeamID = &parsed
+		resolved, ok := resolveTeamID(w, r, h.teamLookup(), orgID, *req.TeamID)
+		if !ok {
+			return
 		}
+		project.TeamID = resolved
 	}
 
 	if err := h.projectStore.Update(r.Context(), &project); err != nil {

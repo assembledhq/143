@@ -266,6 +266,122 @@ func TestOrgTeamHandler_SyncGitHub_503WhenNotConfigured(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "GITHUB_NOT_CONFIGURED")
 }
 
+// --- Update ---
+
+func TestOrgTeamHandler_Update_Success(t *testing.T) {
+	t.Parallel()
+
+	var capturedName, capturedSlug string
+	teams := &mockOrgTeamStore{
+		updateFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, name, slug string, _ *string) error {
+			capturedName = name
+			capturedSlug = slug
+			return nil
+		},
+		getByIDFn: func(_ context.Context, orgID, teamID uuid.UUID) (models.Team, error) {
+			return models.Team{ID: teamID, OrgID: orgID, Name: "Renamed", Slug: "renamed"}, nil
+		},
+	}
+	h := newOrgTeamHandler(teams, nil)
+
+	body := map[string]string{"name": "Renamed"}
+	buf, _ := json.Marshal(body)
+
+	teamID := uuid.New()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/teams/"+teamID.String(), bytes.NewReader(buf))
+	req = req.WithContext(withChiParam(orgTeamCtx(uuid.New(), &models.User{ID: uuid.New()}), "id", teamID.String()))
+	rec := httptest.NewRecorder()
+
+	h.Update(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "Renamed", capturedName)
+	require.Equal(t, "renamed", capturedSlug)
+	require.Contains(t, rec.Body.String(), "Renamed")
+}
+
+func TestOrgTeamHandler_Update_NotFound(t *testing.T) {
+	t.Parallel()
+
+	teams := &mockOrgTeamStore{
+		updateFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, _, _ string, _ *string) error {
+			return pgx.ErrNoRows
+		},
+	}
+	h := newOrgTeamHandler(teams, nil)
+
+	body := map[string]string{"name": "X"}
+	buf, _ := json.Marshal(body)
+
+	teamID := uuid.New()
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/teams/"+teamID.String(), bytes.NewReader(buf))
+	req = req.WithContext(withChiParam(orgTeamCtx(uuid.New(), &models.User{ID: uuid.New()}), "id", teamID.String()))
+	rec := httptest.NewRecorder()
+
+	h.Update(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "NOT_FOUND")
+}
+
+// --- Delete ---
+
+func TestOrgTeamHandler_Delete_Success(t *testing.T) {
+	t.Parallel()
+
+	var capturedOrgID, capturedTeamID uuid.UUID
+	teams := &mockOrgTeamStore{
+		deleteFn: func(_ context.Context, orgID, teamID uuid.UUID) error {
+			capturedOrgID = orgID
+			capturedTeamID = teamID
+			return nil
+		},
+	}
+	h := newOrgTeamHandler(teams, nil)
+
+	orgID := uuid.New()
+	teamID := uuid.New()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/teams/"+teamID.String(), nil)
+	req = req.WithContext(withChiParam(orgTeamCtx(orgID, &models.User{ID: uuid.New()}), "id", teamID.String()))
+	rec := httptest.NewRecorder()
+
+	h.Delete(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, orgID, capturedOrgID)
+	require.Equal(t, teamID, capturedTeamID)
+}
+
+func TestOrgTeamHandler_Delete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	teams := &mockOrgTeamStore{
+		deleteFn: func(_ context.Context, _, _ uuid.UUID) error {
+			return pgx.ErrNoRows
+		},
+	}
+	h := newOrgTeamHandler(teams, nil)
+
+	teamID := uuid.New()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/teams/"+teamID.String(), nil)
+	req = req.WithContext(withChiParam(orgTeamCtx(uuid.New(), &models.User{ID: uuid.New()}), "id", teamID.String()))
+	rec := httptest.NewRecorder()
+
+	h.Delete(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "NOT_FOUND")
+}
+
+func TestOrgTeamHandler_Delete_RejectsInvalidID(t *testing.T) {
+	t.Parallel()
+
+	h := newOrgTeamHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/teams/not-a-uuid", nil)
+	req = req.WithContext(withChiParam(orgTeamCtx(uuid.New(), &models.User{ID: uuid.New()}), "id", "not-a-uuid"))
+	rec := httptest.NewRecorder()
+
+	h.Delete(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "INVALID_ID")
+}
+
 // --- toSlug helper ---
 
 func TestToSlug(t *testing.T) {

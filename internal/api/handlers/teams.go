@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -412,18 +413,25 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find GitHub integration for this org.
+	// Find GitHub integration for this org. Filter to active integrations so a
+	// stale/revoked integration ahead of an active one doesn't leak bad creds.
 	integrations, err := h.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_INTEGRATIONS_FAILED", "failed to list integrations", err)
 		return
 	}
-	if len(integrations) == 0 {
+	var integration *models.Integration
+	for i := range integrations {
+		if integrations[i].Status == models.IntegrationStatusActive {
+			integration = &integrations[i]
+			break
+		}
+	}
+	if integration == nil {
 		writeError(w, r, http.StatusNotFound, "NO_GITHUB_INTEGRATION", "no active GitHub integration found")
 		return
 	}
 
-	integration := integrations[0]
 	var config struct {
 		InstallationID int64 `json:"installation_id"`
 	}
@@ -445,15 +453,34 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Derive GitHub org name from repos, falling back to the request body.
+	// Pick the owner that appears most often across the org's repos so we're
+	// deterministic when repos span multiple GitHub orgs; ties break
+	// alphabetically to keep the choice stable across calls.
 	githubOrg := reqBody.Org
 	if githubOrg == "" {
 		repos, repoErr := h.repos.ListByOrg(ctx, orgID)
 		if repoErr == nil {
+			counts := map[string]int{}
 			for _, repo := range repos {
-				if parts := strings.SplitN(repo.FullName, "/", 2); len(parts) == 2 {
-					githubOrg = parts[0]
-					break
+				if parts := strings.SplitN(repo.FullName, "/", 2); len(parts) == 2 && parts[0] != "" {
+					counts[parts[0]]++
 				}
+			}
+			maxCount := 0
+			for _, n := range counts {
+				if n > maxCount {
+					maxCount = n
+				}
+			}
+			tied := make([]string, 0, len(counts))
+			for owner, n := range counts {
+				if n == maxCount {
+					tied = append(tied, owner)
+				}
+			}
+			sort.Strings(tied)
+			if len(tied) > 0 {
+				githubOrg = tied[0]
 			}
 		}
 	}
@@ -470,11 +497,11 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type syncResult struct {
-		sync db.GitHubTeamSync
-		ok   bool
-	}
-	results := make([]syncResult, len(ghTeams))
+	// Each slot holds a non-nil *db.GitHubTeamSync on success, nil on failure.
+	// A nil pointer is an explicit "skipped" marker rather than relying on an
+	// uninitialised zero-value struct.
+	results := make([]*db.GitHubTeamSync, len(ghTeams))
+	skippedSlugs := make([]string, len(ghTeams))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 10)
 	for i, ght := range ghTeams {
@@ -486,6 +513,7 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 			members, memberErr := h.githubSvc.ListTeamMembers(ctx, token, githubOrg, ght.Slug)
 			if memberErr != nil {
 				zerolog.Ctx(ctx).Warn().Err(memberErr).Str("team", ght.Slug).Msg("failed to fetch team members, skipping")
+				skippedSlugs[idx] = ght.Slug
 				return
 			}
 
@@ -494,25 +522,29 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 				memberIDs[j] = m.ID
 			}
 
-			desc := ght.Description
-			results[idx] = syncResult{
-				sync: db.GitHubTeamSync{
-					GitHubTeamID:    ght.ID,
-					GitHubTeamSlug:  ght.Slug,
-					Name:            ght.Name,
-					Description:     &desc,
-					MemberGitHubIDs: memberIDs,
-				},
-				ok: true,
+			var descPtr *string
+			if ght.Description != "" {
+				desc := ght.Description
+				descPtr = &desc
+			}
+			results[idx] = &db.GitHubTeamSync{
+				GitHubTeamID:    ght.ID,
+				GitHubTeamSlug:  ght.Slug,
+				Name:            ght.Name,
+				Description:     descPtr,
+				MemberGitHubIDs: memberIDs,
 			}
 		}(i, ght)
 	}
 	wg.Wait()
 
 	syncTeams := make([]db.GitHubTeamSync, 0, len(ghTeams))
-	for _, r := range results {
-		if r.ok {
-			syncTeams = append(syncTeams, r.sync)
+	skipped := make([]string, 0)
+	for i, res := range results {
+		if res != nil {
+			syncTeams = append(syncTeams, *res)
+		} else if skippedSlugs[i] != "" {
+			skipped = append(skipped, skippedSlugs[i])
 		}
 	}
 
@@ -523,7 +555,10 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 
 	emitUserAudit(h.audit, r, models.AuditActionOrgTeamGitHubSynced, models.AuditResourceOrgTeam, nil, nil)
 
-	// Return updated team list.
+	// Return updated team list. `skipped_slugs` lists GitHub teams whose member
+	// fetch failed and were excluded from this sync — non-empty means callers
+	// should retry to pick up missing teams. Stale teams that no longer exist
+	// on GitHub are intentionally left untouched; this sync only upserts.
 	teams, err := h.teams.ListByOrg(ctx, orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "sync succeeded but failed to list teams", err)
@@ -532,5 +567,17 @@ func (h *OrgTeamHandler) SyncGitHub(w http.ResponseWriter, r *http.Request) {
 	if teams == nil {
 		teams = []models.Team{}
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.Team]{Data: teams})
+	writeJSON(w, http.StatusOK, syncResponse{
+		Data:         teams,
+		Synced:       len(syncTeams),
+		Skipped:      len(skipped),
+		SkippedSlugs: skipped,
+	})
+}
+
+type syncResponse struct {
+	Data         []models.Team `json:"data"`
+	Synced       int           `json:"synced"`
+	Skipped      int           `json:"skipped"`
+	SkippedSlugs []string      `json:"skipped_slugs"`
 }

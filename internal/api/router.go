@@ -164,6 +164,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		logger,
 	)
 	sessionHandler.SetViewStore(sessionViewStore)
+	sessionHandler.SetTeamStore(teamStore)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -209,6 +210,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
+	projectHandler.SetTeamStore(teamStore)
 
 	automationStore := db.NewAutomationStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
@@ -445,9 +447,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
 			r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
 
-			// Teams — summary list and caller-scoped list are safe for all roles.
-			// Full team detail (with members) is admin-only; see below.
-			r.Get("/api/v1/teams", orgTeamHandler.List)
+			// Non-admins can only see the teams they belong to. The full org-wide
+			// list (and member details) is admin-only; see below.
 			r.Get("/api/v1/teams/mine", orgTeamHandler.ListMine)
 
 			r.Get("/api/v1/repositories", repoHandler.List)
@@ -683,6 +684,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
 
 			// Org teams management
+			r.Get("/api/v1/teams", orgTeamHandler.List)
 			r.Post("/api/v1/teams", orgTeamHandler.Create)
 			r.Get("/api/v1/teams/{id}", orgTeamHandler.Get)
 			r.Patch("/api/v1/teams/{id}", orgTeamHandler.Update)

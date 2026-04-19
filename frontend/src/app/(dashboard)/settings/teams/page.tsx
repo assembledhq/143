@@ -94,8 +94,16 @@ export default function TeamsSettingsPage() {
 
   const syncGitHubMutation = useMutation({
     mutationFn: () => api.teams.syncGitHub(),
-    onSuccess: () => {
-      toast.success("Teams synced from GitHub");
+    onSuccess: (res) => {
+      if (res.skipped > 0) {
+        const preview = res.skipped_slugs.slice(0, 3).join(", ");
+        const more = res.skipped_slugs.length > 3 ? ` (+${res.skipped_slugs.length - 3} more)` : "";
+        toast.warning(
+          `Synced ${res.synced} team${res.synced === 1 ? "" : "s"}; ${res.skipped} skipped: ${preview}${more}. Try again.`
+        );
+      } else {
+        toast.success(`Synced ${res.synced} team${res.synced === 1 ? "" : "s"} from GitHub`);
+      }
       invalidateTeams();
     },
     onError: () => toast.error("Failed to sync teams from GitHub"),
