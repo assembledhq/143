@@ -101,8 +101,15 @@ fi
 scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy"
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
+fi
+if [ "$ROLE" = "worker" ]; then
+  # Keep the sandbox firewall script in sync so every deploy can re-apply
+  # the egress rules (they read the sandbox network's current subnet).
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod +x /opt/143/deploy/scripts/sandbox-firewall.sh"
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
@@ -196,9 +203,20 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
     # Ensure the shared sandbox egress network exists (idempotent). Older hosts
     # provisioned before this was added won't have it, and session creation
-    # will fail until it does.
+    # will fail until it does. enable_icc=false blocks one sandbox from
+    # TCP-connecting to another on the same bridge.
     docker network inspect 143-sandbox >/dev/null 2>&1 || \
-      docker network create --driver bridge --label managed-by=143 143-sandbox
+      docker network create --driver bridge \
+        --opt com.docker.network.bridge.enable_icc=false \
+        --label managed-by=143 143-sandbox
+    # Install iptables-persistent on hosts that predate it (no-op otherwise).
+    sudo apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
+    # Re-apply sandbox egress firewall. Script is idempotent — safe to run
+    # on every deploy. Ensures rules exist even if someone flushed iptables
+    # or the sandbox network was recreated with a new subnet.
+    if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
+      sudo /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
+    fi
   fi
 
   # Run migrations BEFORE restarting the app so the DB schema is ready when

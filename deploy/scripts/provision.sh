@@ -220,7 +220,15 @@ PULL_APP
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
       su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
       # Ensure the shared sandbox egress network exists (idempotent).
-      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --label managed-by=143 143-sandbox'
+      # enable_icc=false blocks one sandbox from TCP-connecting to another.
+      su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+      # Install iptables-persistent so the egress block survives reboots.
+      apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
+      # Apply sandbox egress firewall. Script is idempotent and reads the
+      # network's current subnet, so safe to re-run on every provision.
+      if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
+        /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
+      fi
 PULL_WORKER
     ;;
   db|logging)

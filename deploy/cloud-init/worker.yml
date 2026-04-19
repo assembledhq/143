@@ -27,6 +27,7 @@ packages:
   - git
   - jq
   - curl
+  - iptables-persistent
 
 runcmd:
   # Install gVisor
@@ -51,8 +52,13 @@ runcmd:
 
   # Create the shared sandbox egress network (idempotent). The worker also
   # self-heals this at startup, but pre-creating it on bootstrap means the
-  # first health check never has to.
-  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --label managed-by=143 143-sandbox'
+  # first health check never has to. enable_icc=false blocks one sandbox
+  # from TCP-connecting to another on the same bridge.
+  - su - deploy -c 'docker network inspect 143-sandbox >/dev/null 2>&1 || docker network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label managed-by=143 143-sandbox'
+
+  # Apply host-level egress rules: block sandbox traffic to cloud metadata
+  # and RFC1918. Must run AFTER the network exists (reads its subnet).
+  - /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
 
   # Apply kernel tuning
   - sysctl -p /etc/sysctl.d/99-worker.conf
