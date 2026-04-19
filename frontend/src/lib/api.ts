@@ -152,6 +152,7 @@ export const api = {
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
+    detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
   },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
@@ -282,6 +283,30 @@ export const api = {
       if (above != null) params.set('above', String(above));
       if (below != null) params.set('below', String(below));
       return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
+    },
+    preview: {
+      get: (sessionId: string) =>
+        get<import('./types').SingleResponse<import('./preview-types').PreviewStatusResponse>>(`/api/v1/sessions/${sessionId}/preview`)
+          .then(r => r.data),
+      start: (sessionId: string, config?: Record<string, unknown>) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
+          .then(r => r.data),
+      stop: (sessionId: string) => del(`/api/v1/sessions/${sessionId}/preview`),
+      restart: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/restart`),
+      bootstrap: (sessionId: string) =>
+        post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/sessions/${sessionId}/preview/bootstrap`)
+          .then(r => r.data),
+      extend: (sessionId: string) => post(`/api/v1/sessions/${sessionId}/preview/extend`),
+      services: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
+          .then(r => r.data),
+      console: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+          .then(r => r.data),
+      inspect: (sessionId: string, x: number, y: number) =>
+        post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
+          .then(r => r.data),
+      designFeedback: (sessionId: string, feedback: import('./preview-types').DesignModeFeedback) => post(`/api/v1/sessions/${sessionId}/preview/design-feedback`, feedback),
     },
   },
   settings: {

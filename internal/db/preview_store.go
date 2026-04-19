@@ -49,7 +49,7 @@ const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy'
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, error, created_at, updated_at`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -84,12 +84,12 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			session_id, org_id, user_id, profile_name, name, status, provider,
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
-			last_path, memory_limit_mb, cpu_limit_millis
+			last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
-			@last_path, @memory_limit_mb, @cpu_limit_millis
+			@last_path, @memory_limit_mb, @cpu_limit_millis, @recycle_config, @recycle_sandbox
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -110,6 +110,8 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 		"last_path":        p.LastPath,
 		"memory_limit_mb":  p.MemoryLimitMB,
 		"cpu_limit_millis": p.CPULimitMillis,
+		"recycle_config":   p.RecycleConfig,
+		"recycle_sandbox":  p.RecycleSandbox,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview instance: %w", err)
@@ -180,6 +182,22 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	return nil
 }
 
+// UpdatePreviewStatusIfActive atomically transitions a preview to the given
+// status only if its current status is not terminal (stopped, failed, expired).
+// Returns true if the update took effect, false if the preview was already
+// terminal (no error). This eliminates the TOCTOU window in RecyclePreview.
+func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (bool, error) {
+	query := `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id": id, "org_id": orgID, "status": status, "error": errMsg,
+	})
+	if err != nil {
+		return false, fmt.Errorf("conditional update preview status: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // UpdatePreviewAccess updates the last_accessed_at timestamp.
 func (s *PreviewStore) UpdatePreviewAccess(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
@@ -231,6 +249,118 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 		return fmt.Errorf("preview instance not found or already stopped")
 	}
 	return nil
+}
+
+// UpdatePreviewHandle updates the provider handle and primary port. A new
+// handle implies the preview process restarted successfully, so recycled_at is
+// refreshed to anchor the next recycle window.
+func (s *PreviewStore) UpdatePreviewHandle(ctx context.Context, orgID, id uuid.UUID, handle string, port int) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET preview_handle = @handle, port = @port, updated_at = now(), recycled_at = now()
+		 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "handle": handle, "port": port},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview handle: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+// ListActivePreviews returns all active previews for a given worker node.
+// lint:allow-no-orgid reason="worker-scoped background sweep; scans across all orgs by design"
+func (s *PreviewStore) ListActivePreviews(ctx context.Context, workerNodeID string) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s
+		ORDER BY created_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_node_id": workerNodeID})
+	if err != nil {
+		return nil, fmt.Errorf("list active previews: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
+	}
+	return result, nil
+}
+
+// ListActivePreviewsRecycledBefore returns active previews on the given worker
+// whose last successful start/recycle was before the cutoff time. Used by the
+// recycler to avoid repeatedly restarting a long-lived row after its first recycle.
+// lint:allow-no-orgid reason="worker-scoped background recycler; scans across all orgs by design"
+func (s *PreviewStore) ListActivePreviewsRecycledBefore(ctx context.Context, workerNodeID string, recycledBefore time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s AND recycled_at < @recycled_before
+		ORDER BY recycled_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"worker_node_id":  workerNodeID,
+		"recycled_before": recycledBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list active previews recycled before: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
+	}
+	return result, nil
+}
+
+// ScheduleRecycle marks a preview for recycle in the future by stamping the
+// recycle_scheduled_at column. Safe to call only when the column is NULL —
+// the partial update avoids pushing the window out repeatedly if the
+// recycler sweeps more than once within the grace period.
+func (s *PreviewStore) ScheduleRecycle(ctx context.Context, orgID, previewID uuid.UUID, at time.Time) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances
+		 SET recycle_scheduled_at = @at, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND recycle_scheduled_at IS NULL`,
+		pgx.NamedArgs{"id": previewID, "org_id": orgID, "at": at},
+	)
+	if err != nil {
+		return false, fmt.Errorf("schedule recycle: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ClearRecycleSchedule resets the scheduled recycle timestamp back to NULL.
+// Called after the recycler performs (or cancels) the recycle.
+func (s *PreviewStore) ClearRecycleSchedule(ctx context.Context, orgID, previewID uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE preview_instances
+		 SET recycle_scheduled_at = NULL, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": previewID, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("clear recycle schedule: %w", err)
+	}
+	return nil
+}
+
+// ListPreviewsScheduledToRecycleBefore returns active previews on this worker
+// whose recycle_scheduled_at is at or before the cutoff — i.e., their grace
+// period has elapsed and the recycler should now restart them.
+// lint:allow-no-orgid reason="worker-scoped background recycler; scans across all orgs by design"
+func (s *PreviewStore) ListPreviewsScheduledToRecycleBefore(ctx context.Context, workerNodeID string, cutoff time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE worker_node_id = @worker_node_id AND status IN %s
+		  AND recycle_scheduled_at IS NOT NULL AND recycle_scheduled_at <= @cutoff
+		ORDER BY recycle_scheduled_at ASC`, previewInstanceColumns, activeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"worker_node_id": workerNodeID,
+		"cutoff":         cutoff,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list previews scheduled to recycle: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview instance: %w", err)
+	}
+	return result, nil
 }
 
 // CountActivePreviewsByOrg counts active previews for concurrency cap enforcement.
@@ -521,21 +651,35 @@ func (s *PreviewStore) CountSnapshotsByPreview(ctx context.Context, orgID, previ
 }
 
 // DeleteOldestSnapshots removes the oldest snapshots beyond a keep limit, scoped through org.
-func (s *PreviewStore) DeleteOldestSnapshots(ctx context.Context, orgID, previewInstanceID uuid.UUID, keepCount int) error {
-	_, err := s.db.Exec(ctx,
+// It returns the blob_ref paths of the deleted snapshots so callers can clean up
+// the corresponding files on disk.
+func (s *PreviewStore) DeleteOldestSnapshots(ctx context.Context, orgID, previewInstanceID uuid.UUID, keepCount int) ([]string, error) {
+	rows, err := s.db.Query(ctx,
 		`DELETE FROM preview_snapshots WHERE id IN (
 			SELECT ps.id FROM preview_snapshots ps
 			JOIN preview_instances pi ON pi.id = ps.preview_instance_id
 			WHERE ps.preview_instance_id = @pid AND pi.org_id = @org_id
 			ORDER BY ps.created_at DESC
 			OFFSET @keep
-		)`,
+		) RETURNING blob_ref`,
 		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID, "keep": keepCount},
 	)
 	if err != nil {
-		return fmt.Errorf("delete oldest snapshots: %w", err)
+		return nil, fmt.Errorf("delete oldest snapshots: %w", err)
 	}
-	return nil
+	defer rows.Close()
+
+	var blobRefs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return blobRefs, fmt.Errorf("scan blob_ref: %w", err)
+		}
+		if ref != "" {
+			blobRefs = append(blobRefs, ref)
+		}
+	}
+	return blobRefs, rows.Err()
 }
 
 // =============================================================================
@@ -667,6 +811,22 @@ func (s *PreviewStore) GetAccessSessionByTokenUnscoped(ctx context.Context, toke
 	return &row, nil
 }
 
+// GetAccessSessionByID retrieves an access session by ID, scoped to org.
+func (s *PreviewStore) GetAccessSessionByID(ctx context.Context, orgID, id uuid.UUID) (*models.PreviewAccessSession, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_access_sessions
+		WHERE id = @id AND org_id = @org_id`, previewAccessSessionColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query access session: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewAccessSession])
+	if err != nil {
+		return nil, fmt.Errorf("get access session by id: %w", err)
+	}
+	return &row, nil
+}
+
 // RevokeAccessSession revokes a single access session, scoped to org.
 func (s *PreviewStore) RevokeAccessSession(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
@@ -686,7 +846,10 @@ func (s *PreviewStore) RevokeAllForPreview(ctx context.Context, orgID, previewIn
 		 WHERE preview_instance_id = @pid AND org_id = @org_id AND revoked_at IS NULL`,
 		pgx.NamedArgs{"pid": previewInstanceID, "org_id": orgID},
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("revoke all access sessions for preview: %w", err)
+	}
+	return nil
 }
 
 // UpdateAccessSessionActivity updates the last_accessed_at for an access session, scoped to org.
@@ -697,6 +860,26 @@ func (s *PreviewStore) UpdateAccessSessionActivity(ctx context.Context, orgID, i
 	)
 	if err != nil {
 		return fmt.Errorf("update access session activity: %w", err)
+	}
+	return nil
+}
+
+// ErrSessionRevoked is returned when an extend operation targets a revoked session.
+var ErrSessionRevoked = fmt.Errorf("access session has been revoked")
+
+// ExtendAccessSessionExpiry extends the expires_at for an active access session.
+// Returns ErrSessionRevoked if the session was revoked (0 rows affected).
+func (s *PreviewStore) ExtendAccessSessionExpiry(ctx context.Context, orgID, id uuid.UUID, newExpiry time.Time) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_access_sessions SET expires_at = @expires_at
+		 WHERE id = @id AND org_id = @org_id AND revoked_at IS NULL`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "expires_at": newExpiry},
+	)
+	if err != nil {
+		return fmt.Errorf("extend access session expiry: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrSessionRevoked
 	}
 	return nil
 }
@@ -713,9 +896,9 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 		) VALUES (
 			@org_id, @repo_id, @snapshot_key, @blob_path, @size_bytes, @worker_node_id
 		)
-		ON CONFLICT (org_id, repo_id, snapshot_key)
+		ON CONFLICT (org_id, repo_id, snapshot_key, worker_node_id)
 		DO UPDATE SET blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
-			worker_node_id = EXCLUDED.worker_node_id, last_used_at = now()
+			last_used_at = now()
 		RETURNING %s`, previewStartupCacheColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -738,12 +921,12 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 }
 
 // FindMatchingCache looks up a startup cache entry by snapshot key.
-func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*models.PreviewStartupCache, error) {
+func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey, workerNodeID string) (*models.PreviewStartupCache, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
-		WHERE org_id = @org_id AND repo_id = @repo_id AND snapshot_key = @key`, previewStartupCacheColumns)
+		WHERE org_id = @org_id AND repo_id = @repo_id AND snapshot_key = @key AND worker_node_id = @worker_node_id`, previewStartupCacheColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id": orgID, "repo_id": repoID, "key": snapshotKey,
+		"org_id": orgID, "repo_id": repoID, "key": snapshotKey, "worker_node_id": workerNodeID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query startup cache: %w", err)
