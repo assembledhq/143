@@ -133,14 +133,16 @@ function checkResultBadge(result: string | null) {
 
 type DetailTab = "overview" | "changes" | "validation" | "preview";
 
+const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
-  // Force re-render every 5s while pending so the elapsed time stays current.
+  // Force re-render every 5s while the session is active so elapsed time stays current.
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (session.status !== "pending") return;
+    if (terminalSessionStatuses.has(session.status)) return;
     const id = setInterval(() => setTick((t) => t + 1), 5000);
     return () => clearInterval(id);
   }, [session.status]);
@@ -162,8 +164,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   });
 
   const status = statusConfig[session.status] || statusConfig.pending;
-  const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
-  const isActive = !terminalStatuses.has(session.status);
+  const isActive = !terminalSessionStatuses.has(session.status);
 
   const triggeredByLabel = session.pm_plan_id && !session.triggered_by_user_id
     ? "PM Agent"
@@ -296,11 +297,15 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
             <span className="inline-flex items-center gap-1.5">
               <Timer className="h-3 w-3" />
-              {session.status === "pending" ? formatDuration(session.created_at) : formatDuration(session.started_at, session.completed_at)}
+              {session.status === "pending"
+                ? formatDuration(session.created_at)
+                : isActive
+                  ? formatDuration(session.started_at)
+                  : formatDuration(session.started_at, session.completed_at)}
             </span>
           )}
           <span className="inline-flex items-center gap-1.5">
-            {session.completed_at ? (
+            {!isActive && session.completed_at ? (
               session.status === "failed" ? (
                 <>
                   <XCircle className="h-3 w-3" />

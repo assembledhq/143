@@ -231,7 +231,10 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
 	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == "running" {
-		query = `UPDATE sessions SET status = @status, started_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		// Clear completed_at so a resumed session doesn't display as "completed"
+		// while actively running. Duration is computed from started_at, so that is
+		// also refreshed to reflect the current run.
+		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
 		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
@@ -294,7 +297,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running'
+		SET status = 'running', started_at = now(), completed_at = NULL
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
