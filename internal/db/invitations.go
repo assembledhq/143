@@ -28,21 +28,22 @@ func (s *InvitationStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return txStarter.Begin(ctx)
 }
 
-const invitationSelectColumns = `id, org_id, email, role, invited_by, token, status, expires_at, created_at, accepted_at`
+const invitationSelectColumns = `id, org_id, email, github_username, role, invited_by, token, status, expires_at, created_at, accepted_at`
 
 // Create inserts a new invitation and populates the generated fields on the input.
 func (s *InvitationStore) Create(ctx context.Context, inv *models.Invitation) error {
-	query := `INSERT INTO invitations (org_id, email, role, invited_by, token, expires_at)
-		VALUES (@org_id, @email, @role, @invited_by, @token, @expires_at)
+	query := `INSERT INTO invitations (org_id, email, github_username, role, invited_by, token, expires_at)
+		VALUES (@org_id, @email, @github_username, @role, @invited_by, @token, @expires_at)
 		RETURNING id, status, created_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":     inv.OrgID,
-		"email":      inv.Email,
-		"role":       inv.Role,
-		"invited_by": inv.InvitedBy,
-		"token":      inv.Token,
-		"expires_at": inv.ExpiresAt,
+		"org_id":          inv.OrgID,
+		"email":           inv.Email,
+		"github_username": inv.GitHubUsername,
+		"role":            inv.Role,
+		"invited_by":      inv.InvitedBy,
+		"token":           inv.Token,
+		"expires_at":      inv.ExpiresAt,
 	})
 	return row.Scan(&inv.ID, &inv.Status, &inv.CreatedAt)
 }
@@ -71,7 +72,7 @@ func (s *InvitationStore) ListPendingByOrg(ctx context.Context, orgID uuid.UUID)
 
 // ListPendingByOrgWithInviter returns pending invitations with the inviter's name via JOIN.
 func (s *InvitationStore) ListPendingByOrgWithInviter(ctx context.Context, orgID uuid.UUID) ([]models.InvitationWithInviter, error) {
-	query := `SELECT i.id, i.org_id, i.email, i.role, i.invited_by, i.token, i.status, i.expires_at, i.created_at, i.accepted_at,
+	query := `SELECT i.id, i.org_id, i.email, i.github_username, i.role, i.invited_by, i.token, i.status, i.expires_at, i.created_at, i.accepted_at,
 		COALESCE(u.name, '') AS inviter_name
 		FROM invitations i
 		LEFT JOIN users u ON u.id = i.invited_by
