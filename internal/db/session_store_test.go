@@ -592,6 +592,44 @@ func TestSessionStore_Archive(t *testing.T) {
 	})
 }
 
+func TestSessionStore_ArchiveSystem(t *testing.T) {
+	t.Parallel()
+
+	t.Run("archives session without a user actor", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("is a no-op when the session is already archived", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
+		require.NoError(t, err, "already-archived sessions should not produce an error")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
 func TestSessionStore_Unarchive(t *testing.T) {
 	t.Parallel()
 

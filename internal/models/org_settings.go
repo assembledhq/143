@@ -193,6 +193,7 @@ type OrgSettings struct {
 	ContextLimits              ContextLimits   `json:"context_limits,omitempty"`
 	PRAuthorship               PRAuthorship    `json:"pr_authorship,omitempty"`
 	PRDraftDefault             bool            `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose       bool            `json:"auto_archive_on_pr_close,omitempty"`
 }
 
 // Agent autonomy mode constants.
