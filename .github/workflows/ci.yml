@@ -95,10 +95,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      # actions/checkout on pull_request checks out refs/pull/N/merge and does not
+      # always set up origin/main as a remote-tracking ref — fetch it explicitly so
+      # diff-cover's `--compare-branch=origin/main` resolves.
+      - name: Fetch base branch (PR only)
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
 
       - uses: actions/setup-python@v5
         if: github.event_name == 'pull_request'
@@ -184,12 +191,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      # actions/checkout on pull_request checks out refs/pull/N/merge and does not
+      # always set up origin/main as a remote-tracking ref — fetch it explicitly so
+      # vitest --changed=origin/main and diff-cover both resolve.
+      - name: Fetch base branch (PR only)
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        run: git fetch --no-tags --prune origin +refs/heads/main:refs/remotes/origin/main
 
       - uses: actions/setup-python@v5
         if: github.event_name == 'pull_request'
