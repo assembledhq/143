@@ -113,9 +113,11 @@ Today every query is manually scoped by `org_id` in SQL. With multi-org users, f
 
 Three layers, all required:
 
-1. **Postgres RLS or stricter store API.** Prefer Postgres RLS keyed off a transaction-local `SET LOCAL app.current_org_id` for sensitive org-scoped tables. If RLS is deferred, introduce a stricter store construction path that binds `org_id` before any org-scoped method can be called. A SQL-string wrapper that only checks whether text contains `org_id` is not sufficient as the main defense; it can catch obvious misses but cannot prove the predicate is correct.
+1. **Org-bound store API.** Introduce a store construction path that takes `org_id` from the request context and returns handles whose query methods are pre-bound to that org. Org-scoped methods accept the scoped handle, not the raw pool. The goal is that "forget the `WHERE org_id = ...`" becomes a type error at the call site, not a runtime bug. A SQL-string wrapper that greps query text for `org_id` is not sufficient as the main defense — it can catch obvious misses but cannot prove the predicate is correct. The binding has to happen at the store/handle layer.
 2. **Cross-org isolation integration test, per handler.** A shared test helper asserts that when a user with memberships in OrgA and OrgB requests resource X (created in OrgA) with OrgB active, they get 404 — not the resource, not a 500. Every handler under `internal/api/handlers/` gets one test case enumerated from a table.
-3. **Static tenancy audit stays in CI.** Keep and expand the existing `internal/db/tenancy_test.go` SQL scan. It is still useful as a cheap regression detector even if RLS is enabled.
+3. **Static tenancy audit stays in CI.** Keep and expand the existing `internal/db/tenancy_test.go` SQL scan. It is cheap, catches the obvious "added a new query, forgot `org_id`" regression, and complements the store-layer defense.
+
+We considered Postgres RLS keyed off a transaction-local `SET LOCAL app.current_org_id` and rejected it for 143's situation. RLS shines when the database serves queries from untrusted sources (Supabase's model); here all SQL is ours, which means the store-bound API gets most of the safety benefit with none of the operational tax — no owner-bypass footguns during migrations, no invisible predicates in query plans, no separate bypassing role for support tooling, and nothing new for pgx/PgBouncer transaction management. Revisit if we ever let customers run SQL directly.
 
 The PR that ships the memberships table and middleware change is not mergeable without these layers.
 
@@ -213,7 +215,7 @@ What stays identical for today's single-org users:
 Each step is independently revertible until step 6.
 
 1. **Schema migration.** Add `organization_memberships`. Backfill one row per existing user from `users.org_id` / `users.role`. Add nullable `auth_sessions.last_org_id` and backfill from `auth_sessions.org_id`. Keep `users.org_id` / `users.role` in place for one release as a read-through shim.
-2. **Defense-in-depth landed first.** Ship RLS or the stricter org-bound store API, expand the static tenancy audit, and add the cross-org isolation integration test harness *before* any behavioral change. This is the PR that makes the rest safe.
+2. **Defense-in-depth landed first.** Ship the org-bound store API, expand the static tenancy audit, and add the cross-org isolation integration test harness *before* any behavioral change. This is the PR that makes the rest safe.
 3. **Backend dual-read.** Middleware reads membership from the new table but asserts equivalence with `users.org_id` for single-org users. Log mismatches. Ship behind a feature flag for engineers first.
 4. **Backend cutover.** Writes (invite accept, signup, org create, team role changes, member removal) go through the memberships table. Drop the equivalence assertion. `RequireRole` refactored to use active-org membership role.
 5. **API + frontend additions.** `active-org` endpoint, expanded `/auth/me`, `X-Active-Org-ID` API-client header, `ActiveOrgProvider`, `OrgContextSwitcher` (shipped hidden for single-org users from day 1), copy-link `?org=` writer.
@@ -314,7 +316,7 @@ Each step is independently revertible until step 6.
 
 ### Risk 4: Data-scoping regressions now leak across orgs instead of failing safe
 
-*Resolved in design* with RLS or a stricter org-bound store API, the existing static tenancy audit, and mandatory per-handler cross-org isolation integration tests. Defense-in-depth lands before behavioral change (rollout step 2).
+*Resolved in design* with a typed org-bound store API, the existing static tenancy audit, and mandatory per-handler cross-org isolation integration tests. Defense-in-depth lands before behavioral change (rollout step 2). Postgres RLS was considered and rejected — see the defense-in-depth section for the trade-off.
 
 ### Risk 5: Destructive column drop
 
@@ -342,9 +344,8 @@ Each step is independently revertible until step 6.
 
 ## Open Questions
 
-1. **Exact RLS rollout shape** (Risk 4). RLS is the preferred defense for sensitive org-scoped tables, but it needs careful connection/transaction handling with pgx pools. Decide whether to enable it for all org-scoped tables in one migration or phase it in table-by-table behind integration tests.
-2. **Auto-switch on deep-link — prompt vs. silent** (Risk 3). Starting with prompt to avoid surprise. Revisit after two weeks of usage data.
-3. **Default org name.** "Personal" is the proposal. Alternatives: "<first-name>'s workspace," or a required prompt. Going with "Personal" because it minimizes onboarding friction.
+1. **Auto-switch on deep-link — prompt vs. silent** (Risk 3). Starting with prompt to avoid surprise. Revisit after two weeks of usage data.
+2. **Default org name.** "Personal" is the proposal. Alternatives: "<first-name>'s workspace," or a required prompt. Going with "Personal" because it minimizes onboarding friction.
 
 ## Success Criteria
 
