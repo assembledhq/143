@@ -30,8 +30,10 @@ export function fileNameFromURL(url: string): string {
   return url.split("?")[0].split("#")[0].split("/").pop() || "file";
 }
 
-export function formatTimeAgo(dateStr: string): string {
+export function formatTimeAgo(dateStr: string | null | undefined): string {
+  if (!dateStr) return "—";
   const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "—";
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);

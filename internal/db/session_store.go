@@ -346,6 +346,11 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 	return err
 }
 
+// UpdateResult persists a turn result and status transition. Always bumps
+// last_activity_at because every call represents user-driven activity (the
+// agent finished processing a user turn). Do NOT call this from reaper /
+// sweeper code paths — use a status-only update instead, otherwise dormant
+// sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
 
