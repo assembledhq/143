@@ -706,6 +706,25 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Contains(t, boot.Cmd[2], "mkdir -p", "bootstrap must still create the workdir idempotently")
 	})
 
+	t.Run("falls back to / when HomeDir is unset", func(t *testing.T) {
+		t.Parallel()
+
+		var createdCfg *container.Config
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createdCfg = config
+			return container.CreateResponse{ID: "no-home"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.HomeDir = ""
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+
+		require.Equal(t, "/", createdCfg.WorkingDir, "callers that omit HomeDir should anchor at / rather than an empty WorkingDir (which the OCI runtime would reject)")
+	})
+
 	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
 		t.Parallel()
 
