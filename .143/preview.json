@@ -43,6 +43,6 @@
     "mode": "none"
   },
   "network": {
-    "mode": "restricted"
+    "mode": "managed"
   }
 }
