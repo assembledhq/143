@@ -379,6 +379,20 @@ func TestParseStreamOutput(t *testing.T) {
 				require.Len(t, logs, 1)
 				require.Equal(t, "tool_use", logs[0].Level)
 				require.Contains(t, logs[0].Message, "edit_file")
+				require.Equal(t, "edit_file", logs[0].Metadata["tool"])
+			},
+		},
+		{
+			name:   "tool_use event with input preserves description",
+			output: `{"type":"tool_use","tool":"Bash","input":{"command":"ls -la","description":"List files"}}`,
+			checkResult: func(t *testing.T, result *agent.AgentResult, logs []agent.LogEntry) {
+				t.Helper()
+				require.Len(t, logs, 1)
+				require.Equal(t, "tool_use", logs[0].Level)
+				input, ok := logs[0].Metadata["input"].(map[string]interface{})
+				require.True(t, ok, "expected input metadata to be a map")
+				require.Equal(t, "ls -la", input["command"])
+				require.Equal(t, "List files", input["description"])
 			},
 		},
 		{
