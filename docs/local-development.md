@@ -80,7 +80,7 @@ This handles "Sign in with GitHub".
 
 ### Step 3: Create a GitHub App
 
-This handles repo access, PR creation, and webhooks. See [github-app-setup.md](github-app-setup.md) for the full walkthrough with permissions and events. The short version:
+This handles repo access, PR creation, and webhooks. See [self-hosting/github-app-setup.md](self-hosting/github-app-setup.md) for the full walkthrough with permissions and events. The short version:
 
 1. Go to **[GitHub > Settings > Developer settings > GitHub Apps > New GitHub App](https://github.com/settings/apps/new)**
 2. Fill in:
@@ -93,7 +93,7 @@ This handles repo access, PR creation, and webhooks. See [github-app-setup.md](g
 | Webhook URL | `{BASE_URL}/api/v1/webhooks/github` |
 | Webhook secret | Generate with `openssl rand -hex 32` |
 
-3. Set permissions and events per [github-app-setup.md](github-app-setup.md)
+3. Set permissions and events per [self-hosting/github-app-setup.md](self-hosting/github-app-setup.md)
 4. Under "Where can this app be installed?" select **Only on this account**
 5. Click **Create GitHub App**
 6. Note the **App ID**
@@ -200,7 +200,7 @@ Once your GitHub App is installed and the tunnel is running:
 | `configured=false` for GitHub App | Check that `GITHUB_APP_ID` is a number and `GITHUB_APP_PRIVATE_KEY` is set |
 | OAuth login redirects to wrong URL | Update `BASE_URL` in `.env.local` to match your current tunnel URL |
 | Webhook returns 401 | `GITHUB_WEBHOOK_SECRET` doesn't match what's in your GitHub App settings |
-| "Resource not accessible by integration" | App is missing a permission — check [github-app-setup.md](github-app-setup.md) |
+| "Resource not accessible by integration" | App is missing a permission — check [self-hosting/github-app-setup.md](self-hosting/github-app-setup.md) |
 | Private key parse error | Make sure the full PEM is included with `-----BEGIN/END RSA PRIVATE KEY-----` |
 | Port 3000 already in use | `FRONTEND_PORT=3001 make dev` or kill the process on 3000 |
 | Database connection refused | Check PostgreSQL is running: `brew services list` (macOS) or `systemctl status postgresql` (Linux) |

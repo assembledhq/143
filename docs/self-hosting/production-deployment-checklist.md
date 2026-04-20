@@ -65,7 +65,7 @@ Optional LLM routing vars:
 - [ ] Create GitHub App:
   - Setup URL: `https://<your-domain>/settings/integrations/github/setup`
   - Webhook URL: `https://<your-domain>/api/v1/webhooks/github`
-  - Permissions/events: see `docs/github-app-setup.md`
+  - Permissions/events: see [github-app-setup.md](github-app-setup.md)
 - [ ] Install GitHub App on a test org/repo
 
 ## 5. Build and Deploy
