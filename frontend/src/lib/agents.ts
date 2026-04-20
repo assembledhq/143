@@ -1,0 +1,124 @@
+// Single source of truth for coding agents — labels, brand colors, monogram
+// badges, models, and per-agent env vars used in the settings UI. The backend
+// equivalent lives in internal/models/agent_model_constants.go and
+// internal/models/org_settings.go (AgentType constants); keep these in sync.
+
+import {
+  AVAILABLE_AMP_MODES,
+  AVAILABLE_CLAUDE_CODE_MODELS,
+  AVAILABLE_CODEX_MODELS,
+  AVAILABLE_GEMINI_CLI_MODELS,
+  AVAILABLE_PI_MODELS,
+} from "@/lib/model-constants";
+
+export interface AgentEnvVar {
+  name: string;
+  label: string;
+  sensitive?: boolean;
+  placeholder?: string;
+  options?: string[];
+  advanced?: boolean;
+  helpText?: string;
+}
+
+export interface AgentMeta {
+  key: string;
+  label: string;
+  short: string;       // 2-letter monogram shown inside <AgentBadge>
+  color: string;       // brand hex used as the badge background
+  description: string;
+  providerKey: string;
+  models: readonly string[];
+  envVars: AgentEnvVar[];
+  note?: string;       // small inline note shown in the settings card
+}
+
+export const AGENTS: readonly AgentMeta[] = [
+  {
+    key: "codex",
+    label: "Codex",
+    short: "CX",
+    color: "#10a37f",
+    description: "OpenAI Codex (GPT-5 models)",
+    providerKey: "openai",
+    models: AVAILABLE_CODEX_MODELS,
+    envVars: [
+      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
+      { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
+      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
+    ],
+  },
+  {
+    key: "claude_code",
+    label: "Claude Code",
+    short: "CC",
+    color: "#cc785c",
+    description: "Anthropic Claude (Opus, Sonnet, Haiku)",
+    providerKey: "anthropic",
+    models: AVAILABLE_CLAUDE_CODE_MODELS,
+    envVars: [
+      { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
+      { name: "ANTHROPIC_MODEL", label: "Default model", options: [...AVAILABLE_CLAUDE_CODE_MODELS] },
+      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
+    ],
+  },
+  {
+    key: "gemini_cli",
+    label: "Gemini CLI",
+    short: "GE",
+    color: "#4285f4",
+    description: "Google Gemini (Pro, Flash)",
+    providerKey: "gemini",
+    models: AVAILABLE_GEMINI_CLI_MODELS,
+    envVars: [
+      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
+      { name: "GEMINI_MODEL", label: "Default model", options: [...AVAILABLE_GEMINI_CLI_MODELS] },
+    ],
+  },
+  {
+    key: "amp",
+    label: "Amp",
+    short: "AM",
+    color: "#ff5c00",
+    description: "Sourcegraph Amp (mode-based agent)",
+    providerKey: "amp",
+    models: AVAILABLE_AMP_MODES,
+    envVars: [
+      { name: "AMP_API_KEY", label: "API Key", sensitive: true, placeholder: "amp_..." },
+      { name: "AMP_MODE", label: "Default mode", options: [...AVAILABLE_AMP_MODES] },
+    ],
+  },
+  {
+    key: "pi",
+    label: "Pi",
+    short: "PI",
+    color: "#7c3aed",
+    description: "Pi — meta-agent that routes to many providers",
+    providerKey: "pi",
+    models: AVAILABLE_PI_MODELS,
+    note: "Pi reuses keys from your other configured agents by default. Set values here to override.",
+    envVars: [
+      { name: "PI_MODEL", label: "Default model", options: [...AVAILABLE_PI_MODELS] },
+      {
+        name: "PI_MODEL_CUSTOM",
+        label: "Custom model override",
+        placeholder: "provider/model (e.g. moonshot/kimi-k2)",
+        advanced: true,
+        helpText: "Wins over Default model. Pi accepts any provider/model the upstream supports.",
+      },
+    ],
+  },
+] as const;
+
+export const AGENTS_BY_KEY: Record<string, AgentMeta> = AGENTS.reduce(
+  (acc, agent) => {
+    acc[agent.key] = agent;
+    return acc;
+  },
+  {} as Record<string, AgentMeta>,
+);
+
+// Resolve the agent type key for a given model string.
+export function agentTypeForModel(model: string): string | undefined {
+  return AGENTS.find((a) => a.models.includes(model))?.key;
+}

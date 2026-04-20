@@ -1,61 +1,18 @@
-import { AVAILABLE_CLAUDE_CODE_MODELS, AVAILABLE_CODEX_MODELS, AVAILABLE_GEMINI_CLI_MODELS } from "@/lib/model-constants";
+// Re-exports the canonical AGENTS registry from @/lib/agents under the
+// legacy AGENT_TYPES name so the existing call sites keep working.
+import { AGENTS, type AgentEnvVar, type AgentMeta } from "@/lib/agents";
 
-export interface AgentEnvVar {
-  name: string;
-  label: string;
-  sensitive?: boolean;
-  placeholder?: string;
-  options?: string[];
-  advanced?: boolean;
-}
+export type { AgentEnvVar };
+export type AgentType = AgentMeta;
 
-export interface AgentType {
-  key: string;
-  label: string;
-  description: string;
-  providerKey: string;
-  envVars: AgentEnvVar[];
-}
-
-export const AGENT_TYPES: AgentType[] = [
-  {
-    key: "codex",
-    label: "Codex",
-    description: "OpenAI Codex (GPT-5 models)",
-    providerKey: "openai",
-    envVars: [
-      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
-      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
-    ],
-  },
-  {
-    key: "claude_code",
-    label: "Claude Code",
-    description: "Anthropic Claude (Opus, Sonnet, Haiku)",
-    providerKey: "anthropic",
-    envVars: [
-      { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
-      { name: "ANTHROPIC_MODEL", label: "Default model", options: [...AVAILABLE_CLAUDE_CODE_MODELS] },
-      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
-    ],
-  },
-  {
-    key: "gemini_cli",
-    label: "Gemini CLI",
-    description: "Google Gemini (Pro, Flash)",
-    providerKey: "gemini",
-    envVars: [
-      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
-      { name: "GEMINI_MODEL", label: "Default model", options: [...AVAILABLE_GEMINI_CLI_MODELS] },
-    ],
-  },
-];
+export const AGENT_TYPES: readonly AgentMeta[] = AGENTS;
 
 export const KEY_PLACEHOLDERS: Record<string, string> = {
   anthropic: "sk-ant-...",
   openai: "sk-...",
   gemini: "AIza...",
+  amp: "amp_...",
+  pi: "(see per-provider keys)",
 };
 
 export function sourceLabel(source: string): string {

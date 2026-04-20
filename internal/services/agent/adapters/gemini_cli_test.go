@@ -718,7 +718,7 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
-func TestShellEscapeGemini(t *testing.T) {
+func TestShellEscapeSingle(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -734,7 +734,7 @@ func TestShellEscapeGemini(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, shellEscapeGemini(tt.input))
+			require.Equal(t, tt.expected, shellEscapeSingle(tt.input))
 		})
 	}
 }

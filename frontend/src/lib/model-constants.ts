@@ -45,6 +45,36 @@ export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_5_3_CODEX_SPARK,
 ] as const;
 
+// Amp uses agent "modes" instead of model names; each mode bundles a model,
+// system prompt, and tool set on Sourcegraph's side.
+export const AMP_MODE_SMART = "smart";
+export const AMP_MODE_DEEP = "deep";
+export const AMP_MODE_LARGE = "large";
+export const AMP_MODE_RUSH = "rush";
+
+export const AVAILABLE_AMP_MODES = [
+  AMP_MODE_SMART,
+  AMP_MODE_DEEP,
+  AMP_MODE_LARGE,
+  AMP_MODE_RUSH,
+] as const;
+
+// Pi accepts provider/model patterns. Curated short list; PI_MODEL_CUSTOM
+// lets users opt into Pi's full multi-provider catalog.
+export const PI_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
+export const PI_MODEL_CLAUDE_OPUS_46 = "anthropic/claude-opus-4-6";
+export const PI_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
+export const PI_MODEL_GPT_5_4 = "openai/gpt-5.4";
+export const PI_MODEL_GEMINI_2_5_PRO = "google/gemini-2.5-pro";
+
+export const AVAILABLE_PI_MODELS = [
+  PI_MODEL_CLAUDE_SONNET_46,
+  PI_MODEL_CLAUDE_OPUS_46,
+  PI_MODEL_CLAUDE_HAIKU_45,
+  PI_MODEL_GPT_5_4,
+  PI_MODEL_GEMINI_2_5_PRO,
+] as const;
+
 // PM model configuration: maps each provider to its available models and API key env var.
 export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[]; apiKeyVar: string }> = {
   claude_code: { label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS, apiKeyVar: "ANTHROPIC_API_KEY" },
@@ -59,6 +89,8 @@ export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly 
   { key: "codex", label: "Codex", models: AVAILABLE_CODEX_MODELS },
   { key: "claude_code", label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS },
   { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
+  { key: "amp", label: "Amp", models: AVAILABLE_AMP_MODES },
+  { key: "pi", label: "Pi", models: AVAILABLE_PI_MODELS },
 ];
 
 // Resolve the agent type key for a given model string.

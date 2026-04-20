@@ -1510,6 +1510,30 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				merged["GEMINI_MODEL"] = gc.Model
 			}
 		}
+	case models.AgentTypeAmp:
+		// Amp authenticates to Sourcegraph's API with a dedicated AMP_API_KEY
+		// that lives in agent_config.amp.AMP_API_KEY — applied by the per-agent
+		// override block below. No first-class credential store (no ProviderAmp)
+		// exists today, so we intentionally do nothing here.
+	case models.AgentTypePi:
+		// Pi is a meta-agent: route to many providers via one CLI. Inherit
+		// every provider key the org already configured for the other agents,
+		// then let agent_config.pi.* override at the call site below.
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic); cfg != nil {
+			if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+				merged["ANTHROPIC_API_KEY"] = ac.APIKey
+			}
+		}
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI); cfg != nil {
+			if oc, ok := cfg.(models.OpenAIConfig); ok && oc.APIKey != "" {
+				merged["OPENAI_API_KEY"] = oc.APIKey
+			}
+		}
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini); cfg != nil {
+			if gc, ok := cfg.(models.GeminiConfig); ok && gc.APIKey != "" {
+				merged["GEMINI_API_KEY"] = gc.APIKey
+			}
+		}
 	}
 
 	// Integration credentials — consumed by the 143-tools CLI (preferred) and
@@ -1535,11 +1559,49 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
+	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
+	// Scoped to Amp and Pi only — these agents have no first-class provider
+	// credential store (no ProviderAmp / ProviderPi), so agent_config is the
+	// only channel for their auth (AMP_API_KEY) and routing (PI_MODEL,
+	// PI_MODEL_CUSTOM). For claude_code/codex/gemini_cli we keep the legacy
+	// behavior: provider creds come exclusively from resolveProviderConfig,
+	// and agent_config is treated as model-default metadata (validated,
+	// stored, but not injected here) — changing that would silently flip
+	// existing orgs' active keys.
+	if agentType == models.AgentTypeAmp || agentType == models.AgentTypePi {
+		o.applyAgentConfigOverrides(ctx, orgID, agentType, merged)
+	}
+
 	if len(merged) == 0 {
 		return nil
 	}
 
 	return merged
+}
+
+// applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
+// settings on top of the already-resolved provider credentials in `merged`.
+// Only called for agent types (amp, pi) that lack a first-class provider
+// credential store — for those, agent_config is the sole channel for auth
+// and routing. Non-empty values win over inherited provider creds.
+func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
+	if o.orgs == nil {
+		return
+	}
+	org, err := o.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return
+	}
+	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		return
+	}
+	envOverrides := orgSettings.AgentConfig[string(agentType)]
+	for k, v := range envOverrides {
+		if v != "" {
+			merged[k] = v
+		}
+	}
 }
 
 // resolveProviderConfig returns the best ProviderConfig for a provider,

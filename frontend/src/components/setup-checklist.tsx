@@ -104,6 +104,20 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
+    {
+      value: "amp",
+      label: "Amp",
+      description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush). Requires an AMP_API_KEY.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    {
+      value: "pi",
+      label: "Pi",
+      description: "Pi routes to many providers via one CLI. Reuses your other configured agent keys by default.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
   ];
 
   const queryClient = useQueryClient();

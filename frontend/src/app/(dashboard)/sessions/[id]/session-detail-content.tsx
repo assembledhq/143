@@ -56,6 +56,7 @@ import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 
 const PREVIEW_ORIGIN_TEMPLATE =
@@ -75,14 +76,6 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   cancelled: { color: "bg-muted text-muted-foreground", label: "Cancelled" },
   skipped: { color: "bg-muted text-muted-foreground", label: "Skipped" },
-};
-
-const agentTypeLabels: Record<string, string> = {
-  claude_code: "Claude Code",
-  codex: "Codex",
-  gemini_cli: "Gemini CLI",
-  pm_agent: "PM Agent",
-  custom: "Custom",
 };
 
 function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolean {
@@ -270,7 +263,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             {status.label}
           </span>
           <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
-            <span className="font-medium text-foreground">{agentTypeLabels[session.agent_type] || session.agent_type}</span>
+            <AgentBadge agentType={session.agent_type} />
             <span aria-hidden="true" className="text-muted-foreground/50">·</span>
             <span>{triggeredByLabel}</span>
           </span>

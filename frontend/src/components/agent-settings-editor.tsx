@@ -18,61 +18,25 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
-import { AVAILABLE_CLAUDE_CODE_MODELS, AVAILABLE_CODEX_MODELS, AVAILABLE_GEMINI_CLI_MODELS } from "@/lib/model-constants";
+import { AgentBadge } from "@/components/agent-badge";
+import { AGENTS } from "@/lib/agents";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
-interface AgentEnvVar {
-  name: string;
-  label: string;
-  sensitive?: boolean;
-  placeholder?: string;
-  options?: string[];
-  advanced?: boolean;
-  hideInSetup?: boolean;
-}
+// Local extension: hideInSetup is editor-specific and not part of the shared registry.
+// Falls back to the registry's AgentEnvVar shape for everything else.
+type AgentEnvVar = (typeof AGENTS)[number]["envVars"][number] & { hideInSetup?: boolean };
 
-const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[] }[] = [
-  {
-    key: "codex",
-    label: "Codex",
-    envVars: [
-      { name: "OPENAI_API_KEY", label: "API Key", sensitive: true },
-      { name: "OPENAI_MODEL", label: "Default model", options: [...AVAILABLE_CODEX_MODELS] },
-      { name: "OPENAI_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)" },
-    ],
-  },
-  {
-    key: "claude_code",
-    label: "Claude Code",
-    envVars: [
-      { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
-      {
-        name: "ANTHROPIC_MODEL",
-        label: "Default model",
-        options: [...AVAILABLE_CLAUDE_CODE_MODELS],
-      },
-      {
-        name: "ANTHROPIC_BASE_URL",
-        label: "Base URL",
-        placeholder: "Custom API endpoint (optional)",
-        advanced: true,
-        hideInSetup: true,
-      },
-    ],
-  },
-  {
-    key: "gemini_cli",
-    label: "Gemini CLI",
-    envVars: [
-      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
-      {
-        name: "GEMINI_MODEL",
-        label: "Default model",
-        options: [...AVAILABLE_GEMINI_CLI_MODELS],
-      },
-    ],
-  },
-];
+const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[]; note?: string }[] = AGENTS.map((agent) => ({
+  key: agent.key,
+  label: agent.label,
+  note: agent.note,
+  envVars: agent.envVars.map((envVar) => {
+    if (agent.key === "claude_code" && envVar.name === "ANTHROPIC_BASE_URL") {
+      return { ...envVar, hideInSetup: true };
+    }
+    return { ...envVar };
+  }),
+}));
 
 export function AgentSettingsEditor({
   title,
@@ -184,12 +148,12 @@ export function AgentSettingsEditor({
         <RadioGroup
           value={defaultAgentType}
           onValueChange={(value) => setDefaultAgentTypeOverride(value as OrgSettings["default_agent_type"])}
-          className="grid grid-cols-3 gap-3"
+          className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4"
         >
           {AGENT_TYPES.map((agent) => (
             <label
               key={agent.key}
-              className={`relative flex cursor-pointer flex-col rounded-lg border p-3 shadow-sm transition-all duration-150 ${
+              className={`relative flex cursor-pointer flex-col rounded-lg border px-3 py-2 shadow-sm transition-all duration-150 ${
                 defaultAgentType === agent.key
                   ? "border-primary bg-primary/5 ring-1 ring-primary/20"
                   : "border-input hover:bg-muted/40 hover:border-border"
@@ -197,12 +161,17 @@ export function AgentSettingsEditor({
             >
               <div className="flex items-center gap-2">
                 <RadioGroupItem value={agent.key} />
+                <AgentBadge agentType={agent.key} hideLabel className="h-4 w-4" />
                 <span className="text-sm font-medium">{agent.label}</span>
               </div>
             </label>
           ))}
         </RadioGroup>
       </div>
+
+      {selectedAgent.note && (
+        <p className="text-xs text-muted-foreground">{selectedAgent.note}</p>
+      )}
 
       {defaultAgentType === "codex" && (
         <div className="space-y-4">
@@ -374,6 +343,9 @@ export function AgentSettingsEditor({
                       });
                     }}
                   />
+                )}
+                {envVar.helpText && (
+                  <p className="text-xs text-muted-foreground">{envVar.helpText}</p>
                 )}
               </div>
             );

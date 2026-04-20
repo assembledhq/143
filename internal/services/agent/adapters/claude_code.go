@@ -674,6 +674,12 @@ func shellEscapeDouble(s string) string {
 	return r.Replace(s)
 }
 
+// shellEscapeSingle escapes single quotes for safe use inside single-quoted shell strings.
+// Replaces each single quote with the standard close-quote, escaped-quote, reopen-quote pattern.
+func shellEscapeSingle(s string) string {
+	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
 // collectDiff runs git diff inside the sandbox to capture changes.
 // Returns an empty string (not an error) when the workspace is not a git repository,
 // which happens when no repository was configured for the issue.

@@ -398,6 +398,8 @@ func buildServices(
 		models.AgentTypeClaudeCode: adapters.NewClaudeCodeAdapter(logger),
 		models.AgentTypeGeminiCLI:  adapters.NewGeminiCLIAdapter(logger),
 		models.AgentTypeCodex:      adapters.NewCodexAdapter(logger),
+		models.AgentTypeAmp:        adapters.NewAmpAdapter(logger),
+		models.AgentTypePi:         adapters.NewPiAdapter(logger),
 	}
 
 	// Orchestrator.
