@@ -19,14 +19,13 @@
       "command": [
         "sh",
         "-c",
-        "go run ./cmd/migrate up && psql \"$DATABASE_URL\" -f .143/seed.sql && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" go run ./cmd/server"
+        "export SESSION_SECRET=\"$(head -c 32 /dev/urandom | base64)\" && echo '[143-preview] running migrations...' && go run ./cmd/migrate up && echo '[143-preview] seeding database...' && psql \"$DATABASE_URL\" -f .143/seed.sql && echo '[143-preview] starting server...' && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" go run ./cmd/server"
       ],
       "port": 8080,
       "env": {
         "MODE": "all",
         "ENV": "development",
-        "LOG_LEVEL": "info",
-        "SESSION_SECRET": "PREVIEW-ONLY-dogfood-ephemeral-DO-NOT-REUSE-outside-previews"
+        "LOG_LEVEL": "info"
       },
       "ready": {
         "http_path": "/api/v1/health",
