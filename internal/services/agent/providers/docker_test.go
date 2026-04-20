@@ -421,6 +421,8 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		// Verify tmpfs mount options
 		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+			"GOTMPDIR must be redirected off /tmp so `go test` can exec compiled test binaries")
 
 		// Verify resource limits
 		require.Equal(t, int64(2e9), capturedHostConfig.Resources.NanoCPUs, "container should have 2 CPU cores")
@@ -504,9 +506,31 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "env-test", sb.ID)
 
-		require.Len(t, capturedConfig.Env, 2, "container should have 2 env vars")
 		require.Contains(t, capturedConfig.Env, "ANTHROPIC_API_KEY=sk-ant-test-key")
 		require.Contains(t, capturedConfig.Env, "OPENAI_API_KEY=sk-test-openai-key")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+			"GOTMPDIR should be injected so `go test` works despite /tmp being noexec")
+	})
+
+	t.Run("preserves caller-supplied GOTMPDIR override", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedConfig *container.Config
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedConfig = config
+			return container.CreateResponse{ID: "gotmpdir-override"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.Env = map[string]string{"GOTMPDIR": "/workspace/.gotmp"}
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/workspace/.gotmp")
+		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+			"caller-supplied GOTMPDIR should not be overridden")
 	})
 
 	t.Run("handles nil env map gracefully", func(t *testing.T) {
@@ -526,7 +550,8 @@ func TestDockerProvider_Create(t *testing.T) {
 		sb, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Equal(t, "no-env", sb.ID)
-		require.Empty(t, capturedConfig.Env, "container should have no env vars when Env is nil")
+		require.ElementsMatch(t, []string{"GOTMPDIR=" + defaultGoTmpDir}, capturedConfig.Env,
+			"with nil cfg.Env, only the auto-injected GOTMPDIR should be present")
 	})
 
 	t.Run("bind-mounts resolv.conf and clears DNS when WithResolvConf is set", func(t *testing.T) {
