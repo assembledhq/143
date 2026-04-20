@@ -276,7 +276,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  it("org name links to /autopilot", async () => {
+  it("org name links to /sessions", async () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -285,7 +285,7 @@ describe("AuthenticatedLayout", () => {
 
     await waitFor(() => {
       const orgLink = screen.getByText("Test Org").closest("a");
-      expect(orgLink).toHaveAttribute("href", "/autopilot");
+      expect(orgLink).toHaveAttribute("href", "/sessions");
     });
   });
 });

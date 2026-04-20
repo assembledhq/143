@@ -14,7 +14,7 @@ export function OnboardingPageContent() {
 
   useEffect(() => {
     if (!isLoading && isSetupComplete) {
-      router.replace("/autopilot");
+      router.replace("/sessions");
     }
   }, [isLoading, isSetupComplete, router]);
 
