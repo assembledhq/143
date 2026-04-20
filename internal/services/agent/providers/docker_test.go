@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -668,6 +669,35 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
 	})
 
+	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
+		t.Parallel()
+
+		var removedID string
+		var removeForce bool
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "bootstrap-fail"}, nil
+		}
+		// ContainerStart succeeds (default). Bootstrap exec runs, but inspect
+		// reports a non-zero exit code so the bootstrap branch in Create trips.
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 1}, nil
+		}
+		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
+			removedID = containerID
+			removeForce = options.Force
+			return nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.Error(t, err, "Create should return an error when bootstrap fails")
+		require.Contains(t, err.Error(), "bootstrap workdir", "error should identify bootstrap failure")
+		require.Equal(t, "bootstrap-fail", removedID, "should force-remove the container after bootstrap failure")
+		require.True(t, removeForce, "bootstrap failure cleanup should force-remove")
+	})
+
 	t.Run("configLogger tolerates partial tracing fields", func(t *testing.T) {
 		t.Parallel()
 
@@ -738,6 +768,44 @@ func TestDockerProvider_ScopedLogger(t *testing.T) {
 
 		err := p.Destroy(context.Background(), sb)
 		require.NoError(t, err)
+	})
+}
+
+func TestDockerProvider_Snapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tars workdir plus agent state dirs under HomeDir", func(t *testing.T) {
+		t.Parallel()
+
+		var gotCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			gotCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "snap-exec"}, nil
+		}
+		// Default attach returns empty data; stdcopy returns EOF and the pipe
+		// closes cleanly without blocking the test.
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{
+			ID:       "snap-container",
+			Provider: "docker",
+			WorkDir:  "/home/sandbox/backend",
+			HomeDir:  "/home/sandbox",
+		}
+
+		rc, err := p.Snapshot(context.Background(), sb)
+		require.NoError(t, err)
+		require.NotNil(t, rc)
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+
+		require.Len(t, gotCmd, 3, "Snapshot exec should be sh -c <cmd>")
+		tarCmd := gotCmd[2]
+		require.Contains(t, tarCmd, "'home/sandbox/backend'", "tar should include the WorkDir relative path")
+		require.Contains(t, tarCmd, "'home/sandbox/.claude'", "tar should include the .claude dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
 	})
 }
 

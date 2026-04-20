@@ -1391,6 +1391,110 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }
 
+// TestContinueSession_SessionRepoSlug drives ContinueSession through the
+// sessionRepoSlug fallback branches by capturing the WorkDir passed to
+// provider.Create. Create is forced to fail so the test doesn't need a full
+// snapshot/restore harness; the relevant code runs before Create is invoked.
+func TestContinueSession_SessionRepoSlug(t *testing.T) {
+	t.Parallel()
+
+	const defaultWorkDir = "/workspace"
+	const slugWorkDir = "/home/sandbox/backend"
+
+	type tc struct {
+		name         string
+		prepSession  func(s *models.Session)
+		prepDeps     func(d testDeps)
+		wantWorkDir  string
+		wantErrMatch string
+	}
+
+	cases := []tc{
+		{
+			name: "session without repo falls back to issue's repo",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps:     func(d testDeps) {},
+			wantWorkDir:  slugWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name: "session without repo and issue fetch fails falls back to default",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps: func(d testDeps) {
+				d.issues.err = errors.New("boom")
+			},
+			wantWorkDir:  defaultWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name: "session without repo and issue has no repo falls back to default",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps: func(d testDeps) {
+				issue := d.issues.issue
+				issue.RepositoryID = nil
+				d.issues.issue = issue
+			},
+			wantWorkDir:  defaultWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name:        "repo fetch fails falls back to default",
+			prepSession: func(s *models.Session) {},
+			prepDeps: func(d testDeps) {
+				d.repos.err = errors.New("boom")
+			},
+			wantWorkDir:  defaultWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			session := testRun(orgID, issue.ID)
+			session.Status = string(models.SessionStatusIdle)
+			session.CurrentTurn = 1
+			c.prepSession(session)
+
+			d := defaultDeps()
+			// mockIssueStore / mockRepositoryStore are value-holders; update in place.
+			d.issues.issue = issue
+			c.prepDeps(d)
+
+			// Pre-populate a user message so ContinueSession reaches the Create call.
+			d.messages.messages = []models.SessionMessage{{
+				ID:         1,
+				SessionID:  session.ID,
+				OrgID:      orgID,
+				TurnNumber: 2,
+				Role:       models.MessageRoleUser,
+				Content:    "continue please",
+			}}
+
+			var gotWorkDir string
+			d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				gotWorkDir = cfg.WorkDir
+				return nil, errors.New("forced create failure to short-circuit test")
+			}
+
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(context.Background(), session)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), c.wantErrMatch)
+			require.Equal(t, c.wantWorkDir, gotWorkDir, "sessionRepoSlug should drive WorkDir selection")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WithSandboxProvider / SandboxProviderFromContext
 // ---------------------------------------------------------------------------
