@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -361,4 +362,54 @@ func TestPiAdapter_Execute_SummaryFromAssistantFallback(t *testing.T) {
 	}, logCh)
 	require.NoError(t, err)
 	require.Equal(t, "final message, no result event", result.Summary)
+}
+
+// TestPiAdapter_ShellModelResolution verifies at the bash level that
+// PI_MODEL_CUSTOM wins over PI_MODEL wins over the hardcoded fallback, and that
+// a value containing shell metacharacters is preserved literally (no injection)
+// when expanded inside the command's double-quoted substitution.
+func TestPiAdapter_ShellModelResolution(t *testing.T) {
+	t.Parallel()
+
+	// Same expansion pattern the adapter emits; isolated so we can drive it
+	// through bash with different env var combinations.
+	const expr = `echo "${PI_MODEL_CUSTOM:-${PI_MODEL:-anthropic/claude-sonnet-4-6}}"`
+
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{
+			name: "falls back to default when nothing set",
+			env:  nil,
+			want: "anthropic/claude-sonnet-4-6",
+		},
+		{
+			name: "uses PI_MODEL when only PI_MODEL is set",
+			env:  []string{"PI_MODEL=openai/gpt-5.4"},
+			want: "openai/gpt-5.4",
+		},
+		{
+			name: "PI_MODEL_CUSTOM wins over PI_MODEL",
+			env:  []string{"PI_MODEL=openai/gpt-5.4", "PI_MODEL_CUSTOM=moonshot/kimi-k2"},
+			want: "moonshot/kimi-k2",
+		},
+		{
+			name: "injection attempt stays inside the argument",
+			env:  []string{`PI_MODEL_CUSTOM=foo"; rm -rf / ; echo "`},
+			want: `foo"; rm -rf / ; echo "`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("bash", "-c", expr)
+			cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, tc.env...)
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, strings.TrimRight(string(out), "\n"))
+		})
+	}
 }

@@ -717,24 +717,3 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
-
-func TestShellEscapeSingle(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"simple", "simple"},
-		{"it's", "it'\\''s"},
-		{"/path/to/file", "/path/to/file"},
-		{"don't stop", "don'\\''t stop"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tt.expected, shellEscapeSingle(tt.input))
-		})
-	}
-}

@@ -1586,14 +1586,28 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 // and routing. Non-empty values win over inherited provider creds.
 func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
 	if o.orgs == nil {
+		o.logger.Warn().
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("orchestrator has no orgs store; skipping agent_config overrides (agent may run without auth)")
 		return
 	}
 	org, err := o.orgs.GetByID(ctx, orgID)
 	if err != nil {
+		o.logger.Warn().
+			Err(err).
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("failed to load org for agent_config overrides; agent may run without auth")
 		return
 	}
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
+		o.logger.Warn().
+			Err(parseErr).
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("failed to parse org settings for agent_config overrides; agent may run without auth")
 		return
 	}
 	envOverrides := orgSettings.AgentConfig[string(agentType)]
