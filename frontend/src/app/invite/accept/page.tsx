@@ -65,7 +65,7 @@ function AcceptInvitationContent() {
         if (data?.action === "login" || data?.action === "register") {
           setStatus(data.action);
         } else {
-          // Fallback: redirect to onboarding (which redirects to autopilot if setup is complete)
+          // Fallback: redirect to onboarding (which redirects to sessions if setup is complete)
           router.replace("/onboarding");
         }
       } catch (err) {
