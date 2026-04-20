@@ -20,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
@@ -42,44 +43,33 @@ import { CreateSessionDialog } from "@/components/create-session-dialog";
 import type { Organization, SingleResponse } from "@/lib/types";
 
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
+const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
 
-function VersionInfo() {
+function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
-  const shortSha = buildSha.slice(0, 7);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback((e: Event) => {
+    e.preventDefault();
     navigator.clipboard.writeText(buildSha);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 1500);
   }, []);
 
   return (
-    <div className="relative px-2 pb-2 pt-0.5">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors w-full rounded-md hover:bg-sidebar-accent/40">
-            <Info className="h-3 w-3 shrink-0" />
-            <span className="font-mono">{shortSha}</span>
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="top" className="w-64">
-          <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-            Build Info
-          </div>
-          <DropdownMenuItem onClick={handleCopy} className="gap-2">
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-green-500" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <div className="flex flex-col gap-0.5">
-              <span className="text-xs text-muted-foreground">Commit SHA</span>
-              <span className="font-mono text-xs">{buildSha === "dev" ? "dev (local)" : buildSha}</span>
-            </div>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+    <DropdownMenuItem
+      onSelect={handleCopy}
+      className="gap-2 text-xs text-muted-foreground focus:text-muted-foreground"
+    >
+      <Info className="h-3.5 w-3.5 opacity-60" />
+      <span className="flex-1">
+        Version <span className="font-mono">{shortSha}</span>
+      </span>
+      {copied ? (
+        <Check className="h-3.5 w-3.5 text-green-500" />
+      ) : (
+        <Copy className="h-3.5 w-3.5 opacity-60" />
+      )}
+    </DropdownMenuItem>
   );
 }
 
@@ -288,18 +278,17 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" side="top" className="w-48">
+              <DropdownMenuContent align="start" side="top" className="w-56">
                 <DropdownMenuItem onClick={logout}>
                   <LogOut className="h-4 w-4" />
                   Log out
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <VersionMenuItem />
               </DropdownMenuContent>
             </DropdownMenu>
           )}
         </div>
-
-        {/* Version info */}
-        <VersionInfo />
       </aside>
       <main className="flex-1 overflow-auto bg-background relative flex flex-col">
         <div className="relative max-w-none px-8 py-6 lg:px-10 flex-1 min-h-0">
