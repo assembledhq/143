@@ -18,7 +18,7 @@ Set one of the following provider keys on the **backend** environment:
 - `OPENAI_API_KEY`
 - `OPENROUTER_API_KEY`
 
-Then pick a model with `PLATFORM_LLM_MODEL`. The default is `gpt-5-nano`, which assumes an OpenAI-compatible key. If you've only set an Anthropic key, set `PLATFORM_LLM_MODEL` to a corresponding small Anthropic model (e.g. `claude-haiku-4-5-20251001`); same idea for OpenRouter.
+Then pick a model with `PLATFORM_LLM_MODEL`. The default is `gpt-5.4-nano`, which assumes an OpenAI-compatible key. If you've only set an Anthropic key, set `PLATFORM_LLM_MODEL` to a corresponding small Anthropic model (e.g. `claude-haiku-4-5-20251001`); same idea for OpenRouter.
 
 The agent-session model (`LLM_MODEL`) is independent — the platform LLM does not use it.
 
@@ -26,7 +26,7 @@ The agent-session model (`LLM_MODEL`) is independent — the platform LLM does n
 
 ```sh
 OPENAI_API_KEY=sk-...
-# PLATFORM_LLM_MODEL is gpt-5-nano by default; no need to set it
+# PLATFORM_LLM_MODEL is gpt-5.4-nano by default; no need to set it
 ```
 
 ### Minimal example (Anthropic)

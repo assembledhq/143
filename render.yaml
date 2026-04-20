@@ -61,7 +61,7 @@ services:
         sync: false
       # ── LLM ──
       - key: LLM_MODEL
-        value: claude-sonnet-4-5
+        value: claude-sonnet-4-6
       - key: ANTHROPIC_API_KEY
         sync: false
 

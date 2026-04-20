@@ -45,7 +45,7 @@ type Config struct {
 	// Slack OAuth
 	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
 	SlackOAuthClientSecret string `env:"SLACK_OAUTH_CLIENT_SECRET"`
-	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5-nano"`
+	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
 	// GitHub App
 	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
@@ -62,7 +62,7 @@ type Config struct {
 	// LLM
 	LLMModel           string `env:"LLM_MODEL"`
 	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
-	PlatformLLMModel   string `env:"PLATFORM_LLM_MODEL"    envDefault:"gpt-5-nano"`
+	PlatformLLMModel   string `env:"PLATFORM_LLM_MODEL"    envDefault:"gpt-5.4-nano"`
 	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
 	AnthropicBaseURL   string `env:"ANTHROPIC_BASE_URL"`
 	OpenAIAPIKey       string `env:"OPENAI_API_KEY"`
@@ -188,7 +188,7 @@ func (c *Config) LLMConfig() llm.Config {
 
 // PlatformLLMConfig returns the llm.Config for platform-internal features
 // (titles, PR descriptions, project generation, validation, prioritization).
-// Uses the cheap PLATFORM_LLM_MODEL (default: gpt-5-nano) regardless of what
+// Uses the cheap PLATFORM_LLM_MODEL (default: gpt-5.4-nano) regardless of what
 // LLM_MODEL is set to, keeping internal feature costs low.
 func (c *Config) PlatformLLMConfig() llm.Config {
 	return llm.Config{

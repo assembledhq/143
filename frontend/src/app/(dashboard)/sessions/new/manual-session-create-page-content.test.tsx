@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
       name: "Test Org",
       settings: {
         default_agent_type: "codex",
-        default_llm_model: "gpt-4o",
+        default_llm_model: "gpt-5.4-mini",
       },
     },
   }),
@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
     data: [{ name: "main", protected: true }],
   }),
   llmModelsMock: vi.fn().mockResolvedValue({
-    data: { openai: ["gpt-4o"], anthropic: ["claude-sonnet-4-20250514"] },
+    data: { openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"], anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   }),
   createSessionMock: vi.fn().mockResolvedValue({
     data: { id: "new-sess" },

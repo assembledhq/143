@@ -290,7 +290,7 @@ See `.env.example` for the full list. Key groups:
 
 ### LLM providers
 
-Set `LLM_MODEL` to a model name (e.g., `claude-sonnet-4-5`, `gpt-4o`) and provide at least one provider API key. The system automatically falls back through configured providers:
+Set `LLM_MODEL` to a model name (e.g., `claude-sonnet-4-6`, `gpt-5.4-mini`) and provide at least one provider API key. The system automatically falls back through configured providers:
 
 | Provider | API key variable | Notes |
 |----------|-----------------|-------|

@@ -12,7 +12,7 @@ import (
 type SettingsHandler struct {
 	orgStore      *db.OrganizationStore
 	llmDefaults   map[string]string // provider name → masked key (from server env)
-	platformModel string            // cheap model used for internal features (e.g. "gpt-5-nano")
+	platformModel string            // cheap model used for internal features (e.g. "gpt-5.4-nano")
 	audit         *db.AuditEmitter
 }
 

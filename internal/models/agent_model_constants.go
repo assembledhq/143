@@ -23,10 +23,10 @@ func init() {
 }
 
 const (
-	ClaudeCodeModelOpus      = "claude-opus-4-6"
-	ClaudeCodeModelSonnet46  = "claude-sonnet-4-6"
-	ClaudeCodeModelSonnet    = "claude-sonnet-4-5"
-	ClaudeCodeModelHaiku     = "claude-haiku-4-5"
+	ClaudeCodeModelOpus     = "claude-opus-4-6"
+	ClaudeCodeModelSonnet46 = "claude-sonnet-4-6"
+	ClaudeCodeModelSonnet   = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku    = "claude-haiku-4-5"
 )
 
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
@@ -152,15 +152,14 @@ const DefaultLLMModel = "gpt-5.4-mini"
 
 // AvailableLLMModels lists all models supported by the general-purpose LLM system.
 // Keep in sync with frontend/src/lib/model-constants.ts (LLM_MODELS_BY_PROVIDER).
+// Models are listed most-capable → least-capable within each provider family.
 var AvailableLLMModels = []string{
-	"claude-opus-4-6",
-	"claude-sonnet-4-5",
+	"claude-opus-4-7",
+	"claude-sonnet-4-6",
 	"claude-haiku-4-5",
-	"gpt-4o",
-	"gpt-4o-mini",
+	"gpt-5.4",
 	"gpt-5.4-mini",
-	"gpt-5-nano",
-	"o3-mini",
+	"gpt-5.4-nano",
 }
 
 // LLMModelsByProvider returns general-purpose LLM models grouped by provider.
@@ -168,9 +167,9 @@ var AvailableLLMModels = []string{
 // GET /api/v1/settings/llm-models endpoint.
 func LLMModelsByProvider() map[string][]string {
 	return map[string][]string{
-		"anthropic":  {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"},
-		"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"},
-		"openrouter": {"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"},
+		"anthropic":  {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
+		"openai":     {"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
+		"openrouter": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
 	}
 }
 
