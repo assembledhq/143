@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import {
   OptimisticSessionsProvider,
@@ -76,6 +76,98 @@ describe("OptimisticSessionsProvider", () => {
     });
 
     expect(result.current.optimisticSessions).toHaveLength(1);
+  });
+
+  it("markOptimisticResolved stamps the real session id onto a placeholder", () => {
+    const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+    let id: string;
+    act(() => {
+      id = result.current.addOptimisticSession("Pending");
+    });
+
+    act(() => {
+      result.current.markOptimisticResolved(id!, "real-123");
+    });
+
+    expect(result.current.optimisticSessions).toHaveLength(1);
+    expect(result.current.optimisticSessions[0].resolvedId).toBe("real-123");
+  });
+
+  it("markOptimisticResolved is a no-op for unknown ids", () => {
+    const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+    act(() => {
+      result.current.addOptimisticSession("Only one");
+    });
+
+    act(() => {
+      result.current.markOptimisticResolved("does-not-exist", "real-xyz");
+    });
+
+    expect(result.current.optimisticSessions).toHaveLength(1);
+    expect(result.current.optimisticSessions[0].resolvedId).toBeUndefined();
+  });
+
+  describe("resolution fallback timer", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("force-removes a resolved optimistic after the fallback window", () => {
+      const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+      let id: string;
+      act(() => {
+        id = result.current.addOptimisticSession("Will be GCd");
+      });
+
+      act(() => {
+        result.current.markOptimisticResolved(id!, "real-1");
+      });
+      expect(result.current.optimisticSessions).toHaveLength(1);
+
+      act(() => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(result.current.optimisticSessions).toHaveLength(0);
+    });
+
+    it("clears the fallback timer when removeOptimisticSession runs first", () => {
+      const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+      let id: string;
+      act(() => {
+        id = result.current.addOptimisticSession("Cleared early");
+        result.current.addOptimisticSession("Untouched");
+      });
+
+      act(() => {
+        result.current.markOptimisticResolved(id!, "real-2");
+      });
+      act(() => {
+        result.current.removeOptimisticSession(id!);
+      });
+
+      // Add it back under the same id slot — the pending timer must not
+      // spuriously drop this replacement when it fires.
+      act(() => {
+        result.current.addOptimisticSession("Reused slot");
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(10_000);
+      });
+
+      expect(result.current.optimisticSessions.map((s) => s.title)).toEqual([
+        "Reused slot",
+        "Untouched",
+      ]);
+    });
   });
 
   it("throws when used outside the provider", () => {

@@ -165,7 +165,7 @@ export function SessionSidebar() {
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
-  const { optimisticSessions } = useOptimisticSessions();
+  const { optimisticSessions, removeOptimisticSession } = useOptimisticSessions();
 
   const currentFilter = activeFilter ?? "all";
   const isArchivedView = currentFilter === "archived";
@@ -262,6 +262,28 @@ export function SessionSidebar() {
     return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [firstPage, extraPages, search]);
 
+  // Hide optimistic rows whose real session is already in the list — prevents
+  // the double-render flash between "optimistic added" and "server refetch
+  // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
+  const realIds = useMemo(() => new Set(displayedSessions.map((s) => s.id)), [displayedSessions]);
+  const visibleOptimistic = useMemo(
+    () => optimisticSessions.filter((os) => !(os.resolvedId && realIds.has(os.resolvedId))),
+    [optimisticSessions, realIds],
+  );
+
+  // Garbage-collect resolved optimistic rows once we've observed their real
+  // counterpart in the list. Done in an effect so state updates happen after
+  // render. This also handles the failure case: if the real session later
+  // changes status (e.g. to "failed"), it's still in the list, so the
+  // optimistic stays hidden and gets cleaned up here.
+  useEffect(() => {
+    for (const os of optimisticSessions) {
+      if (os.resolvedId && realIds.has(os.resolvedId)) {
+        removeOptimisticSession(os.id);
+      }
+    }
+  }, [optimisticSessions, realIds, removeOptimisticSession]);
+
   const counts = countsData?.data;
 
   const isNewSession = pathname === "/sessions/new";
@@ -354,7 +376,7 @@ export function SessionSidebar() {
         )}
 
         {(currentFilter === "all" || currentFilter === "active") &&
-          optimisticSessions.map((os) => (
+          visibleOptimistic.map((os) => (
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
 
