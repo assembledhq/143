@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -430,6 +431,94 @@ func TestNewPreviewHandler(t *testing.T) {
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
+}
+
+// =============================================================================
+// readWorkspacePreviewConfig tests
+// =============================================================================
+
+// fakeFileReader is a stub FileReader that returns canned ReadFile responses.
+// Unused methods panic so this test file fails loudly if something else grows
+// a dependency on them.
+type fakeFileReader struct {
+	content string
+	err     error
+}
+
+func (f fakeFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
+	panic("not used")
+}
+
+func (f fakeFileReader) ReadFile(_ context.Context, _, _, _ string) (string, bool, error) {
+	return f.content, false, f.err
+}
+
+func (f fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) ([]sandbox.FileLine, error) {
+	panic("not used")
+}
+
+func TestReadWorkspacePreviewConfig_NilReader(t *testing.T) {
+	t.Parallel()
+
+	h := &PreviewHandler{logger: zerolog.Nop()}
+	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{}, uuid.New())
+	require.False(t, ok, "nil fileReader must fall through so caller uses defaults")
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_ReadError(t *testing.T) {
+	t.Parallel()
+
+	// A read error is the common "file not present" case and must NOT bubble
+	// up to the user — the caller falls back to built-in defaults.
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{err: errors.New("not found")},
+		logger:     zerolog.Nop(),
+	}
+	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.False(t, ok)
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
+	t.Parallel()
+
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{content: "{not valid json"},
+		logger:     zerolog.Nop(),
+	}
+	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.False(t, ok, "invalid JSON must fall through to defaults, not surface as an error")
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"name": "dogfood",
+		"primary": "web",
+		"services": {
+			"web": {
+				"command": ["npm", "run", "dev"],
+				"port": 3000,
+				"ready": {"http_path": "/"}
+			}
+		},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{content: raw},
+		logger:     zerolog.Nop(),
+	}
+	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.True(t, ok)
+	require.NotNil(t, cfg)
+	require.Equal(t, "web", cfg.Primary)
+	require.Contains(t, cfg.Services, "web")
+	require.Equal(t, 3000, cfg.Services["web"].Port)
 }
 
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {

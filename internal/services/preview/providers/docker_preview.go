@@ -866,13 +866,13 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 	}
 
 	// Inject platform-level env vars (e.g. PREVIEW_ORIGIN) into every service,
-	// overriding any user-declared value. This is applied last so it wins over
-	// both service.env and infrastructure.inject_env.
-	for svcName, env := range envs {
+	// overriding any user-declared value. Applied last so it wins over both
+	// service.env and infrastructure.inject_env. Mutation in place is fine —
+	// env is the same map reference stored in envs[svcName].
+	for _, env := range envs {
 		for k, v := range extraEnv {
 			env[k] = v
 		}
-		envs[svcName] = env
 	}
 
 	return envs

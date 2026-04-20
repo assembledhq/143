@@ -45,6 +45,11 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+-- The github_id, installation_id, and clone_url values are placeholders.
+-- The dogfood preview has no GitHub App configured and will not actually
+-- call the GitHub API, so any code path that tries to hit GitHub from
+-- this seeded data will fail — that is expected. If you need real GitHub
+-- integration in the preview, register a throwaway App and replace these.
 INSERT INTO repositories (
   id, org_id, integration_id, github_id, full_name, default_branch,
   private, language, description, clone_url, installation_id, status,

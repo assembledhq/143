@@ -41,8 +41,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go toolchain matching the builder stage so previews that run the
-# agent's own Go source (e.g. `go run ./cmd/server`) compile inside the sandbox
-# at session-start time. Version tracks the builder FROM directive above.
+# agent's own Go source (e.g. `go run ./cmd/server`) compile inside the
+# sandbox at session-start time.
+#
+# IMPORTANT: keep GO_VERSION below in sync with the `FROM golang:X.Y` pin in
+# the go-builder stage at the top of this Dockerfile. If they drift, a
+# session will compile against a different toolchain than the builder used,
+# which can mask `//go:build` and module-resolution issues.
 ARG TARGETARCH
 RUN set -eux; \
     GO_VERSION="1.26.0"; \
