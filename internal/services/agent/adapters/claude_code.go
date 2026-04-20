@@ -90,23 +90,23 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	var cmd string
 	if prompt.Continuation {
 		// Subsequent turn: resume the latest session with --continue.
+		// The prompt is a positional argument to --print.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --continue --max-tokens %d --prompt \"%s\"",
-			prompt.MaxTokens,
+			"claude --print --output-format stream-json --continue \"%s\"",
 			msg,
 		)
 	} else {
-		// First turn: write prompt file and run fresh. Put it under $HOME
-		// (not WorkDir) so it doesn't pollute the cloned repo's git status.
+		// First turn: write prompt file under $HOME (not WorkDir so it
+		// doesn't pollute the cloned repo's git status) and pipe it into
+		// claude via stdin.
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --max-tokens %d --prompt-file %s",
-			prompt.MaxTokens,
+			"claude --print --output-format stream-json < %s",
 			promptPath,
 		)
 	}
