@@ -236,6 +236,48 @@ func TestUserStore_GetByGoogleID(t *testing.T) {
 	}
 }
 
+func TestUserStore_GetByIDGlobal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows(userColumns).
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, now))
+
+	u, err := store.GetByIDGlobal(context.Background(), userID)
+	require.NoError(t, err)
+	require.Equal(t, userID, u.ID)
+	require.Equal(t, orgID, u.OrgID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_GetByIDGlobal_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	_, err = store.GetByIDGlobal(context.Background(), uuid.New())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, pgx.ErrNoRows))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUserStore_CreateWithPassword(t *testing.T) {
 	t.Parallel()
 

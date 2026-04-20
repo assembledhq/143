@@ -1195,6 +1195,337 @@ func TestValidateInvitation_NilStore(t *testing.T) {
 	require.Equal(t, "INVITE_LOOKUP_FAILED", invErr.code)
 }
 
+// Register happy path without an invitation: creates org, user, and admin
+// membership atomically and sets a session cookie. Exercises createSignupOrg.
+func TestAuthHandler_Register_NoInvitation_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	newOrgID := uuid.New()
+	newUserID := uuid.New()
+	now := time.Now()
+
+	// GetByEmail returns no rows (fresh user).
+	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	// Signup transaction: create org, user, admin membership, commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newOrgID, now, now))
+	mock.ExpectQuery("INSERT INTO users").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(newUserID, now))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	// Session insert.
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	body, _ := json.Marshal(map[string]string{"email": "solo@example.com", "password": "12345678", "name": "Solo"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.Register(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+
+	var foundSession bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "session_token" {
+			foundSession = true
+		}
+	}
+	require.True(t, foundSession, "session cookie should be set")
+}
+
+// Register rolls back the signup transaction when user creation fails,
+// ensuring the org row doesn't leak.
+func TestAuthHandler_Register_NoInvitation_UserCreateFailsRollsBack(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO users").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	body, _ := json.Marshal(map[string]string{"email": "fail@example.com", "password": "12345678", "name": "Fail"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.Register(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "USER_CREATE_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// claimInvitationForExistingUser grants a second-org membership to an already-
+// authenticated user after validating the invitation token.
+func TestAuthHandler_ClaimInvitationForExistingUser_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	userID := uuid.New()
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("existing@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "existing@example.com", "", userID)
+	require.NoError(t, err)
+	require.Nil(t, invErr)
+	require.NotNil(t, inv)
+	require.Equal(t, invID, inv.ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// claimInvitationForExistingUser returns an invitationError (not a raw error)
+// when the invitation token is for a different email, so callers can surface
+// the correct HTTP status.
+func TestAuthHandler_ClaimInvitationForExistingUser_WrongEmail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("invitee@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "other@example.com", "", uuid.New())
+	require.NoError(t, err)
+	require.Nil(t, inv)
+	require.NotNil(t, invErr)
+	require.Equal(t, "INVITE_MISMATCH", invErr.code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// readAndClearPendingInvitationCookie returns the cookie value and emits a
+// Set-Cookie header that clears it so a stale token doesn't leak into a later
+// flow.
+func TestReadAndClearPendingInvitationCookie(t *testing.T) {
+	t.Parallel()
+
+	t.Run("present returns value and clears", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: "pending_invitation", Value: "tok-123"})
+		w := httptest.NewRecorder()
+
+		val := readAndClearPendingInvitationCookie(w, req)
+		require.Equal(t, "tok-123", val)
+
+		var cleared bool
+		for _, c := range w.Result().Cookies() {
+			if c.Name == "pending_invitation" {
+				cleared = true
+				require.Equal(t, "", c.Value)
+				require.Equal(t, -1, c.MaxAge)
+			}
+		}
+		require.True(t, cleared)
+	})
+
+	t.Run("absent returns empty without setting cookie", func(t *testing.T) {
+		t.Parallel()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+
+		val := readAndClearPendingInvitationCookie(w, req)
+		require.Equal(t, "", val)
+		require.Empty(t, w.Result().Cookies())
+	})
+}
+
+// ClaimInvitation handler rejects requests without an authenticated user.
+func TestAuthHandler_ClaimInvitation_Unauthenticated(t *testing.T) {
+	t.Parallel()
+
+	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/claim-invitation", bytes.NewReader([]byte(`{"token":"x"}`)))
+	w := httptest.NewRecorder()
+
+	handler.ClaimInvitation(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Contains(t, w.Body.String(), "UNAUTHORIZED")
+}
+
+// ClaimInvitation handler validates that a token is present in the body.
+func TestAuthHandler_ClaimInvitation_MissingToken(t *testing.T) {
+	t.Parallel()
+
+	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+	user := &models.User{ID: uuid.New(), Email: "u@example.com"}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/claim-invitation", bytes.NewReader([]byte(`{"token":""}`)))
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+
+	handler.ClaimInvitation(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_BODY")
+}
+
+// ClaimInvitation handler end-to-end happy path: validates invitation,
+// accepts it, and grants a membership inside the same tx.
+func TestAuthHandler_ClaimInvitation_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	userID := uuid.New()
+	invOrgID := uuid.New()
+	invID := uuid.New()
+	ghLogin := "octocat"
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	user := &models.User{ID: userID, Email: "u@example.com", GitHubLogin: &ghLogin}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/claim-invitation", bytes.NewReader([]byte(`{"token":"valid"}`)))
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+
+	handler.ClaimInvitation(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), invOrgID.String())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ClaimInvitation surfaces invitationError status/code (e.g. email mismatch)
+// rather than collapsing them into a generic 500.
+func TestAuthHandler_ClaimInvitation_EmailMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	invOrgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, invOrgID, strPtr("someone-else@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	user := &models.User{ID: uuid.New(), Email: "mismatch@example.com"}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/claim-invitation", bytes.NewReader([]byte(`{"token":"valid"}`)))
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+
+	handler.ClaimInvitation(w, req)
+	require.Contains(t, w.Body.String(), "INVITE_MISMATCH")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// createSignupOrg validates its inputs rather than silently accepting nil
+// dependencies — those are programmer errors, not recoverable states.
+func TestAuthHandler_CreateSignupOrg_InputValidation(t *testing.T) {
+	t.Parallel()
+
+	mock, mErr := pgxmock.NewPool()
+	require.NoError(t, mErr)
+	defer mock.Close()
+
+	t.Run("nil pool", func(t *testing.T) {
+		t.Parallel()
+		h := &AuthHandler{}
+		err := h.createSignupOrg(context.Background(), "Acme", &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "pool")
+	})
+
+	t.Run("nil user", func(t *testing.T) {
+		t.Parallel()
+		h := &AuthHandler{pool: mock}
+		err := h.createSignupOrg(context.Background(), "Acme", nil, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "user")
+	})
+
+	t.Run("nil create callback", func(t *testing.T) {
+		t.Parallel()
+		h := &AuthHandler{pool: mock}
+		err := h.createSignupOrg(context.Background(), "Acme", &models.User{}, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "createUser")
+	})
+}
+
 // mockInvitationLookupStore implements invitationLookupStore for tests.
 type mockInvitationLookupStore struct {
 	getByTokenFn func(ctx context.Context, token string) (models.Invitation, error)

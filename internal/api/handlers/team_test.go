@@ -455,6 +455,185 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 	}
 }
 
+// ChangeRole surfaces an internal error when membership lookup fails with a
+// non-ErrNoRows error (e.g. DB down), distinct from the 404 not-found path.
+func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(nil, &mockTeamMembershipStore{
+		getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+			return models.OrganizationMembership{}, fmt.Errorf("boom")
+		},
+	}, nil, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{"role": "member"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+memberID.String()+"/role", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ChangeRole(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// ChangeRole converts pgx.ErrNoRows from UpdateRole into a 404 (race where
+// the membership was removed between the Get and the UpdateRole).
+func TestTeamHandler_ChangeRole_UpdateRaceNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(nil, &mockTeamMembershipStore{
+		getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+			return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
+		},
+		updateRoleFn: func(_ context.Context, _, _ uuid.UUID, _ string) error {
+			return pgx.ErrNoRows
+		},
+	}, nil, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+memberID.String()+"/role", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ChangeRole(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
+// RemoveMember deletes the user's sessions only when the user has no other
+// remaining memberships — otherwise they would be logged out of orgs they
+// still belong to.
+func TestTeamHandler_RemoveMember_DeletesSessionsWhenLastMembership(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	deletedForUser := uuid.Nil
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id, Email: "m@c.com"}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
+			},
+			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, id uuid.UUID) error {
+				deletedForUser = id
+				return nil
+			},
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, memberID, deletedForUser, "session store should be called with the removed member's id")
+}
+
+// RemoveMember keeps the user logged in when they have remaining memberships
+// elsewhere.
+func TestTeamHandler_RemoveMember_KeepsSessionsWhenOtherMembershipsRemain(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	sessionDeleted := false
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id, Email: "m@c.com"}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
+			},
+			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 2, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error {
+				sessionDeleted = true
+				return nil
+			},
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.False(t, sessionDeleted, "sessions should not be deleted while other memberships remain")
+}
+
+// RemoveMember surfaces an internal error when Remove fails for a reason
+// other than pgx.ErrNoRows.
+func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
+			},
+			removeFn: func(_ context.Context, _, _ uuid.UUID) error {
+				return fmt.Errorf("boom")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "DELETE_FAILED")
+}
+
 // --- CreateInvitation tests ---
 
 func TestTeamHandler_CreateInvitation(t *testing.T) {
