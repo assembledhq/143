@@ -24,7 +24,6 @@
       "port": 8080,
       "env": {
         "MODE": "all",
-        "ENV": "development",
         "LOG_LEVEL": "info"
       },
       "ready": {

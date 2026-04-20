@@ -34,7 +34,9 @@ type PreviewHandler struct {
 // NewPreviewHandler creates a new PreviewHandler. fileReader is used to
 // auto-detect .143/preview.json from the session's sandbox workspace when
 // the client does not supply an explicit config; pass sandbox.NoOpFileReader
-// in environments where workspace introspection is unavailable.
+// in environments where workspace introspection is unavailable — its errors
+// wrap sandbox.ErrFileNotFound so auto-detect cleanly falls through to the
+// built-in default config instead of surfacing a 500.
 func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, fileReader sandbox.FileReader, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
 		manager:      manager,
