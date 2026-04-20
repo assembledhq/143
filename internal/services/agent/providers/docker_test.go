@@ -13,6 +13,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
@@ -428,7 +429,9 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, int64(256), *capturedHostConfig.Resources.PidsLimit, "container should have PID limit of 256")
 
 		require.Equal(t, []string{"1.1.1.1", "8.8.8.8"}, capturedHostConfig.DNS,
-			"container should bypass Docker embedded DNS — gVisor netstack can't reach 127.0.0.11")
+			"without resolv.conf bind mount, fall back to HostConfig.DNS (only effective on default bridge / runc)")
+		require.Empty(t, capturedHostConfig.Mounts,
+			"no bind mounts should be added when WithResolvConf is not set")
 
 		// Verify sandbox result
 		require.Equal(t, "abc123", sb.ID, "sandbox ID should match container ID")
@@ -524,6 +527,31 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "no-env", sb.ID)
 		require.Empty(t, capturedConfig.Env, "container should have no env vars when Env is nil")
+	})
+
+	t.Run("bind-mounts resolv.conf and clears DNS when WithResolvConf is set", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedHostConfig *container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedHostConfig = hostConfig
+			return container.CreateResponse{ID: "resolv-mount"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithResolvConf("/etc/143/sandbox-resolv.conf"))
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.NoError(t, err)
+
+		require.Empty(t, capturedHostConfig.DNS,
+			"HostConfig.DNS must be empty when bind-mounting resolv.conf — leaving it set would let Docker re-inject 127.0.0.11 as upstream-forwarder on user-defined networks")
+		require.Len(t, capturedHostConfig.Mounts, 1, "exactly one bind mount expected")
+		m := capturedHostConfig.Mounts[0]
+		require.Equal(t, mount.TypeBind, m.Type)
+		require.Equal(t, "/etc/143/sandbox-resolv.conf", m.Source)
+		require.Equal(t, "/etc/resolv.conf", m.Target)
+		require.True(t, m.ReadOnly, "resolv.conf mount must be read-only — sandboxes shouldn't mutate host DNS config")
 	})
 
 	t.Run("returns error when container create fails", func(t *testing.T) {

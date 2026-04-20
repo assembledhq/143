@@ -83,6 +83,14 @@ type Config struct {
 	// Sandbox
 	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
+	// SandboxResolvConf, when set, is bind-mounted read-only at /etc/resolv.conf
+	// inside every sandbox container. Required under runsc on user-defined
+	// networks because gVisor's netstack can't reach Docker's embedded DNS at
+	// 127.0.0.11 and the HostConfig.DNS field doesn't replace it on user
+	// networks. The file lives on the worker host (e.g. /etc/143/sandbox-resolv.conf)
+	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
+	// this empty falls back to whatever resolv.conf Docker injects.
+	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
 	// Data retention
 	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
 	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
