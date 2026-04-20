@@ -103,7 +103,7 @@ func TestRunBootstrap_NoAdapter(t *testing.T) {
 	svc := &Service{logger: zerolog.Nop()}
 	err := svc.RunBootstrap(context.Background(), uuid.New())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "pm adapter or sandbox not configured")
+	require.Contains(t, err.Error(), "pm adapters or sandbox not configured")
 }
 
 func TestRunBootstrap_NoPMDocStore(t *testing.T) {
@@ -125,7 +125,7 @@ func TestRunRefresh_NoAdapter(t *testing.T) {
 	svc := &Service{logger: zerolog.Nop()}
 	err := svc.RunRefresh(context.Background(), uuid.New())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "pm adapter or sandbox not configured")
+	require.Contains(t, err.Error(), "pm adapters or sandbox not configured")
 }
 
 func TestRunRefresh_NoPMDocStore(t *testing.T) {
