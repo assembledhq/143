@@ -259,6 +259,13 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	for k, v := range cfg.Env {
 		envSlice = append(envSlice, k+"="+v)
 	}
+	// /tmp is mounted noexec (see Tmpfs below), which breaks `go test`: Go
+	// compiles test binaries to $GOTMPDIR (default /tmp) and execs them.
+	// Point Go at /var/tmp on the writable+exec rootfs so test binaries can
+	// run without weakening the noexec hardening on /tmp.
+	if _, ok := cfg.Env["GOTMPDIR"]; !ok {
+		envSlice = append(envSlice, "GOTMPDIR=/var/tmp")
+	}
 
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
