@@ -70,9 +70,7 @@ This works for anything measurable: test coverage, bundle size, response times, 
 
 ## Using 143
 
-If you're using 143 against your repos — on the hosted version or not — the [user guides in `docs/guides/`](docs/guides/) cover per-repo configuration (currently: preview environments).
-
-If you're running your own 143 instance, see [`docs/self-hosting/`](docs/self-hosting/) for GitHub App setup and the production deployment checklist.
+User-facing docs live in [`docs/guides/`](docs/guides/). If you're running your own 143 instance instead of using the hosted version, see [`docs/self-hosting/`](docs/self-hosting/).
 
 ## Built for production
 
