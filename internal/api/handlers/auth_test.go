@@ -27,7 +27,7 @@ func TestAuthHandler_Login_Redirects(t *testing.T) {
 		BaseURL:                "http://localhost:8080",
 		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/login", nil)
 	w := httptest.NewRecorder()
@@ -99,7 +99,7 @@ func TestAuthHandler_Logout(t *testing.T) {
 				defer mock.Close()
 
 				sessionStore := db.NewAuthSessionStore(mock)
-				handler = NewAuthHandler(cfg, nil, nil, sessionStore, nil)
+				handler = NewAuthHandler(cfg, nil, nil, sessionStore, nil, nil)
 				tt.setupMock(mock)
 
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
@@ -127,7 +127,7 @@ func TestAuthHandler_Logout(t *testing.T) {
 
 				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 			} else {
-				handler = NewAuthHandler(cfg, nil, nil, nil, nil)
+				handler = NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 				if tt.cookie != nil {
@@ -174,7 +174,7 @@ func TestAuthHandler_Callback(t *testing.T) {
 			t.Parallel()
 
 			cfg := &config.Config{}
-			handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+			handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			if tt.cookie != nil {
@@ -240,7 +240,7 @@ func TestAuthHandler_Providers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler := NewAuthHandler(tt.cfg, nil, nil, nil, nil)
+			handler := NewAuthHandler(tt.cfg, nil, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
 			w := httptest.NewRecorder()
 
@@ -318,7 +318,7 @@ func TestAuthHandler_Me(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil)
+			handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 			req = tt.setupCtx(req)
 			w := httptest.NewRecorder()
@@ -372,9 +372,9 @@ func TestAuthHandler_Register(t *testing.T) {
 				require.NoError(t, err)
 				defer mock.Close()
 				tt.setupMock(mock)
-				handler = NewAuthHandler(&config.Config{}, db.NewOrganizationStore(mock), db.NewUserStore(mock), db.NewAuthSessionStore(mock), nil)
+				handler = NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), nil, db.NewOrganizationMembershipStore(mock))
 			} else {
-				handler = NewAuthHandler(&config.Config{}, nil, nil, nil, nil)
+				handler = NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
 			}
 
 			body, _ := json.Marshal(tt.body)
@@ -436,7 +436,7 @@ func TestAuthHandler_EmailLogin(t *testing.T) {
 			defer mock.Close()
 			tt.setupMock(mock)
 
-			handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil)
+			handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
 
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(body))
@@ -457,7 +457,7 @@ func TestAuthHandler_GoogleLogin_Redirects(t *testing.T) {
 		GoogleOAuthClientID: "google-client-id",
 		BaseURL:             "http://localhost:8080",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/google/login", nil)
 	w := httptest.NewRecorder()
@@ -501,7 +501,7 @@ func TestAuthHandler_GoogleCallback_Validation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil)
+			handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			if tt.cookie != nil {
 				req.AddCookie(tt.cookie)
@@ -532,7 +532,7 @@ func TestAuthHandler_Register_DuplicateEmail(t *testing.T) {
 				AddRow(uuid.New(), uuid.New(), "dup@example.com", "Existing", "admin", nil, nil, nil, nil, nil, nil),
 		)
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil)
+	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
 
 	body, _ := json.Marshal(map[string]string{"email": "dup@example.com", "password": "12345678", "name": "Dup"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
@@ -576,10 +576,11 @@ func TestAuthHandler_Register_InvitationClaimFailureReturnsGone(t *testing.T) {
 
 	handler := NewAuthHandler(
 		&config.Config{},
-		nil,
+		mock,
 		db.NewUserStore(mock),
 		db.NewAuthSessionStore(mock),
 		db.NewInvitationStore(mock),
+		db.NewOrganizationMembershipStore(mock),
 	)
 
 	body, marshalErr := json.Marshal(map[string]string{
@@ -616,10 +617,11 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_ClaimFailureReturnsInvalid(t 
 
 	handler := NewAuthHandler(
 		&config.Config{},
-		nil,
+		mock,
 		db.NewUserStore(mock),
 		nil,
 		db.NewInvitationStore(mock),
+		db.NewOrganizationMembershipStore(mock),
 	)
 
 	upsertCalled := false
@@ -674,14 +676,19 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(expectedUserID, now))
+	// Grant membership inside the same tx as the invitation claim.
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
 
 	handler := NewAuthHandler(
 		&config.Config{},
-		nil,
+		mock,
 		db.NewUserStore(mock),
 		nil,
 		db.NewInvitationStore(mock),
+		db.NewOrganizationMembershipStore(mock),
 	)
 
 	user := &models.User{
@@ -737,7 +744,7 @@ func TestAuthHandler_Register_WithInvitation_NotFound(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(invitationColumns))
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "new@example.com", "password": "12345678", "name": "New User", "invitation": "nonexistent-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -769,7 +776,7 @@ func TestAuthHandler_Register_WithInvitation_Expired(t *testing.T) {
 		)
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "new@example.com", "password": "12345678", "name": "New User", "invitation": "expired-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -801,7 +808,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 		)
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "different@example.com", "password": "12345678", "name": "Wrong User", "invitation": "mismatch-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -833,7 +840,7 @@ func TestAuthHandler_Register_WithInvitation_AlreadyAccepted(t *testing.T) {
 		)
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "new@example.com", "password": "12345678", "name": "New User", "invitation": "used-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -865,7 +872,7 @@ func TestAuthHandler_Register_WithInvitation_Revoked(t *testing.T) {
 		)
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "new@example.com", "password": "12345678", "name": "New User", "invitation": "revoked-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -909,15 +916,19 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO users").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(newUserID, time.Now()))
+	// Membership upsert inside the signup tx.
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Commit
 	mock.ExpectCommit()
-	// Create session (4 named args: user_id, org_id, token, expires_at)
+	// Create session (5 named args: user_id, org_id, last_org_id, token, expires_at)
 	sessionID := uuid.New()
 	mock.ExpectQuery("INSERT INTO auth_sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(sessionID, time.Now()))
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "invitee@example.com", "password": "12345678", "name": "Invitee", "invitation": "valid-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -948,7 +959,7 @@ func TestAuthHandler_Login_SetsInvitationCookie(t *testing.T) {
 		BaseURL:                "http://localhost:8080",
 		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/login?invitation=test-invite-token", nil)
 	w := httptest.NewRecorder()
@@ -976,7 +987,7 @@ func TestAuthHandler_Login_NoInvitationCookieWithoutParam(t *testing.T) {
 		BaseURL:                "http://localhost:8080",
 		GitHubOAuthRedirectURI: "http://localhost:8080/api/v1/auth/github/callback",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/login", nil)
 	w := httptest.NewRecorder()
@@ -996,7 +1007,7 @@ func TestAuthHandler_GoogleLogin_SetsInvitationCookie(t *testing.T) {
 		GoogleOAuthClientID: "google-client-id",
 		BaseURL:             "http://localhost:8080",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/google/login?invitation=google-invite-token", nil)
 	w := httptest.NewRecorder()
@@ -1035,7 +1046,7 @@ func TestAuthHandler_Register_WithInvitation_ClearsCookie(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(invitationColumns))
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock))
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), db.NewAuthSessionStore(mock), db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	body, _ := json.Marshal(map[string]string{"email": "new@example.com", "password": "12345678", "name": "New", "invitation": "some-token"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(body))
 	w := httptest.NewRecorder()
@@ -1201,7 +1212,7 @@ func TestAuthHandler_createSessionAndRespond_SetsCookiesWithMiddlewareConstants(
 	defer mock.Close()
 
 	mock.ExpectQuery("INSERT INTO auth_sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(uuid.New(), time.Now()),
@@ -1212,6 +1223,7 @@ func TestAuthHandler_createSessionAndRespond_SetsCookiesWithMiddlewareConstants(
 		nil,
 		nil,
 		db.NewAuthSessionStore(mock),
+		nil,
 		nil,
 	)
 
@@ -1247,7 +1259,7 @@ func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing
 	defer mock.Close()
 
 	mock.ExpectQuery("INSERT INTO auth_sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(uuid.New(), time.Now()),
@@ -1261,6 +1273,7 @@ func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing
 		nil,
 		nil,
 		db.NewAuthSessionStore(mock),
+		nil,
 		nil,
 	)
 

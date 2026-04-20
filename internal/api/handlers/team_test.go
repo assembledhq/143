@@ -22,12 +22,9 @@ import (
 // --- mock stores ---
 
 type mockTeamUserStore struct {
-	listByOrgFn   func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
-	getByIDFn     func(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
-	getByEmailFn  func(ctx context.Context, email string) (models.User, error)
-	updateRoleFn  func(ctx context.Context, orgID, userID uuid.UUID, role string) error
-	deleteFn      func(ctx context.Context, orgID, userID uuid.UUID) error
-	countAdminsFn func(ctx context.Context, orgID uuid.UUID) (int, error)
+	listByOrgFn     func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
+	getByIDGlobalFn func(ctx context.Context, userID uuid.UUID) (models.User, error)
+	getByEmailFn    func(ctx context.Context, email string) (models.User, error)
 }
 
 func (m *mockTeamUserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
@@ -36,11 +33,11 @@ func (m *mockTeamUserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]m
 	}
 	return nil, nil
 }
-func (m *mockTeamUserStore) GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error) {
-	if m.getByIDFn != nil {
-		return m.getByIDFn(ctx, orgID, userID)
+func (m *mockTeamUserStore) GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error) {
+	if m.getByIDGlobalFn != nil {
+		return m.getByIDGlobalFn(ctx, userID)
 	}
-	return models.User{}, pgx.ErrNoRows
+	return models.User{ID: userID}, nil
 }
 func (m *mockTeamUserStore) GetByEmail(ctx context.Context, email string) (models.User, error) {
 	if m.getByEmailFn != nil {
@@ -48,23 +45,44 @@ func (m *mockTeamUserStore) GetByEmail(ctx context.Context, email string) (model
 	}
 	return models.User{}, pgx.ErrNoRows
 }
-func (m *mockTeamUserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error {
+
+type mockTeamMembershipStore struct {
+	getFn          func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	updateRoleFn   func(ctx context.Context, userID, orgID uuid.UUID, role string) error
+	removeFn       func(ctx context.Context, userID, orgID uuid.UUID) error
+	countAdminsFn  func(ctx context.Context, orgID uuid.UUID) (int, error)
+	countForUserFn func(ctx context.Context, userID uuid.UUID) (int, error)
+}
+
+func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, userID, orgID)
+	}
+	return models.OrganizationMembership{}, pgx.ErrNoRows
+}
+func (m *mockTeamMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error {
 	if m.updateRoleFn != nil {
-		return m.updateRoleFn(ctx, orgID, userID, role)
+		return m.updateRoleFn(ctx, userID, orgID, role)
 	}
 	return nil
 }
-func (m *mockTeamUserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
-	if m.deleteFn != nil {
-		return m.deleteFn(ctx, orgID, userID)
+func (m *mockTeamMembershipStore) Remove(ctx context.Context, userID, orgID uuid.UUID) error {
+	if m.removeFn != nil {
+		return m.removeFn(ctx, userID, orgID)
 	}
 	return nil
 }
-func (m *mockTeamUserStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
+func (m *mockTeamMembershipStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
 	if m.countAdminsFn != nil {
 		return m.countAdminsFn(ctx, orgID)
 	}
 	return 2, nil
+}
+func (m *mockTeamMembershipStore) CountForUser(ctx context.Context, userID uuid.UUID) (int, error) {
+	if m.countForUserFn != nil {
+		return m.countForUserFn(ctx, userID)
+	}
+	return 0, nil
 }
 
 type mockTeamSessionStore struct {
@@ -133,9 +151,12 @@ func (m *mockTeamOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Or
 
 // --- helpers ---
 
-func newTeamHandler(users *mockTeamUserStore, sessions *mockTeamSessionStore, invitations *mockTeamInvitationStore, orgs *mockTeamOrgStore) *TeamHandler {
+func newTeamHandler(users *mockTeamUserStore, memberships *mockTeamMembershipStore, sessions *mockTeamSessionStore, invitations *mockTeamInvitationStore, orgs *mockTeamOrgStore) *TeamHandler {
 	if users == nil {
 		users = &mockTeamUserStore{}
+	}
+	if memberships == nil {
+		memberships = &mockTeamMembershipStore{}
 	}
 	if sessions == nil {
 		sessions = &mockTeamSessionStore{}
@@ -146,7 +167,7 @@ func newTeamHandler(users *mockTeamUserStore, sessions *mockTeamSessionStore, in
 	if orgs == nil {
 		orgs = &mockTeamOrgStore{}
 	}
-	return NewTeamHandler(users, sessions, invitations, orgs, "http://localhost:3000", nil)
+	return NewTeamHandler(users, memberships, sessions, invitations, orgs, "http://localhost:3000", nil)
 }
 
 func teamCtx(orgID uuid.UUID, user *models.User) context.Context {
@@ -215,7 +236,7 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/team/members", nil)
 			req = req.WithContext(teamCtx(orgID, nil))
 			w := httptest.NewRecorder()
@@ -247,6 +268,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 		body         map[string]string
 		currentUser  *models.User
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		expectedCode int
 		expectedBody string
 	}{
@@ -275,13 +297,26 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			expectedBody: "CANNOT_CHANGE_OWN_ROLE",
 		},
 		{
+			name:        "member not found returns 404",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "member"},
+			currentUser: adminUser,
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{}, pgx.ErrNoRows
+				},
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "MEMBER_NOT_FOUND",
+		},
+		{
 			name:        "cannot demote last admin",
 			memberID:    memberID.String(),
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
-			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "admin"}, nil
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
 				},
 				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
 					return 1, nil
@@ -296,8 +331,13 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "viewer"},
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "member", Email: "b@c.com", Name: "Bob"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com", Name: "Bob"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -308,7 +348,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, nil, nil)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+tt.memberID+"/role", bytes.NewReader(body))
 			ctx := teamCtx(orgID, tt.currentUser)
@@ -339,6 +379,7 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 		memberID     string
 		currentUser  *models.User
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		expectedCode int
 		expectedBody string
 	}{
@@ -361,8 +402,13 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "admin"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
 				},
 				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
 					return 1, nil
@@ -376,8 +422,13 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "member"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
 				},
 			},
 			expectedCode: http.StatusNoContent,
@@ -388,7 +439,7 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+tt.memberID, nil)
 			ctx := teamCtx(orgID, tt.currentUser)
 			ctx = withChiParam(ctx, "id", tt.memberID)
@@ -412,10 +463,13 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 	orgID := uuid.New()
 	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Name: "Admin", Role: "admin"}
 
+	existingUserID := uuid.New()
+
 	tests := []struct {
 		name         string
 		body         map[string]string
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		invitations  *mockTeamInvitationStore
 		expectedCode int
 		expectedBody string
@@ -437,11 +491,31 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 			body: map[string]string{"email": "existing@b.com", "role": "member"},
 			users: &mockTeamUserStore{
 				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
-					return models.User{OrgID: orgID}, nil
+					return models.User{ID: existingUserID}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, userID, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
 				},
 			},
 			expectedCode: http.StatusConflict,
 			expectedBody: "ALREADY_MEMBER",
+		},
+		{
+			name: "existing user in another org does not block invite",
+			body: map[string]string{"email": "elsewhere@b.com", "role": "member"},
+			users: &mockTeamUserStore{
+				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+					return models.User{ID: existingUserID}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{}, pgx.ErrNoRows
+				},
+			},
+			expectedCode: http.StatusCreated,
 		},
 		{
 			name: "successfully creates invitation",
@@ -469,7 +543,7 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, tt.invitations, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, tt.invitations, nil)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
 			req = req.WithContext(teamCtx(orgID, adminUser))
@@ -532,7 +606,7 @@ func TestTeamHandler_RevokeInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(nil, nil, tt.invitations, nil)
+			h := newTeamHandler(nil, nil, nil, tt.invitations, nil)
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/invitations/"+tt.invitationID, nil)
 			ctx := teamCtx(orgID, nil)
 			ctx = withChiParam(ctx, "id", tt.invitationID)
@@ -641,7 +715,7 @@ func TestTeamHandler_AcceptInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, tt.invitations, tt.orgs)
+			h := newTeamHandler(tt.users, nil, nil, tt.invitations, tt.orgs)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations/accept", bytes.NewReader(body))
 			w := httptest.NewRecorder()

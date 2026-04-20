@@ -39,6 +39,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
 	authSessionStore := db.NewAuthSessionStore(pool)
+	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
@@ -88,33 +89,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
 
-	// Build the GitHub App service once and reuse it across PRService, the
-	// integration handler, and the team handler. Left nil when the app is
-	// disabled or its credentials fail to parse — downstream sites nil-check
-	// before using it.
-	var ghSvc *ghservice.Service
-	if cfg.GitHubAppEnabled() {
-		svc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+	// Create PRService if GitHub App credentials are configured.
+	var prService *ghservice.PRService
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
-			ghSvc = svc
+			prService = ghservice.NewPRService(
+				ghSvc, pullRequestStore, sessionStore, issueStore,
+				deployStore, validationStore, repoStore, jobStore, logger,
+			)
+			prService.SetReviewCommentStore(reviewCommentStore)
 		}
-	}
-
-	// Create PRService if the GitHub App service is available.
-	var prService *ghservice.PRService
-	if ghSvc != nil {
-		prService = ghservice.NewPRService(
-			ghSvc, pullRequestStore, sessionStore, issueStore,
-			deployStore, validationStore, repoStore, jobStore, logger,
-		)
-		prService.SetReviewCommentStore(reviewCommentStore)
 	}
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
-	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
+	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	if prService != nil {
 		repoHandler.SetPRService(prService)
@@ -127,8 +119,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	// If the GitHub App service is available, let the integration handler
 	// fetch repos directly from the API during the install redirect.
-	if ghSvc != nil {
-		integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+		}
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -191,9 +186,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
-	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
-	if ghSvc != nil {
-		teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+		}
 	}
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
@@ -322,12 +320,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	})
 	recycleWorker.Start()
 
-	// Wire preview teardown into the PR service so closing a PR stops any
-	// active preview for it. No-op when PRService is nil (no GitHub App).
-	if prService != nil {
-		prService.SetPreviewTeardown(previewStore, previewManager)
-	}
-
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.
 	var gwSrv *http.Server
@@ -424,13 +416,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Protected routes (authenticated)
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(authSessionStore, userStore, []byte(cfg.CSRFSigningKey), logger))
+		r.Use(middleware.Auth(middleware.AuthStores{
+			Sessions:    authSessionStore,
+			Users:       userStore,
+			Memberships: membershipStore,
+		}, []byte(cfg.CSRFSigningKey), logger))
 		r.Use(middleware.OrgContext)
 		r.Use(middleware.LogContext(logger))
 		r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
 		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
+		// Available to any authenticated user (no RequireRole) — an invited
+		// user may not yet have a role in the target org when they claim.
+		r.Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {

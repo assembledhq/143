@@ -41,6 +41,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"eval_runs",
 		"eval_batches",
 		"eval_bootstrap_runs",
+		"organization_memberships",
 	}
 
 	// Tables exempt from org_id requirement (global or no org_id column)
@@ -72,6 +73,8 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"users", "where github_id"},          // pre-auth lookup by GitHub ID
 		{"users", "where email"},              // pre-auth lookup by email
 		{"users", "where google_id"},          // pre-auth lookup by Google ID
+		{"users", "where id = @id`"},          // GetByIDGlobal: auth middleware loads user identity; org is resolved via memberships
+		{"organization_memberships", "where user_id = @user_id`"}, // CountForUser: user-scoped aggregate across all orgs
 	}
 
 	// Scan all .go files in the db package (not test files)

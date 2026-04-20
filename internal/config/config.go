@@ -152,6 +152,15 @@ type Config struct {
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
+
+	// MultiOrgMembershipsEnabled is the rollout gate for the product-visible flip
+	// to multi-organization membership. When false, a user accepting an invitation
+	// to a second org is rejected with ALREADY_IN_ORG. When true, the invitation
+	// inserts an additional membership without removing the user's existing ones.
+	// The membership infrastructure (table, middleware, active-org switching) is
+	// always active; this flag only gates whether new second memberships can be
+	// created through product surfaces.
+	MultiOrgMembershipsEnabled bool `env:"MULTI_ORG_MEMBERSHIPS_ENABLED" envDefault:"false"`
 }
 
 // Load reads configuration from env files and environment variables.

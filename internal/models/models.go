@@ -30,12 +30,18 @@ type User struct {
 }
 
 type AuthSession struct {
-	ID        uuid.UUID `db:"id" json:"id"`
-	UserID    uuid.UUID `db:"user_id" json:"user_id"`
-	OrgID     uuid.UUID `db:"org_id" json:"org_id"`
-	Token     string    `db:"token" json:"-"` // never expose token in JSON
-	ExpiresAt time.Time `db:"expires_at" json:"expires_at"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	OrgID  uuid.UUID `db:"org_id" json:"org_id"`
+	// LastOrgID is the server-side hint for which membership to activate when a
+	// client reconnects without echoing back an X-Active-Org-ID header (new tab,
+	// cold reload). Nullable so that zero-membership users can still sign in and
+	// so that deletion of the selected org via ON DELETE SET NULL does not
+	// invalidate the session.
+	LastOrgID *uuid.UUID `db:"last_org_id" json:"last_org_id,omitempty"`
+	Token     string     `db:"token" json:"-"` // never expose token in JSON
+	ExpiresAt time.Time  `db:"expires_at" json:"expires_at"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
 }
 
 type Integration struct {

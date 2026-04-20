@@ -25,14 +25,25 @@ import (
 	"github.com/assembledhq/143/internal/services/email"
 )
 
-// teamUserStore is the interface the team handler depends on for user operations.
+// teamUserStore is the interface the team handler depends on for user lookups.
+// Membership-scoped operations (role updates, removal, admin counts) live on
+// teamMembershipStore instead — users own identity, memberships own access.
 type teamUserStore interface {
 	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
-	GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
+	GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error)
 	GetByEmail(ctx context.Context, email string) (models.User, error)
-	UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error
-	Delete(ctx context.Context, orgID, userID uuid.UUID) error
+}
+
+// teamMembershipStore is the authoritative source for per-org role and access.
+// Every decision that was "does this user belong to this org, and at what
+// level" routes through here — the users table is only consulted for display
+// fields (name, email, avatar, github login).
+type teamMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error
+	Remove(ctx context.Context, userID, orgID uuid.UUID) error
 	CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error)
+	CountForUser(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
 // teamSessionStore is the interface for session invalidation on member removal.
@@ -69,6 +80,7 @@ var validRoles = []string{"admin", "member", "viewer"}
 // TeamHandler serves the /api/v1/team/* endpoints.
 type TeamHandler struct {
 	users        teamUserStore
+	memberships  teamMembershipStore
 	sessions     teamSessionStore
 	invitations  teamInvitationStore
 	orgs         teamOrgStore
@@ -96,6 +108,7 @@ func (h *TeamHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // NewTeamHandler creates a new team management handler.
 func NewTeamHandler(
 	users teamUserStore,
+	memberships teamMembershipStore,
 	sessions teamSessionStore,
 	invitations teamInvitationStore,
 	orgs teamOrgStore,
@@ -107,6 +120,7 @@ func NewTeamHandler(
 	}
 	return &TeamHandler{
 		users:       users,
+		memberships: memberships,
 		sessions:    sessions,
 		invitations: invitations,
 		orgs:        orgs,
@@ -160,15 +174,19 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If demoting from admin, ensure they're not the last admin.
-	member, err := h.users.GetByID(r.Context(), orgID, memberID)
+	// Authoritative per-org role lives on the membership row, not on users.
+	membership, err := h.memberships.Get(r.Context(), memberID, orgID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up member", err)
 		return
 	}
 
-	if member.Role == "admin" && body.Role != "admin" {
-		count, err := h.users.CountAdmins(r.Context(), orgID)
+	if membership.Role == "admin" && body.Role != "admin" {
+		count, err := h.memberships.CountAdmins(r.Context(), orgID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
 			return
@@ -179,13 +197,25 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.users.UpdateRole(r.Context(), orgID, memberID, body.Role); err != nil {
+	if err := h.memberships.UpdateRole(r.Context(), memberID, orgID, body.Role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update role", err)
 		return
 	}
 
+	// Fetch the user identity row for the response payload; role comes from the
+	// updated membership so the frontend sees the new value immediately.
+	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up member", err)
+		return
+	}
+
 	memberIDStr := memberID.String()
-	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": member.Role})
+	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": membership.Role})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for role change")
 	}
@@ -211,15 +241,25 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check that the member exists and isn't the last admin.
-	member, err := h.users.GetByID(r.Context(), orgID, memberID)
+	// Fetch identity for audit details and membership for the last-admin check.
+	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found", err)
 		return
 	}
 
-	if member.Role == "admin" {
-		count, err := h.users.CountAdmins(r.Context(), orgID)
+	membership, err := h.memberships.Get(r.Context(), memberID, orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up membership", err)
+		return
+	}
+
+	if membership.Role == "admin" {
+		count, err := h.memberships.CountAdmins(r.Context(), orgID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
 			return
@@ -230,7 +270,15 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.users.Delete(r.Context(), orgID, memberID); err != nil {
+	// Removing a membership (not the user) keeps the user available to any
+	// other orgs they belong to. The CTE inside Remove also clears the
+	// org-scoped references (invitations they sent, session_questions they
+	// answered) so nothing dangles pointing at a non-member.
+	if err := h.memberships.Remove(r.Context(), memberID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove member", err)
 		return
 	}
@@ -242,9 +290,18 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRemoved, models.AuditResourceTeamMember, &removedIDStr, details)
 
-	// Invalidate all sessions for the removed user.
-	if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+	// Only invalidate the user's sessions if they have no remaining memberships
+	// — otherwise they'd be logged out of orgs they still belong to. A failure
+	// here is non-fatal: the removal itself succeeded and stale sessions will
+	// fail their next middleware check (membership lookup returns ErrNoRows)
+	// and get rejected there.
+	remaining, countErr := h.memberships.CountForUser(r.Context(), memberID)
+	if countErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(countErr).Msg("failed to count remaining memberships after removal")
+	} else if remaining == 0 {
+		if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -297,14 +354,29 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if the invitee is already a member of this org.
+	// Check if the invitee is already a member of this org. With multi-org
+	// memberships the users row alone no longer tells us — a user may exist
+	// globally and be a member of *other* orgs without being a member here.
+	// The authoritative check is memberships.Get(userID, orgID).
 	if body.Email != "" {
-		if existing, err := h.users.GetByEmail(r.Context(), body.Email); err == nil && existing.OrgID == orgID {
-			writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
-			return
+		if existing, err := h.users.GetByEmail(r.Context(), body.Email); err == nil {
+			if _, memErr := h.memberships.Get(r.Context(), existing.ID, orgID); memErr == nil {
+				writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
+				return
+			} else if !errors.Is(memErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check existing membership", memErr)
+				return
+			}
 		}
 	}
 	if body.GitHubUsername != "" {
+		// ListByOrg returns users whose legacy primary org is this org — the
+		// frontend only renders invitations against currently-visible members,
+		// so iterating that list is sufficient for the dedup check. A user who
+		// is a member via a non-primary membership will be rejected later by
+		// the invitation's unique (org_id, github_username) constraint if
+		// another pending invitation already exists, and the OAuth callback
+		// upserts idempotently on re-claim.
 		members, err := h.users.ListByOrg(r.Context(), orgID)
 		if err == nil {
 			for _, m := range members {
