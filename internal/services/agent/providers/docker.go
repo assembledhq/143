@@ -384,7 +384,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// the exec's own cwd doesn't race with creation.
 	bootstrapSB := &agent.Sandbox{ID: resp.ID, Provider: "docker", WorkDir: "/"}
 	bootstrapCmd := fmt.Sprintf(
-		"sudo mkdir -p %s && sudo chown sandbox:sandbox %s",
+		"sudo mkdir -p '%s' && sudo chown sandbox:sandbox '%s'",
 		shellEscape(cfg.WorkDir), shellEscape(cfg.WorkDir),
 	)
 	var bootErr bytes.Buffer
