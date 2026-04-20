@@ -66,7 +66,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
 
-  const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessionsSafe();
+  const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessionsSafe();
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -166,12 +166,15 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
         : message.trim();
       return { optimisticId: addOptimisticSession(title) };
     },
-    onSuccess: async (response, _variables, context) => {
+    onSuccess: (response, _variables, context) => {
       if (selectedRepoId) {
         try { localStorage.setItem("143:lastUsedRepoId", selectedRepoId); } catch {}
       }
-      await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-      removeOptimisticSession(context.optimisticId);
+      // Keep the optimistic row visible — the sidebar swaps it for the real
+      // session once the refetch lands, so there's no double-render flash and
+      // no empty gap. Cleanup happens there after the real row is observed.
+      markOptimisticResolved(context.optimisticId, response.data.id);
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       onOpenChange(false);
       router.push(`/sessions/${response.data.id}`);
     },
