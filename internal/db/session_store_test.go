@@ -496,6 +496,68 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "UpdatePMPlanID must not write last_activity_at")
 }
 
+func TestSessionStore_ResetForRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery(`SELECT status FROM sessions WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("failed"))
+
+	// Pinned: ResetForRetry must bump last_activity_at so the retry surfaces
+	// to the top of the MRU-ordered sessions list.
+	mock.ExpectExec(`(?s)UPDATE sessions.+SET status = 'pending'.+last_activity_at = now\(\).+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ResetForRetry(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "ResetForRetry must bump last_activity_at")
+}
+
+func TestSessionStore_ResetForRetry_NotFailed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery(`SELECT status FROM sessions WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("running"))
+
+	err = store.ResetForRetry(context.Background(), uuid.New(), uuid.New())
+	require.ErrorIs(t, err, ErrSessionNotFailed)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UndoResetForRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	// Pinned: UndoResetForRetry must bump last_activity_at so the session
+	// reverts to visible-as-just-updated after a retry enqueue failure.
+	mock.ExpectExec(`(?s)UPDATE sessions.+SET status = 'failed'.+last_activity_at = now\(\).+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UndoResetForRetry(context.Background(), uuid.New(), uuid.New(), "retry failed", "transient")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "UndoResetForRetry must bump last_activity_at")
+}
+
 func TestSessionStore_SoftDelete(t *testing.T) {
 	t.Parallel()
 

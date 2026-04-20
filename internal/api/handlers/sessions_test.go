@@ -376,6 +376,62 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestSessionHandler_List_EmitsCursorWhenFull exercises the nextCursor emission
+// path: when the DB returns exactly `limit` rows, the handler must encode the
+// last row's last_activity_at (the MRU sort key) into the returned cursor so
+// callers can page from the correct position.
+func TestSessionHandler_List_EmitsCursorWhenFull(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil,
+				nil, 0, now, "none", nil,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+			),
+		)
+
+	// Request exactly one row so len(runs) == limit and the cursor is emitted.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?limit=1", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.List(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp models.ListResponse[models.SessionListItem]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(resp.Data))
+	require.NotEmpty(t, resp.Meta.NextCursor, "next cursor must be set when page is full")
+
+	// Cursor must encode (last_activity_at, id) so pagination continues in MRU order.
+	decodedTime, decodedID, err := decodeSessionCursor(resp.Meta.NextCursor)
+	require.NoError(t, err)
+	require.True(t, now.Equal(decodedTime), "cursor time must be last_activity_at of last row")
+	require.Equal(t, runID, decodedID, "cursor id must be id of last row")
+}
+
 func TestSessionHandler_List_InvalidCursor(t *testing.T) {
 	t.Parallel()
 
