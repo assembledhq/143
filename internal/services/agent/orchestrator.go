@@ -260,10 +260,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return err
 	}
 
-	// 2. Update status to "running" (sets started_at).
+	// 2. Update status to "running" (sets started_at in DB). We also capture
+	// the start time locally so the timeout branch below can log a
+	// meaningful elapsed duration regardless of whether run.StartedAt was
+	// populated by the caller.
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	runStartedAt := time.Now()
 
 	// 3. Fetch the issue (non-fatal when IssueID is nil/zero for project-dispatched sessions).
 	var issue *models.Issue
@@ -509,17 +513,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if err != nil {
 		// Distinguish three cases:
-		//   1. context.DeadlineExceeded — session hit its wall-clock limit.
+		//   1. User cancellation (wasCancelled or ctx.Err()==Canceled) —
+		//      snapshot and return to idle so the session can be continued.
+		//      Checked first so an explicit user cancel that races the
+		//      deadline is classified as a cancel, not a timeout.
+		//   2. context.DeadlineExceeded — session hit its wall-clock limit.
 		//      Mark as failed with a clear timeout message so failure.go
 		//      classifies it correctly and the user sees actionable guidance.
-		//   2. User cancellation (wasCancelled or ctx.Err()==Canceled) —
-		//      snapshot and return to idle so the session can be continued.
 		//   3. Any other error — fail with the underlying message.
+		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
+			log.Info().Msg("session cancelled by user")
+			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
+			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			elapsed := time.Duration(0)
-			if run.StartedAt != nil {
-				elapsed = time.Since(*run.StartedAt).Round(time.Second)
-			}
+			elapsed := time.Since(runStartedAt).Round(time.Second)
 			log.Error().
 				Err(err).
 				Dur("elapsed", elapsed).
@@ -535,11 +543,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				"org_id":     run.OrgID.String(),
 			})
 			return fmt.Errorf("session timed out: %w", err)
-		}
-		if wasCancelled || ctx.Err() != nil {
-			log.Info().Msg("session cancelled by user")
-			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
-			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
@@ -694,10 +697,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
 
-	// 1. Update status to running.
+	// 1. Update status to running. Capture wall-clock start locally so the
+	// timeout branch below can log a meaningful elapsed regardless of
+	// whether session.StartedAt is populated (it's set from the first
+	// turn; on a later turn this captures THIS turn's elapsed).
 	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
 		return fmt.Errorf("update session status to running: %w", err)
 	}
+	turnStartedAt := time.Now()
 	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateRunning)); err != nil {
 		log.Warn().Err(err).Msg("failed to update sandbox state to running")
 	}
@@ -953,11 +960,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(session.ID)
 
 	if err != nil {
+		// User cancel is checked first so an explicit cancel that races the
+		// deadline is classified as a cancel, not a timeout.
+		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
+			log.Info().Msg("session cancelled by user during continue")
+			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
+			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			elapsed := time.Duration(0)
-			if session.StartedAt != nil {
-				elapsed = time.Since(*session.StartedAt).Round(time.Second)
-			}
+			elapsed := time.Since(turnStartedAt).Round(time.Second)
 			log.Error().
 				Err(err).
 				Dur("elapsed", elapsed).
@@ -972,11 +983,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				"org_id":     session.OrgID.String(),
 			})
 			return fmt.Errorf("session timed out: %w", err)
-		}
-		if wasCancelled || ctx.Err() != nil {
-			log.Info().Msg("session cancelled by user during continue")
-			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
-			return fmt.Errorf("session cancelled: %w", ctx.Err())
 		}
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)

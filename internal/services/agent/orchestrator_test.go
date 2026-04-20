@@ -1985,3 +1985,64 @@ func TestContinueSession_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testi
 	require.Equal(t, session.ID.String(), payload["session_id"])
 	require.Equal(t, session.OrgID.String(), payload["org_id"])
 }
+
+// TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering
+// of branches in the RunAgent error handler: when a user cancel and a
+// context deadline have both fired, the session must be classified as a
+// user cancel (snapshotted back to idle) rather than a timeout failure.
+// Without this ordering, a cancel that races the deadline could flip the
+// session into a failed-with-timeout state instead of returning to idle.
+func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("cancel-snapshot"))), nil
+	}
+	// Make Exec fail so doCancel falls back to immediate ctx cancel rather
+	// than waiting 30s for the SIGINT timer.
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 1, errors.New("exec not available in test")
+	}
+
+	// Adapter waits for the cancel registry to mark the session cancelled,
+	// then returns DeadlineExceeded to simulate the race where the ctx
+	// deadline has also fired by the time the adapter reports back.
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return nil, context.DeadlineExceeded
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		// Pass a context with a near-future deadline so DeadlineExceeded is
+		// a plausible outcome by the time we check ctx.Err() in RunAgent.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		done <- buildOrchestrator(d).RunAgent(ctx, run)
+	}()
+
+	<-adapterStarted
+	require.True(t, cancelReg.CancelSession(run.ID), "cancel should find registered session")
+
+	err := <-done
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cancelled", "cancel must win over timeout classification")
+	require.NotContains(t, err.Error(), "timed out", "timeout classification must lose to explicit user cancel")
+
+	// No failed-status update should have been recorded.
+	for _, r := range d.sessions.getResultUpdates() {
+		require.NotEqual(t, "failed", r.status, "cancelled-with-expired-ctx should not mark session failed")
+	}
+	// No analyze_failure job should have been enqueued.
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
+}

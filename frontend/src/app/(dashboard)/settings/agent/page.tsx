@@ -44,6 +44,11 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
+// Keep these in sync with internal/models/org_settings.go —
+// DefaultMaxSessionDurationSeconds, MinMaxSessionDurationSeconds,
+// MaxMaxSessionDurationSeconds. ParseOrgSettings on the server clamps
+// whatever we send into the same range, so UI drift won't break
+// persistence, but users would see values snap.
 const DEFAULT_EXECUTION_SETTINGS: Pick<
   Required<OrgSettings>,
   "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "max_session_duration_seconds"
@@ -596,6 +601,20 @@ export default function AgentPage() {
                       value={maxSessionMinutes}
                       onChange={(e) => setMaxSessionMinutesOverride(e.target.value)}
                     />
+                    {(() => {
+                      const parsed = parseInt(maxSessionMinutes, 10);
+                      if (
+                        Number.isFinite(parsed) &&
+                        (parsed < MIN_SESSION_DURATION_MINUTES || parsed > MAX_SESSION_DURATION_MINUTES)
+                      ) {
+                        return (
+                          <p className="text-xs text-destructive">
+                            Value will be clamped to {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes on save.
+                          </p>
+                        );
+                      }
+                      return null;
+                    })()}
                     <p className="text-xs text-muted-foreground">
                       Sessions that exceed this wall-clock limit are cancelled and marked failed. Defaults to 25 minutes; allowed range {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes.
                     </p>

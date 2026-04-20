@@ -272,6 +272,12 @@ const (
 	// Values above this are clamped down to protect shared infrastructure
 	// (long-running sandboxes hold concurrency slots). Admins wanting longer
 	// runs should split the task rather than raising this.
+	//
+	// If you bump this, also review agent.minRunningAgeFloor (internal/
+	// services/agent/reaper.go) and the SESSION_MAX_RUNNING_AGE default in
+	// internal/config/config.go — both are derived from this value and must
+	// stay strictly above it so the reaper doesn't kill legitimate
+	// long-running sessions before the orchestrator's own timeout fires.
 	MaxMaxSessionDurationSeconds = 2 * 60 * 60
 )
 

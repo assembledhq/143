@@ -82,11 +82,13 @@ func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 const defaultMaxPendingAge = 10 * time.Minute
 
 // defaultMaxRunningAge is the safety-net cutoff for sessions stuck in
-// "running". It must be longer than the largest per-org session timeout
-// plus the handler cleanup buffer, otherwise legitimate long-running
-// sessions would be failed out from under the orchestrator. The constructor
-// enforces minRunningAgeFloor regardless of how this is configured.
-const defaultMaxRunningAge = 45 * time.Minute
+// "running". It must be at or above minRunningAgeFloor — otherwise an
+// admin who legitimately raises their org's session timeout to the
+// allowed maximum would have sessions killed by the reaper before the
+// orchestrator's own timeout fires. Set a comfortable margin above the
+// floor so raising MaxMaxSessionDurationSeconds in models doesn't
+// silently trip the constructor's warning.
+const defaultMaxRunningAge = 150 * time.Minute // 2h30m; floor is ~2h17m
 
 // minRunningAgeFloor is the hard floor for the reaper's running-session
 // cutoff. It's derived from the maximum per-org session timeout
