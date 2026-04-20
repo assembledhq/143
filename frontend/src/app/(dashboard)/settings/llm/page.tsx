@@ -31,6 +31,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AlertTriangle, Check, Eye, EyeOff } from "lucide-react";
+import Link from "next/link";
 import {
   LLM_MODELS_BY_PROVIDER,
   LLM_PROVIDER_INFO,
@@ -70,7 +71,6 @@ export default function LLMPage() {
     queryFn: () => api.settings.getLLMDefaults(),
   });
   const platformProviders = useMemo(() => llmDefaultsResp?.data ?? {}, [llmDefaultsResp?.data]);
-  const platformModel = llmDefaultsResp?.platform_model;
   const hasPlatformLLM = Object.keys(platformProviders).length > 0;
 
   // Fetch available models from backend (source of truth)
@@ -215,49 +215,28 @@ export default function LLMPage() {
           description="Configure agent credentials and the AI model for your organization."
         />
 
-        {/* Platform Intelligence (read-only) */}
-        <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">Platform intelligence</h2>
-          <Card>
+        {!hasPlatformLLM && (
+          <Card className="border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/20">
             <CardContent>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-muted-foreground">
-                    These features are powered by the platform and work automatically. No configuration needed.
-                  </p>
-                  {hasPlatformLLM ? (
-                    <Badge variant="success" className="text-xs px-1.5 py-0 shrink-0">
-                      <Check className="mr-0.5 h-3 w-3" />
-                      Active
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary" className="text-xs px-1.5 py-0 shrink-0">
-                      <AlertTriangle className="mr-0.5 h-3 w-3" />
-                      Not configured
-                    </Badge>
-                  )}
-                </div>
-                <ul className="text-xs text-muted-foreground space-y-1">
-                  <li>Session titles</li>
-                  <li>PR descriptions</li>
-                  <li>Project generation</li>
-                  <li>Validation checks</li>
-                  <li>Priority scoring</li>
-                </ul>
-                {platformModel && (
-                  <p className="text-xs text-muted-foreground">
-                    Model: <span className="font-mono">{platformModel}</span>
-                  </p>
-                )}
-                {!hasPlatformLLM && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400">
-                    The platform administrator has not configured an LLM provider. These features will be unavailable.
-                  </p>
-                )}
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  Platform LLM not configured. Background features (session titles, PR descriptions,
+                  project generation, validation, prioritization) will be unavailable. See the{" "}
+                  <Link
+                    href="https://github.com/assembledhq/143/blob/main/docs/self-hosting/platform-llm.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
+                  >
+                    self-hosting guide
+                  </Link>{" "}
+                  to enable them.
+                </p>
               </div>
             </CardContent>
           </Card>
-        </section>
+        )}
 
         {/* Agent Credentials */}
         <section className="space-y-3">
