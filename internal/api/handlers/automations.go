@@ -797,9 +797,9 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 
 	idStr := automationID.String()
 	details := map[string]any{
-		"name":   automation.Name,
-		"run_id": run.ID.String(),
-		"via":    "manual",
+		"name":              automation.Name,
+		"automation_run_id": run.ID.String(),
+		"via":               "manual",
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationRunTriggered, models.AuditResourceAutomation, &idStr, nil, nil,
 		marshalAuditDetails(h.logger, details))

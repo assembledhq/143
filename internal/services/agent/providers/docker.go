@@ -204,11 +204,47 @@ func (d *DockerProvider) Name() string {
 	return "docker"
 }
 
+// scopedLogger returns a logger scoped to a sandbox, including session_id,
+// org_id, purpose, and container_id when available. This is the canonical way
+// to emit provider log lines so every sandbox-lifecycle event is greppable by
+// session in Grafana.
+func (d *DockerProvider) scopedLogger(sb *agent.Sandbox) zerolog.Logger {
+	lc := d.logger.With().Str("container_id", sb.ID)
+	if sb.SessionID != "" {
+		lc = lc.Str("session_id", sb.SessionID)
+	}
+	if sb.OrgID != "" {
+		lc = lc.Str("org_id", sb.OrgID)
+	}
+	if sb.Purpose != "" {
+		lc = lc.Str("purpose", sb.Purpose)
+	}
+	return lc.Logger()
+}
+
+// configLogger returns a logger scoped to a SandboxConfig, used during Create
+// before a Sandbox exists. Carries session_id/org_id/purpose so create-time
+// failures can still be traced back to the originating session.
+func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
+	lc := d.logger.With()
+	if cfg.SessionID != "" {
+		lc = lc.Str("session_id", cfg.SessionID)
+	}
+	if cfg.OrgID != "" {
+		lc = lc.Str("org_id", cfg.OrgID)
+	}
+	if cfg.Purpose != "" {
+		lc = lc.Str("purpose", cfg.Purpose)
+	}
+	return lc.Logger()
+}
+
 // Create spins up a new Docker container with the given resource limits and
 // security hardening (dropped capabilities, gVisor runtime, non-root user).
 // The rootfs is writable so agents can install packages via sudo apt-get.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-	d.logger.Info().
+	log := d.configLogger(cfg)
+	log.Info().
 		Str("image", cfg.Image).
 		Float64("cpu_limit", cfg.CPULimit).
 		Int("memory_limit_mb", cfg.MemoryLimitMB).
@@ -282,7 +318,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		// StorageOpt requires overlay2 with XFS+pquota. Fall back gracefully
 		// on hosts that don't support it (e.g. dev machines with ext4).
 		if strings.Contains(err.Error(), "storage-opt") || strings.Contains(err.Error(), "pquota") {
-			d.logger.Warn().Err(err).Msg("storage quota not supported by Docker storage driver; creating container without disk limit")
+			log.Warn().Err(err).Msg("storage quota not supported by Docker storage driver; creating container without disk limit")
 			hostCfg.StorageOpt = nil
 			resp, err = d.client.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, platform, "")
 		}
@@ -295,12 +331,12 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		// Best-effort cleanup on start failure
 		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		if removeErr != nil {
-			d.logger.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
+			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
 		}
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
-	d.logger.Info().
+	log.Info().
 		Str("container_id", resp.ID).
 		Msg("sandbox container started")
 
@@ -312,13 +348,16 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			"runtime": d.runtime,
 			"network": d.network,
 		},
+		SessionID: cfg.SessionID,
+		OrgID:     cfg.OrgID,
+		Purpose:   cfg.Purpose,
 	}, nil
 }
 
 // CloneRepo clones a repository into the sandbox's workspace using git.
 func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoURL, branch, token string) error {
-	d.logger.Info().
-		Str("container_id", sb.ID).
+	log := d.scopedLogger(sb)
+	log.Info().
 		Str("branch", branch).
 		Msg("cloning repository into sandbox")
 
@@ -358,9 +397,7 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 		}
 	}
 
-	d.logger.Info().
-		Str("container_id", sb.ID).
-		Msg("repository cloned successfully")
+	log.Info().Msg("repository cloned successfully")
 
 	return nil
 }
@@ -368,8 +405,8 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 // Exec runs a command inside the sandbox container and streams output to the
 // provided writers. Returns the command's exit code.
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	d.logger.Debug().
-		Str("container_id", sb.ID).
+	log := d.scopedLogger(sb)
+	log.Debug().
 		Str("cmd", cmd).
 		Msg("executing command in sandbox")
 
@@ -438,15 +475,14 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, path 
 
 // Destroy stops and removes the sandbox container. Safe to call multiple times.
 func (d *DockerProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
-	d.logger.Info().
-		Str("container_id", sb.ID).
-		Msg("destroying sandbox container")
+	log := d.scopedLogger(sb)
+	log.Info().Msg("destroying sandbox container")
 
 	// Stop the container with a short timeout
 	stopTimeout := 10 // seconds
 	err := d.client.ContainerStop(ctx, sb.ID, container.StopOptions{Timeout: &stopTimeout})
 	if err != nil && !cerrdefs.IsNotFound(err) {
-		d.logger.Warn().Err(err).Str("container_id", sb.ID).Msg("failed to stop container, forcing removal")
+		log.Warn().Err(err).Msg("failed to stop container, forcing removal")
 	}
 
 	// Remove the container
@@ -455,9 +491,7 @@ func (d *DockerProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 		return fmt.Errorf("remove container %s: %w", sb.ID, err)
 	}
 
-	d.logger.Info().
-		Str("container_id", sb.ID).
-		Msg("sandbox container destroyed")
+	log.Info().Msg("sandbox container destroyed")
 
 	return nil
 }

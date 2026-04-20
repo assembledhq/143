@@ -527,13 +527,13 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		if _, err := s.jobs.EnqueueInTx(ctx, tx, a.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
 			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
-				Str("run_id", run.ID.String()).
+				Str("automation_run_id", run.ID.String()).
 				Msg("failed to enqueue automation_run job; aborting tick")
 			return
 		}
 		s.logger.Info().
 			Str("automation_id", a.ID.String()).
-			Str("run_id", run.ID.String()).
+			Str("automation_run_id", run.ID.String()).
 			Msg("enqueued automation run")
 	}
 

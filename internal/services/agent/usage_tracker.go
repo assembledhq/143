@@ -21,7 +21,7 @@ type ContainerUsageStore interface {
 // It writes to both the database (for billing queries) and OTel metrics (for
 // real-time dashboards and alerting via any backend).
 type UsageTracker struct {
-	store   ContainerUsageStore    // nil = DB tracking disabled
+	store   ContainerUsageStore     // nil = DB tracking disabled
 	metrics *metrics.BillingMetrics // nil = metrics disabled
 	logger  zerolog.Logger
 }
@@ -72,8 +72,10 @@ func (t *UsageTracker) ContainerStarted(ctx context.Context, orgID, sessionID uu
 }
 
 // ContainerStopped records that a container was destroyed. Must be called
-// exactly once per ContainerStarted call.
-func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string) {
+// exactly once per ContainerStarted call. sessionID is included in failure
+// logs so billing write failures can be traced back to the owning session
+// in Grafana.
+func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID, sessionID uuid.UUID, eventID uuid.UUID, startedAt time.Time, exitReason string) {
 	stoppedAt := time.Now()
 	orgIDStr := orgID.String()
 	durationSec := stoppedAt.Sub(startedAt).Seconds()
@@ -87,9 +89,13 @@ func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID uuid.UUID, ev
 	// DB persistence. Skip if eventID is Nil (start recording failed).
 	if t.store != nil && eventID != uuid.Nil {
 		if err := t.store.RecordStop(ctx, eventID, stoppedAt, exitReason); err != nil {
-			t.logger.Error().Err(err).
-				Str("event_id", eventID.String()).
-				Msg("failed to record container stop for billing")
+			ev := t.logger.Error().Err(err).
+				Str("org_id", orgIDStr).
+				Str("event_id", eventID.String())
+			if sessionID != uuid.Nil {
+				ev = ev.Str("session_id", sessionID.String())
+			}
+			ev.Msg("failed to record container stop for billing")
 		}
 	}
 }

@@ -594,6 +594,99 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "fail-start", removedID, "should remove the created container")
 		require.True(t, removeForce, "should force-remove on start failure")
 	})
+
+	t.Run("copies tracing fields onto returned Sandbox", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "traced"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.SessionID = "sess-123"
+		cfg.OrgID = "org-456"
+		cfg.Purpose = "agent_run"
+
+		sb, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Equal(t, "sess-123", sb.SessionID, "SessionID should be copied from config")
+		require.Equal(t, "org-456", sb.OrgID, "OrgID should be copied from config")
+		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
+	})
+
+	t.Run("configLogger tolerates partial tracing fields", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{}, fmt.Errorf("boom")
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		// Only OrgID set — SessionID/Purpose empty. The configLogger path must
+		// not panic when some fields are empty; create-time failure still hits
+		// the logger via the storage-opt fallback branch.
+		cfg := agent.DefaultSandboxConfig()
+		cfg.OrgID = "org-only"
+
+		_, err := p.Create(context.Background(), cfg)
+		require.Error(t, err)
+	})
+}
+
+func TestDockerProvider_ScopedLogger(t *testing.T) {
+	t.Parallel()
+
+	// scopedLogger is exercised by every post-create lifecycle call (Destroy,
+	// CloneRepo, Exec, Snapshot, Restore, ExecStream). Drive Destroy with a
+	// fully-populated Sandbox to cover the three conditional Str() branches.
+	t.Run("Destroy with populated tracing fields uses scoped logger", func(t *testing.T) {
+		t.Parallel()
+
+		var stopCalled, removeCalled bool
+		mock := &mockDockerClient{}
+		mock.containerStopFn = func(ctx context.Context, containerID string, options container.StopOptions) error {
+			stopCalled = true
+			return nil
+		}
+		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
+			removeCalled = true
+			return nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{
+			ID:        "scoped-container",
+			Provider:  "docker",
+			WorkDir:   "/workspace",
+			SessionID: "sess-1",
+			OrgID:     "org-1",
+			Purpose:   "agent_run",
+		}
+
+		err := p.Destroy(context.Background(), sb)
+		require.NoError(t, err)
+		require.True(t, stopCalled)
+		require.True(t, removeCalled)
+	})
+
+	t.Run("Destroy with empty tracing fields skips optional log keys", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		// Stop fails so the log.Warn() branch in Destroy is exercised even
+		// when SessionID/OrgID/Purpose are empty — the scopedLogger should
+		// still produce a valid zerolog.Logger.
+		mock.containerStopFn = func(ctx context.Context, containerID string, options container.StopOptions) error {
+			return fmt.Errorf("already stopped")
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "bare-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.Destroy(context.Background(), sb)
+		require.NoError(t, err)
+	})
 }
 
 func TestDockerProvider_Destroy(t *testing.T) {

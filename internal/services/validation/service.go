@@ -83,8 +83,8 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 
 	v := &models.Validation{
 		SessionID: agentRun.ID,
-		OrgID:      agentRun.OrgID,
-		Status:     "running",
+		OrgID:     agentRun.OrgID,
+		Status:    "running",
 	}
 	if err := s.validations.Create(ctx, v); err != nil {
 		return fmt.Errorf("create validation: %w", err)
@@ -167,7 +167,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 		}
 		payload := map[string]string{
 			"session_id": agentRun.ID.String(),
-			"org_id":       agentRun.OrgID.String(),
+			"org_id":     agentRun.OrgID.String(),
 		}
 		dedupeKey := fmt.Sprintf("open_pr:%s", agentRun.ID.String())
 		if _, err := s.jobs.Enqueue(ctx, agentRun.OrgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
