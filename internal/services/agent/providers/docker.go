@@ -290,8 +290,6 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// sidesteps that entirely so bootstrap can run as the sandbox user.
 	bootstrapCwd := cfg.HomeDir
 	if bootstrapCwd == "" {
-		// Fallback for unusual callers that don't set HomeDir. Bootstrap can
-		// still succeed as long as cfg.WorkDir is writable by sandbox.
 		bootstrapCwd = "/"
 	}
 	containerCfg := &container.Config{
@@ -402,11 +400,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// image's baked-in /workspace (a no-op for mkdir -p) or a HomeDir subdir
 	// like /home/sandbox/<repo>; in the latter case /home/sandbox already
 	// exists and is sandbox-owned (from `useradd -m`), so sandbox can create
-	// the per-session subdir without any privileged exec. The previous
-	// root-exec bootstrap chown'd the dir to sandbox, which requires
-	// CAP_CHOWN — and that cap is stripped by CapDrop=ALL under gVisor and
-	// some Docker runtimes. Owning the dir from creation sidesteps the cap
-	// requirement entirely.
+	// the per-session subdir without any privileged exec. Running this as
+	// root would require CAP_DAC_OVERRIDE / CAP_CHOWN to be preserved under
+	// CapDrop=ALL, which gVisor and some Docker runtimes do not honor —
+	// hence the non-root approach.
 	bootstrapSB := &agent.Sandbox{ID: resp.ID, Provider: "docker", WorkDir: "/"}
 	bootstrapCmd := fmt.Sprintf("mkdir -p '%s'", shellEscape(cfg.WorkDir))
 	var bootErr bytes.Buffer
