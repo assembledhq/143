@@ -506,6 +506,58 @@ func TestRollupHour_TokenQueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestRollupHour_UnattributedUser exercises the uuid.Nil skip branches for
+// sessions without an attributed user (e.g. automation-triggered). Such rows
+// must roll up at the per-tier and org-total levels, but never emit a per-user
+// upsert because usage_hourly.user_id has a FK to users(id).
+func TestRollupHour_UnattributedUser(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUsageRollupStore(mock)
+	orgID := uuid.New()
+	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	sessionID := uuid.New()
+	eventID := uuid.New()
+
+	// Container event with uuid.Nil user (unattributed session).
+	eventCols := []string{"id", "session_id", "user_id", "cpu_limit", "memory_limit_mb", "started_at", "stopped_at", "container_minutes", "duration_ms"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
+		WillReturnRows(pgxmock.NewRows(eventCols).AddRow(
+			eventID, sessionID, uuid.Nil, 2.0, 4096,
+			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
+		))
+
+	// Token row also unattributed — must not emit a per-user token upsert.
+	tokenCols := []string{"user_id", "input_tokens", "output_tokens", "cost_usd"}
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour}).
+		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
+			uuid.Nil, int64(1000), int64(500), 0.25,
+		))
+
+	// Only 2 upserts expected: Level 3 (per-tier) + Level 4 (org-total).
+	// Level 1 (per-user-tier) and Level 2 (per-user) are skipped for uuid.Nil.
+	mock.ExpectBegin()
+	anyArgs := []any{
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		pgxmock.AnyArg(),
+	}
+	eb := mock.ExpectBatch()
+	eb.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	eb.ExpectExec("INSERT INTO usage_hourly").WithArgs(anyArgs...).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	err = store.RollupHour(context.Background(), orgID, hour)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestRollupHour_WithEvents(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
@@ -693,8 +745,8 @@ func TestGetBreakdown_UserDimension(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.Equal(t, "alice@test.com", rows[0].Label)
-	require.Equal(t, 60.0, rows[0].Percentage)  // 60/100 * 100 = 60.0%
-	require.Equal(t, 40.0, rows[1].Percentage)  // 40/100 * 100 = 40.0%
+	require.Equal(t, 60.0, rows[0].Percentage) // 60/100 * 100 = 60.0%
+	require.Equal(t, 40.0, rows[1].Percentage) // 40/100 * 100 = 40.0%
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
