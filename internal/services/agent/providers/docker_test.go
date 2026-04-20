@@ -421,7 +421,7 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		// Verify tmpfs mount options
 		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/var/tmp",
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
 			"GOTMPDIR must be redirected off /tmp so `go test` can exec compiled test binaries")
 
 		// Verify resource limits
@@ -508,7 +508,7 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		require.Contains(t, capturedConfig.Env, "ANTHROPIC_API_KEY=sk-ant-test-key")
 		require.Contains(t, capturedConfig.Env, "OPENAI_API_KEY=sk-test-openai-key")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/var/tmp",
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
 			"GOTMPDIR should be injected so `go test` works despite /tmp being noexec")
 	})
 
@@ -529,7 +529,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/workspace/.gotmp")
-		require.NotContains(t, capturedConfig.Env, "GOTMPDIR=/var/tmp",
+		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
 			"caller-supplied GOTMPDIR should not be overridden")
 	})
 
@@ -550,7 +550,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		sb, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Equal(t, "no-env", sb.ID)
-		require.Equal(t, []string{"GOTMPDIR=/var/tmp"}, capturedConfig.Env,
+		require.ElementsMatch(t, []string{"GOTMPDIR=" + defaultGoTmpDir}, capturedConfig.Env,
 			"with nil cfg.Env, only the auto-injected GOTMPDIR should be present")
 	})
 
