@@ -3,15 +3,37 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
+// Duck-typed 401 check. The backend's Auth middleware writes error.code =
+// "UNAUTHORIZED" for every 401. Using a duck check (not `instanceof ApiError`)
+// means component test mocks don't need to re-export ApiError to interop.
+function isUnauthorizedError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "UNAUTHORIZED"
+  );
+}
+
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["auth", "me"],
     queryFn: () => api.auth.me(),
-    retry: false,
+    // Only treat a confirmed 401 as terminal. Network blips and 5xx
+    // (e.g. during a rolling deploy) retry a few times instead of
+    // instantly logging the user out.
+    retry: (failureCount, err) => {
+      if (isUnauthorizedError(err)) return false;
+      return failureCount < 2;
+    },
+    // Short backoff so a transient deploy blip clears in under a second
+    // rather than stalling on React Query's default exponential backoff.
+    retryDelay: (attempt) => Math.min(200 * 2 ** attempt, 1000),
     staleTime: 5 * 60 * 1000,
   });
+
+  const isUnauthorized = isUnauthorizedError(error);
 
   const logout = async () => {
     await api.auth.logout();
@@ -22,7 +44,8 @@ export function useAuth() {
   return {
     user: data?.data ?? null,
     isLoading,
-    isAuthenticated: !!data?.data && !isError,
+    isAuthenticated: !!data?.data,
+    isUnauthorized,
     logout,
   };
 }

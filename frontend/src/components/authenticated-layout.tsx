@@ -89,7 +89,7 @@ const navItems = [
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoading, isAuthenticated, logout } = useAuth();
+  const { user, isLoading, isAuthenticated, isUnauthorized, logout } = useAuth();
 
   const { data: proposalSummary } = useQuery({
     queryKey: ["proposalSummary"],
@@ -124,12 +124,21 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const handlePaletteOpen = useCallback(() => setPaletteOpen(true), []);
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
+    // Only redirect on a confirmed 401. Transient network errors (5xx during
+    // a rolling deploy, offline blips) leave isAuthenticated false but must
+    // not kick the user to /login — the query will retry and recover.
+    if (!isLoading && isUnauthorized) {
       router.replace("/login");
     }
-  }, [isLoading, isAuthenticated, router]);
+  }, [isLoading, isUnauthorized, router]);
 
-  if (isLoading) {
+  // Show the loading skeleton while the initial /me call is in flight OR
+  // while a transient error is being retried without a cached user yet.
+  // Only confirmed 401s (isUnauthorized) bypass the skeleton and fall through
+  // to the redirect path below.
+  const showLoadingSkeleton = isLoading || (!user && !isUnauthorized);
+
+  if (showLoadingSkeleton) {
     return (
       <div className="flex h-screen">
         <aside className="w-[260px] border-r border-border bg-sidebar flex flex-col">
@@ -169,7 +178,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     );
   }
 
-  if (!isAuthenticated) {
+  if (isUnauthorized || !user) {
     return null;
   }
 
