@@ -544,11 +544,13 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_token",
+		Name:     middleware.SessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   middleware.IsRequestSecure(r),
 	})
 
 	// Clear CSRF cookie on logout.
@@ -558,6 +560,8 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: false,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   middleware.IsRequestSecure(r),
 	})
 
 	user := middleware.UserFromContext(r.Context())
@@ -579,7 +583,7 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
 		Token:     sessionToken,
-		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ExpiresAt: time.Now().Add(middleware.SessionTTL),
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
@@ -587,12 +591,13 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_token",
+		Name:     middleware.SessionCookieName,
 		Value:    sessionToken,
 		Path:     "/",
-		MaxAge:   30 * 24 * 60 * 60,
+		MaxAge:   int(middleware.SessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   middleware.IsRequestSecure(r),
 	})
 
 	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
@@ -623,7 +628,7 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
 		Token:     sessionToken,
-		ExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+		ExpiresAt: time.Now().Add(middleware.SessionTTL),
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
@@ -631,12 +636,13 @@ func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Req
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_token",
+		Name:     middleware.SessionCookieName,
 		Value:    sessionToken,
 		Path:     "/",
-		MaxAge:   30 * 24 * 60 * 60,
+		MaxAge:   int(middleware.SessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   middleware.IsRequestSecure(r),
 	})
 
 	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -144,11 +146,11 @@ func TestAuth(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		setupMock    func(mock pgxmock.PgxPoolIface)
-		setupRequest func(req *http.Request) *http.Request
-		expectedCode int
-		checkContext func(t *testing.T, r *http.Request)
+		name          string
+		setupMock     func(mock pgxmock.PgxPoolIface)
+		setupRequest  func(req *http.Request) *http.Request
+		expectedCode  int
+		checkContext  func(t *testing.T, r *http.Request)
 		checkResponse func(t *testing.T, w *httptest.ResponseRecorder)
 	}{
 		{
@@ -241,13 +243,63 @@ func TestAuth(t *testing.T) {
 			checkResponse: nil,
 		},
 		{
+			name: "does not refresh bearer-token session even when inside refresh window",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000001"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000002"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000003"),
+						"stale-bearer-token",
+						now.Add(24*time.Hour), // well inside the refresh window
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000002"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+				// Deliberately no UPDATE expectation: bearer tokens must not
+				// trigger sliding refresh. pgxmock fails on unexpected calls.
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.Header.Set("Authorization", "Bearer stale-bearer-token")
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName || c.Name == CSRFCookieName {
+						t.Fatalf("bearer-token auth must not emit %s cookie, got %+v", c.Name, c)
+					}
+				}
+			},
+		},
+		{
 			name:      "returns 401 when no cookie and no authorization header present",
 			setupMock: func(mock pgxmock.PgxPoolIface) {},
 			setupRequest: func(req *http.Request) *http.Request {
 				return req
 			},
-			expectedCode: http.StatusUnauthorized,
-			checkContext: nil,
+			expectedCode:  http.StatusUnauthorized,
+			checkContext:  nil,
 			checkResponse: nil,
 		},
 		{
@@ -281,6 +333,179 @@ func TestAuth(t *testing.T) {
 			},
 		},
 		{
+			name: "does not refresh when session expires_at is far in the future",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("dddddddd-0000-0000-0000-000000000001"),
+						uuid.MustParse("dddddddd-0000-0000-0000-000000000002"),
+						uuid.MustParse("dddddddd-0000-0000-0000-000000000003"),
+						"fresh-token",
+						now.Add(29*24*time.Hour), // fresher than TTL - refreshWindow (25d)
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("dddddddd-0000-0000-0000-000000000002"),
+						uuid.MustParse("dddddddd-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+				// No UPDATE expected — expecting no refresh on fresh sessions.
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "fresh-token"})
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName {
+						t.Fatalf("did not expect session cookie to be reissued, got %+v", c)
+					}
+				}
+			},
+		},
+		{
+			name: "refreshes cookie and expires_at when session is past the refresh window",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("eeeeeeee-0000-0000-0000-000000000001"),
+						uuid.MustParse("eeeeeeee-0000-0000-0000-000000000002"),
+						uuid.MustParse("eeeeeeee-0000-0000-0000-000000000003"),
+						"stale-token",
+						now.Add(24*time.Hour), // well inside TTL - refreshWindow (25d)
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("eeeeeeee-0000-0000-0000-000000000002"),
+						uuid.MustParse("eeeeeeee-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+
+				mock.ExpectExec("UPDATE auth_sessions SET expires_at").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "stale-token"})
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				var refreshed, csrf *http.Cookie
+				for _, c := range resp.Cookies() {
+					switch c.Name {
+					case SessionCookieName:
+						refreshed = c
+					case CSRFCookieName:
+						csrf = c
+					}
+				}
+				require.NotNil(t, refreshed, "expected session cookie to be reissued with fresh MaxAge")
+				require.Equal(t, "stale-token", refreshed.Value, "reissued cookie should carry the same opaque token")
+				require.Equal(t, int(SessionTTL.Seconds()), refreshed.MaxAge, "reissued cookie should use the full TTL")
+				require.True(t, refreshed.HttpOnly, "reissued cookie should stay HttpOnly")
+				require.Equal(t, http.SameSiteLaxMode, refreshed.SameSite, "reissued cookie should stay SameSite=Lax")
+				require.False(t, refreshed.Secure, "plain httptest request should not set Secure on reissued cookie")
+				require.NotNil(t, csrf, "CSRF cookie should be extended in lockstep with session refresh")
+				require.Equal(t, int(SessionTTL.Seconds()), csrf.MaxAge, "CSRF cookie MaxAge should match session TTL")
+			},
+		},
+		{
+			name: "authenticates request when Touch fails and does not reissue cookie",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000001"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000002"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000003"),
+						"stale-token",
+						now.Add(24*time.Hour),
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000002"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+
+				// Refresh UPDATE fails — request should still succeed using the
+				// existing session, and no refreshed cookie should be emitted.
+				mock.ExpectExec("UPDATE auth_sessions SET expires_at").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection lost"))
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "stale-token"})
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: func(t *testing.T, r *http.Request) {
+				t.Helper()
+				require.NotNil(t, UserFromContext(r.Context()), "user should still be set on context when Touch fails")
+			},
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName {
+						t.Fatalf("did not expect session cookie to be reissued when Touch fails, got %+v", c)
+					}
+					if c.Name == CSRFCookieName {
+						t.Fatalf("did not expect CSRF cookie to be reissued when Touch fails, got %+v", c)
+					}
+				}
+			},
+		},
+		{
 			name: "returns 401 when session is valid but user not found",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
@@ -306,8 +531,8 @@ func TestAuth(t *testing.T) {
 				req.AddCookie(&http.Cookie{Name: "session_token", Value: "valid-token"})
 				return req
 			},
-			expectedCode: http.StatusUnauthorized,
-			checkContext: nil,
+			expectedCode:  http.StatusUnauthorized,
+			checkContext:  nil,
 			checkResponse: nil,
 		},
 	}
@@ -333,7 +558,7 @@ func TestAuth(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			handler := Auth(sessionStore, userStore)(next)
+			handler := Auth(sessionStore, userStore, []byte("test-signing-key-that-is-long-enough-for-hmac"), zerolog.Nop())(next)
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req = tt.setupRequest(req)
 			w := httptest.NewRecorder()
