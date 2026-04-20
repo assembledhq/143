@@ -6,8 +6,11 @@
 --
 -- Password: "preview-dogfood" (bcrypt hash below).
 --
--- All rows use fixed UUIDs + ON CONFLICT (id) DO NOTHING so the seed is
--- safely re-runnable and does not conflict with user-created rows.
+-- All rows use fixed UUIDs + ON CONFLICT DO NOTHING so the seed is
+-- safely re-runnable. Tables with secondary unique indexes (e.g.
+-- repositories.idx_repositories_org_github) use the unqualified
+-- ON CONFLICT DO NOTHING form so any unique violation — not just on id —
+-- no-ops rather than aborting the transaction.
 
 INSERT INTO organizations (id, name, settings, created_at, updated_at)
 VALUES (
@@ -90,7 +93,7 @@ VALUES
     now(),
     now()
   )
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 INSERT INTO projects (
   id, org_id, repository_id, title, goal, scope, status, priority,

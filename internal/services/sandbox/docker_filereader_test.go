@@ -248,6 +248,31 @@ func TestDockerFileReader_ReadFile(t *testing.T) {
 	}
 }
 
+// TestDockerFileReader_ReadFile_NotFoundSentinel verifies that ENOENT stderr
+// surfaces as ErrFileNotFound so callers can errors.Is against it instead of
+// pattern-matching stderr text themselves.
+func TestDockerFileReader_ReadFile_NotFoundSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("head: cannot open '/workspace/missing' for reading: No such file or directory", 1)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "missing")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from head must be surfaced as ErrFileNotFound")
+}
+
+// TestDockerFileReader_ReadFile_NonNotFoundNotSentinel ensures unrelated exec
+// failures (non-ENOENT stderr) do NOT get miscategorized as ErrFileNotFound.
+func TestDockerFileReader_ReadFile_NonNotFoundNotSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("head: permission denied", 1)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "locked")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrFileNotFound, "non-ENOENT errors must not be classified as file-not-found")
+}
+
 func TestDockerFileReader_ReadFileContext(t *testing.T) {
 	t.Parallel()
 

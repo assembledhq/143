@@ -19,14 +19,14 @@
       "command": [
         "sh",
         "-c",
-        "go run ./cmd/migrate up && psql \"$DATABASE_URL\" -f .143/seed.sql && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:3000}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:3000}\" go run ./cmd/server"
+        "go run ./cmd/migrate up && psql \"$DATABASE_URL\" -f .143/seed.sql && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" go run ./cmd/server"
       ],
       "port": 8080,
       "env": {
         "MODE": "all",
         "ENV": "development",
         "LOG_LEVEL": "info",
-        "SESSION_SECRET": "preview-dogfood-session-secret-change-me"
+        "SESSION_SECRET": "PREVIEW-ONLY-dogfood-ephemeral-DO-NOT-REUSE-outside-previews"
       },
       "ready": {
         "http_path": "/api/v1/health",

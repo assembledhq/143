@@ -40,25 +40,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go toolchain matching the builder stage so previews that run the
+# Copy the Go toolchain from the go-builder stage so previews that run the
 # agent's own Go source (e.g. `go run ./cmd/server`) compile inside the
-# sandbox at session-start time.
-#
-# IMPORTANT: keep GO_VERSION below in sync with the `FROM golang:X.Y` pin in
-# the go-builder stage at the top of this Dockerfile. If they drift, a
-# session will compile against a different toolchain than the builder used,
-# which can mask `//go:build` and module-resolution issues.
-ARG TARGETARCH
-RUN set -eux; \
-    GO_VERSION="1.26.0"; \
-    case "${TARGETARCH:-amd64}" in \
-      amd64) GO_ARCH="amd64" ;; \
-      arm64) GO_ARCH="arm64" ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tar.gz; \
-    tar -C /usr/local -xzf /tmp/go.tar.gz; \
-    rm /tmp/go.tar.gz
+# sandbox at session-start time. Reusing the builder's /usr/local/go
+# guarantees the runtime and builder toolchains cannot drift — the version
+# is pinned in exactly one place (the `FROM golang:X.Y` line above).
+COPY --from=go-builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Install agent CLIs at pinned versions.

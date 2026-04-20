@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -470,10 +471,10 @@ func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 	t.Parallel()
 
 	// The common "no .143/preview.json committed" case: the underlying FileReader
-	// wraps `head: ... No such file or directory` from the sandbox exec. Must
-	// NOT bubble up — caller falls back to built-in defaults.
+	// returns sandbox.ErrFileNotFound (wrapped). Must NOT bubble up — caller
+	// falls back to built-in defaults.
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{err: errors.New("read file .143/preview.json: head: cannot open '/workspace/.143/preview.json' for reading: No such file or directory")},
+		fileReader: fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
 		logger:     zerolog.Nop(),
 	}
 	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())

@@ -3,8 +3,15 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
+
+// ErrFileNotFound is returned by FileReader implementations when the requested
+// path does not exist inside the sandbox. Callers should use errors.Is to
+// distinguish the expected "no such file" case from real read failures
+// (docker exec error, context cancellation, sandbox gone).
+var ErrFileNotFound = errors.New("file not found")
 
 // FileEntry represents a single entry in a directory listing.
 type FileEntry struct {
