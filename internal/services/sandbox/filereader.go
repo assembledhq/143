@@ -3,8 +3,15 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
+
+// ErrFileNotFound is returned by FileReader implementations when the requested
+// path does not exist inside the sandbox. Callers should use errors.Is to
+// distinguish the expected "no such file" case from real read failures
+// (docker exec error, context cancellation, sandbox gone).
+var ErrFileNotFound = errors.New("file not found")
 
 // FileEntry represents a single entry in a directory listing.
 type FileEntry struct {
@@ -40,18 +47,21 @@ type FileReader interface {
 	ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]FileLine, error)
 }
 
-// NoOpFileReader is a FileReader that always returns "unavailable" errors.
-// Use this instead of nil when Docker is not available to avoid nil-pointer panics.
+// NoOpFileReader is a FileReader used when Docker is unavailable so callers
+// don't have to nil-check. Every method returns an error that wraps
+// ErrFileNotFound, so callers using errors.Is(err, ErrFileNotFound) treat the
+// no-Docker case the same as a genuinely missing path — which is what
+// auto-detect callers (e.g. PreviewHandler.readWorkspacePreviewConfig) want.
 type NoOpFileReader struct{}
 
 func (NoOpFileReader) ListDir(_ context.Context, _, _, _ string) ([]FileEntry, error) {
-	return nil, fmt.Errorf("sandbox file browsing is not available")
+	return nil, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
 }
 
 func (NoOpFileReader) ReadFile(_ context.Context, _, _, _ string) (string, bool, error) {
-	return "", false, fmt.Errorf("sandbox file browsing is not available")
+	return "", false, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
 }
 
 func (NoOpFileReader) ReadFileContext(_ context.Context, _, _, _ string, _, _, _ int) ([]FileLine, error) {
-	return nil, fmt.Errorf("sandbox file browsing is not available")
+	return nil, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -303,7 +306,7 @@ type mockPreviewProvider struct {
 	startConfig *models.PreviewConfig
 }
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string) (*preview.PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startHandle != nil {
 		return m.startHandle, nil
@@ -425,10 +428,195 @@ func TestNewPreviewHandler(t *testing.T) {
 	})
 
 	sessionStore := db.NewSessionStore(mock)
-	h := NewPreviewHandler(mgr, store, sessionStore, zerolog.Nop())
+	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
+}
+
+// =============================================================================
+// readWorkspacePreviewConfig tests
+// =============================================================================
+
+// fakeFileReader is a stub FileReader that returns canned ReadFile responses.
+// Unused methods panic so this test file fails loudly if something else grows
+// a dependency on them.
+type fakeFileReader struct {
+	content string
+	err     error
+}
+
+func (f fakeFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
+	panic("not used")
+}
+
+func (f fakeFileReader) ReadFile(_ context.Context, _, _, _ string) (string, bool, error) {
+	return f.content, false, f.err
+}
+
+func (f fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) ([]sandbox.FileLine, error) {
+	panic("not used")
+}
+
+func TestReadWorkspacePreviewConfig_NilReader(t *testing.T) {
+	t.Parallel()
+
+	h := &PreviewHandler{logger: zerolog.Nop()}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{}, uuid.New())
+	require.NoError(t, err, "nil fileReader is the no-op case, not an infrastructure failure")
+	require.Nil(t, cfg, "nil fileReader must fall through so caller uses defaults")
+}
+
+func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
+	t.Parallel()
+
+	// The common "no .143/preview.json committed" case: the underlying FileReader
+	// returns sandbox.ErrFileNotFound (wrapped). Must NOT bubble up — caller
+	// falls back to built-in defaults.
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
+		logger:     zerolog.Nop(),
+	}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err, "ENOENT is expected absence, not an error to surface")
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
+	t.Parallel()
+
+	// A non-ENOENT read error (docker exec failure, context cancel, sandbox
+	// gone) means we cannot tell whether a committed config exists. Returning
+	// (nil, err) makes StartPreview surface a 500 instead of silently swapping
+	// in Node.js defaults — which would start the wrong preview for non-Node
+	// projects and time out after minutes.
+	wantErr := errors.New("docker exec failed: container not running")
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{err: wantErr},
+		logger:     zerolog.Nop(),
+	}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.Error(t, err, "non-ENOENT read errors must surface so the caller returns 500")
+	require.ErrorIs(t, err, wantErr, "underlying read error must be wrapped, not discarded")
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
+	t.Parallel()
+
+	// Parse errors are a user authoring problem, not infrastructure. We still
+	// fall back to defaults (returning the 500 would make the preview strictly
+	// worse than just running the default), but log at Warn so the user sees
+	// why their committed config didn't take effect.
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{content: "{not valid json"},
+		logger:     zerolog.Nop(),
+	}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err, "invalid JSON must fall through to defaults, not surface as a 500")
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"name": "dogfood",
+		"primary": "web",
+		"services": {
+			"web": {
+				"command": ["npm", "run", "dev"],
+				"port": 3000,
+				"ready": {"http_path": "/"}
+			}
+		},
+		"credentials": {"mode": "none"},
+		"network": {"mode": "managed"}
+	}`
+
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{content: raw},
+		logger:     zerolog.Nop(),
+	}
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Equal(t, "web", cfg.Primary)
+	require.Contains(t, cfg.Services, "web")
+	require.Equal(t, 3000, cfg.Services["web"].Port)
+}
+
+// sessionRowColumns mirrors db.sessionSelectColumns. Kept inline so a
+// schema change in one file flips this test red instead of silently
+// returning the wrong shape from pgxmock.
+var sessionRowColumns = []string{
+	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"container_id", "started_at", "completed_at", "token_usage",
+	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"project_task_id", "model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at",
+	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
+	"repository_id", "diff_stats", "diff_history", "input_manifest",
+	"archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+}
+
+func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
+	return []interface{}{
+		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		nil, nil, nil, []string{},
+		&containerID, nil, nil, json.RawMessage(`{}`),
+		nil, nil, []string{}, false,
+		nil, json.RawMessage(`{}`), nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		0, nil,
+		"none", nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, time.Now(),
+	}
+}
+
+// TestPreviewHandler_StartPreview_AutoDetectInfraError exercises the auto-detect
+// branch of StartPreview when the workspace file reader returns a non-ENOENT
+// error. The handler must surface a 500 instead of silently swapping in Node.js
+// defaults — see readWorkspacePreviewConfig's docstring for the rationale.
+func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
+		)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = fakeFileReader{err: errors.New("docker exec failed: container not running")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "non-ENOENT read failure must surface as 500")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "PREVIEW_CONFIG_READ_FAILED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {

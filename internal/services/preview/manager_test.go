@@ -31,7 +31,7 @@ type mockProvider struct {
 	statusErr   error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, _ *models.PreviewConfig, _ map[string]string) (*PreviewHandle, error) {
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -886,6 +886,49 @@ func TestInspector_NilByDefault(t *testing.T) {
 
 	mgr := NewManager(ManagerConfig{})
 	require.Nil(t, mgr.Inspector())
+}
+
+// =============================================================================
+// platformEnv tests
+// =============================================================================
+
+func TestPlatformEnv_SubstitutesPreviewIDIntoTemplate(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(ManagerConfig{
+		PreviewOriginTemplate: "http://{id}.preview.localhost:9090",
+		Logger:                zerolog.Nop(),
+	})
+
+	id := uuid.New()
+	env := mgr.platformEnv(id)
+
+	require.Equal(t, map[string]string{
+		"PREVIEW_ORIGIN": "http://" + id.String() + ".preview.localhost:9090",
+	}, env)
+}
+
+func TestPlatformEnv_EmptyTemplateReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(ManagerConfig{Logger: zerolog.Nop()})
+	require.Nil(t, mgr.platformEnv(uuid.New()), "empty template must skip injection so user-declared env is untouched")
+}
+
+func TestPlatformEnv_ReplacesEveryOccurrenceOfPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	// Guard against anyone swapping strings.ReplaceAll for strings.Replace with
+	// n=1; duplicate {id} in the template (unusual but valid) must all resolve.
+	mgr := NewManager(ManagerConfig{
+		PreviewOriginTemplate: "{id}-{id}",
+		Logger:                zerolog.Nop(),
+	})
+
+	id := uuid.New()
+	env := mgr.platformEnv(id)
+
+	require.Equal(t, id.String()+"-"+id.String(), env["PREVIEW_ORIGIN"])
 }
 
 func TestSetInspector(t *testing.T) {

@@ -56,6 +56,11 @@ type Manager struct {
 
 	workerNodeID string // identity of this worker for routing
 
+	// previewOriginTemplate is used to compute PREVIEW_ORIGIN for each
+	// preview instance. "{id}" is replaced with the instance UUID. When
+	// empty, PREVIEW_ORIGIN is not injected.
+	previewOriginTemplate string
+
 	// hmrWatcher captures screenshots on HMR updates. May be nil.
 	hmrWatcher *HMRWatcher
 
@@ -93,6 +98,13 @@ type ManagerConfig struct {
 	MaxPerUser    int
 	MaxPerOrg     int
 	MaxPerWorker  int
+
+	// PreviewOriginTemplate is the URL template used to compute the public
+	// origin each preview is served from, with "{id}" replaced by the preview
+	// instance UUID. It is passed through to each service as PREVIEW_ORIGIN so
+	// backends can generate absolute URLs that round-trip through the gateway.
+	// When empty (e.g. in tests), PREVIEW_ORIGIN is not injected.
+	PreviewOriginTemplate string
 }
 
 // NewManager creates a new preview Manager. If cfg.Provider is nil, the
@@ -103,18 +115,19 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.Logger.Warn().Msg("preview.NewManager: Provider is nil — preview operations will fail until a provider is set")
 	}
 	m := &Manager{
-		store:         cfg.Store,
-		sessionStore:  cfg.SessionStore,
-		provider:      cfg.Provider,
-		inspector:     cfg.Inspector,
-		snapshotCache: cfg.SnapshotCache,
-		hmrWatcher:    cfg.HMRWatcher,
-		logger:        cfg.Logger,
-		workerNodeID:  cfg.WorkerNodeID,
-		pollStopChs:   make(map[uuid.UUID]chan struct{}),
-		maxPerUser:    cfg.MaxPerUser,
-		maxPerOrg:     cfg.MaxPerOrg,
-		maxPerWorker:  cfg.MaxPerWorker,
+		store:                 cfg.Store,
+		sessionStore:          cfg.SessionStore,
+		provider:              cfg.Provider,
+		inspector:             cfg.Inspector,
+		snapshotCache:         cfg.SnapshotCache,
+		hmrWatcher:            cfg.HMRWatcher,
+		logger:                cfg.Logger,
+		workerNodeID:          cfg.WorkerNodeID,
+		previewOriginTemplate: cfg.PreviewOriginTemplate,
+		pollStopChs:           make(map[uuid.UUID]chan struct{}),
+		maxPerUser:            cfg.MaxPerUser,
+		maxPerOrg:             cfg.MaxPerOrg,
+		maxPerWorker:          cfg.MaxPerWorker,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -260,7 +273,7 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	}
 
 	// 9. Start the preview via the provider (async-friendly).
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config)
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID))
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
@@ -760,8 +773,9 @@ func (m *Manager) RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("recycle: failed to revoke access sessions")
 	}
 
-	// Restart via provider with same sandbox and config.
-	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config)
+	// Restart via provider with same sandbox and config. Use the existing
+	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(previewID))
 	if err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status")
@@ -842,6 +856,19 @@ func (m *Manager) Store() *db.PreviewStore {
 // WorkerNodeID returns this worker's identity string (used by recycle workers).
 func (m *Manager) WorkerNodeID() string {
 	return m.workerNodeID
+}
+
+// platformEnv returns environment variables the platform injects into every
+// service of the given preview, overriding any user-declared value. Currently
+// exposes PREVIEW_ORIGIN (computed from PreviewOriginTemplate with "{id}"
+// replaced by the preview UUID). Returns nil when PreviewOriginTemplate is
+// unset, leaving user-declared env untouched.
+func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
+	if m.previewOriginTemplate == "" {
+		return nil
+	}
+	origin := strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
+	return map[string]string{"PREVIEW_ORIGIN": origin}
 }
 
 // =============================================================================
