@@ -1005,7 +1005,7 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	d.creds = &mockCredentialProvider{
@@ -1055,7 +1055,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	// No credential configured for "claude_code".
@@ -1083,8 +1083,8 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	// when integration skills are available (independent of agent type).
 	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
 		"sandbox config should not have agent-specific env for unconfigured agent type")
-	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
-		"HOME should always be set")
+	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
+		"HOME should always be set to the sandbox user's home dir")
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
@@ -1108,7 +1108,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	orch := buildOrchestrator(d)
@@ -1120,7 +1120,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	require.Empty(t, capturedCfg.Env["CODEX_API_KEY"], "CODEX_API_KEY should not be set as env var")
 
 	// Instead, the token should be injected via auth.json.
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
 	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
@@ -1181,12 +1181,12 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	require.Contains(
 		t,
 		d.provider.ExecCalls,
-		"mkdir -p /workspace/.codex",
-		"codex auth setup should create the auth directory inside the writable sandbox workdir",
+		"mkdir -p /home/sandbox/.codex",
+		"codex auth setup should create the auth directory under the sandbox user's home",
 	)
 
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
-	require.True(t, ok, "codex auth injection should write auth.json under /workspace/.codex")
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
+	require.True(t, ok, "codex auth injection should write auth.json under /home/sandbox/.codex")
 
 	var authJSON map[string]interface{}
 	unmarshalErr := json.Unmarshal(authData, &authJSON)
@@ -1246,14 +1246,14 @@ func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "test-sandbox", WorkDir: cfg.WorkDir}, nil
+		return &agent.Sandbox{ID: "test-sandbox", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	orch := buildOrchestrator(d)
 	_ = orch.RunAgent(context.Background(), run)
 
-	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
-		"sandbox env should set HOME to the workdir so Codex CLI finds ~/.codex/auth.json")
+	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
+		"sandbox env should set HOME to the sandbox user's home so Codex CLI finds ~/.codex/auth.json")
 }
 
 func TestRunAgent_IssueWithoutRepository(t *testing.T) {
@@ -1506,7 +1506,7 @@ func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
 	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
@@ -1621,4 +1621,3 @@ func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
 	turnUpdates := d.sessions.getTurnUpdates()
 	require.Empty(t, turnUpdates, "cancelled session without snapshot should not have turn updates")
 }
-

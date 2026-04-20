@@ -416,12 +416,16 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options (no-new-privileges blocks sudo)")
 		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
+		require.Contains(t, capturedHostConfig.Tmpfs, "/var/tmp", "container should have exec-allowed tmpfs at /var/tmp for scratch binaries")
 		require.NotContains(t, capturedHostConfig.Tmpfs, "/workspace", "workspace should not be a tmpfs (lives on writable rootfs)")
 		require.Equal(t, "10G", capturedHostConfig.StorageOpt["size"], "container should have 10GB disk quota")
 
 		// Verify tmpfs mount options
 		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.Contains(t, capturedHostConfig.Tmpfs["/var/tmp"], "exec", "/var/tmp tmpfs should allow exec so `go test` can run compiled binaries")
+		require.Contains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"TMPDIR must be redirected off /tmp so tools writing executables to tempdir can exec them")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"GOTMPDIR must be redirected off /tmp so `go test` can exec compiled test binaries")
 
 		// Verify resource limits
@@ -508,7 +512,9 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		require.Contains(t, capturedConfig.Env, "ANTHROPIC_API_KEY=sk-ant-test-key")
 		require.Contains(t, capturedConfig.Env, "OPENAI_API_KEY=sk-test-openai-key")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.Contains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"TMPDIR should be injected so tools dropping executables in tempdir can exec them")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"GOTMPDIR should be injected so `go test` works despite /tmp being noexec")
 	})
 
@@ -529,8 +535,29 @@ func TestDockerProvider_Create(t *testing.T) {
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/workspace/.gotmp")
-		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"caller-supplied GOTMPDIR should not be overridden")
+	})
+
+	t.Run("preserves caller-supplied TMPDIR override", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedConfig *container.Config
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedConfig = config
+			return container.CreateResponse{ID: "tmpdir-override"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.Env = map[string]string{"TMPDIR": "/workspace/.tmp"}
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Contains(t, capturedConfig.Env, "TMPDIR=/workspace/.tmp")
+		require.NotContains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"caller-supplied TMPDIR should not be overridden")
 	})
 
 	t.Run("handles nil env map gracefully", func(t *testing.T) {
@@ -550,8 +577,8 @@ func TestDockerProvider_Create(t *testing.T) {
 		sb, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Equal(t, "no-env", sb.ID)
-		require.ElementsMatch(t, []string{"GOTMPDIR=" + defaultGoTmpDir}, capturedConfig.Env,
-			"with nil cfg.Env, only the auto-injected GOTMPDIR should be present")
+		require.ElementsMatch(t, []string{"TMPDIR=" + defaultScratchDir, "GOTMPDIR=" + defaultScratchDir}, capturedConfig.Env,
+			"with nil cfg.Env, only the auto-injected TMPDIR/GOTMPDIR should be present")
 	})
 
 	t.Run("bind-mounts resolv.conf and clears DNS when WithResolvConf is set", func(t *testing.T) {
@@ -1235,7 +1262,7 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 
 		cloneCmd := capturedCmds[0]
 		require.Contains(t, cloneCmd, "git clone", "should run git clone command")
-		require.Contains(t, cloneCmd, "--depth 1", "should do shallow clone")
+		require.Contains(t, cloneCmd, "--filter=blob:none", "should do partial clone so history is preserved")
 		require.Contains(t, cloneCmd, "--branch 'main'", "should clone the specified branch")
 		require.Contains(t, cloneCmd, "x-access-token:ghp_test123@", "should include auth token in URL")
 

@@ -380,10 +380,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
-	// Ensure HOME points to the sandbox workdir so CLI tools (e.g. Codex
-	// resolving ~/.codex/auth.json) find files written to the workdir.
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
+	}
+	// Route the sandbox workdir into a repo-named subdir of HomeDir so the
+	// agent's cwd reads like `/home/sandbox/<repo>` — matching what a human
+	// would see after `git clone && cd <repo>`. Falls back to the default
+	// (/workspace) when no repo is attached.
+	if slug := SlugForRepo(repoFullName); slug != "" {
+		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
 	// Inject GitHub token and repo info for 143-tools CLI only when the agent
 	// has integration skills (i.e. the prompt references CLI tools). This avoids
@@ -405,7 +410,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
-		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
@@ -727,8 +732,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
 	}
+	// Look up the session's repo to derive the same WorkDir used on the
+	// initial run (see RunAgent). Must match the original so snapshot restore
+	// lands files where the agent expects them. Best-effort: if the lookup
+	// fails we fall back to the default WorkDir and log; resume works either
+	// way because the snapshot tar uses absolute paths.
+	if slug := o.sessionRepoSlug(ctx, session); slug != "" {
+		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
-		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
@@ -976,6 +989,32 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, nil
+}
+
+// sessionRepoSlug returns the repo-name slug for the session's repository, or
+// an empty string if no repo is attached. Used to pick a WorkDir that matches
+// the original run's WorkDir so snapshot restores land files where the agent
+// expects them. Errors are logged and swallowed — the fallback (empty slug →
+// default WorkDir) keeps sessions recoverable when the DB is briefly flaky.
+func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) string {
+	repoID := session.RepositoryID
+	if repoID == nil {
+		issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
+		if err != nil {
+			o.logger.Debug().Err(err).Str("session_id", session.ID.String()).Msg("sessionRepoSlug: fetch issue failed; falling back to default WorkDir")
+			return ""
+		}
+		if issue.RepositoryID == nil {
+			return ""
+		}
+		repoID = issue.RepositoryID
+	}
+	repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
+	if err != nil {
+		o.logger.Debug().Err(err).Str("session_id", session.ID.String()).Msg("sessionRepoSlug: fetch repo failed; falling back to default WorkDir")
+		return ""
+	}
+	return SlugForRepo(repo.FullName)
 }
 
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff
@@ -1419,10 +1458,10 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, fmt.Errorf("marshal auth.json: %w", err)
 	}
 
-	// Write auth.json under the sandbox workdir/.codex. The sandbox env
-	// sets HOME to the workdir (see RunAgent step 7) so the Codex CLI
+	// Write auth.json under $HOME/.codex. The sandbox env sets HOME to the
+	// sandbox user's home dir (see RunAgent step 7) so the Codex CLI
 	// resolves ~/.codex/auth.json to this path.
-	authDir := path.Join(sandbox.WorkDir, ".codex")
+	authDir := path.Join(sandbox.HomeDir, ".codex")
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
 
 	var mkdirOut, mkdirErr bytes.Buffer

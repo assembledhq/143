@@ -216,6 +216,7 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			sandbox := &agent.Sandbox{
 				ID:      "test-sandbox",
 				WorkDir: "/workspace",
+				HomeDir: "/home/sandbox",
 			}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
@@ -244,7 +245,7 @@ func TestGeminiCLIAdapter_Execute(t *testing.T) {
 			tt.checkResult(t, result, logs)
 
 			// Verify prompt file was written.
-			promptData, exists := provider.Files["/workspace/.143-prompt.md"]
+			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.", "prompt file should contain system prompt")
 		})
@@ -260,7 +261,7 @@ func TestGeminiCLIAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -283,7 +284,7 @@ func TestGeminiCLIAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -298,7 +299,7 @@ func TestGeminiCLIAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -649,7 +650,7 @@ func TestGeminiCLIAdapter_Execute_StreamingOutput(t *testing.T) {
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "Fix the bug.", UserPrompt: "Null pointer error.", MaxTokens: 50_000}
 
 	logCh := make(chan agent.LogEntry, 100)
@@ -699,7 +700,7 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	}
 
 	adapter := NewGeminiCLIAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please include a regression test.",
 		MaxTokens:    50_000,
@@ -713,7 +714,7 @@ func TestGeminiCLIAdapter_Execute_ContinuationWithoutSessionIDUsesResumeMode(t *
 	require.NoError(t, err, "continuation should succeed without an explicit Gemini session ID")
 	require.NotNil(t, result, "continuation should return a result")
 	require.Contains(t, provider.ExecCalls[0], "gemini --resume", "continuation without a session ID should still use Gemini resume mode")
-	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
