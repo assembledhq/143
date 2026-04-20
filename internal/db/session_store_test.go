@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -728,6 +729,44 @@ func TestSessionStore_ListStaleIdleSessions(t *testing.T) {
 	sessions, err := store.ListStaleIdleSessions(context.Background(), time.Now().Add(-time.Hour))
 	require.NoError(t, err)
 	require.Len(t, sessions, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListStaleRunningSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions.+WHERE s.status = 'running'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListStaleRunningSessions(context.Background(), time.Now().Add(-1*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, sessions, 0)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListStaleRunningSessions_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions.+WHERE s.status = 'running'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+
+	_, err = store.ListStaleRunningSessions(context.Background(), time.Now().Add(-1*time.Hour))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query stale running sessions")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

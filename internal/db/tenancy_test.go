@@ -60,17 +60,18 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
-		{"sessions", "where status = 'idle'"},    // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'idle'"},      // ListStaleIdleSessions: system-wide cleanup across all orgs
 		{"sessions", "where s.status = 'pending'"}, // ListStalePendingSessions: system-wide cleanup across all orgs
-		{"sessions", "where sandbox_state"},      // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
-		{"sessions", "diff_history"},             // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
+		{"sessions", "where s.status = 'running'"}, // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where sandbox_state"},        // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
+		{"sessions", "diff_history"},               // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
 		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK
 		{"session_logs", "into session_logs"}, // no org_id column; scoped via session_id FK
-		{"users", "where github_id"},              // pre-auth lookup by GitHub ID
-		{"users", "where email"},                  // pre-auth lookup by email
-		{"users", "where google_id"},              // pre-auth lookup by Google ID
+		{"users", "where github_id"},          // pre-auth lookup by GitHub ID
+		{"users", "where email"},              // pre-auth lookup by email
+		{"users", "where google_id"},          // pre-auth lookup by Google ID
 	}
 
 	// Scan all .go files in the db package (not test files)

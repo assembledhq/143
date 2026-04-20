@@ -105,9 +105,9 @@ type ContextLimits struct {
 	IssueDescriptionMax int `json:"issue_description_max"` // max chars per issue description
 
 	// Token limits for agents
-	PMMaxTokens        int `json:"pm_max_tokens"`         // max tokens for PM agent context
-	AgentLowTokenMax   int `json:"agent_low_token_max"`   // token limit for low-complexity tasks
-	AgentHighTokenMax  int `json:"agent_high_token_max"`  // token limit for high-complexity tasks
+	PMMaxTokens       int `json:"pm_max_tokens"`        // max tokens for PM agent context
+	AgentLowTokenMax  int `json:"agent_low_token_max"`  // token limit for low-complexity tasks
+	AgentHighTokenMax int `json:"agent_high_token_max"` // token limit for high-complexity tasks
 }
 
 // WithDefaults returns a copy of the ContextLimits with any zero-valued fields
@@ -172,28 +172,34 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel        AutonomyLevel        `json:"autonomy_level"`
-	Aggressiveness       int                  `json:"execution_aggressiveness"`
-	MaxConcurrentRuns    int                  `json:"max_concurrent_runs"`
-	AgentAutonomy        string               `json:"agent_autonomy"`
-	ConfidenceThresholds ConfidenceThresholds `json:"confidence_thresholds"`
-	PriorityWeights      PriorityWeights      `json:"priority_weights"`
-	MinPriorityThreshold float64              `json:"min_priority_threshold"`
-	ProductDirection     string               `json:"product_direction"`
-	ProductContext       *ProductContext      `json:"product_context,omitempty"`
-	PMScheduleHours      int                  `json:"pm_schedule_hours"`
-	PMModel              string               `json:"pm_model"`
-	LLMModel             string               `json:"llm_model"`
-	LLMReasoningEffort         ReasoningEffort `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig                AgentEnvConfig  `json:"agent_config,omitempty"`
-	DefaultAgentType           AgentType       `json:"default_agent_type,omitempty"`
-	AuditRetentionDays         int             `json:"audit_retention_days,omitempty"`
-	ContextRefreshIntervalDays int             `json:"context_refresh_interval_days,omitempty"`
-	OrgSize                    OrgSize         `json:"org_size,omitempty"`
-	ContextLimits              ContextLimits   `json:"context_limits,omitempty"`
-	PRAuthorship               PRAuthorship    `json:"pr_authorship,omitempty"`
-	PRDraftDefault             bool            `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       bool            `json:"auto_archive_on_pr_close,omitempty"`
+	AutonomyLevel              AutonomyLevel        `json:"autonomy_level"`
+	Aggressiveness             int                  `json:"execution_aggressiveness"`
+	MaxConcurrentRuns          int                  `json:"max_concurrent_runs"`
+	AgentAutonomy              string               `json:"agent_autonomy"`
+	ConfidenceThresholds       ConfidenceThresholds `json:"confidence_thresholds"`
+	PriorityWeights            PriorityWeights      `json:"priority_weights"`
+	MinPriorityThreshold       float64              `json:"min_priority_threshold"`
+	ProductDirection           string               `json:"product_direction"`
+	ProductContext             *ProductContext      `json:"product_context,omitempty"`
+	PMScheduleHours            int                  `json:"pm_schedule_hours"`
+	PMModel                    string               `json:"pm_model"`
+	LLMModel                   string               `json:"llm_model"`
+	LLMReasoningEffort         ReasoningEffort      `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                AgentEnvConfig       `json:"agent_config,omitempty"`
+	DefaultAgentType           AgentType            `json:"default_agent_type,omitempty"`
+	AuditRetentionDays         int                  `json:"audit_retention_days,omitempty"`
+	ContextRefreshIntervalDays int                  `json:"context_refresh_interval_days,omitempty"`
+	OrgSize                    OrgSize              `json:"org_size,omitempty"`
+	ContextLimits              ContextLimits        `json:"context_limits,omitempty"`
+	PRAuthorship               PRAuthorship         `json:"pr_authorship,omitempty"`
+	PRDraftDefault             bool                 `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose       bool                 `json:"auto_archive_on_pr_close,omitempty"`
+
+	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
+	// to run_agent and continue_session jobs. A session that exceeds this
+	// limit is cancelled and marked failed with a timeout error. Zero falls
+	// back to DefaultMaxSessionDurationSeconds.
+	MaxSessionDurationSeconds int `json:"max_session_duration_seconds,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -232,17 +238,17 @@ type PriorityWeights struct {
 
 // Default values for org settings.
 const (
-	DefaultAutonomyLevel        AutonomyLevel = AutonomyLevelAutoSimple
-	DefaultAggressiveness                     = 5
-	DefaultMaxConcurrentRuns                  = 10
-	DefaultAgentAutonomy                      = AgentAutonomyAggressive
-	DefaultMinPriorityThreshold               = 30.0
-	DefaultDefaultAgentType     AgentType     = AgentTypeCodex
-	DefaultPMScheduleHours                    = 4
-	DefaultPMModel                            = PMModelSonnet
-	DefaultAuditRetentionDays                 = 90
-	DefaultContextRefreshIntervalDays         = 14
-	DefaultOrgSize                    OrgSize = OrgSizeMedium
+	DefaultAutonomyLevel              AutonomyLevel = AutonomyLevelAutoSimple
+	DefaultAggressiveness                           = 5
+	DefaultMaxConcurrentRuns                        = 10
+	DefaultAgentAutonomy                            = AgentAutonomyAggressive
+	DefaultMinPriorityThreshold                     = 30.0
+	DefaultDefaultAgentType           AgentType     = AgentTypeCodex
+	DefaultPMScheduleHours                          = 4
+	DefaultPMModel                                  = PMModelSonnet
+	DefaultAuditRetentionDays                       = 90
+	DefaultContextRefreshIntervalDays               = 14
+	DefaultOrgSize                    OrgSize       = OrgSizeMedium
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -251,6 +257,28 @@ const (
 
 	DefaultConfidenceAutoProceed = 0.85
 	DefaultConfidenceHumanReview = 0.60
+
+	// DefaultMaxSessionDurationSeconds is the default per-session wall-clock
+	// timeout (25 minutes). Long enough for non-trivial agent runs, short
+	// enough that stuck sessions don't silently eat capacity.
+	DefaultMaxSessionDurationSeconds = 25 * 60
+
+	// MinMaxSessionDurationSeconds is the smallest sensible per-org timeout.
+	// Values below this produce very short runs that are unlikely to complete
+	// a useful agent task; we clamp up to this floor.
+	MinMaxSessionDurationSeconds = 2 * 60
+
+	// MaxMaxSessionDurationSeconds is the upper bound for per-org timeout.
+	// Values above this are clamped down to protect shared infrastructure
+	// (long-running sandboxes hold concurrency slots). Admins wanting longer
+	// runs should split the task rather than raising this.
+	//
+	// If you bump this, also review agent.minRunningAgeFloor (internal/
+	// services/agent/reaper.go) and the SESSION_MAX_RUNNING_AGE default in
+	// internal/config/config.go — both are derived from this value and must
+	// stay strictly above it so the reaper doesn't kill legitimate
+	// long-running sessions before the orchestrator's own timeout fires.
+	MaxMaxSessionDurationSeconds = 2 * 60 * 60
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -421,6 +449,15 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	// PR authorship: default to user_preferred (zero-value treated as user_preferred).
 	if s.PRAuthorship == "" {
 		s.PRAuthorship = PRAuthorshipUserPreferred
+	}
+
+	// Session duration: default when unset, clamp to [min, max].
+	if s.MaxSessionDurationSeconds <= 0 {
+		s.MaxSessionDurationSeconds = DefaultMaxSessionDurationSeconds
+	} else if s.MaxSessionDurationSeconds < MinMaxSessionDurationSeconds {
+		s.MaxSessionDurationSeconds = MinMaxSessionDurationSeconds
+	} else if s.MaxSessionDurationSeconds > MaxMaxSessionDurationSeconds {
+		s.MaxSessionDurationSeconds = MaxMaxSessionDurationSeconds
 	}
 
 	return s, nil

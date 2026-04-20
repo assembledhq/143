@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -29,6 +30,17 @@ const (
 // number of concurrent agent runs. Callers can check for this with
 // errors.Is to handle it as a transient/retryable condition.
 var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
+
+// ErrSessionTimedOut is returned from RunAgent / ContinueSession when the
+// per-session wall-clock deadline fires. Callers can errors.Is against this
+// to distinguish timeout failures from user cancellations and other errors
+// without resorting to error-string matching.
+var ErrSessionTimedOut = errors.New("session timed out")
+
+// canonicalTimeoutLogMessage is the single log phrase emitted whenever a
+// session hits its configured deadline. Kept deliberately narrow so
+// Grafana alerts can key off one string across RunAgent and ContinueSession.
+const canonicalTimeoutLogMessage = "session exceeded configured timeout"
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
@@ -259,10 +271,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return err
 	}
 
-	// 2. Update status to "running" (sets started_at).
+	// 2. Update status to "running" (sets started_at in DB). We also capture
+	// the start time locally so the timeout branch below can log a
+	// meaningful elapsed duration regardless of whether run.StartedAt was
+	// populated by the caller.
 	if err := o.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "running"); err != nil {
 		return fmt.Errorf("update run status to running: %w", err)
 	}
+	// runStartedAt is captured AFTER UpdateStatus, so the elapsed reported on
+	// a timeout excludes concurrency check + status write but includes
+	// everything from issue fetch onward (sandbox create, credential inject,
+	// agent execute, snapshot). An on-call reader seeing a sub-minute
+	// elapsed on a 25-minute timeout should suspect the deadline fired
+	// during sandbox creation, not the adapter.
+	runStartedAt := time.Now()
 
 	// 3. Fetch the issue (non-fatal when IssueID is nil/zero for project-dispatched sessions).
 	var issue *models.Issue
@@ -507,12 +529,25 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(run.ID)
 
 	if err != nil {
-		// If the session was cancelled by the user (context force-cancelled
-		// after SIGINT timeout), snapshot what we have and go to idle.
-		if wasCancelled || ctx.Err() != nil {
+		// Distinguish three cases:
+		//   1. User cancellation (wasCancelled or ctx.Err()==Canceled) —
+		//      snapshot and return to idle so the session can be continued.
+		//      Checked first so an explicit user cancel that races the
+		//      deadline is classified as a cancel, not a timeout.
+		//   2. context.DeadlineExceeded — session hit its wall-clock limit.
+		//      Classify explicitly via failTimedOutSession so the category
+		//      is set without relying on text-matching in classifyFailure.
+		//   3. Any other error — fail with the underlying message and defer
+		//      classification to the async analyze_failure job.
+		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
 			log.Info().Msg("session cancelled by user")
 			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			elapsed := time.Since(runStartedAt).Round(time.Second)
+			o.failTimedOutSession(run, elapsed, 0, err, log)
+			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
 		}
 		o.failRun(ctx, run, err.Error())
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
@@ -667,10 +702,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.snapshots != nil &&
 		session.SandboxState != string(models.SandboxStateDestroyed)
 
-	// 1. Update status to running.
+	// 1. Update status to running. Capture wall-clock start locally so the
+	// timeout branch below can log a meaningful elapsed regardless of
+	// whether session.StartedAt is populated (it's set from the first
+	// turn; on a later turn this captures THIS turn's elapsed).
 	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, "running"); err != nil {
 		return fmt.Errorf("update session status to running: %w", err)
 	}
+	// turnStartedAt scopes elapsed to THIS turn only — it excludes any time
+	// the session spent idle between turns, and excludes the status write
+	// above. It includes snapshot restore, sandbox create, and agent
+	// execute. See runStartedAt in RunAgent for analogous semantics.
+	turnStartedAt := time.Now()
 	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateRunning)); err != nil {
 		log.Warn().Err(err).Msg("failed to update sandbox state to running")
 	}
@@ -926,10 +969,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(session.ID)
 
 	if err != nil {
-		if wasCancelled || ctx.Err() != nil {
+		// User cancel is checked first so an explicit cancel that races the
+		// deadline is classified as a cancel, not a timeout.
+		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
 			log.Info().Msg("session cancelled by user during continue")
 			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			elapsed := time.Since(turnStartedAt).Round(time.Second)
+			o.failTimedOutSession(session, elapsed, turnNumber, err, log)
+			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, turnNumber, elapsed, err)
 		}
 		o.failRun(ctx, session, err.Error())
 		return fmt.Errorf("execute agent on continue: %w", err)
@@ -1229,6 +1279,62 @@ func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Sess
 	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
 	}
+}
+
+// failTimedOutSession handles the common bookkeeping for a session that hit
+// its wall-clock deadline: structured failure persisted via
+// failRunWithCategory (with FailureCategoryTimeout so no downstream text
+// classifier is involved), and a canonical log line for Grafana alerts.
+// Uses a fresh cleanup context because the caller's ctx has already
+// expired. Pass turnNumber=0 for initial runs; any other value is treated
+// as a continue-session turn and surfaced in the user-facing error text.
+// underlyingErr is the error returned by the adapter/exec path (often
+// context.DeadlineExceeded, sometimes a wrapped Docker/exec error) and is
+// attached to the log event so on-call can tell at a glance whether the
+// deadline tripped the adapter or something downstream.
+// retryAdvised is hard-coded true inside failRunWithCategory; the default
+// fits the "transient slowness" case and we accept the small false-positive
+// rate where a session is structurally too large to ever fit.
+func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger) {
+	event := log.Error().Err(underlyingErr).Dur("elapsed", elapsed)
+	if turnNumber > 0 {
+		event = event.Int("turn", turnNumber)
+	}
+	event.Msg(canonicalTimeoutLogMessage)
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+
+	// Sub-second elapsed almost always means the handler ctx was already
+	// expired on entry (e.g. a retry picked up a job whose budget had
+	// already been spent). Saying "after 0s" reads as a bug report; frame
+	// it as "before the run could start" so the user-visible text matches
+	// reality.
+	elapsedDesc := fmt.Sprintf("after %s of execution", elapsed)
+	if elapsed < time.Second {
+		elapsedDesc = "before the run could meaningfully start (the context deadline had already passed when the orchestrator picked up the job)"
+	}
+
+	var errMsg, explanation string
+	if turnNumber > 0 {
+		errMsg = fmt.Sprintf("Session timed out %s on turn %d. Raise max_session_duration_seconds in org settings or break the remaining work into a shorter follow-up turn.", elapsedDesc, turnNumber)
+		// Continue-session may still have a prior snapshot that is usable
+		// for a follow-up — don't claim the session's state is gone.
+		explanation = "This turn hit the configured wall-clock limit before the agent finished. Work done during this turn was not snapshotted, but the prior turn's snapshot (if any) is still available for a follow-up."
+	} else {
+		errMsg = fmt.Sprintf("Session timed out %s. Raise max_session_duration_seconds in org settings or split the task into smaller sub-tasks.", elapsedDesc)
+		explanation = "The session hit its configured wall-clock limit before the agent could finish. Any work committed inside the sandbox during this run was discarded — no snapshot was taken."
+	}
+	o.failRunWithCategory(cleanupCtx, run,
+		errMsg,
+		FailureCategoryTimeout,
+		explanation,
+		[]string{
+			"Raise Max session duration on the Coding agents settings page if these runs legitimately need more time",
+			"Split the task into smaller sub-tasks so each fits inside the limit",
+			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
+		},
+	)
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
@@ -1684,6 +1790,24 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// ResolveSessionTimeout returns the per-session wall-clock timeout for the
+// given org, reading OrgSettings.MaxSessionDurationSeconds.
+// ParseOrgSettings always normalises the value (defaulting to
+// DefaultMaxSessionDurationSeconds and clamping into [Min, Max]), so the
+// only path that hits the DefaultSandboxTimeout fallback is the one where
+// we cannot reach the org store at all — nil store, DB outage, or a
+// malformed settings row. Safe to call with a nil OrgStore.
+func (o *Orchestrator) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if o.orgs != nil {
+		if org, err := o.orgs.GetByID(ctx, orgID); err == nil {
+			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				return time.Duration(orgSettings.MaxSessionDurationSeconds) * time.Second
+			}
+		}
+	}
+	return DefaultSandboxTimeout
 }
 
 const maxBranchSlugLen = 60

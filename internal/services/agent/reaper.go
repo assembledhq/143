@@ -26,8 +26,11 @@ type UsageRoller interface {
 }
 
 // SessionReaper periodically cleans up stale sessions and expired snapshots
-// in five phases:
+// in six phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
+//   - Phase 0.5: Fail sessions stuck in running for longer than maxRunningAge
+//     (safety net for orphaned sessions when the worker handler timeout path
+//     didn't run, e.g. worker crash or DB write failure during failure handling)
 //   - Phase 1: Transition idle sessions to completed (keep snapshots)
 //   - Phase 2: Delete snapshots that have exceeded the max snapshot age
 //   - Phase 3: Close orphaned container usage events for billing accuracy
@@ -39,6 +42,7 @@ type SessionReaper struct {
 	usageRoller      UsageRoller  // nil-safe — usage rollup disabled if nil
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
+	maxRunningAge    time.Duration
 	maxSnapshotAge   time.Duration
 	interval         time.Duration
 	logger           zerolog.Logger
@@ -50,6 +54,7 @@ type SessionReaper struct {
 type StaleSessionLister interface {
 	ListStaleIdleSessions(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	ListStalePendingSessions(ctx context.Context, createdBefore time.Time) ([]models.Session, error)
+	ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error)
 	ListExpiredSnapshots(ctx context.Context, olderThan time.Time) ([]models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status string) error
 	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error
@@ -76,12 +81,32 @@ func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 // before the reaper considers it stuck and marks it as failed.
 const defaultMaxPendingAge = 10 * time.Minute
 
+// defaultMaxRunningAge is the safety-net cutoff for sessions stuck in
+// "running". It must be at or above minRunningAgeFloor — otherwise an
+// admin who legitimately raises their org's session timeout to the
+// allowed maximum would have sessions killed by the reaper before the
+// orchestrator's own timeout fires. Set a comfortable margin above the
+// floor so raising MaxMaxSessionDurationSeconds in models doesn't
+// silently trip the constructor's warning.
+const defaultMaxRunningAge = 150 * time.Minute // 2h30m; floor is ~2h17m
+
+// minRunningAgeFloor is the hard floor for the reaper's running-session
+// cutoff. It's derived from the maximum per-org session timeout
+// (OrgSettings.MaxMaxSessionDurationSeconds) plus HandlerCleanupBuffer plus
+// a 15-minute safety margin for orchestrator bookkeeping. If an operator
+// configures SESSION_MAX_RUNNING_AGE below this, NewSessionReaper logs a
+// warning and raises it — otherwise an admin who legitimately raises their
+// org's timeout above SESSION_MAX_RUNNING_AGE would have sessions killed
+// by the reaper before their own configured timeout fires.
+var minRunningAgeFloor = time.Duration(models.MaxMaxSessionDurationSeconds)*time.Second + HandlerCleanupBuffer + 15*time.Minute
+
 func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger, opts ...SessionReaperOption) *SessionReaper {
 	r := &SessionReaper{
 		sessions:       sessions,
 		snapshotStore:  snapshotStore,
 		maxIdleAge:     maxIdleAge,
 		maxPendingAge:  defaultMaxPendingAge,
+		maxRunningAge:  defaultMaxRunningAge,
 		maxSnapshotAge: maxSnapshotAge,
 		interval:       interval,
 		logger:         logger,
@@ -89,7 +114,24 @@ func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.Snapsho
 	for _, opt := range opts {
 		opt(r)
 	}
+	if r.maxRunningAge < minRunningAgeFloor {
+		logger.Warn().
+			Dur("configured", r.maxRunningAge).
+			Dur("floor", minRunningAgeFloor).
+			Msg("reaper: max_running_age is below the safe floor; raising to protect long-running sessions from premature reaping")
+		r.maxRunningAge = minRunningAgeFloor
+	}
 	return r
+}
+
+// WithMaxRunningAge overrides the max running-state age before the reaper
+// considers a session stuck and fails it.
+func WithMaxRunningAge(d time.Duration) SessionReaperOption {
+	return func(r *SessionReaper) {
+		if d > 0 {
+			r.maxRunningAge = d
+		}
+	}
 }
 
 // Run starts the reaper loop. It blocks until ctx is cancelled.
@@ -100,6 +142,7 @@ func (r *SessionReaper) Run(ctx context.Context) {
 	r.logger.Info().
 		Dur("interval", r.interval).
 		Dur("max_pending", r.maxPendingAge).
+		Dur("max_running", r.maxRunningAge).
 		Dur("max_idle", r.maxIdleAge).
 		Dur("max_snapshot_age", r.maxSnapshotAge).
 		Msg("session reaper started")
@@ -118,6 +161,12 @@ func (r *SessionReaper) Run(ctx context.Context) {
 // FailureCategoryStuckPending is the failure category for sessions that timed
 // out in the pending state without ever starting.
 const FailureCategoryStuckPending = "stuck_pending"
+
+// FailureCategoryStuckRunning is the failure category for sessions that
+// started but never reached a terminal status — typically because the worker
+// handler context timeout path didn't execute (crashed worker, DB write
+// failure during failure bookkeeping, or a new silent-failure code path).
+const FailureCategoryStuckRunning = "stuck_running"
 
 func (r *SessionReaper) reap(ctx context.Context) {
 	// Phase 0: Fail sessions stuck in pending with no active job.
@@ -148,6 +197,54 @@ func (r *SessionReaper) reap(ctx context.Context) {
 				Str("org_id", s.OrgID.String()).
 				Time("created_at", s.CreatedAt).
 				Msg("reaper: failed stale pending session")
+		}
+	}
+
+	// Phase 0.5: Fail sessions stuck in "running" past the max running age.
+	// Safety net for sessions the handler timeout path couldn't mark failed
+	// (worker crash, DB outage during failRun, etc.). Logged at Error level
+	// so Grafana alerts surface these — a healthy system should hit this
+	// phase 0 times.
+	//
+	// Dedup with the orchestrator's own timeout path is structural: the
+	// query below filters `status='running'`, so any session the orchestrator
+	// already transitioned to `failed` is invisible here. A session the
+	// orchestrator is *mid-failing* could race, but failRunWithCategory uses
+	// a 30s cleanup context and this phase only fires after maxRunningAge
+	// (≥2h17m), which is far longer than that window.
+	runningCutoff := time.Now().Add(-r.maxRunningAge)
+	staleRunning, err := r.sessions.ListStaleRunningSessions(ctx, runningCutoff)
+	if err != nil {
+		r.logger.Error().Err(err).Msg("reaper: failed to list stale running sessions")
+	} else {
+		for _, s := range staleRunning {
+			errMsg := fmt.Sprintf("session stuck in running state for more than %s — no status update from worker", r.maxRunningAge)
+			result := &models.SessionResult{
+				Error: strPtr(errMsg),
+			}
+			if err := r.sessions.UpdateResult(ctx, s.OrgID, s.ID, string(models.SessionStatusFailed), result); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to mark stale running session as failed")
+				continue
+			}
+			explanation := "This session started but never reported a result. This usually means the worker processing it crashed or lost connectivity to the database. The work may or may not have completed inside the sandbox; any produced diff has been lost."
+			nextSteps := []string{
+				"Retry the session — a fresh worker should pick it up",
+				"If this keeps happening across multiple sessions, check worker health and database connectivity",
+			}
+			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryStuckRunning, nextSteps, true); err != nil {
+				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for stale running session")
+			}
+			// Omit started_at/elapsed when nil rather than logging a
+			// year-zero timestamp with a multi-millennium duration, which
+			// would poison Grafana aggregations on this alert.
+			event := r.logger.Error().
+				Str("session_id", s.ID.String()).
+				Str("org_id", s.OrgID.String())
+			if s.StartedAt != nil {
+				event = event.Time("started_at", *s.StartedAt).
+					Dur("elapsed", time.Since(*s.StartedAt))
+			}
+			event.Msg("reaper: failed stale running session — worker did not persist terminal status")
 		}
 	}
 

@@ -232,6 +232,14 @@ func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	return out
 }
 
+func (m *mockSessionStore) getFailureUpdates() []failureUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]failureUpdate, len(m.failureUpdates))
+	copy(out, m.failureUpdates)
+	return out
+}
+
 // mockSessionLogStore implements agent.SessionLogStore.
 type mockSessionLogStore struct {
 	mu    sync.Mutex
@@ -1750,4 +1758,303 @@ func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
 	// No turn updates since there's no snapshot.
 	turnUpdates := d.sessions.getTurnUpdates()
 	require.Empty(t, turnUpdates, "cancelled session without snapshot should not have turn updates")
+}
+
+// --- ResolveSessionTimeout ---
+
+func TestResolveSessionTimeout_UsesOrgOverride(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	// 10 min override — inside [min, max] so ParseOrgSettings leaves it alone.
+	overrideSeconds := 10 * 60
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": overrideSeconds,
+	})
+	require.NoError(t, err)
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, 10*time.Minute, got)
+}
+
+func TestResolveSessionTimeout_ClampsBelowFloor(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	// 30 seconds — below MinMaxSessionDurationSeconds (120s). ParseOrgSettings
+	// should clamp up to 2 minutes.
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": 30,
+	})
+	require.NoError(t, err)
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, 2*time.Minute, got)
+}
+
+func TestResolveSessionTimeout_FallsBackWhenOrgStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{err: errors.New("db down")},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, agent.DefaultSandboxTimeout, got)
+}
+
+func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
+	t.Parallel()
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		// Orgs intentionally nil.
+		Jobs:          d.jobs,
+		GitHub:        d.github,
+		Credentials:   d.creds,
+		Snapshots:     d.snapshots,
+		Logger:        zerolog.Nop(),
+		MaxConcurrent: 3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), testOrg())
+	require.Equal(t, agent.DefaultSandboxTimeout, got)
+}
+
+// --- DeadlineExceeded handling in RunAgent / ContinueSession ---
+
+func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	startedAt := time.Now().Add(-10 * time.Minute)
+	run.StartedAt = &startedAt
+
+	d := defaultDeps()
+	// Simulate the adapter returning after ctx has already expired — the
+	// orchestrator should detect ctx.Err() == DeadlineExceeded and route
+	// into the timeout branch.
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	orch := buildOrchestrator(d)
+
+	// Pass a context that's already past its deadline.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	err := orch.RunAgent(ctx, run)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
+
+	// failRun persists status via UpdateResult, not UpdateStatus.
+	results := d.sessions.getResultUpdates()
+	foundFailed := false
+	for _, r := range results {
+		if r.status == "failed" {
+			foundFailed = true
+			require.NotNil(t, r.result)
+			require.NotNil(t, r.result.Error)
+			require.Contains(t, *r.result.Error, "Session timed out")
+		}
+	}
+	require.True(t, foundFailed, "session should have been marked failed via UpdateResult")
+
+	// Classification should be set directly (no analyze_failure enqueue)
+	// so the UI sees a timeout category without round-tripping through the
+	// async classifier.
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
+		"timeout path classifies explicitly; analyze_failure should not be enqueued")
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
+	require.True(t, failures[0].retryAdvised)
+}
+
+func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	startedAt := time.Now().Add(-10 * time.Minute)
+	session.StartedAt = &startedAt
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Keep going.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	err := orch.ContinueSession(ctx, session)
+	require.Error(t, err)
+	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
+
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
+		"timeout path classifies explicitly; analyze_failure should not be enqueued")
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
+	require.True(t, failures[0].retryAdvised)
+}
+
+// TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering
+// of branches in the RunAgent error handler: when a user cancel and a
+// context deadline have both fired, the session must be classified as a
+// user cancel (snapshotted back to idle) rather than a timeout failure.
+// Without this ordering, a cancel that races the deadline could flip the
+// session into a failed-with-timeout state instead of returning to idle.
+func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.cancels = cancelReg
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("cancel-snapshot"))), nil
+	}
+	// Make Exec fail so doCancel falls back to immediate ctx cancel rather
+	// than waiting 30s for the SIGINT timer.
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 1, errors.New("exec not available in test")
+	}
+
+	// Adapter waits for the cancel registry to mark the session cancelled,
+	// then returns DeadlineExceeded to simulate the race where the ctx
+	// deadline has also fired by the time the adapter reports back.
+	adapterStarted := make(chan struct{})
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		close(adapterStarted)
+		<-ctx.Done()
+		return nil, context.DeadlineExceeded
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		// Pass a context with a near-future deadline so DeadlineExceeded is
+		// a plausible outcome by the time we check ctx.Err() in RunAgent.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		done <- buildOrchestrator(d).RunAgent(ctx, run)
+	}()
+
+	<-adapterStarted
+	require.True(t, cancelReg.CancelSession(run.ID), "cancel should find registered session")
+
+	err := <-done
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cancelled", "cancel must win over timeout classification")
+	require.NotContains(t, err.Error(), "timed out", "timeout classification must lose to explicit user cancel")
+
+	// No failed-status update should have been recorded.
+	for _, r := range d.sessions.getResultUpdates() {
+		require.NotEqual(t, "failed", r.status, "cancelled-with-expired-ctx should not mark session failed")
+	}
+	// No analyze_failure job should have been enqueued.
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
 }
