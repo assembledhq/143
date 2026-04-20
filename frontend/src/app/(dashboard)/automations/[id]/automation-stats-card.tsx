@@ -44,7 +44,7 @@ interface ChartDatum {
 // uneven bar spacing because recharts spaces categorical ticks evenly — two
 // adjacent bars in the data would look like two adjacent days regardless of
 // actual gap length.
-function fillGaps(
+export function fillGaps(
   buckets: AutomationRunStatsBucket[],
   since: Date,
   until: Date,

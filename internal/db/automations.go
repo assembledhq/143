@@ -663,14 +663,17 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 // job delivery: two workers each holding a duplicate job will both pass the
 // "is pending?" check, so the transition itself must be the source of truth.
 //
-// completedAt and resultSummary are written unconditionally on a successful
-// transition, so callers must pass the final values every time. For
-// intermediate transitions (e.g. pending → running) pass nil for both; the row
-// already has NULL in those columns at that point, so the rewrite is harmless.
-// For a terminal transition, pass the real completion time and a non-empty
-// summary — passing nil would clear a previously-populated summary.
+// completedAt and resultSummary are preserved via COALESCE when the caller
+// passes nil: intermediate transitions (e.g. pending → running) can pass nil
+// for both without risk, and a later terminal transition that accidentally
+// drops one of them still won't clobber a value written by an earlier writer.
+// Pass non-nil values for terminal transitions.
 func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
-	query := `UPDATE automation_runs SET status = @to_status, completed_at = @completed_at, result_summary = @result_summary, updated_at = now()
+	query := `UPDATE automation_runs
+		SET status = @to_status,
+			completed_at = COALESCE(@completed_at, completed_at),
+			result_summary = COALESCE(@result_summary, result_summary),
+			updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = @from_status`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":             runID,
@@ -741,7 +744,7 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 			count(*) FILTER (WHERE status = 'running') AS running,
 			count(*) FILTER (WHERE status = 'pending') AS pending,
 			coalesce(
-				avg(EXTRACT(EPOCH FROM (completed_at - triggered_at)))
+				avg(GREATEST(EXTRACT(EPOCH FROM (completed_at - triggered_at)), 0))
 					FILTER (WHERE status IN ('completed', 'completed_noop', 'failed')
 						AND completed_at IS NOT NULL),
 				0
