@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -425,6 +425,36 @@ logs:
 	echo "Opening Grafana tunnel → http://localhost:9999"; \
 	echo "Press Ctrl+C to close."; \
 	ssh -i $(SSH_KEY) -L 9999:localhost:9999 -N deploy@$$LOGGING_HOST
+
+# One-shot LogsQL query against VictoriaLogs. Prints NDJSON results to stdout
+# (one JSON log line per result). Bounded by a 30s curl timeout. The query
+# text travels over ssh stdin so shell metacharacters cannot escape.
+#
+# Usage: make logs-query Q='service:api AND level:error AND _time:[now-1h,now]' [LIMIT=100]
+#
+# Add `_time:[now-1h,now]` (or similar) to bound the time range, otherwise
+# VictoriaLogs scans the full retention window. LogsQL reference:
+# https://docs.victoriametrics.com/victorialogs/logsql/
+logs-query: export LOGS_QUERY := $(Q)
+logs-query: export LOGS_LIMIT := $(or $(LIMIT),100)
+logs-query:
+	@test -n "$$LOGS_QUERY" || { echo "Usage: make logs-query Q='service:api AND level:error' [LIMIT=100]"; exit 1; }
+	$(check-ssh-key)
+	@LOGGING_HOST="$(LOGGING_HOST)"; \
+	if [ -z "$$LOGGING_HOST" ]; then \
+		$(read-fleet-hosts); \
+		LOGGING_HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^logging:' | cut -d: -f2 | head -1)"; \
+	fi; \
+	if [ -z "$$LOGGING_HOST" ]; then \
+		echo "ERROR: Could not find logging host. Set LOGGING_HOST or add logging:<ip> to FLEET_HOSTS."; \
+		exit 1; \
+	fi; \
+	printf '%s' "$$LOGS_QUERY" | ssh -i $(SSH_KEY) deploy@$$LOGGING_HOST \
+	  "VLOGS_HOST=\$$(grep ^VICTORIALOGS_HOST= /opt/143/.env | cut -d= -f2); \
+	   curl -sS --max-time 30 \
+	     --data-urlencode query@- \
+	     --data-urlencode limit=$$LOGS_LIMIT \
+	     http://\$$VLOGS_HOST:9428/select/logsql/query"
 
 # ── Read-only prod DB access ─────────────────────────────────────────
 # The `readonly` Postgres role is safe for ad-hoc inspection by humans and
