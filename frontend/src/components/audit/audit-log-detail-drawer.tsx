@@ -52,14 +52,19 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Details</h3>
               <div className="rounded-md bg-muted/30 border border-border/50 p-3 space-y-2">
-                {Object.entries(entry.details).map(([key, value]) => (
-                  <div key={key} className="flex gap-2 text-xs">
-                    <span className="font-medium text-muted-foreground min-w-[100px] shrink-0">{key}</span>
-                    <span className="text-foreground break-all font-mono text-xs">
-                      {typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)}
-                    </span>
-                  </div>
-                ))}
+                {Object.entries(entry.details).map(([key, value]) => {
+                  if (key === "changes" && isChangesMap(value)) {
+                    return <ChangesBlock key={key} changes={value} />;
+                  }
+                  return (
+                    <div key={key} className="flex gap-2 text-xs">
+                      <span className="font-medium text-muted-foreground min-w-[100px] shrink-0">{key}</span>
+                      <span className="text-foreground break-all font-mono text-xs">
+                        {typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -111,6 +116,50 @@ function DetailRow({
           {value}
         </span>
       )}
+    </div>
+  );
+}
+
+type ChangesMap = Record<string, { before: unknown; after: unknown }>;
+
+/**
+ * isChangesMap narrows an unknown details value to the {field: {before,after}}
+ * shape emitted by backend update handlers. We reject arrays up front because
+ * `typeof []` is "object" in JS and we don't want "changes: [1,2,3]" to fall
+ * into the diff renderer.
+ */
+function isChangesMap(value: unknown): value is ChangesMap {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value).every(
+    (v) =>
+      typeof v === "object" &&
+      v !== null &&
+      !Array.isArray(v) &&
+      "before" in (v as object) &&
+      "after" in (v as object),
+  );
+}
+
+function formatDiffValue(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+function ChangesBlock({ changes }: { changes: ChangesMap }) {
+  return (
+    <div className="text-xs space-y-1.5">
+      <span className="font-medium text-muted-foreground">changes</span>
+      <div className="ml-2 space-y-1.5">
+        {Object.entries(changes).map(([field, { before, after }]) => (
+          <div key={field} className="flex flex-wrap items-baseline gap-2">
+            <span className="font-mono text-muted-foreground">{field}</span>
+            <span className="font-mono text-foreground/70 line-through">{formatDiffValue(before)}</span>
+            <span className="text-muted-foreground/50">→</span>
+            <span className="font-mono text-foreground">{formatDiffValue(after)}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -205,7 +206,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, snapshotStore, billingMetrics, cancelRegistry)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry)
 		}
 		retentionCfg := worker.DataRetentionConfig{
 			WebhookDays: cfg.DataRetentionWebhookDays,
@@ -237,7 +238,6 @@ func main() {
 			repoStore,
 			logger,
 		)
-		scheduler.SetProjectStore(projectStore)
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		go scheduler.Start(ctx, 10*time.Minute)
@@ -326,6 +326,7 @@ func buildServices(
 	pmDocumentStore *db.PMDocumentStore,
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
+	automationRunStore *db.AutomationRunStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
@@ -391,6 +392,7 @@ func buildServices(
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
@@ -402,6 +404,7 @@ func buildServices(
 		SessionMessages:  sessionMessageStore,
 		DecisionLog:      pmDecisionLogStore,
 		ProjectTasks:     projectTaskUpdater,
+		AutomationRuns:   automationRunUpdater,
 		Issues:           issueStore,
 		Repositories:     repoStore,
 		Orgs:             orgStore,

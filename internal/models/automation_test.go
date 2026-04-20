@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -34,26 +35,109 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 	}
 }
 
-func TestValidateAutomationScheduleSupported(t *testing.T) {
+func TestValidateCronExpression(t *testing.T) {
 	t.Parallel()
 
-	// interval is always supported.
-	require.NoError(t, ValidateAutomationScheduleSupported(AutomationScheduleInterval))
-
-	// Cron passes type validation but must be gated by AutomationCronSupported
-	// until the cron parser lands. If this test starts failing because
-	// AutomationCronSupported flipped to true, make sure NextRunTime handles
-	// cron and remove the cron-specific branch in the function above.
-	if AutomationCronSupported {
-		require.NoError(t, ValidateAutomationScheduleSupported(AutomationScheduleCron))
-	} else {
-		err := ValidateAutomationScheduleSupported(AutomationScheduleCron)
-		require.Error(t, err, "cron must be rejected while AutomationCronSupported is false")
-		require.Contains(t, err.Error(), "cron")
+	tests := []struct {
+		name      string
+		expr      string
+		expectErr bool
+	}{
+		{name: "5-field daily", expr: "0 9 * * *"},
+		{name: "5-field weekly", expr: "0 9 * * 1"},
+		{name: "6-field with seconds", expr: "0 0 9 * * *"},
+		{name: "alias", expr: "@daily"},
+		{name: "empty", expr: "", expectErr: true},
+		{name: "garbage", expr: "every monday", expectErr: true},
+		{name: "too few fields", expr: "0 9 *", expectErr: true},
 	}
 
-	// Unknown type is rejected with the same error ValidateAutomationScheduleType returns.
-	require.Error(t, ValidateAutomationScheduleSupported("every-friday"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateCronExpression(tt.expr)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestNextCronRunTime(t *testing.T) {
+	t.Parallel()
+
+	// 9am daily, evaluated from 8am UTC → next fire is 9am UTC same day.
+	from := time.Date(2026, 4, 17, 8, 0, 0, 0, time.UTC)
+	next, err := NextCronRunTime("0 9 * * *", "UTC", from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC), next)
+
+	// Same cron in America/New_York: 9am ET on 2026-04-17 = 13:00 UTC (EDT).
+	next, err = NextCronRunTime("0 9 * * *", "America/New_York", from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 13, 0, 0, 0, time.UTC), next)
+
+	// Unknown timezone.
+	_, err = NextCronRunTime("0 9 * * *", "Mars/Olympus", from)
+	require.Error(t, err)
+
+	// Malformed expression.
+	_, err = NextCronRunTime("not a cron", "UTC", from)
+	require.Error(t, err)
+}
+
+func TestComputeNextRunAt(t *testing.T) {
+	t.Parallel()
+
+	from := time.Date(2026, 4, 17, 8, 0, 0, 0, time.UTC)
+
+	iv := 6
+	iu := "hours"
+	interval := Automation{
+		ScheduleType:  AutomationScheduleInterval,
+		IntervalValue: &iv,
+		IntervalUnit:  &iu,
+	}
+	got, err := interval.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.Equal(t, from.Add(6*time.Hour), got)
+
+	// Interval with missing companion fields is rejected (corrupt row).
+	bad := Automation{ScheduleType: AutomationScheduleInterval}
+	_, err = bad.ComputeNextRunAt(from)
+	require.Error(t, err)
+
+	expr := "0 9 * * *"
+	cron := Automation{
+		ScheduleType:   AutomationScheduleCron,
+		CronExpression: &expr,
+		Timezone:       "UTC",
+	}
+	got, err = cron.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC), got)
+
+	// Cron with missing expression is rejected.
+	bad = Automation{ScheduleType: AutomationScheduleCron}
+	_, err = bad.ComputeNextRunAt(from)
+	require.Error(t, err)
+
+	// Unknown schedule kind is rejected.
+	bad = Automation{ScheduleType: "event"}
+	_, err = bad.ComputeNextRunAt(from)
+	require.Error(t, err)
+
+	// Empty timezone on a cron schedule defaults to UTC so legacy rows
+	// imported without an explicit zone still fire correctly.
+	cronNoTz := Automation{
+		ScheduleType:   AutomationScheduleCron,
+		CronExpression: &expr,
+	}
+	got, err = cronNoTz.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC), got)
 }
 
 func TestValidateAutomationRunStatus(t *testing.T) {

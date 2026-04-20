@@ -34,10 +34,6 @@ type Project struct {
 	SimilarProjects    json.RawMessage  `db:"similar_projects" json:"similar_projects,omitempty"`
 	AgentType          *string          `db:"agent_type" json:"agent_type,omitempty"`
 	ModelOverride      *string          `db:"model_override" json:"model_override,omitempty"`
-	ScheduleEnabled    bool             `db:"schedule_enabled" json:"schedule_enabled"`
-	ScheduleInterval   int              `db:"schedule_interval" json:"schedule_interval"`
-	ScheduleUnit       string           `db:"schedule_unit" json:"schedule_unit"`
-	NextRunAt          *time.Time       `db:"next_run_at" json:"next_run_at,omitempty"`
 	CreatedBy          *uuid.UUID       `db:"created_by" json:"created_by,omitempty"`
 	DeletedAt          *time.Time       `db:"deleted_at" json:"-"`
 	CreatedAt          time.Time        `db:"created_at" json:"created_at"`

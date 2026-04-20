@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -210,13 +211,21 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 	}{
 		{name: "missing name", body: map[string]any{"goal": "do a thing"}, code: http.StatusBadRequest},
 		{name: "missing goal", body: map[string]any{"name": "n"}, code: http.StatusBadRequest},
-		{name: "cron rejected", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron missing expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron invalid expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "not a cron"}, code: http.StatusBadRequest},
 		{name: "invalid schedule type", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "bogus"}, code: http.StatusBadRequest},
 		{name: "interval out of range", body: map[string]any{"name": "n", "goal": "g", "interval_value": 999}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"name": "n", "goal": "g", "interval_unit": "fortnights"}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"name": "n", "goal": "g", "execution_mode": "mayhem"}, code: http.StatusBadRequest},
 		{name: "max_concurrent too high", body: map[string]any{"name": "n", "goal": "g", "max_concurrent": 9999}, code: http.StatusBadRequest},
 		{name: "priority out of range", body: map[string]any{"name": "n", "goal": "g", "priority": 999}, code: http.StatusBadRequest},
+		// Cross-typed schedule fields are rejected up front so client bugs
+		// (sending interval_* on a cron payload, or vice versa) surface as
+		// 400s instead of being silently dropped and producing a row whose
+		// in-memory fields disagree with the persisted ones.
+		{name: "cron with interval_value", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_value": 3}, code: http.StatusBadRequest},
+		{name: "cron with interval_unit", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_unit": "days"}, code: http.StatusBadRequest},
+		{name: "interval with cron_expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "interval", "cron_expression": "0 9 * * *"}, code: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -343,10 +352,24 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "blank goal", body: map[string]any{"goal": "   "}, code: http.StatusBadRequest},
 		{name: "invalid exec mode", body: map[string]any{"execution_mode": "x"}, code: http.StatusBadRequest},
 		{name: "invalid priority", body: map[string]any{"priority": 999}, code: http.StatusBadRequest},
-		{name: "cron rejected", body: map[string]any{"schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "cron invalid expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "nope"}, code: http.StatusBadRequest},
+		// Up-front switch validation: a type switch must include its
+		// companion fields in the same PATCH. Before this check, the handler
+		// would happily mutate the in-memory model and surface a less
+		// precise error downstream at ComputeNextRunAt.
+		{name: "switch to cron without expression", body: map[string]any{"schedule_type": "cron"}, code: http.StatusBadRequest},
+		{name: "switch to cron with blank expression", body: map[string]any{"schedule_type": "cron", "cron_expression": "   "}, code: http.StatusBadRequest},
 		{name: "blank base branch", body: map[string]any{"base_branch": "  "}, code: http.StatusBadRequest},
 		{name: "invalid interval value", body: map[string]any{"interval_value": -1}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"interval_unit": "bogus"}, code: http.StatusBadRequest},
+		// Reject mismatched companion fields up front: existing automation
+		// is interval, so cron_expression on its own should 400 (not be
+		// silently dropped during normalisation).
+		{name: "interval automation with cron_expression", body: map[string]any{"cron_expression": "0 9 * * *"}, code: http.StatusBadRequest},
+		// Switching to cron with stale interval_value in the same PATCH is
+		// also rejected — the user must supply a clean cron payload.
+		{name: "switch to cron with leftover interval_value", body: map[string]any{"schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_value": 3}, code: http.StatusBadRequest},
+		{name: "invalid schedule_type", body: map[string]any{"schedule_type": "bogus"}, code: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -425,6 +448,89 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestAutomationHandler_Update_SwitchScheduleType_OK exercises the schedule
+// type switch arms in Update: an interval automation is converted to cron
+// (which clears the legacy interval_* fields) and vice versa. These two paths
+// share the validation that demands the new type's companion field be present
+// in the same PATCH.
+func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
+	t.Parallel()
+
+	t.Run("interval to cron clears interval fields", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		id := uuid.New()
+		now := time.Now()
+		iv := 1
+		unit := "days"
+		a := models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, a))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(21)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{
+			"schedule_type":   "cron",
+			"cron_expression": "0 9 * * *",
+		}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("cron to interval clears cron expression", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		id := uuid.New()
+		now := time.Now()
+		cron := "0 9 * * *"
+		a := models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "cron",
+			Timezone: "UTC", Enabled: true, CronExpression: &cron,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, a))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(21)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{
+			"schedule_type":  "interval",
+			"interval_value": 2,
+			"interval_unit":  "days",
+		}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
 func TestAutomationHandler_Update_NotFound(t *testing.T) {
 	t.Parallel()
 
@@ -464,7 +570,18 @@ func TestAutomationHandler_Delete_OK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	orgID := uuid.New()
 	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	// Delete reads the row first so the audit entry can record the name/schedule.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
 	// SoftDelete wraps the automation update and pending-run cancel in one tx.
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE automations SET deleted_at").
@@ -476,7 +593,7 @@ func TestAutomationHandler_Delete_OK(t *testing.T) {
 	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr := httptest.NewRecorder()
 	h.Delete(rr, req)
 	require.Equal(t, http.StatusNoContent, rr.Code)
@@ -491,6 +608,27 @@ func TestAutomationHandler_Delete_InvalidID(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.Delete(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAutomationHandler_Delete_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	id := uuid.New()
+	// Delete reads the row first; a missing row short-circuits before SoftDelete.
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodDelete, "/api/v1/automations/"+id.String(), nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Delete(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // --- Pause / Resume ---
@@ -840,16 +978,32 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	// BulkUpdateEnabled wraps the UPDATE in a tx so cron rows can be fixed up
+	// in the same atomic step. The UPDATE's RETURNING is narrowed to only the
+	// fields ComputeNextRunAt needs (schedule_type / cron_expression /
+	// timezone) plus id — mirror that here.
+	a1 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
+	a2 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
+	pauseRows := pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
+		AddRow(a1.ID, a1.ScheduleType, a1.CronExpression, a1.Timezone).
+		AddRow(a2.ID, a2.ScheduleType, a2.CronExpression, a2.Timezone)
+
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(testAnyArgs(5)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()).AddRow(uuid.New()))
+		WillReturnRows(pauseRows)
+	mock.ExpectCommit()
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	body := map[string]any{"action": "pause", "automation_ids": []string{uuid.New().String(), uuid.New().String()}}
 	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
 	rr := httptest.NewRecorder()
 	h.Bulk(rr, req)
-	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Affected, 2)
+	require.Empty(t, resp.FixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -876,8 +1030,67 @@ func TestAutomationHandler_Bulk_DeleteOK(t *testing.T) {
 	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
 	rr := httptest.NewRecorder()
 	h.Bulk(rr, req)
-	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Affected, 1)
+	require.Empty(t, resp.FixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_Bulk_ResumeCronFixupFailure exercises the resume path
+// when a cron row's expression no longer parses: the row must still be flipped
+// enabled, the response must carry a fixup_failures entry keyed by that row's
+// ID, and the per-row audit emit must include fixup_failure_reason so an
+// auditor reading "automation.resumed" sees why the scheduler will skip it.
+// This is the only test that covers the full resume-with-fixup branch through
+// the handler — the store-layer test (TestAutomationStore_BulkUpdateEnabled_
+// Resume_CronFixupFailure) stops at the store boundary.
+func TestAutomationHandler_Bulk_ResumeCronFixupFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	automationID := uuid.New()
+	brokenCron := "this is not a cron expression"
+
+	// BulkUpdateEnabled's UPDATE ... RETURNING returns only the four columns
+	// the post-update cron-fixup pass needs. Match that narrow projection so
+	// the handler test reflects the real store contract.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(testAnyArgs(5)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
+				AddRow(automationID, "cron", &brokenCron, "UTC"),
+		)
+	mock.ExpectCommit()
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"action": "resume", "automation_ids": []string{automationID.String()}}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Bulk(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, []string{automationID.String()}, resp.Affected, "row was still resumed")
+	require.Len(t, resp.FixupFailures, 1, "broken cron must surface to the caller")
+	require.Equal(t, automationID.String(), resp.FixupFailures[0].AutomationID)
+	require.NotEmpty(t, resp.FixupFailures[0].Reason)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_SetLogger exercises the logger setter — trivial, but
+// unexercised setters otherwise drag diff coverage down.
+func TestAutomationHandler_SetLogger(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	h.SetLogger(zerolog.Nop())
 }
 
 // --- ListRuns / GetRun ---
@@ -989,6 +1202,125 @@ func TestAutomationHandler_GetRun_InvalidIDs(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	h.GetRun(rr2, req2)
 	require.Equal(t, http.StatusBadRequest, rr2.Code)
+}
+
+// --- Stats ---
+
+func TestAutomationHandler_Stats_OK(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	cols := []string{
+		"bucket", "total", "completed", "completed_noop", "failed",
+		"skipped", "running", "pending", "avg_duration_seconds",
+	}
+	day := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("FROM automation_runs").
+		WithArgs(testAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(day, 3, 2, 0, 1, 0, 0, 0, 90.0))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+id.String()+"/stats", nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Stats_AutomationNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	id := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+id.String()+"/stats", nil, uuid.New(), uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestAutomationHandler_Stats_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/x/stats", nil, uuid.New(), uuid.New(), map[string]string{"id": "x"})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+
+	// Param validation now runs BEFORE the automation lookup, so the
+	// invalid-window branches must short-circuit without touching the DB.
+	// No ExpectQuery calls here: mock.ExpectationsWereMet() below fails if
+	// the handler regresses and burns a SELECT on malformed params.
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+
+	// since after until -> 400.
+	url := "/api/v1/automations/" + id.String() + "/stats?since=2026-05-01T00:00:00Z&until=2026-04-01T00:00:00Z"
+	req := newAutomationRequest(t, http.MethodGet, url, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Stats(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// window > 90 days -> 400.
+	url2 := "/api/v1/automations/" + id.String() + "/stats?since=2026-01-01T00:00:00Z&until=2026-06-01T00:00:00Z"
+	req2 := newAutomationRequest(t, http.MethodGet, url2, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr2 := httptest.NewRecorder()
+	h.Stats(rr2, req2)
+	require.Equal(t, http.StatusBadRequest, rr2.Code)
+
+	// Malformed since -> 400 INVALID_SINCE.
+	url3 := "/api/v1/automations/" + id.String() + "/stats?since=not-a-date"
+	req3 := newAutomationRequest(t, http.MethodGet, url3, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr3 := httptest.NewRecorder()
+	h.Stats(rr3, req3)
+	require.Equal(t, http.StatusBadRequest, rr3.Code)
+	require.Contains(t, rr3.Body.String(), "INVALID_SINCE")
+
+	// Malformed until -> 400 INVALID_UNTIL. The handler parses until before
+	// since, so a junk until short-circuits before the window-size and
+	// since-ordering checks can fire — this pins that precedence so a future
+	// reordering doesn't silently fall through to a confusing INVALID_WINDOW.
+	url4 := "/api/v1/automations/" + id.String() + "/stats?until=not-a-date"
+	req4 := newAutomationRequest(t, http.MethodGet, url4, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr4 := httptest.NewRecorder()
+	h.Stats(rr4, req4)
+	require.Equal(t, http.StatusBadRequest, rr4.Code)
+	require.Contains(t, rr4.Body.String(), "INVALID_UNTIL")
+
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // --- Setters ---

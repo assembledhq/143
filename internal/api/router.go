@@ -206,6 +206,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	automationHandler.SetJobStore(jobStore)
 	automationHandler.SetRepositoryStore(repoStore)
 	automationHandler.SetPool(pool)
+	automationHandler.SetLogger(logger)
 
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	githubStatusHandler := handlers.NewGitHubStatusHandler(
@@ -487,6 +488,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/automations/{id}", automationHandler.Get)
 			r.Get("/api/v1/automations/{id}/runs", automationHandler.ListRuns)
 			r.Get("/api/v1/automations/{id}/runs/{rid}", automationHandler.GetRun)
+			r.Get("/api/v1/automations/{id}/stats", automationHandler.Stats)
 
 			r.Get("/api/v1/projects", projectHandler.List)
 			r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)

@@ -137,6 +137,15 @@ type ProjectTaskUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
 }
 
+// AutomationRunUpdater is called after an agent run completes to bubble the
+// session's terminal status back to the owning automation_runs row. Mirrors
+// ProjectTaskUpdater: one hook per owning-entity kind, invoked at both the
+// success and failure paths so the run's completed_at + result_summary stay
+// consistent with whatever the orchestrator persisted to the session.
+type AutomationRunUpdater interface {
+	OnSessionComplete(ctx context.Context, run *models.Session, status string) error
+}
+
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
@@ -147,7 +156,8 @@ type Orchestrator struct {
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
 	decisionLog       DecisionLogStore
-	projectTasks      ProjectTaskUpdater // can be nil
+	projectTasks      ProjectTaskUpdater   // can be nil
+	automationRuns    AutomationRunUpdater // can be nil
 	issues            IssueStore
 	repositories      RepositoryStore
 	orgs              OrgStore
@@ -173,7 +183,8 @@ type OrchestratorConfig struct {
 	SessionQuestions SessionQuestionStore
 	SessionMessages   SessionMessageStore
 	DecisionLog       DecisionLogStore
-	ProjectTasks      ProjectTaskUpdater // optional — updates project tasks on run completion
+	ProjectTasks      ProjectTaskUpdater   // optional — updates project tasks on run completion
+	AutomationRuns    AutomationRunUpdater // optional — updates automation_runs on session completion
 	Issues            IssueStore
 	Repositories      RepositoryStore
 	Orgs              OrgStore
@@ -206,6 +217,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sessionMessages:   cfg.SessionMessages,
 		decisionLog:       cfg.DecisionLog,
 		projectTasks:      cfg.ProjectTasks,
+		automationRuns:    cfg.AutomationRuns,
 		issues:            cfg.Issues,
 		repositories:      cfg.Repositories,
 		orgs:              cfg.Orgs,
@@ -607,6 +619,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, status); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run completion")
+		}
+	}
+
+	// 14. Bubble session completion to the owning automation_run, if any.
+	if run.AutomationRunID != nil && o.automationRuns != nil {
+		if err := o.automationRuns.OnSessionComplete(ctx, run, status); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session completion")
 		}
 	}
 
@@ -1124,6 +1143,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
+		}
+	}
+	if run.AutomationRunID != nil && o.automationRuns != nil {
+		if err := o.automationRuns.OnSessionComplete(ctx, run, "failed"); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
 }

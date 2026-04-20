@@ -30,6 +30,7 @@ import { PageHeader } from "@/components/page-header";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
+import { AutomationStatsCard } from "./automation-stats-card";
 
 // Single source of truth for interval unit values. Kept as a tuple so we can
 // derive the union type for state AND runtime-validate incoming Select values
@@ -418,6 +419,8 @@ export default function AutomationDetailPage() {
             {headerError}
           </div>
         )}
+
+        <AutomationStatsCard automationId={automationId} />
 
         <Tabs defaultValue="runs">
           <TabsList>
