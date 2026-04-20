@@ -31,6 +31,10 @@ The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself 
 
 Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
 
+**Why the dogfood hard-codes `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets. The server config in `.143/preview.json` is the only place the sandbox can pick up a `SESSION_SECRET`, and it must stay stable across preview recycles so a reviewer's session isn't silently invalidated. The committed value is intentionally public, labeled as such, and does not protect any real data — the only accounts it covers are the seeded demo user whose password is also public. Do not reuse this secret for anything that matters.
+
+**Why `MODE=api` and not `MODE=all`:** The dogfood sandbox has no Docker socket, so the background worker mode (which spawns session sandboxes and previews) cannot function. Running it would only produce worker-loop errors in the logs. Any UI that polls job status will therefore show the seeded snapshot forever — no background processing advances it.
+
 ## Quickstart
 
 Add `.143/preview.json` at the root of your repo:

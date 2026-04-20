@@ -1968,3 +1968,98 @@ func TestHandlePullRequestEvent_ClosedStopsPreview(t *testing.T) {
 	require.NoError(t, repoMock.ExpectationsWereMet())
 	require.NoError(t, previewMock.ExpectationsWereMet())
 }
+
+// TestTeardownPRPreview focuses on the merged-vs-closed status decision inside
+// teardownPRPreview without exercising the rest of HandlePullRequestEvent
+// (which, on the merged branch, also writes a Deploy row and enqueues a job).
+func TestTeardownPRPreview(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		merged     bool
+		wantStatus models.PRPreviewStatus
+	}{
+		{name: "closed without merge", merged: false, wantStatus: models.PRPreviewStatusClosed},
+		{name: "closed via merge", merged: true, wantStatus: models.PRPreviewStatusMerged},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			prID := uuid.New()
+			repoID := uuid.New()
+			integrationID := uuid.New()
+			prPreviewStateID := uuid.New()
+			previewInstanceID := uuid.New()
+			now := time.Now()
+
+			repoMock := newMockPool(t)
+			previewMock := newMockPool(t)
+
+			stopper := &recordingPreviewStopper{}
+
+			svc := &PRService{
+				repos:          db.NewRepositoryStore(repoMock),
+				previews:       db.NewPreviewStore(previewMock),
+				previewStopper: stopper,
+				logger:         zerolog.Nop(),
+			}
+
+			// Repo lookup by full name.
+			handlerRepoColumns := []string{
+				"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+				"private", "language", "description", "clone_url", "installation_id", "status",
+				"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+			}
+			repoMock.ExpectQuery("SELECT .+ FROM repositories").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(handlerRepoColumns).
+						AddRow(repoID, orgID, integrationID, int64(12345),
+							"testorg/testrepo", "main", false, nil, nil,
+							"https://github.com/testorg/testrepo.git", int64(99),
+							"active", nil, nil, json.RawMessage(`{}`), now, now),
+				)
+
+			// GetPRPreviewState returns a state with a live instance.
+			previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows([]string{
+						"id", "org_id", "repo_id", "pr_number", "github_comment_id",
+						"last_preview_instance_id", "last_screenshot_blob_path",
+						"last_visual_diff_blob_path", "base_snapshot_key", "status",
+						"created_at", "updated_at",
+					}).AddRow(
+						prPreviewStateID, orgID, repoID, 42, nil,
+						&previewInstanceID, "", "", "", "running", now, now,
+					),
+				)
+
+			// UpdatePRPreviewStatus — assert the status arg matches the expected
+			// terminal value. pgx expands NamedArgs positionally in the order the
+			// @name placeholders appear in the SQL: @status, @id, @org_id.
+			previewMock.ExpectExec("UPDATE pr_preview_state SET status").
+				WithArgs(tc.wantStatus, pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			pr := models.PullRequest{
+				ID:             prID,
+				OrgID:          orgID,
+				GitHubRepo:     "testorg/testrepo",
+				GitHubPRNumber: 42,
+			}
+			svc.teardownPRPreview(context.Background(), pr, tc.merged)
+
+			require.Equal(t, 1, stopper.calls, "StopPreview should be called exactly once")
+			require.Equal(t, previewInstanceID, stopper.prevID)
+			require.Equal(t, orgID, stopper.orgID)
+			require.NoError(t, repoMock.ExpectationsWereMet())
+			require.NoError(t, previewMock.ExpectationsWereMet())
+		})
+	}
+}

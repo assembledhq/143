@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/llm"
@@ -173,6 +174,14 @@ func Load() *Config {
 	return cfg
 }
 
+// GitHubAppEnabled reports whether the GitHub App integration should be
+// wired up. Requires both app credentials and a non-demo environment: in
+// DemoMode we skip GitHub App construction so the dogfood preview can boot
+// with placeholder credentials without 500-ing on integration calls.
+func (c *Config) GitHubAppEnabled() bool {
+	return !c.DemoMode && c.GitHubAppID != 0 && c.GitHubAppPrivateKey != ""
+}
+
 // LLMConfig returns the llm.Config derived from this Config.
 func (c *Config) LLMConfig() llm.Config {
 	return llm.Config{
@@ -303,8 +312,8 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
 	}
 
-	if c.Env == "production" && c.PreviewOriginTemplate == "http://{id}.preview.localhost:9090" {
-		logger.Warn().Msg("PREVIEW_ORIGIN_TEMPLATE is using the localhost default in production — preview URLs in PR comments and the gateway will not resolve. Set PREVIEW_ORIGIN_TEMPLATE to e.g. https://{id}.preview.example.com.")
+	if c.Env == "production" && strings.Contains(c.PreviewOriginTemplate, "localhost") {
+		logger.Warn().Str("preview_origin_template", c.PreviewOriginTemplate).Msg("PREVIEW_ORIGIN_TEMPLATE points at localhost in production — preview URLs in PR comments and the gateway will not resolve. Set PREVIEW_ORIGIN_TEMPLATE to e.g. https://{id}.preview.example.com.")
 	}
 
 	if c.DemoMode {
