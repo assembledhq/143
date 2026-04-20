@@ -1584,6 +1584,11 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 // Only called for agent types (amp, pi) that lack a first-class provider
 // credential store — for those, agent_config is the sole channel for auth
 // and routing. Non-empty values win over inherited provider creds.
+//
+// Cost: one orgs.GetByID per Amp/Pi session start. There is no cache today
+// and session starts are dominated by sandbox creation, so this hasn't
+// warranted one — revisit if we either scale Amp/Pi traffic significantly
+// or introduce a general org-settings cache that other hot paths can share.
 func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
 	if o.orgs == nil {
 		o.logger.Warn().

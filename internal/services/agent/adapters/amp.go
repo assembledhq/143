@@ -275,6 +275,9 @@ func parseAmpStreamLine(line []byte, result *agent.AgentResult, logCh chan<- age
 			*summaryParts = append(*summaryParts, content)
 			tryExtractConfidence(content, result)
 		}
+		// Amp has shipped both shapes: a dedicated `usage` object, and a
+		// `result` payload that sometimes packs the same counters. We accept
+		// either; `result` is checked last so it wins when both are present.
 		if event.Usage != nil {
 			result.TokenUsage = agent.TokenUsage{
 				InputTokens:  event.Usage.InputTokens,

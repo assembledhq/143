@@ -110,13 +110,18 @@ export const AGENTS: readonly AgentMeta[] = [
   },
 ] as const;
 
-export const AGENTS_BY_KEY: Record<string, AgentMeta> = AGENTS.reduce(
-  (acc, agent) => {
-    acc[agent.key] = agent;
-    return acc;
-  },
-  {} as Record<string, AgentMeta>,
+export const AGENTS_BY_KEY: Record<string, AgentMeta> = Object.fromEntries(
+  AGENTS.map((agent) => [agent.key, agent]),
 );
+
+// Display-only labels for agent_type values that exist on sessions but are
+// not user-selectable in the settings UI (so they're intentionally absent
+// from AGENTS). AgentBadge consults this as a fallback before rendering the
+// raw key.
+export const AGENT_DISPLAY_LABELS: Record<string, string> = {
+  pm_agent: "PM Agent",
+  custom: "Custom",
+};
 
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {

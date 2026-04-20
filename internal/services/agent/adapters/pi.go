@@ -275,6 +275,9 @@ func parsePiStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agen
 			*summaryParts = append(*summaryParts, content)
 			tryExtractConfidence(content, result)
 		}
+		// Pi emits token counters either via a dedicated `usage` object or
+		// packed into the `result` payload. We accept either; `result` is
+		// checked last so it wins when both are present.
 		if event.Usage != nil {
 			result.TokenUsage = agent.TokenUsage{
 				InputTokens:  event.Usage.InputTokens,

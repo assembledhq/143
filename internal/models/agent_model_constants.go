@@ -1,6 +1,9 @@
 package models
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Legacy PM model aliases (kept for backward compatibility).
 const (
@@ -178,10 +181,15 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 	case AgentTypePi:
 		// Pi proxies to many providers and accepts arbitrary "provider/model"
 		// patterns. The curated AvailablePiModels list drives UI dropdowns, but
-		// callers (session/project creation) may pass any non-empty string —
-		// this mirrors the PI_MODEL_CUSTOM bypass in ValidateSettingsModels.
+		// callers (session/project creation) may pass any value matching the
+		// "provider/model" shape — this mirrors the PI_MODEL_CUSTOM bypass in
+		// ValidateSettingsModels while still catching obvious typos (e.g.
+		// "claude-sonnet-4-6" missing its provider prefix).
 		if model == "" {
 			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypePi)
+		}
+		if !strings.Contains(model, "/") {
+			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeSonnet46)
 		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)

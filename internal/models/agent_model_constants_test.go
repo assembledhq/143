@@ -125,6 +125,7 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
 		{name: "invalid amp mode", agentType: AgentTypeAmp, model: "turbo", wantErr: true},
 		{name: "empty pi model rejected", agentType: AgentTypePi, model: "", wantErr: true},
+		{name: "pi model missing provider prefix rejected", agentType: AgentTypePi, model: "claude-sonnet-4-6", wantErr: true},
 		{name: "unknown agent type", agentType: "unknown", model: "any", wantErr: true},
 	}
 

@@ -1,7 +1,7 @@
 // Visual marker for an agent type — a small colored monogram next to the
-// agent's label. Falls back to a plain text label for unknown agent types
-// (e.g. "pm_agent", "custom") so callers don't need to special-case them.
-import { AGENTS_BY_KEY } from "@/lib/agents";
+// agent's label. Agent types not in the settings registry (e.g. "pm_agent",
+// "custom") fall back to a plain text label via AGENT_DISPLAY_LABELS.
+import { AGENTS_BY_KEY, AGENT_DISPLAY_LABELS } from "@/lib/agents";
 
 export function AgentBadge({
   agentType,
@@ -15,7 +15,8 @@ export function AgentBadge({
   const meta = AGENTS_BY_KEY[agentType];
 
   if (!meta) {
-    return <span className="text-sm text-muted-foreground">{agentType}</span>;
+    const label = AGENT_DISPLAY_LABELS[agentType] ?? agentType;
+    return <span className="text-sm text-muted-foreground">{label}</span>;
   }
 
   return (
