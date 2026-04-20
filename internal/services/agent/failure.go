@@ -98,6 +98,12 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 	// and anything else bubbled up as a plain string. The explanation
 	// below is deliberately generic because we can't distinguish a session
 	// deadline from a transient socket timeout at this point.
+	//
+	// Category is Tooling (not Timeout) on purpose: Timeout means "the
+	// session's own wall-clock budget was exceeded" — a signal to raise
+	// max_session_duration_seconds. A network/IO timeout bubbling up here
+	// is an infra/tooling issue and shouldn't push admins to raise the
+	// session budget. Keep these two categories semantically distinct.
 	if containsAny(errorMsg, "timeout", "deadline exceeded", "timed out") {
 		return &FailureSummary{
 			Explanation:  "The agent ran out of time before completing the fix. This usually means the issue requires more analysis than the allocated time window allows.",

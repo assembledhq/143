@@ -205,6 +205,13 @@ func (r *SessionReaper) reap(ctx context.Context) {
 	// (worker crash, DB outage during failRun, etc.). Logged at Error level
 	// so Grafana alerts surface these — a healthy system should hit this
 	// phase 0 times.
+	//
+	// Dedup with the orchestrator's own timeout path is structural: the
+	// query below filters `status='running'`, so any session the orchestrator
+	// already transitioned to `failed` is invisible here. A session the
+	// orchestrator is *mid-failing* could race, but failRunWithCategory uses
+	// a 30s cleanup context and this phase only fires after maxRunningAge
+	// (≥2h17m), which is far longer than that window.
 	runningCutoff := time.Now().Add(-r.maxRunningAge)
 	staleRunning, err := r.sessions.ListStaleRunningSessions(ctx, runningCutoff)
 	if err != nil {
@@ -227,16 +234,17 @@ func (r *SessionReaper) reap(ctx context.Context) {
 			if err := r.sessions.UpdateFailure(ctx, s.OrgID, s.ID, explanation, FailureCategoryStuckRunning, nextSteps, true); err != nil {
 				r.logger.Error().Err(err).Str("session_id", s.ID.String()).Msg("reaper: failed to update failure details for stale running session")
 			}
-			startedAt := time.Time{}
-			if s.StartedAt != nil {
-				startedAt = *s.StartedAt
-			}
-			r.logger.Error().
+			// Omit started_at/elapsed when nil rather than logging a
+			// year-zero timestamp with a multi-millennium duration, which
+			// would poison Grafana aggregations on this alert.
+			event := r.logger.Error().
 				Str("session_id", s.ID.String()).
-				Str("org_id", s.OrgID.String()).
-				Time("started_at", startedAt).
-				Dur("elapsed", time.Since(startedAt)).
-				Msg("reaper: failed stale running session — worker did not persist terminal status")
+				Str("org_id", s.OrgID.String())
+			if s.StartedAt != nil {
+				event = event.Time("started_at", *s.StartedAt).
+					Dur("elapsed", time.Since(*s.StartedAt))
+			}
+			event.Msg("reaper: failed stale running session — worker did not persist terminal status")
 		}
 	}
 

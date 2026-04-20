@@ -1305,14 +1305,24 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cleanupCancel()
 
+	// Sub-second elapsed almost always means the handler ctx was already
+	// expired on entry (e.g. a retry picked up a job whose budget had
+	// already been spent). Saying "after 0s" reads as a bug report; frame
+	// it as "before the run could start" so the user-visible text matches
+	// reality.
+	elapsedDesc := fmt.Sprintf("after %s of execution", elapsed)
+	if elapsed < time.Second {
+		elapsedDesc = "before the run could meaningfully start (the context deadline had already passed when the orchestrator picked up the job)"
+	}
+
 	var errMsg, explanation string
 	if turnNumber > 0 {
-		errMsg = fmt.Sprintf("Session timed out after %s of execution on turn %d. Raise max_session_duration_seconds in org settings or break the remaining work into a shorter follow-up turn.", elapsed, turnNumber)
+		errMsg = fmt.Sprintf("Session timed out %s on turn %d. Raise max_session_duration_seconds in org settings or break the remaining work into a shorter follow-up turn.", elapsedDesc, turnNumber)
 		// Continue-session may still have a prior snapshot that is usable
 		// for a follow-up — don't claim the session's state is gone.
 		explanation = "This turn hit the configured wall-clock limit before the agent finished. Work done during this turn was not snapshotted, but the prior turn's snapshot (if any) is still available for a follow-up."
 	} else {
-		errMsg = fmt.Sprintf("Session timed out after %s of execution. Raise max_session_duration_seconds in org settings or split the task into smaller sub-tasks.", elapsed)
+		errMsg = fmt.Sprintf("Session timed out %s. Raise max_session_duration_seconds in org settings or split the task into smaller sub-tasks.", elapsedDesc)
 		explanation = "The session hit its configured wall-clock limit before the agent could finish. Any work committed inside the sandbox during this run was discarded — no snapshot was taken."
 	}
 	o.failRunWithCategory(cleanupCtx, run,

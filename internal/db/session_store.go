@@ -717,6 +717,12 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 // because the worker crashed mid-execution or a DB write failed during
 // failure handling. The reaper fails them so the UI stops showing them as
 // active and concurrency slots are freed.
+//
+// Rows with status='running' AND started_at IS NULL are excluded: the
+// orchestrator always writes started_at in the same UpdateStatus call that
+// sets status='running' (see UpdateStatus in this package), so such rows
+// should be structurally impossible. If one ever appears, it indicates a
+// corrupted write path and needs investigation rather than reaping.
 // lint:allow-no-orgid reason="cross-org reaper scan for stuck running sessions"
 func (s *SessionStore) ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error) {
 	query := `
