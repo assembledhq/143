@@ -529,34 +529,6 @@ describe('api client', () => {
     });
   });
 
-  describe('settings - agent defaults', () => {
-    it('fetches agent defaults', async () => {
-      const mockDefaults = {
-        data: {
-          claude_code: {
-            autonomy_level: 'full',
-            token_mode: 'standard',
-          },
-          codex: {
-            autonomy_level: 'supervised',
-            token_mode: 'standard',
-          },
-        },
-      };
-
-      server.use(
-        http.get('/api/v1/settings/agent-defaults', () => {
-          return HttpResponse.json(mockDefaults);
-        }),
-      );
-
-      const result = await api.settings.getAgentDefaults();
-      expect(result.data).toBeDefined();
-      expect(result.data.claude_code.autonomy_level).toBe('full');
-      expect(result.data.codex.autonomy_level).toBe('supervised');
-    });
-  });
-
   describe('auth - email login and register', () => {
     it('loginEmail sends credentials', async () => {
       let capturedBody: unknown;

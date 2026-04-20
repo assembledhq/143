@@ -50,7 +50,6 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                   "returns user from context only",
 		"AuthHandler.Logout":               "deletes session by cookie token only",
-		"SettingsHandler.GetAgentDefaults": "returns static server config",
 		"SettingsHandler.GetLLMDefaults":   "returns static server config",
 		"SettingsHandler.GetLLMModels":     "returns static server config",
 		"ProjectGenerateHandler.Generate":  "calls LLM only, no org-scoped data",

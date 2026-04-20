@@ -1252,6 +1252,12 @@ func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uu
 // resolveAgentEnv builds the sandbox env vars for the given agent type.
 // It checks credentials in order: user personal → team default → org credential.
 // Codex CLI auth is handled via auth.json injection (injectCodexAuth), not env vars.
+//
+// Invariant: sandbox env must only come from org-scoped DB credentials. Do NOT
+// fall back to server-level env vars (e.g. cfg.AnthropicAPIKey, cfg.OpenAIAPIKey)
+// — those are 143.dev-level platform credentials and would leak across orgs in
+// a multi-tenant deployment. Server-level LLM keys are reserved for 143's own
+// internal LLM calls via Config.LLMConfig().
 func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
 	merged := make(map[string]string)
 

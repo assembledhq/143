@@ -256,30 +256,6 @@ describe("AgentSettingsEditor", () => {
     expect(screen.queryByText("Show advanced settings")).not.toBeInTheDocument();
   });
 
-  it("shows server default badge when org value matches server default", async () => {
-    server.use(
-      http.get("/api/v1/settings/agent-defaults", () => {
-        return HttpResponse.json({
-          data: {
-            claude_code: { ANTHROPIC_API_KEY: "sk-server-default" },
-          },
-        });
-      })
-    );
-
-    renderWithProviders(
-      <AgentSettingsEditor
-        title="Agent settings"
-        description="Configure"
-        initialAgentType="claude_code"
-      />
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("server default")).toBeInTheDocument();
-    });
-  });
-
   it("shows Sign in with ChatGPT button when codex chatgpt method and not connected", async () => {
     server.use(
       http.get("/api/v1/settings/codex-auth/status", () => {

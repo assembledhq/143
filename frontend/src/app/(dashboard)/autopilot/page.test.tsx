@@ -98,9 +98,7 @@ function mockDocuments(docs: PMDocument[]) {
 function mockAgentReadiness() {
   server.use(
     http.get("/api/v1/settings/codex-auth/status", () =>
-      HttpResponse.json({ data: { status: "completed" } })),
-    http.get("/api/v1/settings/agent-defaults", () =>
-      HttpResponse.json({ data: {} }))
+      HttpResponse.json({ data: { status: "completed" } }))
   );
 }
 
