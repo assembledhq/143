@@ -22,7 +22,7 @@ services:
           cpus: "1.0"
 
   grafana:
-    image: grafana/grafana:13.0.0
+    image: grafana/grafana:13.0.1
     environment:
       GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
