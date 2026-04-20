@@ -12,27 +12,29 @@
       },
       "ready": {
         "http_path": "/",
-        "timeout_seconds": 120
+        "timeout_seconds": 240
       }
     },
     "server": {
-      "command": ["go", "run", "./cmd/server"],
+      "command": [
+        "sh",
+        "-c",
+        "export SESSION_SECRET=\"$(head -c 32 /dev/urandom | base64)\" && echo '[143-preview] running migrations...' && go run ./cmd/migrate up && echo '[143-preview] seeding database...' && psql \"$DATABASE_URL\" -f .143/seed.sql && echo '[143-preview] starting server...' && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" go run ./cmd/server"
+      ],
       "port": 8080,
       "env": {
         "MODE": "all",
-        "LOG_LEVEL": "info",
-        "SESSION_SECRET": "preview-dogfood-secret"
+        "LOG_LEVEL": "info"
       },
       "ready": {
         "http_path": "/api/v1/health",
-        "timeout_seconds": 90
+        "timeout_seconds": 240
       }
     }
   },
   "infrastructure": {
     "db": {
       "template": "postgres-17",
-      "init_script": ".143/seed.sql",
       "inject_env": {
         "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
       },

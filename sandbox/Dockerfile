@@ -23,18 +23,30 @@ FROM ubuntu:24.04
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 # System dependencies for agent CLIs and typical repo operations.
+# postgresql-client is needed when a preview's command chain seeds a Postgres
+# infrastructure container via `psql -f`; keeping it in the base image avoids
+# per-preview apt installs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
     jq \
     sudo \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 LTS via NodeSource.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Copy the Go toolchain from the go-builder stage so previews that run the
+# agent's own Go source (e.g. `go run ./cmd/server`) compile inside the
+# sandbox at session-start time. Reusing the builder's /usr/local/go
+# guarantees the runtime and builder toolchains cannot drift — the version
+# is pinned in exactly one place (the `FROM golang:X.Y` line above).
+COPY --from=go-builder /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Install agent CLIs at pinned versions.
 # The npm cache mount avoids re-downloading unchanged packages on rebuilds.

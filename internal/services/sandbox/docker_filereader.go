@@ -50,6 +50,10 @@ func (d *DockerFileReader) execCmd(ctx context.Context, containerID, workDir str
 		AttachStdout: true,
 		AttachStderr: true,
 		WorkingDir:   workDir,
+		// Force the C locale so utilities (head, sed, ls) emit stderr in a
+		// known dialect — isNotFoundStderr relies on the English "No such
+		// file or directory" phrase to distinguish ENOENT from other errors.
+		Env: []string{"LC_ALL=C", "LANG=C"},
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, containerID, execCfg)
@@ -146,11 +150,24 @@ func (d *DockerFileReader) ReadFile(ctx context.Context, containerID, workDir, f
 		return "", false, fmt.Errorf("read file %s: %w", filePath, err)
 	}
 	if exitCode != 0 {
-		return "", false, fmt.Errorf("read file %s: %s", filePath, strings.TrimSpace(stderrOut))
+		trimmed := strings.TrimSpace(stderrOut)
+		if isNotFoundStderr(trimmed) {
+			return "", false, fmt.Errorf("read file %s: %w", filePath, ErrFileNotFound)
+		}
+		return "", false, fmt.Errorf("read file %s: %s", filePath, trimmed)
 	}
 
 	truncated := len(stdout) >= maxFileReadBytes
 	return stdout, truncated, nil
+}
+
+// isNotFoundStderr detects the ENOENT message produced by the small utilities
+// we exec inside the sandbox (head, sed — GNU coreutils, busybox, or BSD all
+// surface ENOENT with the same phrase). Keeping this in one spot lets
+// ReadFile/ReadFileContext surface a single ErrFileNotFound sentinel to
+// callers instead of forcing them to pattern-match on stderr themselves.
+func isNotFoundStderr(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "no such file or directory")
 }
 
 // ReadFileContext returns lines around a specific line number.
@@ -173,7 +190,11 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 		return nil, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
 	}
 	if exitCode != 0 {
-		return nil, fmt.Errorf("read context %s:%d: %s", filePath, line, strings.TrimSpace(stderrOut))
+		trimmed := strings.TrimSpace(stderrOut)
+		if isNotFoundStderr(trimmed) {
+			return nil, fmt.Errorf("read context %s:%d: %w", filePath, line, ErrFileNotFound)
+		}
+		return nil, fmt.Errorf("read context %s:%d: %s", filePath, line, trimmed)
 	}
 
 	var lines []FileLine
