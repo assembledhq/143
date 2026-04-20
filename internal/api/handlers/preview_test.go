@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -303,7 +304,7 @@ type mockPreviewProvider struct {
 	startConfig *models.PreviewConfig
 }
 
-func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
+func (m *mockPreviewProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ map[string]string) (*preview.PreviewHandle, error) {
 	m.startConfig = cfg
 	if m.startHandle != nil {
 		return m.startHandle, nil
@@ -425,7 +426,7 @@ func TestNewPreviewHandler(t *testing.T) {
 	})
 
 	sessionStore := db.NewSessionStore(mock)
-	h := NewPreviewHandler(mgr, store, sessionStore, zerolog.Nop())
+	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)

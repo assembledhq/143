@@ -301,14 +301,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 
 	previewManager := preview.NewManager(preview.ManagerConfig{
-		Store:         previewStore,
-		SessionStore:  sessionStore,
-		Provider:      previewProvider,
-		Inspector:     previewInspector,
-		SnapshotCache: previewSnapshotCache,
-		HMRWatcher:    hmrWatcher,
-		Logger:        logger,
-		WorkerNodeID:  "local", // MODE=all: single-node
+		Store:                 previewStore,
+		SessionStore:          sessionStore,
+		Provider:              previewProvider,
+		Inspector:             previewInspector,
+		SnapshotCache:         previewSnapshotCache,
+		HMRWatcher:            hmrWatcher,
+		Logger:                logger,
+		WorkerNodeID:          "local", // MODE=all: single-node
+		PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -346,7 +347,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		}()
 	}
 
-	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, logger)
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, fileReader, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.

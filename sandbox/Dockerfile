@@ -23,18 +23,38 @@ FROM ubuntu:24.04
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 # System dependencies for agent CLIs and typical repo operations.
+# postgresql-client is needed when a preview's command chain seeds a Postgres
+# infrastructure container via `psql -f`; keeping it in the base image avoids
+# per-preview apt installs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
     jq \
     sudo \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 LTS via NodeSource.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Go toolchain matching the builder stage so previews that run the
+# agent's own Go source (e.g. `go run ./cmd/server`) compile inside the sandbox
+# at session-start time. Version tracks the builder FROM directive above.
+ARG TARGETARCH
+RUN set -eux; \
+    GO_VERSION="1.26.0"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) GO_ARCH="amd64" ;; \
+      arm64) GO_ARCH="arm64" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tar.gz; \
+    tar -C /usr/local -xzf /tmp/go.tar.gz; \
+    rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Install agent CLIs at pinned versions.
 # The npm cache mount avoids re-downloading unchanged packages on rebuilds.

@@ -139,7 +139,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*preview.PreviewHandle, error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -208,7 +208,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	}
 
 	// Phase 4: Build service environment with injected credentials.
-	svcEnvs := d.buildServiceEnvs(cfg, infraCreds)
+	svcEnvs := d.buildServiceEnvs(cfg, infraCreds, extraEnv)
 
 	// Phase 5: Start application services in dependency order
 	// (support services first, then primary).
@@ -837,7 +837,7 @@ func (d *DockerPreviewProvider) resolveSandboxNetwork(ctx context.Context, conta
 // Credential helpers
 // =============================================================================
 
-func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential) map[string]map[string]string {
+func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infraCreds map[string]preview.InfraCredential, extraEnv map[string]string) map[string]map[string]string {
 	envs := make(map[string]map[string]string, len(cfg.Services))
 
 	// Start with service-declared env vars.
@@ -863,6 +863,16 @@ func (d *DockerPreviewProvider) buildServiceEnvs(cfg *models.PreviewConfig, infr
 				}
 			}
 		}
+	}
+
+	// Inject platform-level env vars (e.g. PREVIEW_ORIGIN) into every service,
+	// overriding any user-declared value. This is applied last so it wins over
+	// both service.env and infrastructure.inject_env.
+	for svcName, env := range envs {
+		for k, v := range extraEnv {
+			env[k] = v
+		}
+		envs[svcName] = env
 	}
 
 	return envs

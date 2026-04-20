@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,16 +26,21 @@ type PreviewHandler struct {
 	manager      *preview.Manager
 	store        *db.PreviewStore
 	sessionStore *db.SessionStore
+	fileReader   sandbox.FileReader
 	logger       zerolog.Logger
 	audit        *db.AuditEmitter
 }
 
-// NewPreviewHandler creates a new PreviewHandler.
-func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, logger zerolog.Logger) *PreviewHandler {
+// NewPreviewHandler creates a new PreviewHandler. fileReader is used to
+// auto-detect .143/preview.json from the session's sandbox workspace when
+// the client does not supply an explicit config; pass sandbox.NoOpFileReader
+// in environments where workspace introspection is unavailable.
+func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, fileReader sandbox.FileReader, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
 		manager:      manager,
 		store:        store,
 		sessionStore: sessionStore,
+		fileReader:   fileReader,
 		logger:       logger,
 	}
 }
@@ -77,6 +83,46 @@ func (h *PreviewHandler) requireManager(w http.ResponseWriter, r *http.Request) 
 		return false
 	}
 	return true
+}
+
+// workspacePreviewConfigPath is the repo-relative path 143 looks at when a
+// client calls StartPreview without supplying an explicit config.
+const workspacePreviewConfigPath = ".143/preview.json"
+
+// readWorkspacePreviewConfig attempts to read and parse .143/preview.json from
+// the session's sandbox workspace. Returns the parsed config and true when a
+// valid config is found; returns false in every other case (no fileReader
+// wired, file absent, read error, or invalid contents) so the caller can fall
+// back to built-in defaults without surfacing an error to the user.
+func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, bool) {
+	if h.fileReader == nil {
+		return nil, false
+	}
+	content, _, err := h.fileReader.ReadFile(ctx, sb.ID, sb.WorkDir, workspacePreviewConfigPath)
+	if err != nil {
+		// File most likely doesn't exist; log at debug so a missing file
+		// doesn't spam warnings on every autodetect attempt.
+		h.logger.Debug().
+			Err(err).
+			Str("session_id", sessionID.String()).
+			Str("path", workspacePreviewConfigPath).
+			Msg("no committed preview config in workspace")
+		return nil, false
+	}
+	cfg, err := preview.ParseConfig([]byte(content))
+	if err != nil {
+		h.logger.Warn().
+			Err(err).
+			Str("session_id", sessionID.String()).
+			Str("path", workspacePreviewConfigPath).
+			Msg("committed preview config failed to parse; falling back to defaults")
+		return nil, false
+	}
+	h.logger.Info().
+		Str("session_id", sessionID.String()).
+		Str("path", workspacePreviewConfigPath).
+		Msg("using preview config from workspace")
+	return cfg, true
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.
@@ -141,17 +187,6 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if body.Config == nil {
-		// Auto-detect: build a minimal default config when the client sends no
-		// explicit preview config. This lets the frontend start a preview with
-		// a single click. NOTE: defaults to Node.js (npm start on port 3000);
-		// non-Node projects should provide an explicit config.
-		h.logger.Info().
-			Str("session_id", sessionID.String()).
-			Msg("no preview config provided, using Node.js defaults (npm start, port 3000)")
-		body.Config = defaultPreviewConfig()
-	}
-
 	// Look up the session to get its sandbox container.
 	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
@@ -167,6 +202,20 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		ID:       *session.ContainerID,
 		Provider: "docker",
 		WorkDir:  "/workspace",
+	}
+
+	if body.Config == nil {
+		// Auto-detect: first try to read .143/preview.json from the session's
+		// workspace so repos with a committed config just work. Fall back to a
+		// Node.js default (npm start, port 3000) only if no config is present.
+		if cfg, ok := h.readWorkspacePreviewConfig(r.Context(), sb, sessionID); ok {
+			body.Config = cfg
+		} else {
+			h.logger.Info().
+				Str("session_id", sessionID.String()).
+				Msg("no preview config provided or committed, using Node.js defaults (npm start, port 3000)")
+			body.Config = defaultPreviewConfig()
+		}
 	}
 
 	input := preview.StartPreviewInput{

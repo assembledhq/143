@@ -12,27 +12,31 @@
       },
       "ready": {
         "http_path": "/",
-        "timeout_seconds": 120
+        "timeout_seconds": 240
       }
     },
     "server": {
-      "command": ["go", "run", "./cmd/server"],
+      "command": [
+        "sh",
+        "-c",
+        "set -e; go run ./cmd/migrate up; psql \"$DATABASE_URL\" -f .143/seed.sql; BASE_URL=\"$PREVIEW_ORIGIN\" FRONTEND_URL=\"$PREVIEW_ORIGIN\" go run ./cmd/server"
+      ],
       "port": 8080,
       "env": {
         "MODE": "all",
+        "ENV": "development",
         "LOG_LEVEL": "info",
-        "SESSION_SECRET": "preview-dogfood-secret"
+        "SESSION_SECRET": "preview-dogfood-session-secret-change-me"
       },
       "ready": {
         "http_path": "/api/v1/health",
-        "timeout_seconds": 90
+        "timeout_seconds": 240
       }
     }
   },
   "infrastructure": {
     "db": {
       "template": "postgres-17",
-      "init_script": ".143/seed.sql",
       "inject_env": {
         "DATABASE_URL": "postgres://{{username}}:{{password}}@{{host}}:{{port}}/{{database}}?sslmode=disable"
       },
