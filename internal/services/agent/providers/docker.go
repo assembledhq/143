@@ -25,12 +25,14 @@ import (
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
 
-// defaultGoTmpDir is the default value injected into $GOTMPDIR for sandbox
-// containers. /tmp is mounted noexec, which breaks `go test` / `go run`
-// because Go compiles binaries to $GOTMPDIR and execs them; /var/tmp lives
-// on the writable+exec rootfs, so redirecting there fixes this without
-// weakening the /tmp hardening.
-const defaultGoTmpDir = "/var/tmp"
+// defaultScratchDir is the exec-allowed scratch dir injected as $TMPDIR (and
+// $GOTMPDIR) for sandbox containers. /tmp is mounted noexec for defense in
+// depth, which breaks any tool that compiles a binary into its tempdir and
+// execs it (most famously `go test` / `go run`, but the same pattern shows up
+// in pytest-xdist, native-extension installers, etc.). /var/tmp is mounted as
+// a separate writable+exec tmpfs so well-behaved tooling has a place to work
+// without weakening the /tmp hardening.
+const defaultScratchDir = "/var/tmp"
 
 // DockerClient defines the subset of the Docker API used by DockerProvider.
 type DockerClient interface {
@@ -266,9 +268,14 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	for k, v := range cfg.Env {
 		envSlice = append(envSlice, k+"="+v)
 	}
-	// See defaultGoTmpDir for why this env var is injected.
+	// Point TMPDIR at the exec-allowed scratch tmpfs (see defaultScratchDir)
+	// so well-behaved tools don't trip over the noexec /tmp. GOTMPDIR is kept
+	// as belt-and-suspenders in case a caller overrides TMPDIR.
+	if _, ok := cfg.Env["TMPDIR"]; !ok {
+		envSlice = append(envSlice, "TMPDIR="+defaultScratchDir)
+	}
 	if _, ok := cfg.Env["GOTMPDIR"]; !ok {
-		envSlice = append(envSlice, "GOTMPDIR="+defaultGoTmpDir)
+		envSlice = append(envSlice, "GOTMPDIR="+defaultScratchDir)
 	}
 
 	containerCfg := &container.Config{
@@ -293,7 +300,12 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		CapAdd:         []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, // minimum caps for sudo
 		ReadonlyRootfs: false,
 		Tmpfs: map[string]string{
-			"/tmp": "rw,noexec,nosuid,size=1073741824",
+			// /tmp is hardened (noexec,nosuid) so exploits can't drop a binary
+			// and run it. /var/tmp is the exec-allowed scratch dir for tools
+			// that need to compile and exec in their tempdir; TMPDIR points
+			// here by default (see defaultScratchDir).
+			"/tmp":     "rw,noexec,nosuid,size=1073741824",
+			"/var/tmp": "rw,exec,nosuid,size=1073741824",
 		},
 	}
 
@@ -351,10 +363,11 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Str("container_id", resp.ID).
 		Msg("sandbox container started")
 
-	return &agent.Sandbox{
+	sb := &agent.Sandbox{
 		ID:       resp.ID,
 		Provider: "docker",
 		WorkDir:  cfg.WorkDir,
+		HomeDir:  cfg.HomeDir,
 		Metadata: map[string]string{
 			"runtime": d.runtime,
 			"network": d.network,
@@ -362,7 +375,34 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		SessionID: cfg.SessionID,
 		OrgID:     cfg.OrgID,
 		Purpose:   cfg.Purpose,
-	}, nil
+	}
+
+	// Bootstrap WorkDir: Docker creates a missing WorkingDir as root, so the
+	// sandbox user can't write to it (e.g. git clone). We mkdir -p + chown
+	// idempotently so the case where WorkDir already exists (e.g. /workspace
+	// baked into the image) is a harmless no-op too. Run with WorkDir="/" so
+	// the exec's own cwd doesn't race with creation.
+	bootstrapSB := &agent.Sandbox{ID: resp.ID, Provider: "docker", WorkDir: "/"}
+	bootstrapCmd := fmt.Sprintf(
+		"sudo mkdir -p '%s' && sudo chown sandbox:sandbox '%s'",
+		shellEscape(cfg.WorkDir), shellEscape(cfg.WorkDir),
+	)
+	var bootErr bytes.Buffer
+	if code, err := d.Exec(ctx, bootstrapSB, bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
+		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		if removeErr != nil {
+			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
+		}
+		// Split the error construction so %w only wraps a non-nil error.
+		// When the exec itself succeeds but the command returns a non-zero
+		// exit code, err is nil and we surface only the exit code + stderr.
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap workdir (exit %d): %w: %s", code, err, bootErr.String())
+		}
+		return nil, fmt.Errorf("bootstrap workdir (exit %d): %s", code, bootErr.String())
+	}
+
+	return sb, nil
 }
 
 // CloneRepo clones a repository into the sandbox's workspace using git.
@@ -378,7 +418,11 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 		authURL = strings.Replace(repoURL, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
 	}
 
-	cmd := fmt.Sprintf("git clone --depth 1 --branch '%s' '%s' '%s'",
+	// Partial clone (--filter=blob:none) keeps the full commit graph so agents
+	// can use `git log`, `git blame`, `git show <sha>` to understand history,
+	// while deferring blob downloads to first access. Setup cost is similar
+	// to --depth 1 but unlocks history-based reasoning.
+	cmd := fmt.Sprintf("git clone --filter=blob:none --branch '%s' '%s' '%s'",
 		shellEscape(branch), shellEscape(authURL), shellEscape(sb.WorkDir))
 	var stderr bytes.Buffer
 	exitCode, err := d.Exec(ctx, sb, cmd, io.Discard, &stderr)
@@ -532,12 +576,13 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 		Msg("snapshotting sandbox")
 
 	// Tar workspace + agent state dirs. --ignore-failed-read handles missing dirs gracefully.
-	// Agent state dirs (e.g. .claude/, .codex/, .gemini/) live under WorkDir since
-	// HOME is set to WorkDir in the sandbox config.
+	// Agent state dirs (.claude/, .codex/, .gemini/) live under HomeDir, not WorkDir —
+	// HOME is set to the sandbox user's home so CLI configs resolve there.
 	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
+	homeDirRel := strings.TrimPrefix(sb.HomeDir, "/")
 	cmd := fmt.Sprintf(
 		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.codex' '%s/.gemini' 2>/dev/null",
-		workDirRel, workDirRel, workDirRel, workDirRel,
+		workDirRel, homeDirRel, homeDirRel, homeDirRel,
 	)
 
 	execCfg := container.ExecOptions{

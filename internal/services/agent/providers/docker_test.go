@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -416,12 +417,16 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options (no-new-privileges blocks sudo)")
 		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
+		require.Contains(t, capturedHostConfig.Tmpfs, "/var/tmp", "container should have exec-allowed tmpfs at /var/tmp for scratch binaries")
 		require.NotContains(t, capturedHostConfig.Tmpfs, "/workspace", "workspace should not be a tmpfs (lives on writable rootfs)")
 		require.Equal(t, "10G", capturedHostConfig.StorageOpt["size"], "container should have 10GB disk quota")
 
 		// Verify tmpfs mount options
 		require.Contains(t, capturedHostConfig.Tmpfs["/tmp"], "noexec", "/tmp tmpfs should be noexec")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.Contains(t, capturedHostConfig.Tmpfs["/var/tmp"], "exec", "/var/tmp tmpfs should allow exec so `go test` can run compiled binaries")
+		require.Contains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"TMPDIR must be redirected off /tmp so tools writing executables to tempdir can exec them")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"GOTMPDIR must be redirected off /tmp so `go test` can exec compiled test binaries")
 
 		// Verify resource limits
@@ -508,7 +513,9 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		require.Contains(t, capturedConfig.Env, "ANTHROPIC_API_KEY=sk-ant-test-key")
 		require.Contains(t, capturedConfig.Env, "OPENAI_API_KEY=sk-test-openai-key")
-		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.Contains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"TMPDIR should be injected so tools dropping executables in tempdir can exec them")
+		require.Contains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"GOTMPDIR should be injected so `go test` works despite /tmp being noexec")
 	})
 
@@ -529,8 +536,29 @@ func TestDockerProvider_Create(t *testing.T) {
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Contains(t, capturedConfig.Env, "GOTMPDIR=/workspace/.gotmp")
-		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultGoTmpDir,
+		require.NotContains(t, capturedConfig.Env, "GOTMPDIR="+defaultScratchDir,
 			"caller-supplied GOTMPDIR should not be overridden")
+	})
+
+	t.Run("preserves caller-supplied TMPDIR override", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedConfig *container.Config
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedConfig = config
+			return container.CreateResponse{ID: "tmpdir-override"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.Env = map[string]string{"TMPDIR": "/workspace/.tmp"}
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+		require.Contains(t, capturedConfig.Env, "TMPDIR=/workspace/.tmp")
+		require.NotContains(t, capturedConfig.Env, "TMPDIR="+defaultScratchDir,
+			"caller-supplied TMPDIR should not be overridden")
 	})
 
 	t.Run("handles nil env map gracefully", func(t *testing.T) {
@@ -550,8 +578,8 @@ func TestDockerProvider_Create(t *testing.T) {
 		sb, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Equal(t, "no-env", sb.ID)
-		require.ElementsMatch(t, []string{"GOTMPDIR=" + defaultGoTmpDir}, capturedConfig.Env,
-			"with nil cfg.Env, only the auto-injected GOTMPDIR should be present")
+		require.ElementsMatch(t, []string{"TMPDIR=" + defaultScratchDir, "GOTMPDIR=" + defaultScratchDir}, capturedConfig.Env,
+			"with nil cfg.Env, only the auto-injected TMPDIR/GOTMPDIR should be present")
 	})
 
 	t.Run("bind-mounts resolv.conf and clears DNS when WithResolvConf is set", func(t *testing.T) {
@@ -641,6 +669,35 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
 	})
 
+	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
+		t.Parallel()
+
+		var removedID string
+		var removeForce bool
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "bootstrap-fail"}, nil
+		}
+		// ContainerStart succeeds (default). Bootstrap exec runs, but inspect
+		// reports a non-zero exit code so the bootstrap branch in Create trips.
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 1}, nil
+		}
+		mock.containerRemoveFn = func(ctx context.Context, containerID string, options container.RemoveOptions) error {
+			removedID = containerID
+			removeForce = options.Force
+			return nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.Error(t, err, "Create should return an error when bootstrap fails")
+		require.Contains(t, err.Error(), "bootstrap workdir", "error should identify bootstrap failure")
+		require.Equal(t, "bootstrap-fail", removedID, "should force-remove the container after bootstrap failure")
+		require.True(t, removeForce, "bootstrap failure cleanup should force-remove")
+	})
+
 	t.Run("configLogger tolerates partial tracing fields", func(t *testing.T) {
 		t.Parallel()
 
@@ -711,6 +768,44 @@ func TestDockerProvider_ScopedLogger(t *testing.T) {
 
 		err := p.Destroy(context.Background(), sb)
 		require.NoError(t, err)
+	})
+}
+
+func TestDockerProvider_Snapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tars workdir plus agent state dirs under HomeDir", func(t *testing.T) {
+		t.Parallel()
+
+		var gotCmd []string
+
+		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			gotCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "snap-exec"}, nil
+		}
+		// Default attach returns empty data; stdcopy returns EOF and the pipe
+		// closes cleanly without blocking the test.
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{
+			ID:       "snap-container",
+			Provider: "docker",
+			WorkDir:  "/home/sandbox/backend",
+			HomeDir:  "/home/sandbox",
+		}
+
+		rc, err := p.Snapshot(context.Background(), sb)
+		require.NoError(t, err)
+		require.NotNil(t, rc)
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+
+		require.Len(t, gotCmd, 3, "Snapshot exec should be sh -c <cmd>")
+		tarCmd := gotCmd[2]
+		require.Contains(t, tarCmd, "'home/sandbox/backend'", "tar should include the WorkDir relative path")
+		require.Contains(t, tarCmd, "'home/sandbox/.claude'", "tar should include the .claude dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
+		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
 	})
 }
 
@@ -1235,7 +1330,7 @@ func TestDockerProvider_CloneRepo(t *testing.T) {
 
 		cloneCmd := capturedCmds[0]
 		require.Contains(t, cloneCmd, "git clone", "should run git clone command")
-		require.Contains(t, cloneCmd, "--depth 1", "should do shallow clone")
+		require.Contains(t, cloneCmd, "--filter=blob:none", "should do partial clone so history is preserved")
 		require.Contains(t, cloneCmd, "--branch 'main'", "should clone the specified branch")
 		require.Contains(t, cloneCmd, "x-access-token:ghp_test123@", "should include auth token in URL")
 

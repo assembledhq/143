@@ -650,7 +650,7 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			}
 
 			adapter := NewCodexAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace"}
+			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
 				UserPrompt:   "Null pointer error.",
@@ -677,7 +677,7 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			tt.checkResult(t, result, logs)
 
 			// Verify prompt file was written.
-			promptData, exists := provider.Files["/workspace/.143-prompt.md"]
+			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
 		})
@@ -696,7 +696,7 @@ func TestCodexAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -716,7 +716,7 @@ func TestCodexAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -731,7 +731,7 @@ func TestCodexAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -762,7 +762,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	}
 
 	adapter := NewCodexAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please tighten the test case.",
 		MaxTokens:    50_000,
@@ -775,7 +775,7 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	require.NoError(t, err, "continuation should succeed without an explicit session ID")
 	require.NotNil(t, result, "continuation should return a result")
 	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last --dangerously-bypass-approvals-and-sandbox", "continuation without a session ID should resume the latest restored Codex session")
-	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
@@ -814,7 +814,6 @@ func TestIsDuplicateOutput(t *testing.T) {
 		require.False(t, isDuplicateOutput("message", "", m))
 	})
 }
-
 
 func TestParseCodexStreamLine_DeduplicatesConsecutiveOutput(t *testing.T) {
 	t.Parallel()

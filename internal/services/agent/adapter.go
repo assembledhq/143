@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -155,7 +156,8 @@ type SandboxConfig struct {
 	MemoryLimitMB int               // memory in MB (default: 4096)
 	Timeout       time.Duration     // max execution time (default: 5 min)
 	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
-	WorkDir       string            // /workspace
+	WorkDir       string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
+	HomeDir       string            // sandbox user's home dir (e.g. /home/sandbox); HOME env var points here
 	Env           map[string]string // environment variables injected into the container (e.g. API keys)
 	DiskLimitGB   int               // max container rootfs size in GB (default: 10); requires overlay2+xfs backing store
 
@@ -186,14 +188,39 @@ func DefaultSandboxConfig() SandboxConfig {
 		Timeout:       5 * time.Minute,
 		NetworkPolicy: "restricted",
 		WorkDir:       "/workspace",
+		HomeDir:       "/home/sandbox",
 	}
+}
+
+// SlugForRepo converts a repo full name ("org/repo") into a filesystem-safe
+// slug suitable for use as a directory name (the repo portion only). Returns
+// an empty string for inputs that don't contain a "/", resolve to an empty
+// slug, or resolve to a traversal component ("." / ".."); callers should
+// treat that as "no repo known" and fall back to defaults.
+func SlugForRepo(fullName string) string {
+	_, slug, ok := strings.Cut(fullName, "/")
+	if !ok {
+		return ""
+	}
+	// Replace path separators defensively — GitHub repo names don't contain "/"
+	// but the sandbox dir must be a single path component.
+	slug = strings.ReplaceAll(slug, "/", "-")
+	// Reject traversal components so /home/sandbox/<slug> can't resolve to a
+	// parent dir (e.g. "/home/sandbox/.." = "/home"). GitHub's repo-name
+	// grammar already excludes these, but this keeps the function safe for
+	// any future caller that feeds it less-trusted input.
+	if slug == "." || slug == ".." {
+		return ""
+	}
+	return slug
 }
 
 // Sandbox represents a running isolated environment for agent execution.
 type Sandbox struct {
 	ID       string            // unique sandbox identifier (container ID, VM ID, etc.)
 	Provider string            // which provider created this sandbox
-	WorkDir  string            // path to the workspace inside the sandbox
+	WorkDir  string            // path to the repo checkout inside the sandbox
+	HomeDir  string            // sandbox user's home dir (HOME env); distinct from WorkDir
 	Metadata map[string]string // provider-specific metadata
 
 	// Tracing identifiers copied from SandboxConfig at Create time. Providers

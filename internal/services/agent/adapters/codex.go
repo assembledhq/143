@@ -81,9 +81,10 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			)
 		}
 	} else {
-		// First turn: write prompt file and run fresh.
+		// First turn: write prompt file and run fresh. Put it under $HOME
+		// (not WorkDir) so it doesn't pollute the cloned repo's git status.
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
-		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
@@ -482,13 +483,13 @@ func parseCodexOutput(output []byte, result *agent.AgentResult, logCh chan<- age
 // codexItem represents a nested item inside a Codex CLI stream event
 // (used by item.started / item.completed events).
 type codexItem struct {
-	ID               string  `json:"id,omitempty"`
-	Type             string  `json:"type,omitempty"`
-	Text             string  `json:"text,omitempty"`
-	Command          string  `json:"command,omitempty"`
-	AggregatedOutput string  `json:"aggregated_output,omitempty"`
-	ExitCode         *int    `json:"exit_code,omitempty"`
-	Status           string  `json:"status,omitempty"`
+	ID               string `json:"id,omitempty"`
+	Type             string `json:"type,omitempty"`
+	Text             string `json:"text,omitempty"`
+	Command          string `json:"command,omitempty"`
+	AggregatedOutput string `json:"aggregated_output,omitempty"`
+	ExitCode         *int   `json:"exit_code,omitempty"`
+	Status           string `json:"status,omitempty"`
 }
 
 // codexStreamEvent represents a single line of Codex CLI's stream-json output.
