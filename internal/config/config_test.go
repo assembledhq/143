@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -287,4 +288,126 @@ func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
 	require.Contains(t, err.Error(), "CSRF_SIGNING_KEY")
+}
+
+func TestGitHubAppEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{
+			name: "fully configured",
+			cfg:  Config{GitHubAppID: 123, GitHubAppPrivateKey: "key"},
+			want: true,
+		},
+		{
+			name: "missing app id",
+			cfg:  Config{GitHubAppPrivateKey: "key"},
+			want: false,
+		},
+		{
+			name: "missing private key",
+			cfg:  Config{GitHubAppID: 123},
+			want: false,
+		},
+		{
+			name: "demo mode disables even with credentials",
+			cfg:  Config{GitHubAppID: 123, GitHubAppPrivateKey: "key", DemoMode: true},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, tc.cfg.GitHubAppEnabled())
+		})
+	}
+}
+
+func TestLogStatus_DemoModeWarns(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	cfg := &Config{
+		SessionSecret:  "s",
+		CSRFSigningKey: "c",
+		DemoMode:       true,
+	}
+	cfg.LogStatus(logger)
+
+	require.Contains(t, buf.String(), "DEMO_MODE is enabled", "LogStatus should warn when DemoMode is set")
+}
+
+func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "production + localhost template warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://{id}.preview.localhost:9090",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "production + custom localhost variant warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://localhost:8080/{id}",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "production + real host does not warn",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "https://{id}.preview.example.com",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "development + localhost does not warn",
+			cfg: Config{
+				Env:                   "development",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://{id}.preview.localhost:9090",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "PREVIEW_ORIGIN_TEMPLATE points at localhost")
+			} else {
+				require.NotContains(t, buf.String(), "PREVIEW_ORIGIN_TEMPLATE points at localhost")
+			}
+		})
+	}
 }
