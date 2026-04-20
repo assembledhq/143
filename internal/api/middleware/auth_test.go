@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -389,6 +390,66 @@ func TestAuth(t *testing.T) {
 				require.True(t, refreshed.HttpOnly, "reissued cookie should stay HttpOnly")
 				require.NotNil(t, csrf, "CSRF cookie should be extended in lockstep with session refresh")
 				require.Equal(t, int(SessionTTL.Seconds()), csrf.MaxAge, "CSRF cookie MaxAge should match session TTL")
+			},
+		},
+		{
+			name: "authenticates request when Touch fails and does not reissue cookie",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000001"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000002"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000003"),
+						"stale-token",
+						now.Add(24*time.Hour),
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000002"),
+						uuid.MustParse("ffffffff-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+
+				// Refresh UPDATE fails — request should still succeed using the
+				// existing session, and no refreshed cookie should be emitted.
+				mock.ExpectExec("UPDATE auth_sessions SET expires_at").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection lost"))
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "stale-token"})
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: func(t *testing.T, r *http.Request) {
+				t.Helper()
+				require.NotNil(t, UserFromContext(r.Context()), "user should still be set on context when Touch fails")
+			},
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName {
+						t.Fatalf("did not expect session cookie to be reissued when Touch fails, got %+v", c)
+					}
+					if c.Name == CSRFCookieName {
+						t.Fatalf("did not expect CSRF cookie to be reissued when Touch fails, got %+v", c)
+					}
+				}
 			},
 		},
 		{
