@@ -408,12 +408,12 @@ func TestDockerProvider_Create(t *testing.T) {
 
 		// Verify container config
 		require.Equal(t, "sandbox", capturedConfig.User, "container should run as non-root user")
-		require.Equal(t, "/workspace", capturedConfig.WorkingDir, "container should use /workspace as working dir")
+		require.Equal(t, "/home/sandbox", capturedConfig.WorkingDir, "container WorkingDir should be HomeDir (sandbox-owned, always present) so the OCI runtime doesn't auto-create cfg.WorkDir as root")
 
 		// Verify security hardening
 		require.Equal(t, "runsc", capturedHostConfig.Runtime, "container should use gVisor runtime")
 		require.Equal(t, []string(capturedHostConfig.CapDrop), []string{"ALL"}, "container should drop all capabilities")
-		require.Empty(t, capturedHostConfig.CapAdd, "container should not add back any caps — sudo is gone from the image and bootstrap uses docker exec User=root")
+		require.Empty(t, capturedHostConfig.CapAdd, "container should not add back any caps — sudo is gone from the image and bootstrap runs unprivileged as the sandbox user")
 		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options — no-new-privileges is moot without sudo, keep it unset for parity with the pre-sudo-removal behavior")
 		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
@@ -669,20 +669,22 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
 	})
 
-	t.Run("bootstrap runs as root without sudo", func(t *testing.T) {
+	t.Run("bootstrap runs as sandbox user with no sudo or chown", func(t *testing.T) {
 		t.Parallel()
 
-		// The bootstrap mkdir/chown must NOT shell out to `sudo`: under gVisor
-		// (and no-new-privileges / userns-remap / any nosuid mount) the setuid
-		// bit on /usr/bin/sudo is stripped, producing "sudo: effective uid is
-		// not 0 ... nosuid" and failing session startup. Running the exec with
-		// ExecOptions.User="root" goes through Docker's control plane instead,
-		// so it works under every runtime and security profile we support.
+		// Bootstrap must NOT require root: sudo's setuid bit is stripped under
+		// gVisor/nosuid, and Docker exec with User="root" + CapDrop=ALL has
+		// been observed to fail `mkdir -p /home/sandbox` with Permission
+		// denied on some runtimes. Anchoring the container's WorkingDir at
+		// HomeDir (baked in by `useradd -m sandbox`, owned by sandbox:sandbox)
+		// lets the sandbox user create the per-session workdir itself.
 		var execCfgs []container.ExecOptions
+		var createdCfg *container.Config
 
 		mock := &mockDockerClient{}
 		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
-			return container.CreateResponse{ID: "bootstrap-root"}, nil
+			createdCfg = config
+			return container.CreateResponse{ID: "bootstrap-sandbox"}, nil
 		}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			execCfgs = append(execCfgs, config)
@@ -693,13 +695,34 @@ func TestDockerProvider_Create(t *testing.T) {
 		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
 		require.NoError(t, err)
 
+		require.Equal(t, "/home/sandbox", createdCfg.WorkingDir, "container WorkingDir must be HomeDir so the OCI runtime doesn't auto-create a root-owned cfg.WorkDir")
+
 		require.Len(t, execCfgs, 1, "Create should issue exactly one bootstrap exec")
 		boot := execCfgs[0]
-		require.Equal(t, "root", boot.User, "bootstrap exec must run as root via ExecOptions.User (not via sudo)")
+		require.Empty(t, boot.User, "bootstrap exec must run as the container's default user (sandbox), not root")
 		require.Len(t, boot.Cmd, 3, "bootstrap cmd should be wrapped by sh -c")
 		require.NotContains(t, boot.Cmd[2], "sudo", "bootstrap shell cmd must not invoke sudo — the setuid bit is stripped under gVisor/no-new-privileges")
+		require.NotContains(t, boot.Cmd[2], "chown", "bootstrap shell cmd must not invoke chown — sandbox already owns the created dir and chown under CapDrop=ALL fails without CAP_CHOWN")
 		require.Contains(t, boot.Cmd[2], "mkdir -p", "bootstrap must still create the workdir idempotently")
-		require.Contains(t, boot.Cmd[2], "chown sandbox:sandbox", "bootstrap must chown the workdir to the sandbox user")
+	})
+
+	t.Run("falls back to / when HomeDir is unset", func(t *testing.T) {
+		t.Parallel()
+
+		var createdCfg *container.Config
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			createdCfg = config
+			return container.CreateResponse{ID: "no-home"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.HomeDir = ""
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err)
+
+		require.Equal(t, "/", createdCfg.WorkingDir, "callers that omit HomeDir should anchor at / rather than an empty WorkingDir (which the OCI runtime would reject)")
 	})
 
 	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
@@ -933,7 +956,7 @@ func TestDockerProvider_Exec(t *testing.T) {
 		require.NoError(t, err, "Exec should not return an error")
 		require.Equal(t, 0, code, "exit code should be 0")
 		require.Equal(t, []string{"sh", "-c", "echo hello"}, capturedCmd, "command should be wrapped in sh -c")
-		require.Empty(t, capturedUser, "public Exec must leave User empty so the exec runs as the container's default (sandbox); only bootstrap opts in to root")
+		require.Empty(t, capturedUser, "Exec must leave User empty so the exec runs as the container's default (sandbox); bootstrap also runs as sandbox now")
 		require.True(t, capturedAttachStdout, "should attach stdout")
 		require.True(t, capturedAttachStderr, "should attach stderr")
 	})

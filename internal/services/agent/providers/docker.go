@@ -251,9 +251,10 @@ func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
 // Create spins up a new Docker container with the given resource limits and
 // security hardening (dropped capabilities, gVisor runtime, non-root user).
 // The rootfs is writable so the orchestrator can seed per-session state via
-// docker exec User="root" (see bootstrap below). Runtime apt-get is not
-// supported — every dependency is baked into the sandbox image — because
-// sudo's setuid bit is stripped under gVisor / nosuid mounts.
+// unprivileged docker exec as the sandbox user (see bootstrap below).
+// Runtime apt-get is not supported — every dependency is baked into the
+// sandbox image — because sudo's setuid bit is stripped under gVisor /
+// nosuid mounts and the provider runs with CapDrop=ALL.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 	log := d.configLogger(cfg)
 	log.Info().
@@ -281,9 +282,21 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		envSlice = append(envSlice, "GOTMPDIR="+defaultScratchDir)
 	}
 
+	// Anchor the container's WorkingDir at HomeDir (baked into the image by
+	// `useradd -m sandbox`, owned by sandbox:sandbox) rather than cfg.WorkDir.
+	// If WorkingDir doesn't exist, the OCI runtime auto-creates it as root —
+	// which then makes the dir unwritable by the sandbox user without a
+	// privileged chown. Pointing at an always-present, sandbox-owned dir
+	// sidesteps that entirely so bootstrap can run as the sandbox user.
+	bootstrapCwd := cfg.HomeDir
+	if bootstrapCwd == "" {
+		// Fallback for unusual callers that don't set HomeDir. Bootstrap can
+		// still succeed as long as cfg.WorkDir is writable by sandbox.
+		bootstrapCwd = "/"
+	}
 	containerCfg := &container.Config{
 		Image:      cfg.Image,
-		WorkingDir: cfg.WorkDir,
+		WorkingDir: bootstrapCwd,
 		User:       "sandbox",
 		Tty:        false,
 		Env:        envSlice,
@@ -302,9 +315,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		CapDrop:     []string{"ALL"},
 		// No CapAdd: sudo was removed from the sandbox image (setuid bits
 		// are stripped under gVisor / nosuid), and bootstrap provisioning
-		// runs via docker exec User="root", which doesn't need container
-		// capabilities. Keeping the cap set empty shrinks the attack
-		// surface for any agent code that escapes into the sandbox.
+		// runs as the sandbox user under its own home directory, which
+		// needs no container capabilities. Keeping the cap set empty
+		// shrinks the attack surface for any agent code that escapes into
+		// the sandbox.
 		ReadonlyRootfs: false,
 		Tmpfs: map[string]string{
 			// /tmp is hardened (noexec,nosuid) so exploits can't drop a binary
@@ -384,25 +398,19 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Purpose:   cfg.Purpose,
 	}
 
-	// Bootstrap WorkDir: Docker creates a missing WorkingDir as root, so the
-	// sandbox user can't write to it (e.g. git clone). We mkdir -p + chown
-	// idempotently so the case where WorkDir already exists (e.g. /workspace
-	// baked into the image) is a harmless no-op too. Run with WorkDir="/" so
-	// the exec's own cwd doesn't race with creation.
-	//
-	// Invoke docker exec with User="root" rather than prefixing `sudo`: sudo
-	// relies on its setuid bit, which the kernel strips under gVisor (and
-	// under no-new-privileges, userns-remap, or any nosuid mount), yielding
-	// "sudo: effective uid is not 0, is /usr/bin/sudo on a file system with
-	// the 'nosuid' option set". The exec API sets the uid via the runtime's
-	// control plane, so no setuid is involved.
+	// Bootstrap WorkDir as the sandbox user. cfg.WorkDir is always either the
+	// image's baked-in /workspace (a no-op for mkdir -p) or a HomeDir subdir
+	// like /home/sandbox/<repo>; in the latter case /home/sandbox already
+	// exists and is sandbox-owned (from `useradd -m`), so sandbox can create
+	// the per-session subdir without any privileged exec. The previous
+	// root-exec bootstrap chown'd the dir to sandbox, which requires
+	// CAP_CHOWN — and that cap is stripped by CapDrop=ALL under gVisor and
+	// some Docker runtimes. Owning the dir from creation sidesteps the cap
+	// requirement entirely.
 	bootstrapSB := &agent.Sandbox{ID: resp.ID, Provider: "docker", WorkDir: "/"}
-	bootstrapCmd := fmt.Sprintf(
-		"mkdir -p '%s' && chown sandbox:sandbox '%s'",
-		shellEscape(cfg.WorkDir), shellEscape(cfg.WorkDir),
-	)
+	bootstrapCmd := fmt.Sprintf("mkdir -p '%s'", shellEscape(cfg.WorkDir))
 	var bootErr bytes.Buffer
-	if code, err := d.execAs(ctx, bootstrapSB, "root", bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
+	if code, err := d.Exec(ctx, bootstrapSB, bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
 		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		if removeErr != nil {
 			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
@@ -472,25 +480,13 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 }
 
 // Exec runs a command inside the sandbox container and streams output to the
-// provided writers. Returns the command's exit code.
+// provided writers. Returns the command's exit code. Leaves ExecOptions.User
+// empty so the exec runs as the container's default user (sandbox).
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	return d.execAs(ctx, sb, "", cmd, stdout, stderr)
-}
-
-// execAs runs a command in the container as a specific user. An empty user
-// means "use the container's default" (sandbox, per containerCfg.User).
-// Bootstrap uses user="root" to mkdir/chown without relying on sudo's setuid
-// bit, which the kernel strips under gVisor / no-new-privileges / userns.
-func (d *DockerProvider) execAs(ctx context.Context, sb *agent.Sandbox, user, cmd string, stdout, stderr io.Writer) (int, error) {
 	log := d.scopedLogger(sb)
-	logEvent := log.Debug().Str("cmd", cmd)
-	if user != "" {
-		logEvent = logEvent.Str("user", user)
-	}
-	logEvent.Msg("executing command in sandbox")
+	log.Debug().Str("cmd", cmd).Msg("executing command in sandbox")
 
 	execCfg := container.ExecOptions{
-		User:         user,
 		Cmd:          []string{"sh", "-c", cmd},
 		AttachStdout: true,
 		AttachStderr: true,
