@@ -18,6 +18,10 @@ const (
 	FailureCategoryValidation = "validation"
 	FailureCategoryComplexity = "complexity"
 	FailureCategoryCodexAuth  = "codex_auth_expired"
+	// FailureCategoryTimeout marks a session that hit its configured
+	// wall-clock limit. Set explicitly by the orchestrator timeout path so
+	// classification does not depend on error-text matching in classifyFailure.
+	FailureCategoryTimeout = "session_timeout"
 )
 
 // FailureSummary holds a human-readable explanation of why an agent run failed,
@@ -38,14 +42,14 @@ type FailureRunUpdater interface {
 // FailureService classifies agent run failures and generates user-facing explanations.
 type FailureService struct {
 	sessions FailureRunUpdater
-	logger    zerolog.Logger
+	logger   zerolog.Logger
 }
 
 // NewFailureService creates a new FailureService.
 func NewFailureService(sessions FailureRunUpdater, logger zerolog.Logger) *FailureService {
 	return &FailureService{
 		sessions: sessions,
-		logger:    logger,
+		logger:   logger,
 	}
 }
 
@@ -86,8 +90,15 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		diff = *run.Diff
 	}
 
-	// 1. Timeout detection
-	if containsAny(errorMsg, "timeout", "deadline exceeded") {
+	// 1. Timeout detection. The orchestrator's session-timeout path now
+	// classifies explicitly via failRunWithCategory(FailureCategoryTimeout),
+	// so this branch only fires for async-classified failures whose error
+	// text happens to contain a timeout shape — including network/IO
+	// timeouts ("dial tcp: i/o timed out"), upstream API deadline errors,
+	// and anything else bubbled up as a plain string. The explanation
+	// below is deliberately generic because we can't distinguish a session
+	// deadline from a transient socket timeout at this point.
+	if containsAny(errorMsg, "timeout", "deadline exceeded", "timed out") {
 		return &FailureSummary{
 			Explanation:  "The agent ran out of time before completing the fix. This usually means the issue requires more analysis than the allocated time window allows.",
 			Category:     FailureCategoryTooling,

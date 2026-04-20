@@ -232,6 +232,14 @@ func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	return out
 }
 
+func (m *mockSessionStore) getFailureUpdates() []failureUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]failureUpdate, len(m.failureUpdates))
+	copy(out, m.failureUpdates)
+	return out
+}
+
 // mockSessionLogStore implements agent.SessionLogStore.
 type mockSessionLogStore struct {
 	mu    sync.Mutex
@@ -1886,7 +1894,7 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
 
 // --- DeadlineExceeded handling in RunAgent / ContinueSession ---
 
-func TestRunAgent_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
+func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1911,7 +1919,7 @@ func TestRunAgent_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
 
 	err := orch.RunAgent(ctx, run)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "session timed out")
+	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
 
 	// failRun persists status via UpdateResult, not UpdateStatus.
 	results := d.sessions.getResultUpdates()
@@ -1926,15 +1934,18 @@ func TestRunAgent_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
 	}
 	require.True(t, foundFailed, "session should have been marked failed via UpdateResult")
 
-	// analyze_failure should be enqueued with session_id and org_id.
-	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
-	payload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
-	require.True(t, ok)
-	require.Equal(t, run.ID.String(), payload["session_id"])
-	require.Equal(t, run.OrgID.String(), payload["org_id"])
+	// Classification should be set directly (no analyze_failure enqueue)
+	// so the UI sees a timeout category without round-tripping through the
+	// async classifier.
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
+		"timeout path classifies explicitly; analyze_failure should not be enqueued")
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
+	require.True(t, failures[0].retryAdvised)
 }
 
-func TestContinueSession_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
+func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -1977,13 +1988,14 @@ func TestContinueSession_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testi
 
 	err := orch.ContinueSession(ctx, session)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "session timed out")
+	require.ErrorIs(t, err, agent.ErrSessionTimedOut)
 
-	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
-	payload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
-	require.True(t, ok)
-	require.Equal(t, session.ID.String(), payload["session_id"])
-	require.Equal(t, session.OrgID.String(), payload["org_id"])
+	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
+		"timeout path classifies explicitly; analyze_failure should not be enqueued")
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
+	require.True(t, failures[0].retryAdvised)
 }
 
 // TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering

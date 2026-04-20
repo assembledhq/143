@@ -602,11 +602,25 @@ export default function AgentPage() {
                       onChange={(e) => setMaxSessionMinutesOverride(e.target.value)}
                     />
                     {(() => {
-                      const parsed = parseInt(maxSessionMinutes, 10);
-                      if (
-                        Number.isFinite(parsed) &&
-                        (parsed < MIN_SESSION_DURATION_MINUTES || parsed > MAX_SESSION_DURATION_MINUTES)
-                      ) {
+                      const trimmed = maxSessionMinutes.trim();
+                      if (trimmed === "") {
+                        return (
+                          <p className="text-xs text-destructive">
+                            Enter a number between {MIN_SESSION_DURATION_MINUTES} and {MAX_SESSION_DURATION_MINUTES} minutes; empty saves will revert to the {DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds / 60}-minute default.
+                          </p>
+                        );
+                      }
+                      // Strict integer match — `parseInt("5abc", 10)` silently
+                      // returns 5, so we validate the whole string first.
+                      if (!/^\d+$/.test(trimmed)) {
+                        return (
+                          <p className="text-xs text-destructive">
+                            &quot;{trimmed}&quot; is not a whole number of minutes; enter a value between {MIN_SESSION_DURATION_MINUTES} and {MAX_SESSION_DURATION_MINUTES}.
+                          </p>
+                        );
+                      }
+                      const parsed = parseInt(trimmed, 10);
+                      if (parsed < MIN_SESSION_DURATION_MINUTES || parsed > MAX_SESSION_DURATION_MINUTES) {
                         return (
                           <p className="text-xs text-destructive">
                             Value will be clamped to {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes on save.
