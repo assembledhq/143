@@ -53,7 +53,7 @@ Notes:
   - `ANTHROPIC_API_KEY`, or
   - `OPENAI_API_KEY`, or
   - `OPENROUTER_API_KEY`
-- [ ] `PLATFORM_LLM_MODEL` (small model used for background features — defaults to `gpt-5-nano`; see [platform-llm.md](platform-llm.md))
+- [ ] `PLATFORM_LLM_MODEL` (small model used for background features — defaults to `gpt-5.4-nano`; see [platform-llm.md](platform-llm.md))
 
 Optional LLM routing vars:
 - `OPENAI_API_TYPE`, `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, `OPENROUTER_APP_NAME`, `OPENROUTER_SITE_URL`

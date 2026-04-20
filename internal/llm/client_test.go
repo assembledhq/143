@@ -140,11 +140,11 @@ func TestBuildChain_FiltersUnavailableProviders(t *testing.T) {
 		// openai_chat is NOT configured
 	}
 
-	chain, err := buildChain("claude-sonnet-4-5", available)
+	chain, err := buildChain("claude-sonnet-4-6", available)
 	require.NoError(t, err)
 	require.Len(t, chain, 1, "chain should only include configured providers")
 	require.Equal(t, "anthropic", chain[0].provider.Name())
-	require.Equal(t, "claude-sonnet-4-5-20250929", chain[0].modelID)
+	require.Equal(t, "claude-sonnet-4-6", chain[0].modelID)
 }
 
 func TestBuildChain_UnknownModel(t *testing.T) {
@@ -160,7 +160,7 @@ func TestBuildChain_NoConfiguredProviders(t *testing.T) {
 	t.Parallel()
 
 	// Model exists in registry but no matching providers configured.
-	_, err := buildChain("claude-sonnet-4-5", map[string]Provider{})
+	_, err := buildChain("claude-sonnet-4-6", map[string]Provider{})
 	require.Error(t, err)
 	var noProvidersErr *NoProvidersError
 	require.ErrorAs(t, err, &noProvidersErr)
@@ -190,7 +190,7 @@ func TestNewClient_DefaultsModelWhenEmpty(t *testing.T) {
 func TestNewClient_ErrorWhenNoProviders(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewClient(Config{Model: "claude-sonnet-4-5"}, zerolog.Nop())
+	_, err := NewClient(Config{Model: "claude-sonnet-4-6"}, zerolog.Nop())
 	require.Error(t, err)
 }
 
@@ -198,7 +198,7 @@ func TestNewClient_WithAnthropicKey(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:           "claude-sonnet-4-5",
+		Model:           "claude-sonnet-4-6",
 		AnthropicAPIKey: "sk-ant-test",
 	}, zerolog.Nop())
 	require.NoError(t, err, "should create client with anthropic key")
@@ -209,7 +209,7 @@ func TestNewClient_WithOpenAIChatKey(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:         "gpt-4o",
+		Model:         "gpt-5.4-mini",
 		OpenAIAPIKey:  "sk-test",
 		OpenAIAPIType: "chat",
 	}, zerolog.Nop())
@@ -221,7 +221,7 @@ func TestNewClient_WithOpenAIResponsesKey(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:         "gpt-4o",
+		Model:         "gpt-5.4-mini",
 		OpenAIAPIKey:  "sk-test",
 		OpenAIAPIType: "responses",
 	}, zerolog.Nop())
@@ -233,7 +233,7 @@ func TestNewClient_WithOpenRouterKey(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:             "claude-sonnet-4-5",
+		Model:             "claude-sonnet-4-6",
 		OpenRouterAPIKey:  "sk-or-test",
 		OpenRouterBaseURL: "https://custom.openrouter.ai",
 		OpenRouterAppName: "test-app",
@@ -247,7 +247,7 @@ func TestNewClient_WithCustomTimeout(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:           "claude-sonnet-4-5",
+		Model:           "claude-sonnet-4-6",
 		AnthropicAPIKey: "sk-ant-test",
 		Timeout:         30 * time.Second,
 	}, zerolog.Nop())
@@ -259,7 +259,7 @@ func TestNewClient_WithAllProviders(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:            "claude-sonnet-4-5",
+		Model:            "claude-sonnet-4-6",
 		AnthropicAPIKey:  "sk-ant-test",
 		AnthropicBaseURL: "https://custom.anthropic.com",
 		OpenAIAPIKey:     "sk-openai-test",

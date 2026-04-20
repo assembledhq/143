@@ -26,11 +26,10 @@ type Provider interface {
 }
 
 // modelSupportsReasoningEffort returns true if the given model ID is known to
-// support the reasoning_effort parameter. Unsupported models (e.g. gpt-4o)
-// may reject the parameter with a 400 error.
+// support the reasoning_effort parameter. Unsupported models (e.g. legacy
+// gpt-4o) may reject the parameter with a 400 error.
 func modelSupportsReasoningEffort(model string) bool {
 	// o-series reasoning models and gpt-5+ models support reasoning_effort.
-	// Legacy models (gpt-4o, gpt-4o-mini) do not.
 	return strings.HasPrefix(model, "o") || strings.HasPrefix(model, "gpt-5")
 }
 

@@ -15,7 +15,7 @@ const {
     data: {
       name: "Test Org",
       settings: {
-        default_llm_model: "gpt-4o",
+        default_llm_model: "gpt-5.4-mini",
       },
     },
   }),
@@ -27,12 +27,12 @@ const {
   settingsUpdateMock: vi.fn().mockResolvedValue({}),
   llmModelsMock: vi.fn().mockResolvedValue({
     data: {
-      openai: ["gpt-4o", "gpt-4o-mini"],
-      anthropic: ["claude-sonnet-4-20250514"],
+      openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
+      anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
     },
   }),
   llmDefaultsMock: vi.fn().mockResolvedValue({
-    data: { default_llm_model: "gpt-4o", available_providers: ["openai"] },
+    data: { default_llm_model: "gpt-5.4-mini", available_providers: ["openai"] },
   }),
 }));
 
@@ -102,7 +102,7 @@ describe("LLMPage", () => {
   it("shows the platform-LLM alert when no platform provider is configured", async () => {
     llmDefaultsMock.mockResolvedValueOnce({
       data: {},
-      platform_model: "gpt-5-nano",
+      platform_model: "gpt-5.4-nano",
     });
 
     renderWithProviders(<LLMPage />);
@@ -119,7 +119,7 @@ describe("LLMPage", () => {
   it("hides the platform-LLM alert when a platform provider is configured", async () => {
     llmDefaultsMock.mockResolvedValueOnce({
       data: { openai: "sk-...abc" },
-      platform_model: "gpt-5-nano",
+      platform_model: "gpt-5.4-nano",
     });
 
     renderWithProviders(<LLMPage />);

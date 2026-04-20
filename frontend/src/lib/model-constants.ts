@@ -79,9 +79,9 @@ export const AVAILABLE_PM_MODELS = [
 // from GET /api/v1/settings/llm-models (served by models.LLMModelsByProvider()
 // in internal/models/agent_model_constants.go). Keep both in sync.
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
-  anthropic: { label: "Anthropic", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"] },
-  openai: { label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5", "gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"] },
+  anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
+  openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
+  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
 };
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
