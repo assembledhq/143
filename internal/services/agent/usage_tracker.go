@@ -89,11 +89,13 @@ func (t *UsageTracker) ContainerStopped(ctx context.Context, orgID, sessionID uu
 	// DB persistence. Skip if eventID is Nil (start recording failed).
 	if t.store != nil && eventID != uuid.Nil {
 		if err := t.store.RecordStop(ctx, eventID, stoppedAt, exitReason); err != nil {
-			t.logger.Error().Err(err).
-				Str("session_id", sessionID.String()).
+			ev := t.logger.Error().Err(err).
 				Str("org_id", orgIDStr).
-				Str("event_id", eventID.String()).
-				Msg("failed to record container stop for billing")
+				Str("event_id", eventID.String())
+			if sessionID != uuid.Nil {
+				ev = ev.Str("session_id", sessionID.String())
+			}
+			ev.Msg("failed to record container stop for billing")
 		}
 	}
 }

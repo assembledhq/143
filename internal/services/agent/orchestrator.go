@@ -537,7 +537,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if org, orgErr := o.orgs.GetByID(ctx, run.OrgID); orgErr == nil {
 			orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 			if parseErr != nil {
-				o.logger.Warn().Err(parseErr).Str("org_id", run.OrgID.String()).Msg("failed to parse org settings, using defaults")
+				log.Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
 			} else {
 				confidenceThresholds = orgSettings.ConfidenceThresholds
 			}
@@ -610,10 +610,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if outcome != "" {
 			if run.IssueID != uuid.Nil {
 				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, run.IssueID, outcome); err != nil {
-					o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update PM decision log outcome")
+					log.Warn().Err(err).Msg("failed to update PM decision log outcome")
 				}
 			} else {
-				o.logger.Debug().Str("session_id", run.ID.String()).Msg("skipping PM decision log outcome update because run has no issue_id")
+				log.Debug().Msg("skipping PM decision log outcome update because run has no issue_id")
 			}
 		}
 	}
@@ -621,14 +621,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// 13. Update project task status if this run is part of a project.
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, status); err != nil {
-			o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update project task on run completion")
+			log.Warn().Err(err).Msg("failed to update project task on run completion")
 		}
 	}
 
 	// 14. Bubble session completion to the owning automation_run, if any.
 	if run.AutomationRunID != nil && o.automationRuns != nil {
 		if err := o.automationRuns.OnSessionComplete(ctx, run, status); err != nil {
-			o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update automation run on session completion")
+			log.Warn().Err(err).Msg("failed to update automation run on session completion")
 		}
 	}
 
@@ -1140,20 +1140,24 @@ func (o *Orchestrator) handleQuestion(ctx context.Context, runID, orgID uuid.UUI
 
 // failRun marks a run as failed and records the error.
 func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg string) {
+	log := o.logger.With().
+		Str("session_id", run.ID.String()).
+		Str("org_id", run.OrgID.String()).
+		Logger()
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, "failed", result); err != nil {
-		o.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to update run to failed")
+		log.Error().Err(err).Msg("failed to update run to failed")
 	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
-			o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update project task on run failure")
+			log.Warn().Err(err).Msg("failed to update project task on run failure")
 		}
 	}
 	if run.AutomationRunID != nil && o.automationRuns != nil {
 		if err := o.automationRuns.OnSessionComplete(ctx, run, "failed"); err != nil {
-			o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update automation run on session failure")
+			log.Warn().Err(err).Msg("failed to update automation run on session failure")
 		}
 	}
 }
@@ -1164,7 +1168,10 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
 	o.failRun(ctx, run, errMsg)
 	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
-		o.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to update run failure details")
+		o.logger.Error().Err(err).
+			Str("session_id", run.ID.String()).
+			Str("org_id", run.OrgID.String()).
+			Msg("failed to update run failure details")
 	}
 }
 
