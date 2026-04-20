@@ -225,6 +225,18 @@ func runStreamingAgent(
 	var promptContent string
 	if prompt.Continuation {
 		promptContent = prompt.UserMessage
+		// Amp/Pi have no headless resume flag, so continuation replays against
+		// the restored filesystem with only the new user message as the prompt.
+		// Emit an explicit log so "the agent forgot the original task" reports
+		// are debuggable without reading the adapter source.
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message: fmt.Sprintf(
+				"%s has no headless resume; continuation prompt is the new user message only (prior conversation context is not replayed)",
+				cfg.DisplayName,
+			),
+		}
 	} else {
 		promptContent = fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 	}

@@ -172,6 +172,11 @@ func TestAgentType_Validate(t *testing.T) {
 	require.NoError(t, AgentTypeClaudeCode.Validate())
 	require.NoError(t, AgentTypeGeminiCLI.Validate())
 	require.NoError(t, AgentTypeCodex.Validate())
+	require.NoError(t, AgentTypeAmp.Validate())
+	require.NoError(t, AgentTypePi.Validate())
+	// pm_agent is intentionally rejected: it's an internal agent type used by
+	// the PM service for its own scheduled runs, never a user-selectable
+	// default_agent_type on OrgSettings.
 	require.Error(t, AgentType("pm_agent").Validate())
 	require.Error(t, AgentType("").Validate())
 }
