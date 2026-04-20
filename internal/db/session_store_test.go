@@ -574,13 +574,17 @@ func TestSessionStore_UpdateSandboxState(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	mock.ExpectExec("UPDATE sessions SET sandbox_state").
+	// Pinned: UpdateSandboxState must NOT touch last_activity_at. The reaper
+	// uses this to mark long-completed sessions as 'destroyed' during snapshot
+	// cleanup; bumping the MRU timestamp there would resurface dormant
+	// sessions at the top of the Sessions page.
+	mock.ExpectExec(`^UPDATE sessions SET sandbox_state = @sandbox_state WHERE id = @id AND org_id = @org_id$`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateSandboxState(context.Background(), uuid.New(), uuid.New(), "snapshotted")
 	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, mock.ExpectationsWereMet(), "UpdateSandboxState must not write last_activity_at")
 }
 
 func TestSessionStore_UpdateWorkingBranch(t *testing.T) {

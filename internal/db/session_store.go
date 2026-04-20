@@ -28,16 +28,21 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Statuses          []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
-	Limit             int
-	CursorTime        *time.Time // Cursor-based pagination: last_activity_at of the last item.
-	CursorID          *uuid.UUID // Cursor-based pagination: id of the last item.
-	AdHocOnly         bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID      uuid.UUID  // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
-	Search            string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived   bool       // When true, include archived sessions in the results.
-	OnlyArchived      bool       // When true, return only archived sessions.
+	Statuses []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
+	Limit    int
+	// Cursor-based pagination on (last_activity_at, id). Because last_activity_at
+	// changes as sessions get bumped, callers should expect the standard MRU
+	// pagination drift: a row touched after page N was fetched can reappear on
+	// an earlier page (duplicate) or be skipped on a later page. The frontend
+	// dedupes by id, so this manifests as occasional reordering, not data loss.
+	CursorTime        *time.Time
+	CursorID          *uuid.UUID
+	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived   bool      // When true, include archived sessions in the results.
+	OnlyArchived      bool      // When true, return only archived sessions.
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
@@ -639,8 +644,14 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// UpdateSandboxState changes only the sandbox lifecycle column. It deliberately
+// does NOT touch last_activity_at because the reaper calls this to mark
+// long-completed sessions as 'destroyed' during snapshot cleanup — bumping the
+// MRU timestamp there would resurface dormant sessions at the top of the list.
+// Caller-driven activity (turn results, status transitions) bumps last_activity_at
+// through its own update path.
 func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
-	query := `UPDATE sessions SET sandbox_state = @sandbox_state, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET sandbox_state = @sandbox_state WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":            sessionID,
 		"org_id":        orgID,
