@@ -38,9 +38,9 @@ type AgentInput struct {
 	ComplexityEstimate *ComplexityEstimate
 	ContextDocs        []string // content of CLAUDE.md, AGENTS.md, etc.
 	RevisionContext    *RevisionContext
-	PMContext          *PMTaskContext // PM guidance for coding agents
-	PMContextJSON      string         // serialized PM context for PM agent runs
-	IntegrationSkills  string         // auto-generated CLI skills doc for integration tools
+	PMContext          *PMTaskContext        // PM guidance for coding agents
+	PMContextJSON      string                // serialized PM context for PM agent runs
+	IntegrationSkills  string                // auto-generated CLI skills doc for integration tools
 	ContextLimits      *models.ContextLimits // org-specific token limits (nil = use defaults)
 }
 
@@ -158,6 +158,18 @@ type SandboxConfig struct {
 	WorkDir       string            // /workspace
 	Env           map[string]string // environment variables injected into the container (e.g. API keys)
 	DiskLimitGB   int               // max container rootfs size in GB (default: 10); requires overlay2+xfs backing store
+
+	// SessionID and OrgID are tracing identifiers propagated into provider log
+	// lines so that every sandbox-lifecycle event (create, exec, clone, stop,
+	// destroy) is greppable by session in Grafana. Set by the caller; empty
+	// values are omitted from logs. Copied onto the returned Sandbox so
+	// follow-up operations keep the same scope.
+	SessionID string
+	OrgID     string
+	// Purpose describes why the sandbox was created (e.g. "agent_run",
+	// "pm_bootstrap", "preview"). Included in provider logs to disambiguate
+	// sandboxes that aren't attached to a single session (e.g. PM bootstrap).
+	Purpose string
 }
 
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.
@@ -183,6 +195,13 @@ type Sandbox struct {
 	Provider string            // which provider created this sandbox
 	WorkDir  string            // path to the workspace inside the sandbox
 	Metadata map[string]string // provider-specific metadata
+
+	// Tracing identifiers copied from SandboxConfig at Create time. Providers
+	// attach these to every lifecycle log line so operators can find all
+	// sandbox logs for a given session in Grafana.
+	SessionID string
+	OrgID     string
+	Purpose   string
 }
 
 // SandboxConnectionInfo holds provider-specific connection details for local resume.

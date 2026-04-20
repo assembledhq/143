@@ -119,8 +119,8 @@ type SkillsBuilder interface {
 // Service is the AI Product Manager. It runs the PM agent and delegates work.
 type Service struct {
 	issues            issueStore
-	sessions         sessionStore
-	sessionLogs       sessionLogStore   // nil-safe: if nil, PM session logs are not persisted
+	sessions          sessionStore
+	sessionLogs       sessionLogStore // nil-safe: if nil, PM session logs are not persisted
 	pullRequests      prStore
 	orgs              orgStore
 	repos             repoStore
@@ -158,7 +158,7 @@ func NewService(
 ) *Service {
 	return &Service{
 		issues:       issues,
-		sessions:    sessions,
+		sessions:     sessions,
 		pullRequests: pullRequests,
 		orgs:         orgs,
 		repos:        repos,
