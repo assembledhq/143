@@ -25,6 +25,13 @@ import (
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
 var _ agent.SandboxProvider = (*DockerProvider)(nil)
 
+// defaultGoTmpDir is the default value injected into $GOTMPDIR for sandbox
+// containers. /tmp is mounted noexec, which breaks `go test` / `go run`
+// because Go compiles binaries to $GOTMPDIR and execs them; /var/tmp lives
+// on the writable+exec rootfs, so redirecting there fixes this without
+// weakening the /tmp hardening.
+const defaultGoTmpDir = "/var/tmp"
+
 // DockerClient defines the subset of the Docker API used by DockerProvider.
 type DockerClient interface {
 	Ping(ctx context.Context) (types.Ping, error)
@@ -258,6 +265,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	var envSlice []string
 	for k, v := range cfg.Env {
 		envSlice = append(envSlice, k+"="+v)
+	}
+	// See defaultGoTmpDir for why this env var is injected.
+	if _, ok := cfg.Env["GOTMPDIR"]; !ok {
+		envSlice = append(envSlice, "GOTMPDIR="+defaultGoTmpDir)
 	}
 
 	containerCfg := &container.Config{
