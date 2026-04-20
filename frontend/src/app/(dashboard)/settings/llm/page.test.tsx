@@ -99,11 +99,36 @@ describe("LLMPage", () => {
     });
   });
 
-  it("renders platform intelligence section", async () => {
+  it("shows the platform-LLM alert when no platform provider is configured", async () => {
+    llmDefaultsMock.mockResolvedValueOnce({
+      data: {},
+      platform_model: "gpt-5-nano",
+    });
+
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Platform intelligence")).toBeInTheDocument();
+      expect(screen.getByText(/Platform LLM not configured/i)).toBeInTheDocument();
+    });
+    expect(screen.getByRole("link", { name: /self-hosting guide/i })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/docs/self-hosting/platform-llm.md"),
+    );
+  });
+
+  it("hides the platform-LLM alert when a platform provider is configured", async () => {
+    llmDefaultsMock.mockResolvedValueOnce({
+      data: { openai: "sk-...abc" },
+      platform_model: "gpt-5-nano",
+    });
+
+    renderWithProviders(<LLMPage />);
+
+    await waitFor(() => {
+      expect(llmDefaultsMock).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(/Platform LLM not configured/i)).not.toBeInTheDocument();
     });
   });
 
