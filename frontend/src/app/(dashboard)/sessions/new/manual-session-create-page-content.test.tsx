@@ -73,6 +73,8 @@ vi.mock("@/components/no-repos-warning", () => ({
 vi.mock("@/contexts/optimistic-sessions", () => ({
   useOptimisticSessions: () => ({
     addOptimisticSession: vi.fn(),
+    removeOptimisticSession: vi.fn(),
+    markOptimisticResolved: vi.fn(),
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));

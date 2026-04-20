@@ -86,7 +86,7 @@ export function ManualSessionCreatePageContent() {
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
 
-  const { addOptimisticSession, removeOptimisticSession } = useOptimisticSessions();
+  const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -190,12 +190,14 @@ export function ManualSessionCreatePageContent() {
         : message.trim();
       return { optimisticId: addOptimisticSession(title) };
     },
-    onSuccess: async (response, _variables, context) => {
+    onSuccess: (response, _variables, context) => {
       if (selectedRepoId) {
         try { localStorage.setItem("143:lastUsedRepoId", selectedRepoId); } catch {}
       }
-      await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-      removeOptimisticSession(context.optimisticId);
+      // Keep the optimistic row visible — the sidebar swaps it for the real
+      // session once the refetch lands. See OptimisticSession.resolvedId.
+      markOptimisticResolved(context.optimisticId, response.data.id);
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       router.push(`/sessions/${response.data.id}`);
     },
     onError: (error, _variables, context) => {

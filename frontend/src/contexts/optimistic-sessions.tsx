@@ -1,6 +1,15 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+
+/**
+ * Safety-net window after resolution before we force-remove a placeholder.
+ * The sidebar normally GCs resolved rows as soon as the real session appears
+ * in its list, but if the user's current filters exclude the new session (or
+ * no sidebar is mounted), the placeholder would otherwise linger forever.
+ * 10s comfortably exceeds a typical post-invalidation refetch.
+ */
+const RESOLUTION_FALLBACK_MS = 10_000;
 
 /**
  * Minimal shape for a session that hasn't been saved to the backend yet.
@@ -16,20 +25,37 @@ export interface OptimisticSession {
   title: string;
   status: "pending";
   created_at: string;
+  /**
+   * Set once the create mutation returns with a real session id. The sidebar
+   * hides optimistic rows whose resolvedId matches a session already in the
+   * server-returned list, then removes them — avoiding a double-render flash.
+   */
+  resolvedId?: string;
 }
 
 interface OptimisticSessionsContextValue {
   optimisticSessions: OptimisticSession[];
   /** Add a placeholder session. Returns the temporary id. */
   addOptimisticSession: (title: string) => string;
-  /** Remove a placeholder (on success or error). */
+  /** Remove a placeholder (on error, or after the real session is visible). */
   removeOptimisticSession: (id: string) => void;
+  /** Link an optimistic placeholder to the real session id returned by the server. */
+  markOptimisticResolved: (id: string, resolvedId: string) => void;
 }
 
 const OptimisticSessionsContext = createContext<OptimisticSessionsContextValue | null>(null);
 
 export function OptimisticSessionsProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<OptimisticSession[]>([]);
+  const fallbackTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  const clearFallback = useCallback((id: string) => {
+    const handle = fallbackTimers.current.get(id);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      fallbackTimers.current.delete(id);
+    }
+  }, []);
 
   const addOptimisticSession = useCallback((title: string) => {
     const id = `optimistic-${crypto.randomUUID()}`;
@@ -41,11 +67,30 @@ export function OptimisticSessionsProvider({ children }: { children: React.React
   }, []);
 
   const removeOptimisticSession = useCallback((id: string) => {
+    clearFallback(id);
     setSessions((prev) => prev.filter((s) => s.id !== id));
+  }, [clearFallback]);
+
+  const markOptimisticResolved = useCallback((id: string, resolvedId: string) => {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, resolvedId } : s)));
+    clearFallback(id);
+    const handle = setTimeout(() => {
+      fallbackTimers.current.delete(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    }, RESOLUTION_FALLBACK_MS);
+    fallbackTimers.current.set(id, handle);
+  }, [clearFallback]);
+
+  useEffect(() => {
+    const timers = fallbackTimers.current;
+    return () => {
+      for (const handle of timers.values()) clearTimeout(handle);
+      timers.clear();
+    };
   }, []);
 
   return (
-    <OptimisticSessionsContext.Provider value={{ optimisticSessions: sessions, addOptimisticSession, removeOptimisticSession }}>
+    <OptimisticSessionsContext.Provider value={{ optimisticSessions: sessions, addOptimisticSession, removeOptimisticSession, markOptimisticResolved }}>
       {children}
     </OptimisticSessionsContext.Provider>
   );
@@ -62,10 +107,12 @@ export function useOptimisticSessions() {
 const EMPTY_SESSIONS: OptimisticSession[] = [];
 const noopAdd = () => `optimistic-${Date.now()}`;
 const noopRemove = () => {};
+const noopResolve = () => {};
 const FALLBACK: OptimisticSessionsContextValue = {
   optimisticSessions: EMPTY_SESSIONS,
   addOptimisticSession: noopAdd,
   removeOptimisticSession: noopRemove,
+  markOptimisticResolved: noopResolve,
 };
 
 /** Same as useOptimisticSessions but returns no-op stubs when outside a provider. */
