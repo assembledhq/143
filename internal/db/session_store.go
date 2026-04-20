@@ -31,10 +31,12 @@ type SessionFilters struct {
 	Statuses []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit    int
 	// Cursor-based pagination on (last_activity_at, id). Because last_activity_at
-	// changes as sessions get bumped, callers should expect the standard MRU
-	// pagination drift: a row touched after page N was fetched can reappear on
-	// an earlier page (duplicate) or be skipped on a later page. The frontend
-	// dedupes by id, so this manifests as occasional reordering, not data loss.
+	// mutates as sessions get bumped, callers should expect the standard MRU
+	// pagination drift: the primary failure mode is that a row bumped after
+	// page N was fetched will be *skipped on a later page* (it moved ahead of
+	// the cursor). The inverse — a duplicate reappearing on an earlier page —
+	// only happens if the same page is re-fetched. The frontend dedupes by id,
+	// so this manifests as occasional reordering, not data loss.
 	CursorTime        *time.Time
 	CursorID          *uuid.UUID
 	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
@@ -627,11 +629,15 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 // UpdateSnapshotInfo persists snapshot metadata without changing the session status.
 // Used after the first run to store snapshot data while letting the normal
 // completion flow control the status.
+//
+// Deliberately does NOT touch last_activity_at: the orchestrator calls
+// UpdateResult (which bumps last_activity_at) immediately before this, so an
+// additional bump here is redundant and would double-write the column on
+// every snapshot.
 func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
 	query := `
 		UPDATE sessions
-		SET last_activity_at = now(),
-		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
+		SET agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted'
 		WHERE id = @id AND org_id = @org_id`
 

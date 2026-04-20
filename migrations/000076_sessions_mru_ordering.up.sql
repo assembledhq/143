@@ -2,6 +2,21 @@
 -- last_activity_at the authoritative "last touched" timestamp for every
 -- session and backing the new ORDER BY with a matching partial index.
 --
+-- DEPLOY ORDER: this migration MUST run before any backend that issues
+-- `ORDER BY last_activity_at` ships to that database. The new partial index
+-- is what keeps the list query off a table scan; a backend that runs the
+-- new query against a DB that hasn't applied this migration will still
+-- function (the NULL-producing COALESCE backfill is not strictly required
+-- for the ORDER BY), but will pay a seq-scan cost on every page load.
+-- Roll out: apply migration -> verify index is present -> deploy backend.
+--
+-- LARGE-TABLE NOTE: on deployments where `sessions` has grown past ~1M rows,
+-- do not rely on this migration's inline steps to finish quickly. The inline
+-- `SET NOT NULL` falls back to a full-table ACCESS EXCLUSIVE scan when the
+-- CHECK NOT VALID / VALIDATE runbook hasn't been completed. Run the full
+-- runbook below out-of-band first; the migration then finishes in
+-- milliseconds.
+--
 -- PRODUCTION RUNBOOK (do these out-of-band BEFORE running this migration so
 -- the migrate step is fast and lock-light):
 --

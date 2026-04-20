@@ -24,16 +24,24 @@ var sessionTestColumns = []string{
 	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
 }
 
+// newAgentSessionRow returns a completed-session row for mock queries. The
+// three timestamp columns are distinct so that tests which assert on
+// MRU ordering or pagination drift against last_activity_at don't accidentally
+// also satisfy a regression that ordered by started_at / created_at.
 func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []interface{} {
+	createdAt := now.Add(-2 * time.Hour) // oldest
+	startedAt := now.Add(-time.Hour)     // middle
+	lastActivityAt := now                // newest
+	completedAt := now.Add(-5 * time.Minute)
 	return []interface{}{
 		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
-		nil, &now, &now, nil,
+		nil, &startedAt, &completedAt, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
-		nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+		nil, 0, lastActivityAt, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 		nil,      // target_branch
 		nil,      // working_branch
 		nil,      // repository_id
@@ -43,7 +51,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, // archived_at, archived_by_user_id
 		nil, // automation_run_id
 		nil, // deleted_at
-		now,
+		createdAt,
 	}
 }
 
@@ -556,13 +564,16 @@ func TestSessionStore_UpdateSnapshotInfo(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	mock.ExpectExec("UPDATE sessions.+SET.+agent_session_id.+snapshot_key").
+	// Pinned: UpdateSnapshotInfo must NOT write last_activity_at. The
+	// orchestrator calls UpdateResult (which bumps it) immediately before
+	// this; a second bump here would be a redundant write on every snapshot.
+	mock.ExpectExec(`UPDATE sessions\s+SET agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,\s+sandbox_state = 'snapshotted'\s+WHERE id = @id AND org_id = @org_id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateSnapshotInfo(context.Background(), uuid.New(), uuid.New(), "agent-123", "snap-key")
 	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, mock.ExpectationsWereMet(), "UpdateSnapshotInfo must not write last_activity_at")
 }
 
 func TestSessionStore_UpdateSandboxState(t *testing.T) {
