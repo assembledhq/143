@@ -91,16 +91,33 @@ func SetCSRFCookie(w http.ResponseWriter, r *http.Request, key []byte) error {
 	if err != nil {
 		return err
 	}
+	writeCSRFCookie(w, r, token)
+	return nil
+}
+
+// ExtendCSRFCookie re-emits the existing valid CSRF cookie with a fresh
+// MaxAge so its lifetime stays aligned with a sliding session refresh.
+// If no valid cookie is present, a new signed token is issued instead.
+// Keeps the same token value when possible so in-flight requests that
+// already read document.cookie continue to validate.
+func ExtendCSRFCookie(w http.ResponseWriter, r *http.Request, key []byte) error {
+	if c, err := r.Cookie(CSRFCookieName); err == nil && validSignedToken(c.Value, key) {
+		writeCSRFCookie(w, r, c.Value)
+		return nil
+	}
+	return SetCSRFCookie(w, r, key)
+}
+
+func writeCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     CSRFCookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   30 * 24 * 60 * 60, // match session cookie lifetime
-		HttpOnly: false,             // frontend JS must read this
+		MaxAge:   int(SessionTTL.Seconds()), // match session cookie lifetime
+		HttpOnly: false,                     // frontend JS must read this
 		SameSite: http.SameSiteLaxMode,
 		Secure:   IsRequestSecure(r),
 	})
-	return nil
 }
 
 func isSafeMethod(method string) bool {

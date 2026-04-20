@@ -17,7 +17,7 @@ function isUnauthorizedError(err: unknown): boolean {
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["auth", "me"],
     queryFn: () => api.auth.me(),
     // Only treat a confirmed 401 as terminal. Network blips and 5xx
@@ -34,6 +34,10 @@ export function useAuth() {
   });
 
   const isUnauthorized = isUnauthorizedError(error);
+  // Retries exhausted with a non-401 failure. Callers should render an
+  // explicit error state (with a retry affordance) rather than hang on a
+  // loading skeleton forever.
+  const isTransientError = !!error && !isUnauthorized;
 
   const logout = async () => {
     await api.auth.logout();
@@ -46,6 +50,8 @@ export function useAuth() {
     isLoading,
     isAuthenticated: !!data?.data,
     isUnauthorized,
+    isTransientError,
+    refetchUser: refetch,
     logout,
   };
 }

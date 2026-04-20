@@ -2,7 +2,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
 const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(public code: string, message: string, public details?: unknown) {
     super(message);
     this.name = 'ApiError';

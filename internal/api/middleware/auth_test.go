@@ -374,16 +374,21 @@ func TestAuth(t *testing.T) {
 				t.Helper()
 				resp := w.Result()
 				defer resp.Body.Close()
-				var refreshed *http.Cookie
+				var refreshed, csrf *http.Cookie
 				for _, c := range resp.Cookies() {
-					if c.Name == SessionCookieName {
+					switch c.Name {
+					case SessionCookieName:
 						refreshed = c
+					case CSRFCookieName:
+						csrf = c
 					}
 				}
 				require.NotNil(t, refreshed, "expected session cookie to be reissued with fresh MaxAge")
 				require.Equal(t, "stale-token", refreshed.Value, "reissued cookie should carry the same opaque token")
 				require.Equal(t, int(SessionTTL.Seconds()), refreshed.MaxAge, "reissued cookie should use the full TTL")
 				require.True(t, refreshed.HttpOnly, "reissued cookie should stay HttpOnly")
+				require.NotNil(t, csrf, "CSRF cookie should be extended in lockstep with session refresh")
+				require.Equal(t, int(SessionTTL.Seconds()), csrf.MaxAge, "CSRF cookie MaxAge should match session TTL")
 			},
 		},
 		{
@@ -439,7 +444,7 @@ func TestAuth(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			handler := Auth(sessionStore, userStore)(next)
+			handler := Auth(sessionStore, userStore, []byte("test-signing-key-that-is-long-enough-for-hmac"))(next)
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req = tt.setupRequest(req)
 			w := httptest.NewRecorder()

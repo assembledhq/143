@@ -80,7 +80,23 @@ describe('useAuth', () => {
 
     expect(result.current.isAuthenticated).toBe(false);
     expect(result.current.isUnauthorized).toBe(false);
+    expect(result.current.isTransientError).toBe(true);
     expect(result.current.user).toBeNull();
+  });
+
+  it('is neither unauthorized nor transient-error on success', async () => {
+    meMock.mockResolvedValue({
+      data: { id: '1', email: 'test@test.com', name: 'Test' },
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.isUnauthorized).toBe(false);
+    expect(result.current.isTransientError).toBe(false);
   });
 
   it('starts in loading state', () => {

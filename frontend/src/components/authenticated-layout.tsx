@@ -89,7 +89,15 @@ const navItems = [
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoading, isAuthenticated, isUnauthorized, logout } = useAuth();
+  const {
+    user,
+    isLoading,
+    isAuthenticated,
+    isUnauthorized,
+    isTransientError,
+    refetchUser,
+    logout,
+  } = useAuth();
 
   const { data: proposalSummary } = useQuery({
     queryKey: ["proposalSummary"],
@@ -133,10 +141,36 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   }, [isLoading, isUnauthorized, router]);
 
   // Show the loading skeleton while the initial /me call is in flight OR
-  // while a transient error is being retried without a cached user yet.
-  // Only confirmed 401s (isUnauthorized) bypass the skeleton and fall through
-  // to the redirect path below.
-  const showLoadingSkeleton = isLoading || (!user && !isUnauthorized);
+  // while retries are still in progress without a cached user. Confirmed
+  // 401s fall through to the redirect path; exhausted non-401 retries fall
+  // through to the error UI below.
+  const showLoadingSkeleton =
+    !user && !isUnauthorized && !isTransientError && isLoading;
+
+  if (!user && isTransientError) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background px-6">
+        <div className="max-w-sm text-center space-y-4">
+          <h2 className="text-base font-semibold text-foreground">
+            Can&apos;t reach the server
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            We couldn&apos;t load your session. This usually clears up on its own
+            during a deploy.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void refetchUser();
+            }}
+          >
+            Try again
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (showLoadingSkeleton) {
     return (

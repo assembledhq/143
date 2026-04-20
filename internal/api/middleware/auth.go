@@ -46,7 +46,10 @@ func WithOrgID(ctx context.Context, id uuid.UUID) context.Context {
 }
 
 // Auth middleware reads the session cookie, validates the session, and sets user on context.
-func Auth(sessionStore *db.AuthSessionStore, userStore *db.UserStore) func(http.Handler) http.Handler {
+// csrfKey is used to extend the CSRF cookie in lockstep with sliding session
+// refresh so its lifetime never trails the session. Pass nil to skip CSRF
+// extension (e.g. in tests that don't exercise CSRF).
+func Auth(sessionStore *db.AuthSessionStore, userStore *db.UserStore, csrfKey []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(SessionCookieName)
@@ -58,15 +61,15 @@ func Auth(sessionStore *db.AuthSessionStore, userStore *db.UserStore) func(http.
 					return
 				}
 				token := strings.TrimPrefix(auth, "Bearer ")
-				handleToken(w, r, next, sessionStore, userStore, token, false)
+				handleToken(w, r, next, sessionStore, userStore, csrfKey, token, false)
 				return
 			}
-			handleToken(w, r, next, sessionStore, userStore, cookie.Value, true)
+			handleToken(w, r, next, sessionStore, userStore, csrfKey, cookie.Value, true)
 		})
 	}
 }
 
-func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.AuthSessionStore, userStore *db.UserStore, token string, cookieBased bool) {
+func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.AuthSessionStore, userStore *db.UserStore, csrfKey []byte, token string, cookieBased bool) {
 	session, err := sessionStore.GetByToken(r.Context(), token)
 	if err != nil {
 		if cookieBased {
@@ -90,7 +93,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sess
 	// back out to TTL so active users don't get a hard logout at 30 days.
 	// Only for cookie-based auth — bearer tokens manage their own lifetime.
 	if cookieBased {
-		maybeRefreshSession(w, r, sessionStore, session)
+		maybeRefreshSession(w, r, sessionStore, csrfKey, session)
 	}
 
 	ctx := WithUser(r.Context(), &user)
@@ -98,7 +101,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sess
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
-func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthSessionStore, session models.AuthSession) {
+func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthSessionStore, csrfKey []byte, session models.AuthSession) {
 	if time.Until(session.ExpiresAt) > SessionTTL-sessionRefreshWindow {
 		return
 	}
@@ -117,6 +120,13 @@ func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthS
 		SameSite: http.SameSiteLaxMode,
 		Secure:   IsRequestSecure(r),
 	})
+	// Keep CSRF cookie lifetime pinned to the session so an active user
+	// can't end up with a live session but an expired CSRF cookie. Best-
+	// effort: failure just means the CSRF cookie expires on its own clock
+	// and ensureCSRFCookie reissues on the next safe-method request.
+	if len(csrfKey) > 0 {
+		_ = ExtendCSRFCookie(w, r, csrfKey)
+	}
 }
 
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
