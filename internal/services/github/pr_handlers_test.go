@@ -105,7 +105,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 
 	svc := &PRService{
 		pullRequests: prStore,
-		sessions:    sessionStore,
+		sessions:     sessionStore,
 		issues:       issueStore,
 		deploys:      deployStore,
 		jobs:         jobStore,
@@ -137,15 +137,15 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,
-					nil, // model_override
-					nil, // triggered_by_user_id
-					nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-					nil, // target_branch
-					nil, // working_branch
-					nil, // repository_id
-					nil, // diff_stats
-					nil, // diff_history
-					nil, // input_manifest
+					nil,                      // model_override
+					nil,                      // triggered_by_user_id
+					nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+					nil,      // target_branch
+					nil,      // working_branch
+					nil,      // repository_id
+					nil,      // diff_stats
+					nil,      // diff_history
+					nil,      // input_manifest
 					nil, nil, // archived_at, archived_by_user_id
 					nil, // automation_run_id
 					nil, // deleted_at
@@ -1293,7 +1293,7 @@ func TestCreatePR_Success(t *testing.T) {
 	svc := &PRService{
 		tokenProvider: tokenSvc,
 		pullRequests:  prStore,
-		sessions:     sessionStore,
+		sessions:      sessionStore,
 		issues:        issueStore,
 		repos:         repoStore,
 		logger:        zerolog.Nop(),
@@ -1402,7 +1402,7 @@ func TestPushRevision_Success(t *testing.T) {
 	pr := &models.PullRequest{
 		ID:             prID,
 		OrgID:          orgID,
-		SessionID:     &sid,
+		SessionID:      &sid,
 		GitHubPRNumber: 42,
 		GitHubRepo:     "testorg/testrepo",
 	}

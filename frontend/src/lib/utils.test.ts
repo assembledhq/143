@@ -44,6 +44,13 @@ describe("formatTimeAgo", () => {
     const twentyThreeHoursAgo = new Date(Date.now() - 23 * 3_600_000).toISOString();
     expect(formatTimeAgo(twentyThreeHoursAgo)).toBe("23h ago");
   });
+
+  it("returns an em-dash for missing input (rollback safety)", () => {
+    expect(formatTimeAgo(undefined)).toBe("—");
+    expect(formatTimeAgo(null)).toBe("—");
+    expect(formatTimeAgo("")).toBe("—");
+    expect(formatTimeAgo("not-a-date")).toBe("—");
+  });
 });
 
 describe("isImageURL", () => {

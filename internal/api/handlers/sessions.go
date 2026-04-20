@@ -187,7 +187,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	var nextCursor string
 	if len(runs) > 0 && len(runs) == limit {
 		last := runs[len(runs)-1]
-		nextCursor = encodeSessionCursor(last.CreatedAt, last.ID)
+		nextCursor = encodeSessionCursor(last.LastActivityAt, last.ID)
 	}
 
 	// Enrich sessions with last_viewed_at and PR summaries.

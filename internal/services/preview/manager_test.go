@@ -179,7 +179,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
-		nil, 0, nil, "running", nil,
+		nil, 0, now, "running", nil,
 		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, now,
 	}

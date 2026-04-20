@@ -179,17 +179,14 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
     },
     {
       id: "last_modified",
-      accessorFn: (row) => row.completed_at || row.started_at || row.created_at,
+      accessorKey: "last_activity_at",
       header: ({ column }) => <SortableHeader label="Last modified" column={column} />,
       size: 110,
-      cell: ({ row }) => {
-        const ts = row.original.completed_at || row.original.started_at || row.original.created_at;
-        return (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {formatTimeAgo(ts)}
-          </span>
-        );
-      },
+      cell: ({ row }) => (
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {formatTimeAgo(row.original.last_activity_at)}
+        </span>
+      ),
     },
   ];
 }
