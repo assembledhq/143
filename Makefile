@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-db provision-logging deploy deploy-app deploy-worker deploy-db deploy-logging deploy-fleet logs setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -425,3 +425,73 @@ logs:
 	echo "Opening Grafana tunnel → http://localhost:9999"; \
 	echo "Press Ctrl+C to close."; \
 	ssh -i $(SSH_KEY) -L 9999:localhost:9999 -N deploy@$$LOGGING_HOST
+
+# ── Read-only prod DB access ─────────────────────────────────────────
+# The `readonly` Postgres role is safe for ad-hoc inspection by humans and
+# coding agents: SELECT only, every connection opens a read-only txn, and
+# a 30s statement_timeout bounds runaway queries.
+
+# $(call resolve-db-and-readonly-env,REQUIRE_ADMIN)
+# Resolves DB_HOST from FLEET_HOSTS and DB_READONLY_PASSWORD (+ DB_PASSWORD
+# when REQUIRE_ADMIN is non-empty) from .env.production.enc into exported
+# shell vars. Use inside a recipe joined with `\` so the vars persist.
+define resolve-db-and-readonly-env
+DB_HOST="$${DB_HOST:-}"; \
+DB_PASSWORD="$${DB_PASSWORD:-}"; \
+DB_READONLY_PASSWORD="$${DB_READONLY_PASSWORD:-}"; \
+if [ -z "$$DB_HOST" ] || [ -z "$$DB_PASSWORD" ] || [ -z "$$DB_READONLY_PASSWORD" ]; then \
+	ENV_DUMP="$$(sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc 2>/dev/null || true)"; \
+	if [ -z "$$DB_HOST" ]; then \
+		FLEET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^FLEET_HOSTS=' | cut -d= -f2-)"; \
+		DB_HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; \
+	fi; \
+	if [ -z "$$DB_PASSWORD" ]; then \
+		DB_PASSWORD="$$(printf '%s\n' "$$ENV_DUMP" | grep '^DB_PASSWORD=' | cut -d= -f2-)"; \
+	fi; \
+	if [ -z "$$DB_READONLY_PASSWORD" ]; then \
+		DB_READONLY_PASSWORD="$$(printf '%s\n' "$$ENV_DUMP" | grep '^DB_READONLY_PASSWORD=' | cut -d= -f2-)"; \
+	fi; \
+fi; \
+if [ -z "$$DB_HOST" ]; then echo "ERROR: DB_HOST not set. Add db:<ip> to FLEET_HOSTS in .env.production.enc."; exit 1; fi; \
+if [ -z "$$DB_READONLY_PASSWORD" ]; then echo "ERROR: DB_READONLY_PASSWORD not set. Add to .env.production.enc (use 'make secrets-edit ENV=production')."; exit 1; fi; \
+if [ -n "$(1)" ] && [ -z "$$DB_PASSWORD" ]; then echo "ERROR: DB_PASSWORD (admin) not set. Needed to apply the readonly role."; exit 1; fi; \
+export DB_HOST DB_PASSWORD DB_READONLY_PASSWORD
+endef
+
+# Run once to create the readonly role on prod. Rerun only to rotate the
+# password (the SQL is idempotent).
+setup-readonly-user:
+	$(check-ssh-key)
+	@$(call resolve-db-and-readonly-env,admin); \
+	DB_HOST="$$DB_HOST" \
+	DB_PASSWORD="$$DB_PASSWORD" \
+	DB_READONLY_PASSWORD="$$DB_READONLY_PASSWORD" \
+	SSH_KEY="$(SSH_KEY)" \
+	./deploy/scripts/setup-readonly-user.sh
+
+# Interactive read-only psql session on prod.
+# Usage: make db-psql
+db-psql:
+	$(check-ssh-key)
+	@$(call resolve-db-and-readonly-env); \
+	echo "Connecting to $$DB_HOST as readonly (statement_timeout=30s — 'SET statement_timeout=0' to disable)..."; \
+	ssh -i $(SSH_KEY) -t deploy@$$DB_HOST \
+	  "docker exec -it -e PGPASSWORD='$$DB_READONLY_PASSWORD' -e PGOPTIONS='-c statement_timeout=30000' 143-postgres-1 \
+	     psql -U readonly -d onefortythree"
+
+# One-shot read-only query. Prints results to stdout. Bounded by a 30s
+# statement timeout (connection-level PGOPTIONS).
+# Usage: make db-query Q='SELECT id,status FROM sessions ORDER BY created_at DESC LIMIT 5'
+#
+# The query text is passed through a target-specific exported env var so
+# shell metacharacters inside Q (quotes, semicolons, backticks) cannot
+# escape into the recipe shell. Note: Make still eats single `$` — use
+# `$$` on the command line for a literal dollar sign (e.g. `$$1`, `$$foo`).
+db-query: export DB_QUERY_SQL := $(Q)
+db-query:
+	@test -n "$$DB_QUERY_SQL" || { echo "Usage: make db-query Q='SELECT ...'"; exit 1; }
+	$(check-ssh-key)
+	@$(call resolve-db-and-readonly-env); \
+	printf '%s\n' "$$DB_QUERY_SQL" | ssh -i $(SSH_KEY) deploy@$$DB_HOST \
+	  "docker exec -i -e PGPASSWORD='$$DB_READONLY_PASSWORD' -e PGOPTIONS='-c statement_timeout=30000' 143-postgres-1 \
+	     psql -U readonly -d onefortythree -v ON_ERROR_STOP=1"
