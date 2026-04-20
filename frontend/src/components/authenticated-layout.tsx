@@ -92,6 +92,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const {
     user,
     isLoading,
+    isFetching,
     isAuthenticated,
     isUnauthorized,
     isTransientError,
@@ -165,11 +166,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           <Button
             variant="outline"
             size="sm"
+            disabled={isFetching}
             onClick={() => {
               void refetchUser();
             }}
           >
-            Try again
+            {isFetching ? "Retrying…" : "Try again"}
           </Button>
         </div>
       </div>

@@ -20,7 +20,7 @@ function isUnauthorizedError(err: unknown): boolean {
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["auth", "me"],
     queryFn: () => api.auth.me(),
     // Only treat a confirmed 401 as terminal. Network blips and 5xx
@@ -51,6 +51,7 @@ export function useAuth() {
   return {
     user: data?.data ?? null,
     isLoading,
+    isFetching,
     isAuthenticated: !!data?.data,
     isUnauthorized,
     isTransientError,

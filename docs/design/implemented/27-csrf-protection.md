@@ -202,6 +202,8 @@ This means:
 - **Public auth routes** (`/auth/providers`, `/auth/github/*`, `/auth/google/*`, `/auth/register`, `/auth/login`): No CSRF (pre-authentication)
 - **All protected routes:** CSRF enforced on POST/PUT/PATCH/DELETE
 
+The auth middleware now also performs sliding-window session refresh: when a cookie-based session is within the refresh window of its expiry, `expires_at` is pushed back out to the full session TTL and the session cookie is reissued. The CSRF cookie is re-emitted in lockstep via `ExtendCSRFCookie`, which preserves the existing signed token value when valid, so an active user never ends up with a live session but an expired CSRF cookie.
+
 ### 4. CORS Update (`internal/api/middleware/cors.go`)
 
 Allow the CSRF header in preflight responses:

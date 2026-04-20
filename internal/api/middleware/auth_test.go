@@ -439,6 +439,8 @@ func TestAuth(t *testing.T) {
 				require.Equal(t, "stale-token", refreshed.Value, "reissued cookie should carry the same opaque token")
 				require.Equal(t, int(SessionTTL.Seconds()), refreshed.MaxAge, "reissued cookie should use the full TTL")
 				require.True(t, refreshed.HttpOnly, "reissued cookie should stay HttpOnly")
+				require.Equal(t, http.SameSiteLaxMode, refreshed.SameSite, "reissued cookie should stay SameSite=Lax")
+				require.False(t, refreshed.Secure, "plain httptest request should not set Secure on reissued cookie")
 				require.NotNil(t, csrf, "CSRF cookie should be extended in lockstep with session refresh")
 				require.Equal(t, int(SessionTTL.Seconds()), csrf.MaxAge, "CSRF cookie MaxAge should match session TTL")
 			},
