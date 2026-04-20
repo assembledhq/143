@@ -128,6 +128,16 @@ func TestComputeNextRunAt(t *testing.T) {
 	bad = Automation{ScheduleType: "event"}
 	_, err = bad.ComputeNextRunAt(from)
 	require.Error(t, err)
+
+	// Empty timezone on a cron schedule defaults to UTC so legacy rows
+	// imported without an explicit zone still fire correctly.
+	cronNoTz := Automation{
+		ScheduleType:   AutomationScheduleCron,
+		CronExpression: &expr,
+	}
+	got, err = cronNoTz.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC), got)
 }
 
 func TestValidateAutomationRunStatus(t *testing.T) {

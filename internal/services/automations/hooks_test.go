@@ -2,6 +2,7 @@ package automations
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -142,4 +143,50 @@ func TestAutomationHooks_OnSessionComplete_AlreadyTerminalIsSafeNoOp(t *testing.
 	require.NoError(t, err, "a lost-race transition must not surface as an error")
 	require.Len(t, store.calls, 1, "the hook still attempts the conditional transition")
 	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
+}
+
+func TestAutomationHooks_OnSessionComplete_TransitionErrorWraps(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("db down")
+	store := &fakeAutomationRunStore{err: sentinel}
+	h := NewAutomationHooks(store, zerolog.Nop())
+
+	runID := uuid.New()
+	session := &models.Session{OrgID: uuid.New(), AutomationRunID: &runID}
+	err := h.OnSessionComplete(context.Background(), session, "completed")
+	require.Error(t, err)
+	require.ErrorIs(t, err, sentinel, "store errors must propagate so the worker can retry/log")
+}
+
+// TestDeriveSummary_FallbackLabels covers the static label arms used when the
+// session has neither a ResultSummary nor (for failures) an Error string. The
+// audit log relies on these defaults so a row never lands with an empty
+// result_summary.
+func TestDeriveSummary_FallbackLabels(t *testing.T) {
+	t.Parallel()
+
+	t.Run("completed without summary", func(t *testing.T) {
+		t.Parallel()
+		got := deriveSummary(&models.Session{}, "completed")
+		require.NotNil(t, got)
+		require.Equal(t, "Agent session completed.", *got)
+	})
+
+	t.Run("failed without summary or error", func(t *testing.T) {
+		t.Parallel()
+		got := deriveSummary(&models.Session{}, "failed")
+		require.NotNil(t, got)
+		require.Equal(t, "Agent session failed.", *got)
+	})
+
+	t.Run("unexpected status falls through to generic label", func(t *testing.T) {
+		t.Parallel()
+		// Defensive default: if a future caller drops in a new terminal
+		// status without updating the switch, we still produce a non-empty
+		// summary that names the status.
+		got := deriveSummary(&models.Session{}, "weird")
+		require.NotNil(t, got)
+		require.Contains(t, *got, "weird")
+	})
 }

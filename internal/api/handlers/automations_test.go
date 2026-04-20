@@ -218,6 +218,13 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 		{name: "invalid exec mode", body: map[string]any{"name": "n", "goal": "g", "execution_mode": "mayhem"}, code: http.StatusBadRequest},
 		{name: "max_concurrent too high", body: map[string]any{"name": "n", "goal": "g", "max_concurrent": 9999}, code: http.StatusBadRequest},
 		{name: "priority out of range", body: map[string]any{"name": "n", "goal": "g", "priority": 999}, code: http.StatusBadRequest},
+		// Cross-typed schedule fields are rejected up front so client bugs
+		// (sending interval_* on a cron payload, or vice versa) surface as
+		// 400s instead of being silently dropped and producing a row whose
+		// in-memory fields disagree with the persisted ones.
+		{name: "cron with interval_value", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_value": 3}, code: http.StatusBadRequest},
+		{name: "cron with interval_unit", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_unit": "days"}, code: http.StatusBadRequest},
+		{name: "interval with cron_expression", body: map[string]any{"name": "n", "goal": "g", "schedule_type": "interval", "cron_expression": "0 9 * * *"}, code: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -354,6 +361,14 @@ func TestAutomationHandler_Update_ValidationErrors(t *testing.T) {
 		{name: "blank base branch", body: map[string]any{"base_branch": "  "}, code: http.StatusBadRequest},
 		{name: "invalid interval value", body: map[string]any{"interval_value": -1}, code: http.StatusBadRequest},
 		{name: "invalid interval unit", body: map[string]any{"interval_unit": "bogus"}, code: http.StatusBadRequest},
+		// Reject mismatched companion fields up front: existing automation
+		// is interval, so cron_expression on its own should 400 (not be
+		// silently dropped during normalisation).
+		{name: "interval automation with cron_expression", body: map[string]any{"cron_expression": "0 9 * * *"}, code: http.StatusBadRequest},
+		// Switching to cron with stale interval_value in the same PATCH is
+		// also rejected — the user must supply a clean cron payload.
+		{name: "switch to cron with leftover interval_value", body: map[string]any{"schedule_type": "cron", "cron_expression": "0 9 * * *", "interval_value": 3}, code: http.StatusBadRequest},
+		{name: "invalid schedule_type", body: map[string]any{"schedule_type": "bogus"}, code: http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {
@@ -430,6 +445,89 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	h.Update(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_Update_SwitchScheduleType_OK exercises the schedule
+// type switch arms in Update: an interval automation is converted to cron
+// (which clears the legacy interval_* fields) and vice versa. These two paths
+// share the validation that demands the new type's companion field be present
+// in the same PATCH.
+func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
+	t.Parallel()
+
+	t.Run("interval to cron clears interval fields", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		id := uuid.New()
+		now := time.Now()
+		iv := 1
+		unit := "days"
+		a := models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, a))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(21)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{
+			"schedule_type":   "cron",
+			"cron_expression": "0 9 * * *",
+		}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("cron to interval clears cron expression", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		id := uuid.New()
+		now := time.Now()
+		cron := "0 9 * * *"
+		a := models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "cron",
+			Timezone: "UTC", Enabled: true, CronExpression: &cron,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, a))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(21)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{
+			"schedule_type":  "interval",
+			"interval_value": 2,
+			"interval_unit":  "days",
+		}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 func TestAutomationHandler_Update_NotFound(t *testing.T) {

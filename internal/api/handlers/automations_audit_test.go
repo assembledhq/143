@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -141,5 +142,18 @@ func TestMarshalAuditDetails(t *testing.T) {
 		require.NoError(t, json.Unmarshal(got, &decoded))
 		require.Equal(t, "x", decoded["name"])
 		require.Equal(t, float64(3), decoded["count"])
+	})
+
+	t.Run("unmarshalable payload returns nil and logs", func(t *testing.T) {
+		t.Parallel()
+		// Channels are not JSON-marshalable, so this exercises the error
+		// branch. We verify both that the return is nil (so the audit row
+		// stores SQL NULL rather than corrupt bytes) and that a log entry
+		// was written so silent data loss is observable.
+		var buf bytes.Buffer
+		bufLogger := zerolog.New(&buf)
+		details := map[string]any{"unencodable": make(chan int)}
+		require.Nil(t, marshalAuditDetails(bufLogger, details))
+		require.Contains(t, buf.String(), "marshal audit details")
 	})
 }
