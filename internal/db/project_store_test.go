@@ -57,6 +57,9 @@ func TestProjectStore_Create(t *testing.T) {
 
 	// Create wraps insert + join-table writes in a transaction.
 	mock.ExpectBegin()
+	// 22 named args: projects INSERT columns minus the schedule fields that
+	// moved to the automations table in Phase 3 (schedule_enabled,
+	// schedule_interval, schedule_unit, next_run_at).
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(anyArgs(22)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(projectID, now, now))
@@ -270,6 +273,8 @@ func TestProjectStore_Update(t *testing.T) {
 	orgID := uuid.New()
 	projectID := uuid.New()
 
+	// 20 named args: the projects UPDATE SET list after Phase 3 removed
+	// the four per-project schedule columns.
 	mock.ExpectExec("UPDATE projects SET").
 		WithArgs(anyArgs(20)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

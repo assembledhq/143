@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -54,27 +55,21 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 
 	track("name", old.Name, new_.Name)
 	track("goal", old.Goal, new_.Goal)
-	track("scope", derefString(old.Scope), derefString(new_.Scope))
-	track("agent_type", derefString(old.AgentType), derefString(new_.AgentType))
-	track("model_override", derefString(old.ModelOverride), derefString(new_.ModelOverride))
+	// Optional fields use tri-state (nil vs set) so nil→"" and 0→nil
+	// transitions are visible in the audit diff rather than collapsed away.
+	track("scope", optString(old.Scope), optString(new_.Scope))
+	track("agent_type", optString(old.AgentType), optString(new_.AgentType))
+	track("model_override", optString(old.ModelOverride), optString(new_.ModelOverride))
 	track("execution_mode", old.ExecutionMode, new_.ExecutionMode)
 	track("max_concurrent", old.MaxConcurrent, new_.MaxConcurrent)
 	track("base_branch", old.BaseBranch, new_.BaseBranch)
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
-	track("interval_value", derefInt(old.IntervalValue), derefInt(new_.IntervalValue))
-	track("interval_unit", derefString(old.IntervalUnit), derefString(new_.IntervalUnit))
-	track("cron_expression", derefString(old.CronExpression), derefString(new_.CronExpression))
+	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
+	track("interval_unit", optString(old.IntervalUnit), optString(new_.IntervalUnit))
+	track("cron_expression", optString(old.CronExpression), optString(new_.CronExpression))
 	track("timezone", old.Timezone, new_.Timezone)
 	track("priority", old.Priority, new_.Priority)
-
-	oldRepo, newRepo := "", ""
-	if old.RepositoryID != nil {
-		oldRepo = old.RepositoryID.String()
-	}
-	if new_.RepositoryID != nil {
-		newRepo = new_.RepositoryID.String()
-	}
-	track("repository_id", oldRepo, newRepo)
+	track("repository_id", optUUIDString(old.RepositoryID), optUUIDString(new_.RepositoryID))
 
 	return changes
 }
@@ -95,16 +90,27 @@ func marshalAuditDetails(logger zerolog.Logger, details map[string]any) json.Raw
 	return b
 }
 
-func derefString(p *string) string {
+// optString/optInt/optUUIDString return nil for nil pointers and the
+// dereferenced value otherwise. Audit diffs use this so a nil→"" transition
+// (e.g. clearing an optional field) is distinguishable from a no-op; a plain
+// deref would collapse both sides to "" and hide the change.
+func optString(p *string) any {
 	if p == nil {
-		return ""
+		return nil
 	}
 	return *p
 }
 
-func derefInt(p *int) int {
+func optInt(p *int) any {
 	if p == nil {
-		return 0
+		return nil
 	}
 	return *p
+}
+
+func optUUIDString(p *uuid.UUID) any {
+	if p == nil {
+		return nil
+	}
+	return p.String()
 }

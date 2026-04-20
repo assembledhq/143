@@ -92,6 +92,58 @@ func TestAutomationAuditDiff_NoChanges(t *testing.T) {
 	require.Empty(t, changes, "identical automations must yield an empty diff")
 }
 
+// TestAutomationAuditDiff_OptionalFieldsTriState pins the nil-vs-empty
+// distinction: clearing an optional string (nil → "" or vice versa) must
+// show up as a change so the audit timeline doesn't silently collapse the
+// transition. Earlier, derefString-based diff treated nil and "" identically.
+func TestAutomationAuditDiff_OptionalFieldsTriState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil to empty string counts as change", func(t *testing.T) {
+		t.Parallel()
+		empty := ""
+		old := models.Automation{Scope: nil}
+		new_ := models.Automation{Scope: &empty}
+		changes := automationAuditDiff(&old, &new_)
+		require.Contains(t, changes, "scope")
+		scope := changes["scope"].(map[string]any)
+		require.Nil(t, scope["before"])
+		require.Equal(t, "", scope["after"])
+	})
+
+	t.Run("set to nil counts as change", func(t *testing.T) {
+		t.Parallel()
+		expr := "0 9 * * 1"
+		old := models.Automation{CronExpression: &expr}
+		new_ := models.Automation{CronExpression: nil}
+		changes := automationAuditDiff(&old, &new_)
+		require.Contains(t, changes, "cron_expression")
+		c := changes["cron_expression"].(map[string]any)
+		require.Equal(t, "0 9 * * 1", c["before"])
+		require.Nil(t, c["after"])
+	})
+
+	t.Run("nil interval to zero counts as change", func(t *testing.T) {
+		t.Parallel()
+		zero := 0
+		old := models.Automation{IntervalValue: nil}
+		new_ := models.Automation{IntervalValue: &zero}
+		changes := automationAuditDiff(&old, &new_)
+		require.Contains(t, changes, "interval_value")
+		c := changes["interval_value"].(map[string]any)
+		require.Nil(t, c["before"])
+		require.Equal(t, 0, c["after"])
+	})
+
+	t.Run("both nil does not surface a change", func(t *testing.T) {
+		t.Parallel()
+		old := models.Automation{Scope: nil}
+		new_ := models.Automation{Scope: nil}
+		changes := automationAuditDiff(&old, &new_)
+		require.NotContains(t, changes, "scope")
+	})
+}
+
 func TestAutomationAuditDiff_RepositoryIDTransitions(t *testing.T) {
 	t.Parallel()
 

@@ -20,13 +20,17 @@ import type {
 
 interface AutomationStatsCardProps {
   automationId: string;
-  /** Window length in days. Defaults to 30. Must be <= 90. */
-  days?: number;
 }
+
+// Window length for the runs chart. Fixed at 30 days — the backend caps the
+// window at 90 and we haven't surfaced a picker yet, so a prop would advertise
+// flexibility the UI doesn't actually offer.
+const STATS_WINDOW_DAYS = 30;
 
 interface ChartDatum {
   day: string;
   label: string;
+  tooltipLabel: string;
   completed: number;
   failed: number;
   completed_noop: number;
@@ -45,6 +49,10 @@ function fillGaps(
 ): ChartDatum[] {
   const byDay = new Map<string, AutomationRunStatsBucket>();
   for (const b of buckets) {
+    // Key is the YYYY-MM-DD prefix of the bucket's ISO timestamp. This matches
+    // the backend's date_trunc('day', triggered_at AT TIME ZONE 'UTC') — if
+    // that SQL ever switches timezones, this slice must switch with it or
+    // buckets will silently miss their slot in the gap-filled output.
     byDay.set(b.bucket.slice(0, 10), b);
   }
   const out: ChartDatum[] = [];
@@ -63,9 +71,16 @@ function fillGaps(
   while (cur < end) {
     const key = cur.toISOString().slice(0, 10);
     const b = byDay.get(key);
+    // Buckets are UTC day boundaries — the backend aggregates by UTC so
+    // labels must match or a user viewing late evening local time would
+    // see "today" under yesterday's bar. The tooltip spells out UTC so the
+    // bucket boundary convention isn't ambiguous.
+    const mm = cur.getUTCMonth() + 1;
+    const dd = cur.getUTCDate();
     out.push({
       day: key,
-      label: `${cur.getUTCMonth() + 1}/${cur.getUTCDate()}`,
+      label: `${mm}/${dd}`,
+      tooltipLabel: `${mm}/${dd} (UTC)`,
       completed: b?.completed ?? 0,
       failed: b?.failed ?? 0,
       completed_noop: b?.completed_noop ?? 0,
@@ -92,6 +107,7 @@ interface TooltipPayloadEntry {
   dataKey: string;
   color: string;
   name: string;
+  payload?: ChartDatum;
 }
 
 interface ChartTooltipProps {
@@ -103,10 +119,23 @@ interface ChartTooltipProps {
 function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
   if (!active || !payload?.length) return null;
   const total = payload.reduce((acc, p) => acc + (p.value ?? 0), 0);
-  if (total === 0) return null;
+  // Prefer the row's tooltipLabel (e.g. "4/19 (UTC)") so the user sees the
+  // bucket timezone explicitly; fall back to the XAxis label if unset.
+  const headerLabel = payload[0]?.payload?.tooltipLabel ?? label;
+  if (total === 0) {
+    // A gap-filled zero day: show a minimal tooltip so the user gets feedback
+    // on hover. Returning null here would make the cursor highlight appear
+    // without any explanation and read like a broken tooltip.
+    return (
+      <div className="rounded-lg border bg-background px-3 py-2 shadow-sm text-xs">
+        <p className="font-medium text-foreground mb-1">{headerLabel}</p>
+        <p className="text-muted-foreground">No runs</p>
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg border bg-background px-3 py-2 shadow-sm text-xs">
-      <p className="font-medium text-foreground mb-1">{label}</p>
+      <p className="font-medium text-foreground mb-1">{headerLabel}</p>
       {payload.map((p) => (
         <div key={p.dataKey} className="flex items-center gap-2">
           <span
@@ -121,7 +150,7 @@ function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
   );
 }
 
-export function AutomationStatsCard({ automationId, days = 30 }: AutomationStatsCardProps) {
+export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) {
   // Use a stable bucket-start-of-day window so the query key doesn't change
   // every render (which would thrash the cache). Recomputing on mount is
   // fine — the window is forward-looking from "today in UTC".
@@ -133,9 +162,9 @@ export function AutomationStatsCard({ automationId, days = 30 }: AutomationStats
       nowUtc.getUTCDate() + 1, // exclusive upper bound, one past today
     ));
     const sinceDay = new Date(untilDay);
-    sinceDay.setUTCDate(sinceDay.getUTCDate() - days);
+    sinceDay.setUTCDate(sinceDay.getUTCDate() - STATS_WINDOW_DAYS);
     return { since: sinceDay.toISOString(), until: untilDay.toISOString() };
-  }, [days]);
+  }, []);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["automation-stats", automationId, since, until],
@@ -160,13 +189,19 @@ export function AutomationStatsCard({ automationId, days = 30 }: AutomationStats
       <CardContent className="p-4">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h3 className="text-sm font-medium">Runs · last {days} days</h3>
+            <h3 className="text-sm font-medium">Runs · last {STATS_WINDOW_DAYS} days</h3>
             {stats && (
               <p className="text-xs text-muted-foreground mt-0.5">
                 {stats.totals.total} total · {successPct}% success · avg {formatDuration(stats.totals.avg_duration_seconds)}
               </p>
             )}
           </div>
+          <span
+            className="text-[10px] uppercase tracking-wide text-muted-foreground"
+            title="Day buckets use UTC boundaries so aggregates match the backend."
+          >
+            UTC
+          </span>
         </div>
 
         {isLoading ? (
@@ -177,7 +212,7 @@ export function AutomationStatsCard({ automationId, days = 30 }: AutomationStats
           </div>
         ) : !hasAnyRun ? (
           <div className="h-40 flex items-center justify-center text-sm text-muted-foreground">
-            No runs in the last {days} days.
+            No runs in the last {STATS_WINDOW_DAYS} days.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={180}>

@@ -302,10 +302,10 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgI
 
 // CronFixupFailure describes a cron-scheduled automation whose next_run_at
 // could not be recomputed during a bulk resume. The row is still flipped to
-// enabled=true (the SQL UPDATE has already committed by the time the caller
-// sees this), but its next_run_at stays NULL so the scheduler will not fire
-// it. Callers should surface these so the user knows why a "resumed"
-// automation isn't running.
+// enabled=true by the bulk UPDATE and that change is committed alongside the
+// rest of the transaction, but its next_run_at stays NULL so the scheduler
+// will not fire it. Callers should surface these so the user knows why a
+// "resumed" automation isn't running.
 type CronFixupFailure struct {
 	AutomationID uuid.UUID
 	Reason       string
@@ -355,6 +355,12 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	// Interval: compute next_run_at = now() + interval directly in SQL.
 	// Cron: leave next_run_at NULL here and fix up below in Go.
 	// Pause: clear next_run_at so the scheduler skips the row.
+	//
+	// NOTE: the ELSE NULL branch is load-bearing for cron — the Go-side
+	// loop below fixes those up before the tx commits. Any *new* schedule
+	// kind added to AutomationScheduleType must either extend this CASE or
+	// add its own post-update pass, otherwise resuming it here will silently
+	// leave next_run_at NULL and the scheduler will skip it forever.
 	var nextRunAtExpr string
 	if enabled {
 		nextRunAtExpr = `CASE
@@ -414,7 +420,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE automations SET next_run_at = @next_run_at, updated_at = now()
-				WHERE id = @id AND org_id = @org_id`,
+				WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
 			pgx.NamedArgs{"id": a.ID, "org_id": orgID, "next_run_at": next},
 		); err != nil {
 			return nil, nil, fmt.Errorf("update cron next_run_at: %w", err)
@@ -656,6 +662,13 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 // the worker handler's pending → running transition safe under at-least-once
 // job delivery: two workers each holding a duplicate job will both pass the
 // "is pending?" check, so the transition itself must be the source of truth.
+//
+// completedAt and resultSummary are written unconditionally on a successful
+// transition, so callers must pass the final values every time. For
+// intermediate transitions (e.g. pending → running) pass nil for both; the row
+// already has NULL in those columns at that point, so the rewrite is harmless.
+// For a terminal transition, pass the real completion time and a non-empty
+// summary — passing nil would clear a previously-populated summary.
 func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
 	query := `UPDATE automation_runs SET status = @to_status, completed_at = @completed_at, result_summary = @result_summary, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = @from_status`

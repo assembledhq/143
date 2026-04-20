@@ -103,6 +103,32 @@ func TestAutomationHooks_OnSessionComplete_FailedPrefersErrorWhenNoSummary(t *te
 	require.Equal(t, errMsg, *store.calls[0].resultSummary)
 }
 
+// TestAutomationHooks_OnSessionComplete_NeedsHumanGuidanceMapsToFailed
+// pins the mapping that matches pm.ProjectHooks: needs_human_guidance is
+// terminal from the orchestrator's perspective, so the automation_run row
+// must flip to failed (with a descriptive summary) rather than stay stuck
+// in "running" until the 1-hour reaper sweeps it.
+func TestAutomationHooks_OnSessionComplete_NeedsHumanGuidanceMapsToFailed(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeAutomationRunStore{transitioned: true}
+	h := NewAutomationHooks(store, zerolog.Nop())
+
+	runID := uuid.New()
+	session := &models.Session{
+		OrgID:           uuid.New(),
+		AutomationRunID: &runID,
+	}
+
+	err := h.OnSessionComplete(context.Background(), session, "needs_human_guidance")
+	require.NoError(t, err)
+	require.Len(t, store.calls, 1)
+	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
+	require.Equal(t, models.AutomationRunStatusFailed, store.calls[0].toStatus)
+	require.NotNil(t, store.calls[0].resultSummary)
+	require.Equal(t, "Agent run needs human guidance.", *store.calls[0].resultSummary)
+}
+
 func TestAutomationHooks_OnSessionComplete_IgnoresNonTerminal(t *testing.T) {
 	t.Parallel()
 
@@ -178,6 +204,13 @@ func TestDeriveSummary_FallbackLabels(t *testing.T) {
 		got := deriveSummary(&models.Session{}, "failed")
 		require.NotNil(t, got)
 		require.Equal(t, "Agent session failed.", *got)
+	})
+
+	t.Run("needs_human_guidance falls back to descriptive label", func(t *testing.T) {
+		t.Parallel()
+		got := deriveSummary(&models.Session{}, "needs_human_guidance")
+		require.NotNil(t, got)
+		require.Equal(t, "Agent run needs human guidance.", *got)
 	})
 
 	t.Run("unexpected status falls through to generic label", func(t *testing.T) {

@@ -516,6 +516,14 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CronExpression != nil {
 		trimmed := strings.TrimSpace(*req.CronExpression)
+		// Clearing cron_expression on a cron automation (without switching
+		// schedule_type in the same PATCH) would leave the row unschedulable.
+		// ComputeNextRunAt would eventually reject it, but with a generic
+		// INVALID_SCHEDULE message — surface the precise reason here instead.
+		if trimmed == "" && effectiveScheduleType == models.AutomationScheduleCron {
+			writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "cron_expression cannot be cleared on a cron automation; switch schedule_type=interval in the same request to change schedule types")
+			return
+		}
 		if trimmed != "" {
 			if err := models.ValidateCronExpression(trimmed); err != nil {
 				writeError(w, r, http.StatusBadRequest, "INVALID_CRON_EXPRESSION", err.Error())
@@ -788,6 +796,24 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationRun]{Data: run})
 }
 
+// BulkCronFixupFailure is the wire representation of a cron row that was
+// resumed but whose next_run_at could not be recomputed. Surfacing these to the
+// client lets the UI explain why a "resumed" automation isn't firing instead
+// of the user having to scrape server logs.
+type BulkCronFixupFailure struct {
+	AutomationID string `json:"automation_id"`
+	Reason       string `json:"reason"`
+}
+
+// BulkResponse is the JSON body returned by the bulk endpoint. `affected` is
+// the set of automation IDs that actually changed (filtered by the store to
+// exclude cross-tenant / already-deleted IDs); `fixup_failures` is non-empty
+// only for resume with cron rows whose cron_expression no longer parses.
+type BulkResponse struct {
+	Affected      []string               `json:"affected"`
+	FixupFailures []BulkCronFixupFailure `json:"fixup_failures"`
+}
+
 // Bulk handles bulk pause/resume/delete operations.
 func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -810,6 +836,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 
 	var auditAction models.AuditAction
 	var affected []uuid.UUID
+	var fixupFailures []db.CronFixupFailure
 	switch req.Action {
 	case "pause":
 		ids, _, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
@@ -820,7 +847,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		affected = ids
 		auditAction = models.AuditActionAutomationPaused
 	case "resume":
-		ids, fixupFailures, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
+		ids, failures, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to resume automations", err)
 			return
@@ -828,7 +855,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		// Cron-fixup failures: the row was resumed but its next_run_at is
 		// NULL, so the scheduler will skip it. Log per-automation so an
 		// operator chasing "why isn't this firing?" can grep by ID.
-		for _, f := range fixupFailures {
+		for _, f := range failures {
 			h.logger.Warn().
 				Str("automation_id", f.AutomationID.String()).
 				Str("org_id", orgID.String()).
@@ -836,6 +863,7 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 				Msg("cron automation resumed without a computable next_run_at; scheduler will skip it until cron_expression is fixed")
 		}
 		affected = ids
+		fixupFailures = failures
 		auditAction = models.AuditActionAutomationResumed
 	case "delete":
 		ids, err := h.automationStore.BulkSoftDelete(r.Context(), orgID, req.AutomationIDs)
@@ -865,7 +893,20 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, bulkDetails)
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	resp := BulkResponse{
+		Affected:      make([]string, 0, len(affected)),
+		FixupFailures: make([]BulkCronFixupFailure, 0, len(fixupFailures)),
+	}
+	for _, id := range affected {
+		resp.Affected = append(resp.Affected, id.String())
+	}
+	for _, f := range fixupFailures {
+		resp.FixupFailures = append(resp.FixupFailures, BulkCronFixupFailure{
+			AutomationID: f.AutomationID.String(),
+			Reason:       f.Reason,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ListRuns returns paginated runs for an automation.
@@ -925,15 +966,8 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the automation belongs to this org. Without this, a leaked
-	// automation UUID from another tenant could be probed via the stats
-	// endpoint (the aggregate query does filter by org_id, but a 404 here
-	// is cheaper than an empty bucket set and removes the ambiguity).
-	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
-		return
-	}
-
+	// Validate query params before hitting the DB — a malformed since/until
+	// should return 400 without burning an automations lookup.
 	now := time.Now().UTC()
 	until := now
 	if v := r.URL.Query().Get("until"); v != "" {
@@ -959,6 +993,15 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	}
 	if until.Sub(since) > 90*24*time.Hour {
 		writeError(w, r, http.StatusBadRequest, "WINDOW_TOO_LARGE", "window must be <= 90 days")
+		return
+	}
+
+	// Verify the automation belongs to this org. Without this, a leaked
+	// automation UUID from another tenant could be probed via the stats
+	// endpoint (the aggregate query does filter by org_id, but a 404 here
+	// is cheaper than an empty bucket set and removes the ambiguity).
+	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
 		return
 	}
 

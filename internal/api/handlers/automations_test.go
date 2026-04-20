@@ -1013,7 +1013,11 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
 	rr := httptest.NewRecorder()
 	h.Bulk(rr, req)
-	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Affected, 2)
+	require.Empty(t, resp.FixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1040,7 +1044,11 @@ func TestAutomationHandler_Bulk_DeleteOK(t *testing.T) {
 	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
 	rr := httptest.NewRecorder()
 	h.Bulk(rr, req)
-	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Affected, 1)
+	require.Empty(t, resp.FixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1231,18 +1239,14 @@ func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
 
 	orgID := uuid.New()
 	id := uuid.New()
-	now := time.Now()
-	a := models.Automation{
-		ID: id, OrgID: orgID, Name: "a", Goal: "g",
-		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
-		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
-	}
+
+	// Param validation now runs BEFORE the automation lookup, so the
+	// invalid-window branches must short-circuit without touching the DB.
+	// No ExpectQuery calls here: mock.ExpectationsWereMet() below fails if
+	// the handler regresses and burns a SELECT on malformed params.
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 
 	// since after until -> 400.
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
 	url := "/api/v1/automations/" + id.String() + "/stats?since=2026-05-01T00:00:00Z&until=2026-04-01T00:00:00Z"
 	req := newAutomationRequest(t, http.MethodGet, url, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr := httptest.NewRecorder()
@@ -1250,33 +1254,24 @@ func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
 	// window > 90 days -> 400.
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
 	url2 := "/api/v1/automations/" + id.String() + "/stats?since=2026-01-01T00:00:00Z&until=2026-06-01T00:00:00Z"
 	req2 := newAutomationRequest(t, http.MethodGet, url2, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr2 := httptest.NewRecorder()
 	h.Stats(rr2, req2)
 	require.Equal(t, http.StatusBadRequest, rr2.Code)
 
-	// Malformed since -> 400 (no automation lookup because it happens after).
-	// The handler fetches automation first, so expect that lookup.
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
+	// Malformed since -> 400 INVALID_SINCE.
 	url3 := "/api/v1/automations/" + id.String() + "/stats?since=not-a-date"
 	req3 := newAutomationRequest(t, http.MethodGet, url3, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr3 := httptest.NewRecorder()
 	h.Stats(rr3, req3)
 	require.Equal(t, http.StatusBadRequest, rr3.Code)
+	require.Contains(t, rr3.Body.String(), "INVALID_SINCE")
 
 	// Malformed until -> 400 INVALID_UNTIL. The handler parses until before
 	// since, so a junk until short-circuits before the window-size and
 	// since-ordering checks can fire — this pins that precedence so a future
 	// reordering doesn't silently fall through to a confusing INVALID_WINDOW.
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
 	url4 := "/api/v1/automations/" + id.String() + "/stats?until=not-a-date"
 	req4 := newAutomationRequest(t, http.MethodGet, url4, nil, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr4 := httptest.NewRecorder()

@@ -52,11 +52,16 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 	switch status {
 	case "completed":
 		runStatus = models.AutomationRunStatusCompleted
-	case "failed":
+	case "failed", "needs_human_guidance":
+		// needs_human_guidance is terminal from the orchestrator's
+		// perspective — a human response starts a fresh session rather than
+		// re-entering this hook — so map it onto failed here too, matching
+		// pm.ProjectHooks. Without this the automation_run would stay
+		// "running" until the 1-hour reaper swept it.
 		runStatus = models.AutomationRunStatusFailed
 	default:
 		// Ignore non-terminal updates; the automation_run will be updated
-		// when the session eventually lands in completed/failed.
+		// when the session eventually lands in a terminal status.
 		return nil
 	}
 
@@ -96,6 +101,8 @@ func deriveSummary(run *models.Session, status string) *string {
 		s = "Agent session completed."
 	case "failed":
 		s = "Agent session failed."
+	case "needs_human_guidance":
+		s = "Agent run needs human guidance."
 	default:
 		s = fmt.Sprintf("Agent session ended with status %q.", status)
 	}
