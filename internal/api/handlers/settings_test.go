@@ -65,7 +65,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil, "gpt-5-nano")
+			handler := NewSettingsHandler(store, nil, "gpt-5.4-nano")
 
 			tt.setupMock(mock, orgID)
 
@@ -88,7 +88,7 @@ func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 	defaults := map[string]string{
 		"anthropic": "sk-a••••test",
 	}
-	handler := NewSettingsHandler(nil, defaults, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, defaults, "gpt-5.4-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -98,13 +98,13 @@ func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 	require.Contains(t, w.Body.String(), "anthropic", "response should contain provider name")
 	require.Contains(t, w.Body.String(), "sk-a", "response should contain masked key prefix")
 	require.Contains(t, w.Body.String(), "platform_model", "response should contain platform_model")
-	require.Contains(t, w.Body.String(), "gpt-5-nano", "response should contain platform model name")
+	require.Contains(t, w.Body.String(), "gpt-5.4-nano", "response should contain platform model name")
 }
 
 func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, map[string]string{}, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, map[string]string{}, "gpt-5.4-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -117,13 +117,13 @@ func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 	dataMap, ok := resp["data"].(map[string]any)
 	require.True(t, ok, "data should be a map")
 	require.Empty(t, dataMap, "should return empty map when no providers configured")
-	require.Equal(t, "gpt-5-nano", resp["platform_model"], "should return platform model")
+	require.Equal(t, "gpt-5.4-nano", resp["platform_model"], "should return platform model")
 }
 
 func TestSettingsHandler_GetLLMModels(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, nil, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, nil, "gpt-5.4-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-models", nil)
 	w := httptest.NewRecorder()
@@ -132,8 +132,8 @@ func TestSettingsHandler_GetLLMModels(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
 	require.Contains(t, w.Body.String(), "anthropic", "response should contain anthropic provider")
 	require.Contains(t, w.Body.String(), "openai", "response should contain openai provider")
-	require.Contains(t, w.Body.String(), "claude-sonnet-4-5", "response should contain Claude model")
-	require.Contains(t, w.Body.String(), "gpt-4o", "response should contain OpenAI model")
+	require.Contains(t, w.Body.String(), "claude-sonnet-4-6", "response should contain Claude model")
+	require.Contains(t, w.Body.String(), "gpt-5.4-mini", "response should contain OpenAI model")
 }
 
 func TestSettingsHandler_Update(t *testing.T) {
@@ -198,7 +198,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 		},
 		{
 			name: "accepts valid llm_model",
-			body: `{"settings":{"llm_model":"gpt-4o"}}`,
+			body: `{"settings":{"llm_model":"gpt-5.4-mini"}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
@@ -215,7 +215,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 					)
 			},
 			expectedCode: http.StatusOK,
-			expectedBody: "gpt-4o",
+			expectedBody: "gpt-5.4-mini",
 		},
 		{
 			name: "returns bad request for invalid codex model in agent_config",
@@ -280,7 +280,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil, "gpt-5-nano")
+			handler := NewSettingsHandler(store, nil, "gpt-5.4-nano")
 
 			tt.setupMock(mock, orgID)
 

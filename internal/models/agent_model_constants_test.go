@@ -53,8 +53,8 @@ func TestLLMModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, []string{
-		"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
-		"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini",
+		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
+		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -66,15 +66,15 @@ func TestLLMModelsByProvider(t *testing.T) {
 	require.Contains(t, byProvider, "anthropic")
 	require.Contains(t, byProvider, "openai")
 	require.Contains(t, byProvider, "openrouter")
-	require.Equal(t, []string{"claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"}, byProvider["anthropic"])
-	require.Equal(t, []string{"gpt-4o", "gpt-4o-mini", "gpt-5.4-mini", "gpt-5-nano", "o3-mini"}, byProvider["openai"])
+	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
+	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
 }
 
 func TestIsSupportedLLMModel(t *testing.T) {
 	t.Parallel()
 
-	require.True(t, IsSupportedLLMModel("claude-sonnet-4-5"), "should accept valid LLM model")
-	require.True(t, IsSupportedLLMModel("gpt-4o"), "should accept valid OpenAI model")
+	require.True(t, IsSupportedLLMModel("claude-sonnet-4-6"), "should accept valid LLM model")
+	require.True(t, IsSupportedLLMModel("gpt-5.4-mini"), "should accept valid OpenAI model")
 	require.False(t, IsSupportedLLMModel("invalid-model"), "should reject invalid model")
 	require.False(t, IsSupportedLLMModel(""), "should reject empty string")
 }
@@ -167,7 +167,7 @@ func TestValidateSettingsModels(t *testing.T) {
 		{
 			name: "accepts valid llm model",
 			settings: OrgSettings{
-				LLMModel: "gpt-4o",
+				LLMModel: "gpt-5.4-mini",
 			},
 		},
 		{

@@ -23,43 +23,33 @@ type providerModel struct {
 // so it serves as a useful last-resort fallback.
 var defaultChains = map[ModelName][]providerModel{
 	// Anthropic models — primary: Anthropic API, cross-provider fallback, then OpenRouter.
-	"claude-opus-4-6": {
-		{ProviderName: "anthropic", ModelID: "claude-opus-4-6"},
-		{ProviderName: "openai_chat", ModelID: "gpt-4o"},
-		{ProviderName: "openai_responses", ModelID: "gpt-4o"},
-		{ProviderName: "openrouter", ModelID: "anthropic/claude-opus-4-6"},
+	// Ordered most-capable → least-capable within the Claude 4 family.
+	"claude-opus-4-7": {
+		{ProviderName: "anthropic", ModelID: "claude-opus-4-7"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "openrouter", ModelID: "anthropic/claude-opus-4-7"},
 	},
-	"claude-sonnet-4-5": {
-		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-5-20250929"},
-		{ProviderName: "openai_chat", ModelID: "gpt-4o"},
-		{ProviderName: "openai_responses", ModelID: "gpt-4o"},
-		{ProviderName: "openrouter", ModelID: "anthropic/claude-sonnet-4-5"},
+	"claude-sonnet-4-6": {
+		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "openrouter", ModelID: "anthropic/claude-sonnet-4-6"},
 	},
 	"claude-haiku-4-5": {
 		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
-		{ProviderName: "openai_chat", ModelID: "gpt-4o-mini"},
-		{ProviderName: "openai_responses", ModelID: "gpt-4o-mini"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
 		{ProviderName: "openrouter", ModelID: "anthropic/claude-haiku-4-5"},
 	},
 
 	// OpenAI models — primary: OpenAI (chat or responses), cross-provider fallback, then OpenRouter.
-	"gpt-4o": {
-		{ProviderName: "openai_chat", ModelID: "gpt-4o"},
-		{ProviderName: "openai_responses", ModelID: "gpt-4o"},
-		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-5-20250929"},
-		{ProviderName: "openrouter", ModelID: "openai/gpt-4o"},
-	},
-	"gpt-4o-mini": {
-		{ProviderName: "openai_chat", ModelID: "gpt-4o-mini"},
-		{ProviderName: "openai_responses", ModelID: "gpt-4o-mini"},
-		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
-		{ProviderName: "openrouter", ModelID: "openai/gpt-4o-mini"},
-	},
-	"o3-mini": {
-		{ProviderName: "openai_chat", ModelID: "o3-mini"},
-		{ProviderName: "openai_responses", ModelID: "o3-mini"},
-		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-5-20250929"},
-		{ProviderName: "openrouter", ModelID: "openai/o3-mini"},
+	// Ordered most-capable → least-capable within the gpt-5.4 family.
+	"gpt-5.4": {
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
+		{ProviderName: "openrouter", ModelID: "openai/gpt-5.4"},
 	},
 	"gpt-5.4-mini": {
 		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
@@ -67,10 +57,10 @@ var defaultChains = map[ModelName][]providerModel{
 		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
 		{ProviderName: "openrouter", ModelID: "openai/gpt-5.4-mini"},
 	},
-	"gpt-5-nano": {
-		{ProviderName: "openai_chat", ModelID: "gpt-5-nano"},
-		{ProviderName: "openai_responses", ModelID: "gpt-5-nano"},
-		{ProviderName: "openrouter", ModelID: "openai/gpt-5-nano"},
+	"gpt-5.4-nano": {
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-nano"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-nano"},
+		{ProviderName: "openrouter", ModelID: "openai/gpt-5.4-nano"},
 	},
 }
 

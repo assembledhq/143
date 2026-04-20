@@ -59,7 +59,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 			"focus_areas": ["billing", "api"],
 			"avoid_areas": ["legacy-auth"]
 		},
-		"llm_model": "gpt-4o",
+		"llm_model": "gpt-5.4-mini",
 		"priority_weights": {
 			"customer_impact": 0.40,
 			"severity": 0.30,
@@ -83,7 +83,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, "Harden billing", s.ProductContext.Direction, "should parse product_context.direction")
 	require.Equal(t, []string{"billing", "api"}, s.ProductContext.FocusAreas, "should parse product_context.focus_areas")
 	require.Equal(t, []string{"legacy-auth"}, s.ProductContext.AvoidAreas, "should parse product_context.avoid_areas")
-	require.Equal(t, "gpt-4o", s.LLMModel, "should override llm_model")
+	require.Equal(t, "gpt-5.4-mini", s.LLMModel, "should override llm_model")
 	require.Equal(t, "conservative", s.AgentAutonomy, "should override agent_autonomy")
 	require.Equal(t, 1.0, s.ConfidenceThresholds.AutoProceed, "should derive auto_proceed from conservative autonomy")
 	require.Equal(t, 0.8, s.ConfidenceThresholds.HumanReview, "should derive human_review from conservative autonomy")

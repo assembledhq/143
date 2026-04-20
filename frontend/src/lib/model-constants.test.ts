@@ -74,7 +74,7 @@ describe("model constants", () => {
 
   it("LLM_MODELS_BY_PROVIDER maps providers to their models", () => {
     expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "openrouter"]);
-    expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toContain("claude-sonnet-4-5");
-    expect(LLM_MODELS_BY_PROVIDER.openai.models).toContain("gpt-4o");
+    expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+    expect(LLM_MODELS_BY_PROVIDER.openai.models).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
   });
 });
