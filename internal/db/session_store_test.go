@@ -484,13 +484,16 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	mock.ExpectExec("UPDATE sessions SET pm_plan_id").
+	// Pinned: UpdatePMPlanID must NOT write last_activity_at. It is always
+	// called immediately after the PM session's final UpdateResult (which
+	// bumps the timestamp), so a second bump here would be redundant.
+	mock.ExpectExec(`^UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id$`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
 	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, mock.ExpectationsWereMet(), "UpdatePMPlanID must not write last_activity_at")
 }
 
 func TestSessionStore_SoftDelete(t *testing.T) {

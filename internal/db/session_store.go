@@ -330,8 +330,12 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return err
 }
 
+// UpdatePMPlanID links a session to a PM plan. Deliberately does NOT touch
+// last_activity_at: the only caller invokes this immediately after the PM
+// session's final UpdateResult (which already bumps the timestamp), so a
+// second bump here would be a redundant write on every plan creation.
 func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
-	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":         runID,
 		"org_id":     orgID,
