@@ -733,11 +733,35 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 	// Look up the session's repo to derive the same WorkDir used on the
-	// initial run (see RunAgent). Must match the original so snapshot restore
-	// lands files where the agent expects them. Best-effort: if the lookup
-	// fails we fall back to the default WorkDir and log; resume works either
-	// way because the snapshot tar uses absolute paths.
-	if slug := o.sessionRepoSlug(ctx, session); slug != "" {
+	// initial run (see RunAgent). This must match the original: the container
+	// WorkingDir and HOME are driven off WorkDir, and the snapshot tar restores
+	// files at the original absolute paths, so drifting here leaves the agent
+	// running in an empty /workspace while the checkout sits elsewhere.
+	// Treat a lookup failure as fatal — revert to idle so the user can retry.
+	slug, slugErr := o.sessionRepoSlug(ctx, session)
+	if slugErr != nil {
+		log.Error().Err(slugErr).Msg("sandbox workdir resolution failed during continue_session")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after workdir resolution failure")
+		}
+		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
+		}
+		if o.sessionMessages != nil {
+			errMsg := &models.SessionMessage{
+				SessionID:  session.ID,
+				OrgID:      session.OrgID,
+				TurnNumber: session.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
+			}
+			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+				log.Error().Err(createErr).Msg("failed to create error message for workdir resolution failure")
+			}
+		}
+		return fmt.Errorf("resolve workdir: %w", slugErr)
+	}
+	if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
@@ -991,30 +1015,30 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	return issue, repoFullName, nil
 }
 
-// sessionRepoSlug returns the repo-name slug for the session's repository, or
-// an empty string if no repo is attached. Used to pick a WorkDir that matches
-// the original run's WorkDir so snapshot restores land files where the agent
-// expects them. Errors are logged and swallowed — the fallback (empty slug →
-// default WorkDir) keeps sessions recoverable when the DB is briefly flaky.
-func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) string {
+// sessionRepoSlug returns the repo-name slug for the session's repository. The
+// returned slug drives WorkDir selection on resume and MUST match what RunAgent
+// chose originally, or the container's WorkingDir/HOME diverge from where the
+// snapshot tar restored the repo checkout. An empty slug with nil error means
+// "no repo is attached" (legitimate, falls back to default WorkDir). Any lookup
+// failure is returned as an error so the caller can surface it rather than
+// silently diverging.
+func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) (string, error) {
 	repoID := session.RepositoryID
 	if repoID == nil {
 		issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
 		if err != nil {
-			o.logger.Debug().Err(err).Str("session_id", session.ID.String()).Msg("sessionRepoSlug: fetch issue failed; falling back to default WorkDir")
-			return ""
+			return "", fmt.Errorf("fetch issue for session repo lookup: %w", err)
 		}
 		if issue.RepositoryID == nil {
-			return ""
+			return "", nil
 		}
 		repoID = issue.RepositoryID
 	}
 	repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 	if err != nil {
-		o.logger.Debug().Err(err).Str("session_id", session.ID.String()).Msg("sessionRepoSlug: fetch repo failed; falling back to default WorkDir")
-		return ""
+		return "", fmt.Errorf("fetch repo for session workdir: %w", err)
 	}
-	return SlugForRepo(repo.FullName)
+	return SlugForRepo(repo.FullName), nil
 }
 
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff

@@ -194,8 +194,9 @@ func DefaultSandboxConfig() SandboxConfig {
 
 // SlugForRepo converts a repo full name ("org/repo") into a filesystem-safe
 // slug suitable for use as a directory name (the repo portion only). Returns
-// an empty string for inputs that don't contain a "/" or resolve to an empty
-// slug; callers should treat that as "no repo known" and fall back to defaults.
+// an empty string for inputs that don't contain a "/", resolve to an empty
+// slug, or resolve to a traversal component ("." / ".."); callers should
+// treat that as "no repo known" and fall back to defaults.
 func SlugForRepo(fullName string) string {
 	_, slug, ok := strings.Cut(fullName, "/")
 	if !ok {
@@ -203,7 +204,15 @@ func SlugForRepo(fullName string) string {
 	}
 	// Replace path separators defensively — GitHub repo names don't contain "/"
 	// but the sandbox dir must be a single path component.
-	return strings.ReplaceAll(slug, "/", "-")
+	slug = strings.ReplaceAll(slug, "/", "-")
+	// Reject traversal components so /home/sandbox/<slug> can't resolve to a
+	// parent dir (e.g. "/home/sandbox/.." = "/home"). GitHub's repo-name
+	// grammar already excludes these, but this keeps the function safe for
+	// any future caller that feeds it less-trusted input.
+	if slug == "." || slug == ".." {
+		return ""
+	}
+	return slug
 }
 
 // Sandbox represents a running isolated environment for agent execution.

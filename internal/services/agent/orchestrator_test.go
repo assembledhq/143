@@ -1391,10 +1391,21 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }
 
-// TestContinueSession_SessionRepoSlug drives ContinueSession through the
-// sessionRepoSlug fallback branches by capturing the WorkDir passed to
-// provider.Create. Create is forced to fail so the test doesn't need a full
-// snapshot/restore harness; the relevant code runs before Create is invoked.
+// errForcedCreateFailure is used by tests that short-circuit provider.Create so
+// the test can inspect the SandboxConfig without running the full sandbox
+// lifecycle. Named so grep picks it up and future refactors don't silently
+// change behavior if Create's call site moves.
+var errForcedCreateFailure = errors.New("forced create failure to short-circuit test")
+
+// TestContinueSession_SessionRepoSlug exercises every branch of
+// sessionRepoSlug through ContinueSession.
+//   - The two "happy" branches (session.RepositoryID set; issue.RepositoryID
+//     set) must produce the slug-derived WorkDir and then fail at provider.Create.
+//   - The "no repo at all" branch (issue.RepositoryID == nil) must fall back to
+//     the default WorkDir and fail at Create.
+//   - Both lookup-failure branches must hard-fail (resolve workdir error) WITHOUT
+//     ever calling Create — otherwise we'd risk running the agent in /workspace
+//     while the snapshot tar restored files under /home/sandbox/<slug>.
 func TestContinueSession_SessionRepoSlug(t *testing.T) {
 	t.Parallel()
 
@@ -1405,11 +1416,18 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 		name         string
 		prepSession  func(s *models.Session)
 		prepDeps     func(d testDeps)
-		wantWorkDir  string
+		wantWorkDir  string // "" means Create must not be invoked
 		wantErrMatch string
 	}
 
 	cases := []tc{
+		{
+			name:         "session with repo uses slug-derived workdir",
+			prepSession:  func(s *models.Session) {},
+			prepDeps:     func(d testDeps) {},
+			wantWorkDir:  slugWorkDir,
+			wantErrMatch: "create sandbox",
+		},
 		{
 			name: "session without repo falls back to issue's repo",
 			prepSession: func(s *models.Session) {
@@ -1420,18 +1438,7 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			wantErrMatch: "create sandbox",
 		},
 		{
-			name: "session without repo and issue fetch fails falls back to default",
-			prepSession: func(s *models.Session) {
-				s.RepositoryID = nil
-			},
-			prepDeps: func(d testDeps) {
-				d.issues.err = errors.New("boom")
-			},
-			wantWorkDir:  defaultWorkDir,
-			wantErrMatch: "create sandbox",
-		},
-		{
-			name: "session without repo and issue has no repo falls back to default",
+			name: "session and issue both without repo use default workdir",
 			prepSession: func(s *models.Session) {
 				s.RepositoryID = nil
 			},
@@ -1444,17 +1451,29 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			wantErrMatch: "create sandbox",
 		},
 		{
-			name:        "repo fetch fails falls back to default",
+			name: "issue fetch failure hard-fails resume",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps: func(d testDeps) {
+				d.issues.err = errors.New("db flaky")
+			},
+			wantWorkDir:  "",
+			wantErrMatch: "resolve workdir",
+		},
+		{
+			name:        "repo fetch failure hard-fails resume",
 			prepSession: func(s *models.Session) {},
 			prepDeps: func(d testDeps) {
-				d.repos.err = errors.New("boom")
+				d.repos.err = errors.New("db flaky")
 			},
-			wantWorkDir:  defaultWorkDir,
-			wantErrMatch: "create sandbox",
+			wantWorkDir:  "",
+			wantErrMatch: "resolve workdir",
 		},
 	}
 
 	for _, c := range cases {
+		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1481,15 +1500,22 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			}}
 
 			var gotWorkDir string
+			var createCalls int
 			d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				createCalls++
 				gotWorkDir = cfg.WorkDir
-				return nil, errors.New("forced create failure to short-circuit test")
+				return nil, errForcedCreateFailure
 			}
 
 			orch := buildOrchestrator(d)
 			err := orch.ContinueSession(context.Background(), session)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), c.wantErrMatch)
+			if c.wantWorkDir == "" {
+				require.Zero(t, createCalls, "resume must not create a sandbox when repo lookup fails")
+				return
+			}
+			require.Equal(t, 1, createCalls, "Create should be called exactly once when workdir resolution succeeds")
 			require.Equal(t, c.wantWorkDir, gotWorkDir, "sessionRepoSlug should drive WorkDir selection")
 		})
 	}

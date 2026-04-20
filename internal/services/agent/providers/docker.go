@@ -393,7 +393,13 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		if removeErr != nil {
 			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
 		}
-		return nil, fmt.Errorf("bootstrap workdir (exit %d): %w: %s", code, err, bootErr.String())
+		// Split the error construction so %w only wraps a non-nil error.
+		// When the exec itself succeeds but the command returns a non-zero
+		// exit code, err is nil and we surface only the exit code + stderr.
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap workdir (exit %d): %w: %s", code, err, bootErr.String())
+		}
+		return nil, fmt.Errorf("bootstrap workdir (exit %d): %s", code, bootErr.String())
 	}
 
 	return sb, nil
