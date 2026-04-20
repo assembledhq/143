@@ -567,3 +567,35 @@ func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
 		})
 	}
 }
+
+func TestPreviewOriginHostIsLocal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		template string
+		want     bool
+	}{
+		{name: "localhost host", template: "http://localhost:9090/{id}", want: true},
+		{name: "wildcard localhost subdomain", template: "http://{id}.preview.localhost:9090", want: true},
+		{name: "loopback IPv4", template: "http://127.0.0.1:9090/{id}", want: true},
+		{name: "loopback IPv6", template: "http://[::1]:9090/{id}", want: true},
+		{name: "real host", template: "https://{id}.preview.example.com", want: false},
+		{name: "substring localhost in real host", template: "https://{id}.localhost.example.com", want: false},
+		// url.Parse error branch: stray percent escape
+		{name: "malformed percent escape", template: "http://%zz", want: false},
+		// u.Host == "" branch: no authority component
+		{name: "relative path without scheme", template: "relative/path", want: false},
+		{name: "scheme only", template: "http:", want: false},
+		// u.Hostname() == "" branch: authority with port but empty host
+		{name: "empty host with port", template: "http://:8080/{id}", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, previewOriginHostIsLocal(tc.template))
+		})
+	}
+}

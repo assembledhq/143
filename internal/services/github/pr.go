@@ -550,9 +550,6 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 		}
 		return
 	}
-	if state == nil {
-		return
-	}
 
 	if state.LastPreviewInstanceID != nil {
 		if stopErr := s.previewStopper.StopPreview(ctx, pr.OrgID, *state.LastPreviewInstanceID); stopErr != nil {
