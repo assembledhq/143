@@ -11,6 +11,8 @@ export const queryKeys = {
   sessions: {
     all: ["sessions"] as const,
     list: (repo?: string | null) => ["sessions", repo] as const,
+    counts: (repo?: string | null, triggeredByUserId?: string) =>
+      ["sessions", "counts", repo, triggeredByUserId] as const,
     detail: (id: string) => ["session", id] as const,
     validation: (id: string) => ["session", id, "validation"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,

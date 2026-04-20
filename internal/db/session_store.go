@@ -40,6 +40,28 @@ type SessionFilters struct {
 	OnlyArchived      bool       // When true, return only archived sessions.
 }
 
+// SessionCountsFilters scopes CountsByOrg to a subset of sessions.
+// Status, archived, and search are not accepted — the counts endpoint
+// always returns totals for the all/active/archived buckets.
+type SessionCountsFilters struct {
+	RepositoryID      uuid.UUID
+	TriggeredByUserID uuid.UUID
+}
+
+// sessionCountsCap bounds each count subquery so a single user with millions
+// of sessions can't turn the counts endpoint into a table scan. Clients render
+// any bucket that hits the cap as e.g. "99+".
+//
+// LIMIT only short-circuits when an index lets Postgres stop early. The three
+// buckets rely on:
+//   - all:      idx_sessions_not_archived (archived_at IS NULL, deleted_at IS NULL)
+//   - active:   idx_sessions_not_archived, filtered in-line by status
+//   - archived: idx_sessions_archived     (archived_at IS NOT NULL, deleted_at IS NULL)
+//
+// If either partial index is missing, an empty bucket can still force a full
+// slice scan of the (org_id, created_at) range — keep both in place.
+const sessionCountsCap = 100
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
@@ -165,6 +187,60 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
+// CountsByOrg returns non-archived, active, and archived session counts for
+// the org, optionally narrowed by repository and user. Each bucket is counted
+// via a LIMIT-bounded subquery; worst-case cost is O(cap) per bucket as long
+// as an index with the bucket's predicate exists (see sessionCountsCap).
+func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters SessionCountsFilters) (models.SessionCounts, error) {
+	args := pgx.NamedArgs{
+		"org_id": orgID,
+		"cap":    sessionCountsCap,
+	}
+
+	// Shared scope predicates applied to every bucket. We avoid an extra SQL
+	// branch by only building the fragment when a filter is set.
+	var scope string
+	if filters.RepositoryID != uuid.Nil {
+		scope += " AND repository_id = @repository_id"
+		args["repository_id"] = filters.RepositoryID
+	}
+	if filters.TriggeredByUserID != uuid.Nil {
+		scope += " AND triggered_by_user_id = @triggered_by_user_id"
+		args["triggered_by_user_id"] = filters.TriggeredByUserID
+	}
+
+	activeStrings := make([]string, len(models.ActiveStatuses))
+	for i, status := range models.ActiveStatuses {
+		activeStrings[i] = string(status)
+	}
+	args["active_statuses"] = activeStrings
+
+	query := fmt.Sprintf(`
+		SELECT
+			(SELECT count(*) FROM (
+				SELECT 1 FROM sessions
+				WHERE org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL%s
+				LIMIT @cap
+			) t_all) AS all_count,
+			(SELECT count(*) FROM (
+				SELECT 1 FROM sessions
+				WHERE org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL AND status = ANY(@active_statuses)%s
+				LIMIT @cap
+			) t_active) AS active_count,
+			(SELECT count(*) FROM (
+				SELECT 1 FROM sessions
+				WHERE org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL%s
+				LIMIT @cap
+			) t_archived) AS archived_count`, scope, scope, scope)
+
+	var out models.SessionCounts
+	if err := s.db.QueryRow(ctx, query, args).Scan(&out.All, &out.Active, &out.Archived); err != nil {
+		return models.SessionCounts{}, fmt.Errorf("query session counts: %w", err)
+	}
+	out.Cap = sessionCountsCap
+	return out, nil
 }
 
 func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
