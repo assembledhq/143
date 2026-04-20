@@ -22,7 +22,7 @@ VALUES (
   'Preview Admin',
   'admin',
   -- bcrypt hash of "preview-dogfood" (cost 10)
-  '$2a$10$ZQ3Kx6R4Y5V7x8VbKjO0aOQzWkVxJkZqT5mN3nL2rP1sH4gF6dC0e',
+  '$2a$10$yq0Z0nFAzgJa1IuC.zbMh.RmEdX2dAJk8XQwELbmOA1AztcbCUyVi',
   now()
 )
 ON CONFLICT (email) DO NOTHING;
