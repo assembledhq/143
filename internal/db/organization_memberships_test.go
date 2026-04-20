@@ -437,6 +437,63 @@ func TestOrganizationMembershipStore_RejectInvalidRole(t *testing.T) {
 	require.Error(t, err)
 }
 
+// UpdateRole returns the raw Exec error when the DB fails (e.g. connection
+// lost mid-update), distinct from the NoRows race.
+func TestOrganizationMembershipStore_UpdateRole_ExecError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), "member")
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Remove surfaces non-ErrNoRows query errors so the handler can 500 rather
+// than silently returning success.
+func TestOrganizationMembershipStore_Remove_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)WITH deleted_membership.+cleared_answers").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	err = NewOrganizationMembershipStore(mock).Remove(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// ListUserIDsByOrg wraps row-scan errors so the caller sees a specific
+// "scan member id" failure rather than a generic rows error.
+func TestOrganizationMembershipStore_ListUserIDsByOrg_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)SELECT user_id.+FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"user_id"}).AddRow("not-a-uuid"),
+		)
+
+	_, err = NewOrganizationMembershipStore(mock).ListUserIDsByOrg(context.Background(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "scan member id")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // Remove with pgx.ErrNoRows is surfaced so the handler can return a 404
 // rather than pretending the delete happened.
 func TestOrganizationMembershipStore_Remove_NoRows(t *testing.T) {
@@ -446,13 +503,13 @@ func TestOrganizationMembershipStore_Remove_NoRows(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mock.ExpectQuery("(?s)WITH cleared_answers.+deleted_membership").
+	mock.ExpectQuery("(?s)WITH deleted_membership.+cleared_answers").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 
 	err = NewOrganizationMembershipStore(mock).Remove(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
-	require.True(t, errors.Is(err, pgx.ErrNoRows))
+	require.True(t, errors.Is(err, pgx.ErrNoRows), "expected pgx.ErrNoRows, got %v", err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

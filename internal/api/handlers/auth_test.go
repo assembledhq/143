@@ -1312,7 +1312,8 @@ func TestAuthHandler_ClaimInvitationForExistingUser_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
 
-	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	cfg := &config.Config{MultiOrgMembershipsEnabled: true}
+	handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "existing@example.com", "", userID)
 	require.NoError(t, err)
 	require.Nil(t, invErr)
@@ -1323,7 +1324,8 @@ func TestAuthHandler_ClaimInvitationForExistingUser_Success(t *testing.T) {
 
 // claimInvitationForExistingUser returns an invitationError (not a raw error)
 // when the invitation token is for a different email, so callers can surface
-// the correct HTTP status.
+// the correct HTTP status. The invitation pointer is still returned so the
+// caller can audit the failed claim against the inviting org.
 func TestAuthHandler_ClaimInvitationForExistingUser_WrongEmail(t *testing.T) {
 	t.Parallel()
 
@@ -1346,7 +1348,9 @@ func TestAuthHandler_ClaimInvitationForExistingUser_WrongEmail(t *testing.T) {
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "other@example.com", "", uuid.New())
 	require.NoError(t, err)
-	require.Nil(t, inv)
+	require.NotNil(t, inv, "invitation pointer should be returned on validation error so caller can audit the failed claim")
+	require.Equal(t, invID, inv.ID)
+	require.Equal(t, orgID, inv.OrgID)
 	require.NotNil(t, invErr)
 	require.Equal(t, "INVITE_MISMATCH", invErr.code)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1447,7 +1451,8 @@ func TestAuthHandler_ClaimInvitation_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectCommit()
 
-	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	cfg := &config.Config{MultiOrgMembershipsEnabled: true}
+	handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	user := &models.User{ID: userID, Email: "u@example.com", GitHubLogin: &ghLogin}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/claim-invitation", bytes.NewReader([]byte(`{"token":"valid"}`)))
@@ -1524,6 +1529,319 @@ func TestAuthHandler_CreateSignupOrg_InputValidation(t *testing.T) {
 		err := h.createSignupOrg(context.Background(), "Acme", &models.User{}, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "createUser")
+	})
+}
+
+// createSignupOrg surfaces DB errors from each step so a failing commit or
+// rollback does not silently leave the product in an orphan state.
+func TestAuthHandler_CreateSignupOrg_DBErrors(t *testing.T) {
+	t.Parallel()
+
+	newHandler := func(mock pgxmock.PgxPoolIface) *AuthHandler {
+		return NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	}
+
+	t.Run("begin fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin().WillReturnError(errors.New("begin"))
+
+		err = newHandler(mock).createSignupOrg(context.Background(), "Acme", &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("org create fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO organizations").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("org"))
+		mock.ExpectRollback()
+
+		err = newHandler(mock).createSignupOrg(context.Background(), "Acme", &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("createUser callback fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO organizations").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+		mock.ExpectRollback()
+
+		err = newHandler(mock).createSignupOrg(context.Background(), "Acme", &models.User{}, func(context.Context, *db.UserStore, *models.User) error {
+			return errors.New("user create")
+		})
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("membership upsert fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		userID := uuid.New()
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO organizations").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("upsert"))
+		mock.ExpectRollback()
+
+		err = newHandler(mock).createSignupOrg(context.Background(), "Acme", &models.User{ID: userID}, func(_ context.Context, _ *db.UserStore, u *models.User) error {
+			u.ID = userID
+			return nil
+		})
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("commit fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		userID := uuid.New()
+		mock.ExpectBegin()
+		mock.ExpectQuery("INSERT INTO organizations").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit().WillReturnError(errors.New("commit"))
+
+		err = newHandler(mock).createSignupOrg(context.Background(), "Acme", &models.User{ID: userID}, func(_ context.Context, _ *db.UserStore, u *models.User) error {
+			u.ID = userID
+			return nil
+		})
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// claimInvitationForExistingUser propagates DB errors from the Accept step,
+// the membership upsert, and the final commit — each of those failures must
+// abort the claim, not be silently swallowed.
+func TestAuthHandler_ClaimInvitationForExistingUser_DBErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	setupBeginSelect := func(mock pgxmock.PgxPoolIface) {
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+					AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+			)
+	}
+
+	newHandler := func(mock pgxmock.PgxPoolIface) *AuthHandler {
+		cfg := &config.Config{MultiOrgMembershipsEnabled: true}
+		return NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	}
+
+	t.Run("accept hard-error", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		setupBeginSelect(mock)
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnError(errors.New("accept"))
+		mock.ExpectRollback()
+
+		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("membership upsert fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		setupBeginSelect(mock)
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("upsert"))
+		mock.ExpectRollback()
+
+		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("commit fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		setupBeginSelect(mock)
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit().WillReturnError(errors.New("commit"))
+
+		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// acceptInvitationAndUpsertUser rejects a nil pool, nil user, or nil upsert
+// callback as programmer errors rather than calling NPE at runtime.
+func TestAuthHandler_AcceptInvitationAndUpsertUser_InputValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil pool", func(t *testing.T) {
+		t.Parallel()
+		h := &AuthHandler{}
+		_, _, err := h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+	})
+
+	t.Run("nil user", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		h := &AuthHandler{pool: mock}
+		_, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), nil, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+	})
+
+	t.Run("nil upsert", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		h := &AuthHandler{pool: mock}
+		_, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, nil)
+		require.Error(t, err)
+	})
+}
+
+// acceptInvitationAndUpsertUser propagates begin/accept/upsert/membership/
+// commit failures so none of those leave the DB in a half-applied state.
+func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
+	t.Parallel()
+
+	newHandler := func(mock pgxmock.PgxPoolIface) *AuthHandler {
+		return NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	}
+
+	t.Run("begin fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin().WillReturnError(errors.New("begin"))
+
+		_, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("accept hard-error", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnError(errors.New("accept"))
+		mock.ExpectRollback()
+
+		_, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("membership upsert fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("upsert"))
+		mock.ExpectRollback()
+
+		_, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: uuid.New(), OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("commit fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit().WillReturnError(errors.New("commit"))
+
+		_, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: uuid.New(), OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// createInvitedUserWithPassword rejects a nil pool or nil user store before
+// it would panic trying to open a transaction.
+func TestAuthHandler_CreateInvitedUserWithPassword_InputValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil pool", func(t *testing.T) {
+		t.Parallel()
+		h := &AuthHandler{}
+		_, _, err := h.createInvitedUserWithPassword(context.Background(), "t", "e@example.com", "n", "h")
+		require.Error(t, err)
+	})
+
+	t.Run("nil user store", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		h := &AuthHandler{pool: mock}
+		_, _, err = h.createInvitedUserWithPassword(context.Background(), "t", "e@example.com", "n", "h")
+		require.Error(t, err)
 	})
 }
 
@@ -1672,7 +1990,8 @@ func TestAuthHandler_ClaimPendingInvitationForExistingUser(t *testing.T) {
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		mock.ExpectCommit()
 
-		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+		cfg := &config.Config{MultiOrgMembershipsEnabled: true}
+		handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		handler.claimPendingInvitationForExistingUser(req, "valid", "u@example.com", "", userID)
 		require.NoError(t, mock.ExpectationsWereMet())
@@ -1739,10 +2058,12 @@ func TestAuthHandler_ClaimInvitationForExistingUser_AcceptRace(t *testing.T) {
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
 
-	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	cfg := &config.Config{MultiOrgMembershipsEnabled: true}
+	handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 	require.NoError(t, err)
-	require.Nil(t, inv)
+	require.NotNil(t, inv, "invitation pointer is returned even on accept-race so caller can audit")
+	require.Equal(t, invID, inv.ID)
 	require.NotNil(t, invErr)
 	require.Equal(t, http.StatusGone, invErr.status)
 	require.Equal(t, "INVITE_INVALID", invErr.code)

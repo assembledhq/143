@@ -81,6 +81,33 @@ func TestAuthSessionStore_Create_UsesExplicitLastOrgID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// Create surfaces the Scan error when the INSERT...RETURNING query fails,
+// so the caller can distinguish a DB failure from a successful insert.
+func TestAuthSessionStore_Create_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+	now := time.Now()
+
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("insert failed"))
+
+	session := &models.AuthSession{
+		UserID:    uuid.New(),
+		OrgID:     uuid.New(),
+		Token:     "tok",
+		ExpiresAt: now.Add(24 * time.Hour),
+	}
+	err = store.Create(context.Background(), session)
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAuthSessionStore_GetByToken(t *testing.T) {
 	t.Parallel()
 

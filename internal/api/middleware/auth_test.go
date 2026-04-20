@@ -213,10 +213,9 @@ func TestAuth_HeaderSelectsMembership(t *testing.T) {
 			pgxmock.NewRows(memberCols).
 				AddRow(testUserID, testOrgB, "member", now),
 		)
-	// Resolution persisted back to session.
-	mock.ExpectExec("UPDATE auth_sessions SET last_org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// No UpdateLastOrgID expected: header-driven resolution must not trample
+	// the session hint, otherwise two tabs pinned to different orgs would
+	// fight on every request.
 
 	stores := AuthStores{
 		Sessions:    db.NewAuthSessionStore(mock),
@@ -569,6 +568,68 @@ func TestAuth_HeaderMembershipLookupError(t *testing.T) {
 	})).ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusForbidden, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When the X-Active-Org-ID header drives the active-org resolution we must
+// NOT persist last_org_id — two tabs pinned to different orgs would otherwise
+// trample each other's hint on every request, leaving cold-load behavior
+// non-deterministic. The header is the client's authoritative declaration;
+// the session hint should only track the no-header fallback.
+func TestAuth_HeaderResolutionDoesNotUpdateLastOrgID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	// Header points at B; membership lookup succeeds — but no UpdateLastOrgID
+	// should fire.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgB, "member", now),
+		)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		require.Equal(t, testOrgB, OrgIDFromContext(r.Context()))
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set(ActiveOrgHeader, testOrgB.String())
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(next).ServeHTTP(w, req)
+
+	require.True(t, nextCalled, "request should succeed")
+	require.Equal(t, http.StatusOK, w.Code)
+	// pgxmock fails ExpectationsWereMet if any UPDATE auth_sessions runs that
+	// wasn't expected — that's the assertion for "no last_org_id write".
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

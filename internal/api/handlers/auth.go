@@ -555,24 +555,17 @@ func (h *AuthHandler) ClaimInvitation(w http.ResponseWriter, r *http.Request) {
 
 	inv, invErr, err := h.claimInvitationForExistingUser(r.Context(), body.Token, user.Email, githubLogin, user.ID)
 	if err != nil {
+		h.emitInvitationClaimFailed(r, user.ID, inv, "INTERNAL_ERROR", err.Error())
 		writeError(w, r, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim invitation", err)
 		return
 	}
 	if invErr != nil {
+		h.emitInvitationClaimFailed(r, user.ID, inv, invErr.code, invErr.message)
 		writeError(w, r, invErr.status, invErr.code, invErr.message)
 		return
 	}
 
-	if h.audit != nil {
-		invIDStr := inv.ID.String()
-		h.audit.EmitUserAction(r.Context(), db.UserActionParams{
-			OrgID:        inv.OrgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionTeamMemberInvited,
-			ResourceType: models.AuditResourceInvitation,
-			ResourceID:   &invIDStr,
-		})
-	}
+	h.emitInvitationAccepted(r, user.ID, inv)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

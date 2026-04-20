@@ -202,6 +202,36 @@ func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Us
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
 }
 
+// IsGitHubLoginMemberOfOrg reports whether any user whose github_login
+// matches (case-insensitive) is currently a member of the given org via
+// the organization_memberships join. Used by invitation creation to dedup
+// against current members regardless of which org's row was their primary
+// at user-creation time. The legacy users.org_id column does not reflect
+// non-primary memberships, so a plain ListByOrg dedup misses members whose
+// only membership in this org is non-primary.
+func (s *UserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error) {
+	if githubLogin == "" {
+		return false, nil
+	}
+	query := `
+		SELECT EXISTS (
+			SELECT 1
+			FROM users u
+			JOIN organization_memberships m ON m.user_id = u.id
+			WHERE m.org_id = @org_id
+			  AND u.github_login IS NOT NULL
+			  AND lower(u.github_login) = lower(@github_login)
+		)`
+	var exists bool
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":       orgID,
+		"github_login": githubLogin,
+	}).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check github login membership: %w", err)
+	}
+	return exists, nil
+}
+
 // UpdateRole changes a user's role within their org.
 func (s *UserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error {
 	query := `UPDATE users SET role = @role WHERE id = @id AND org_id = @org_id`

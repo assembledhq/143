@@ -16,15 +16,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
 // --- mock stores ---
 
 type mockTeamUserStore struct {
-	listByOrgFn     func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
-	getByIDGlobalFn func(ctx context.Context, userID uuid.UUID) (models.User, error)
-	getByEmailFn    func(ctx context.Context, email string) (models.User, error)
+	listByOrgFn                func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
+	getByIDGlobalFn            func(ctx context.Context, userID uuid.UUID) (models.User, error)
+	getByEmailFn               func(ctx context.Context, email string) (models.User, error)
+	isGitHubLoginMemberOfOrgFn func(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
 }
 
 func (m *mockTeamUserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
@@ -45,13 +47,18 @@ func (m *mockTeamUserStore) GetByEmail(ctx context.Context, email string) (model
 	}
 	return models.User{}, pgx.ErrNoRows
 }
+func (m *mockTeamUserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error) {
+	if m.isGitHubLoginMemberOfOrgFn != nil {
+		return m.isGitHubLoginMemberOfOrgFn(ctx, githubLogin, orgID)
+	}
+	return false, nil
+}
 
 type mockTeamMembershipStore struct {
-	getFn          func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
-	updateRoleFn   func(ctx context.Context, userID, orgID uuid.UUID, role string) error
-	removeFn       func(ctx context.Context, userID, orgID uuid.UUID) error
-	countAdminsFn  func(ctx context.Context, orgID uuid.UUID) (int, error)
-	countForUserFn func(ctx context.Context, userID uuid.UUID) (int, error)
+	getFn               func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error)
+	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, error)
+	countForUserFn      func(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
 func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
@@ -60,23 +67,17 @@ func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UU
 	}
 	return models.OrganizationMembership{}, pgx.ErrNoRows
 }
-func (m *mockTeamMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error {
-	if m.updateRoleFn != nil {
-		return m.updateRoleFn(ctx, userID, orgID, role)
+func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
+	if m.updateRoleGuardedFn != nil {
+		return m.updateRoleGuardedFn(ctx, userID, orgID, role)
 	}
-	return nil
+	return "member", nil
 }
-func (m *mockTeamMembershipStore) Remove(ctx context.Context, userID, orgID uuid.UUID) error {
-	if m.removeFn != nil {
-		return m.removeFn(ctx, userID, orgID)
+func (m *mockTeamMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, error) {
+	if m.removeGuardedFn != nil {
+		return m.removeGuardedFn(ctx, userID, orgID)
 	}
-	return nil
-}
-func (m *mockTeamMembershipStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
-	if m.countAdminsFn != nil {
-		return m.countAdminsFn(ctx, orgID)
-	}
-	return 2, nil
+	return "member", nil
 }
 func (m *mockTeamMembershipStore) CountForUser(ctx context.Context, userID uuid.UUID) (int, error) {
 	if m.countForUserFn != nil {
@@ -302,8 +303,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-					return models.OrganizationMembership{}, pgx.ErrNoRows
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "", pgx.ErrNoRows
 				},
 			},
 			expectedCode: http.StatusNotFound,
@@ -315,11 +316,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
 			memberships: &mockTeamMembershipStore{
-				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
-				},
-				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
-					return 1, nil
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "admin", db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -336,8 +334,8 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "member", nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -407,11 +405,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
-				},
-				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
-					return 1, nil
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
+					return "admin", db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -427,8 +422,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-					return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
+					return "member", nil
 				},
 			},
 			expectedCode: http.StatusNoContent,
@@ -455,8 +450,9 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 	}
 }
 
-// ChangeRole surfaces an internal error when membership lookup fails with a
-// non-ErrNoRows error (e.g. DB down), distinct from the 404 not-found path.
+// ChangeRole surfaces an internal error when the guarded update fails with a
+// non-ErrNoRows / non-ErrLastAdmin error (e.g. DB down), distinct from the
+// 404 not-found path and the LAST_ADMIN guard.
 func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 	t.Parallel()
 
@@ -465,8 +461,8 @@ func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 	memberID := uuid.New()
 
 	h := newTeamHandler(nil, &mockTeamMembershipStore{
-		getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-			return models.OrganizationMembership{}, fmt.Errorf("boom")
+		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+			return "", fmt.Errorf("boom")
 		},
 	}, nil, nil, nil)
 
@@ -479,26 +475,32 @@ func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 
 	h.ChangeRole(w, req)
 	require.Equal(t, http.StatusInternalServerError, w.Code)
-	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+	require.Contains(t, w.Body.String(), "UPDATE_FAILED")
 }
 
-// ChangeRole converts pgx.ErrNoRows from UpdateRole into a 404 (race where
-// the membership was removed between the Get and the UpdateRole).
-func TestTeamHandler_ChangeRole_UpdateRaceNotFound(t *testing.T) {
+// ChangeRole returns 500 when the response-shaping user lookup fails after
+// the role has already been updated. We still 500 rather than silently
+// returning stale data; the client can re-fetch /team/members.
+func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
 	memberID := uuid.New()
 
-	h := newTeamHandler(nil, &mockTeamMembershipStore{
-		getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-			return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, fmt.Errorf("boom")
+			},
 		},
-		updateRoleFn: func(_ context.Context, _, _ uuid.UUID, _ string) error {
-			return pgx.ErrNoRows
+		&mockTeamMembershipStore{
+			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				return "member", nil
+			},
 		},
-	}, nil, nil, nil)
+		nil, nil, nil,
+	)
 
 	body, _ := json.Marshal(map[string]string{"role": "viewer"})
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+memberID.String()+"/role", bytes.NewReader(body))
@@ -508,8 +510,115 @@ func TestTeamHandler_ChangeRole_UpdateRaceNotFound(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	h.ChangeRole(w, req)
-	require.Equal(t, http.StatusNotFound, w.Code)
-	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// RemoveMember succeeds even when CountForUser fails afterward — the removal
+// has already happened, so the CountForUser error is logged and the response
+// is still 204. The caller's session cleanup is best-effort.
+func TestTeamHandler_RemoveMember_CountForUserErrorIsLogged(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) { return "member", nil },
+			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, fmt.Errorf("count down") },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error { return nil },
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// RemoveMember still returns 204 when DeleteByUserID fails — the removal
+// succeeded; stale session cleanup is best-effort and will be caught the
+// next time the session's membership lookup returns ErrNoRows.
+func TestTeamHandler_RemoveMember_DeleteSessionsErrorIsLogged(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) { return "member", nil },
+			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error { return fmt.Errorf("del err") },
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// CreateInvitation surfaces a 500 when the email-dedup membership lookup
+// fails with a non-ErrNoRows error — we don't invite into an org we can't
+// reliably check dedup against.
+func TestTeamHandler_CreateInvitation_DedupLookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	existingID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+				return models.User{ID: existingID}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{}, fmt.Errorf("db down")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{"email": "invite@example.com", "role": "member"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
 }
 
 // RemoveMember deletes the user's sessions only when the user has no other
@@ -530,9 +639,6 @@ func TestTeamHandler_RemoveMember_DeletesSessionsWhenLastMembership(t *testing.T
 			},
 		},
 		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
-			},
 			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
 		},
 		&mockTeamSessionStore{
@@ -572,9 +678,6 @@ func TestTeamHandler_RemoveMember_KeepsSessionsWhenOtherMembershipsRemain(t *tes
 			},
 		},
 		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
-			},
 			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 2, nil },
 		},
 		&mockTeamSessionStore{
@@ -597,10 +700,9 @@ func TestTeamHandler_RemoveMember_KeepsSessionsWhenOtherMembershipsRemain(t *tes
 	require.False(t, sessionDeleted, "sessions should not be deleted while other memberships remain")
 }
 
-// RemoveMember returns 404 when the user identity lookup fails — it's the
-// same public response as "no such membership" because we don't want to leak
-// whether a user id exists at all.
-func TestTeamHandler_RemoveMember_UserLookupFails(t *testing.T) {
+// RemoveMember returns 404 when the user identity row does not exist
+// (pgx.ErrNoRows). The membership store is not consulted in this case.
+func TestTeamHandler_RemoveMember_UserLookupNotFound(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -628,9 +730,10 @@ func TestTeamHandler_RemoveMember_UserLookupFails(t *testing.T) {
 	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
 }
 
-// RemoveMember returns 404 when membership lookup reports ErrNoRows; this is
-// the "user exists but isn't a member of this org" path.
-func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
+// RemoveMember returns 500 (not 404) when the user identity lookup fails
+// with a non-ErrNoRows error like a DB outage — masking these as 404 hides
+// real failures from operators.
+func TestTeamHandler_RemoveMember_UserLookupError(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -639,49 +742,11 @@ func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
 
 	h := newTeamHandler(
 		&mockTeamUserStore{
-			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
-				return models.User{ID: id}, nil
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, fmt.Errorf("db down")
 			},
 		},
-		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{}, pgx.ErrNoRows
-			},
-		},
-		nil, nil, nil,
-	)
-
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
-	ctx := teamCtx(orgID, adminUser)
-	ctx = withChiParam(ctx, "id", memberID.String())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	h.RemoveMember(w, req)
-	require.Equal(t, http.StatusNotFound, w.Code)
-	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
-}
-
-// RemoveMember returns 500 when membership lookup fails with a non-ErrNoRows
-// error (DB down, etc.).
-func TestTeamHandler_RemoveMember_MembershipLookupError(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
-	memberID := uuid.New()
-
-	h := newTeamHandler(
-		&mockTeamUserStore{
-			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
-				return models.User{ID: id}, nil
-			},
-		},
-		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{}, fmt.Errorf("db down")
-			},
-		},
+		&mockTeamMembershipStore{},
 		nil, nil, nil,
 	)
 
@@ -696,9 +761,9 @@ func TestTeamHandler_RemoveMember_MembershipLookupError(t *testing.T) {
 	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
 }
 
-// RemoveMember returns 500 when CountAdmins fails during the last-admin check,
-// so admins don't get silently kept/removed based on a count we couldn't read.
-func TestTeamHandler_RemoveMember_CountAdminsFails(t *testing.T) {
+// RemoveMember returns 404 when the guarded removal reports ErrNoRows.
+// This is the "user exists but isn't a member of this org" path.
+func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -712,48 +777,8 @@ func TestTeamHandler_RemoveMember_CountAdminsFails(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
-			},
-			countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
-				return 0, fmt.Errorf("boom")
-			},
-		},
-		nil, nil, nil,
-	)
-
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
-	ctx := teamCtx(orgID, adminUser)
-	ctx = withChiParam(ctx, "id", memberID.String())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	h.RemoveMember(w, req)
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	require.Contains(t, w.Body.String(), "COUNT_FAILED")
-}
-
-// RemoveMember treats a race where Remove returns pgx.ErrNoRows (another
-// admin deleted the membership first) as a 404, not a 500.
-func TestTeamHandler_RemoveMember_RemoveRaceNotFound(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
-	memberID := uuid.New()
-
-	h := newTeamHandler(
-		&mockTeamUserStore{
-			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
-				return models.User{ID: id}, nil
-			},
-		},
-		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
-			},
-			removeFn: func(_ context.Context, _, _ uuid.UUID) error {
-				return pgx.ErrNoRows
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
+				return "", pgx.ErrNoRows
 			},
 		},
 		nil, nil, nil,
@@ -770,8 +795,8 @@ func TestTeamHandler_RemoveMember_RemoveRaceNotFound(t *testing.T) {
 	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
 }
 
-// RemoveMember surfaces an internal error when Remove fails for a reason
-// other than pgx.ErrNoRows.
+// RemoveMember surfaces an internal error when the guarded removal fails for
+// any reason other than ErrNoRows or the LAST_ADMIN guard.
 func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
 	t.Parallel()
 
@@ -786,11 +811,8 @@ func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			getFn: func(_ context.Context, id, _ uuid.UUID) (models.OrganizationMembership, error) {
-				return models.OrganizationMembership{UserID: id, OrgID: orgID, Role: "member"}, nil
-			},
-			removeFn: func(_ context.Context, _, _ uuid.UUID) error {
-				return fmt.Errorf("boom")
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
+				return "", fmt.Errorf("boom")
 			},
 		},
 		nil, nil, nil,

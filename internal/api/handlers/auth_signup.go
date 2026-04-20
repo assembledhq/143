@@ -85,6 +85,10 @@ func (h *AuthHandler) createSignupOrg(
 // as the signup flow; a mismatch returns an invitationError so handlers can
 // map to an HTTP status. The invitation is accepted inside the same tx as the
 // membership upsert, so a race on status will roll the membership back.
+//
+// The returned *models.Invitation is non-nil whenever the invitation row was
+// loaded — including failure cases past the initial GetByToken lookup. This
+// lets the caller emit org-scoped audit events for failed claims.
 func (h *AuthHandler) claimInvitationForExistingUser(
 	ctx context.Context,
 	token, userEmail, githubLogin string,
@@ -103,28 +107,59 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	txInvitations := db.NewInvitationStore(tx)
 	inv, _, role, invErr := h.validateInvitationWithStore(ctx, txInvitations, token, userEmail, githubLogin)
 	if invErr != nil {
-		return nil, invErr, nil
+		return invitationOrNil(inv), invErr, nil
+	}
+
+	txMemberships := db.NewOrganizationMembershipStore(tx)
+	if h.cfg != nil && !h.cfg.MultiOrgMembershipsEnabled {
+		_, getErr := txMemberships.Get(ctx, userID, inv.OrgID)
+		if errors.Is(getErr, pgx.ErrNoRows) {
+			count, countErr := txMemberships.CountForUser(ctx, userID)
+			if countErr != nil {
+				return &inv, nil, fmt.Errorf("count user memberships: %w", countErr)
+			}
+			if count > 0 {
+				return &inv, &invitationError{
+					status:  http.StatusConflict,
+					code:    "ALREADY_IN_ORG",
+					message: "you are already a member of another organization",
+				}, nil
+			}
+		} else if getErr != nil {
+			return &inv, nil, fmt.Errorf("look up existing membership: %w", getErr)
+		}
 	}
 
 	if err := txInvitations.Accept(ctx, inv.ID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, &invitationError{
+			return &inv, &invitationError{
 				status:  http.StatusGone,
 				code:    "INVITE_INVALID",
 				message: "this invitation is no longer valid",
 			}, nil
 		}
-		return nil, nil, fmt.Errorf("accept invitation: %w", err)
+		return &inv, nil, fmt.Errorf("accept invitation: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).Upsert(ctx, userID, inv.OrgID, role); err != nil {
-		return nil, nil, fmt.Errorf("grant membership: %w", err)
+	if err := txMemberships.Upsert(ctx, userID, inv.OrgID, role); err != nil {
+		return &inv, nil, fmt.Errorf("grant membership: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, fmt.Errorf("commit claim transaction: %w", err)
+		return &inv, nil, fmt.Errorf("commit claim transaction: %w", err)
 	}
 	return &inv, nil, nil
+}
+
+// invitationOrNil returns &inv only when the invitation row was actually
+// populated (id non-zero). validateInvitationWithStore returns a zero-value
+// Invitation when the GetByToken lookup itself failed, which is not useful
+// for org-scoped audit emission.
+func invitationOrNil(inv models.Invitation) *models.Invitation {
+	if inv.ID == uuid.Nil {
+		return nil
+	}
+	return &inv
 }
 
 // claimPendingInvitationForExistingUser is the best-effort adaptor used by
@@ -132,6 +167,10 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 // invitation cookie, we try to grant them membership in the inviting org.
 // Failures are logged but do not abort the auth flow — the user can still
 // sign into their existing org and retry the invite later.
+//
+// Both success and failure are audited (when the invitation row was loaded
+// far enough to identify the org), so security review can spot patterns of
+// failed claims — e.g. a leaked token being tried by the wrong account.
 func (h *AuthHandler) claimPendingInvitationForExistingUser(
 	r *http.Request,
 	token, userEmail, githubLogin string,
@@ -140,9 +179,10 @@ func (h *AuthHandler) claimPendingInvitationForExistingUser(
 	if token == "" {
 		return
 	}
-	_, invErr, err := h.claimInvitationForExistingUser(r.Context(), token, userEmail, githubLogin, userID)
+	inv, invErr, err := h.claimInvitationForExistingUser(r.Context(), token, userEmail, githubLogin, userID)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", userID.String()).Msg("failed to claim pending invitation")
+		h.emitInvitationClaimFailed(r, userID, inv, "INTERNAL_ERROR", err.Error())
 		return
 	}
 	if invErr != nil {
@@ -150,7 +190,60 @@ func (h *AuthHandler) claimPendingInvitationForExistingUser(
 			Str("code", invErr.code).
 			Str("user_id", userID.String()).
 			Msg("pending invitation claim rejected during oauth login")
+		h.emitInvitationClaimFailed(r, userID, inv, invErr.code, invErr.message)
+		return
 	}
+	if inv != nil {
+		h.emitInvitationAccepted(r, userID, inv)
+	}
+}
+
+// emitInvitationClaimFailed records a failed invitation claim attempt for
+// security observability. No-op when the audit emitter is nil or the
+// invitation could not be identified (org context required for audit row).
+func (h *AuthHandler) emitInvitationClaimFailed(
+	r *http.Request,
+	userID uuid.UUID,
+	inv *models.Invitation,
+	code, message string,
+) {
+	if h.audit == nil || inv == nil {
+		return
+	}
+	invIDStr := inv.ID.String()
+	details, _ := json.Marshal(map[string]any{
+		"code":    code,
+		"message": message,
+	})
+	h.audit.EmitUserAction(r.Context(), db.UserActionParams{
+		OrgID:        inv.OrgID,
+		UserID:       userID,
+		Action:       models.AuditActionTeamInvitationClaimFailed,
+		ResourceType: models.AuditResourceInvitation,
+		ResourceID:   &invIDStr,
+		Details:      details,
+	})
+}
+
+// emitInvitationAccepted records a successful invitation claim. Mirrors the
+// failure path so OAuth-driven joins are visible in audit alongside direct
+// ClaimInvitation calls.
+func (h *AuthHandler) emitInvitationAccepted(
+	r *http.Request,
+	userID uuid.UUID,
+	inv *models.Invitation,
+) {
+	if h.audit == nil || inv == nil {
+		return
+	}
+	invIDStr := inv.ID.String()
+	h.audit.EmitUserAction(r.Context(), db.UserActionParams{
+		OrgID:        inv.OrgID,
+		UserID:       userID,
+		Action:       models.AuditActionTeamInvitationAccepted,
+		ResourceType: models.AuditResourceInvitation,
+		ResourceID:   &invIDStr,
+	})
 }
 
 // readAndClearPendingInvitationCookie reads and clears the pending_invitation

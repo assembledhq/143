@@ -147,7 +147,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		return
 	}
 
-	activeOrgID, activeRole, err := resolveActiveMembership(r, stores, user.ID, session)
+	activeOrgID, activeRole, fromHeader, err := resolveActiveMembership(r, stores, user.ID, session)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "NO_MEMBERSHIP", err.Error())
 		return
@@ -157,7 +157,14 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	// the next cold load (new tab / no X-Active-Org-ID) picks up where this
 	// one left off. Failures here are logged but do not fail the request —
 	// the hint is a convenience, not load-bearing.
-	if activeOrgID != uuid.Nil && (session.LastOrgID == nil || *session.LastOrgID != activeOrgID) {
+	//
+	// We skip the write when the resolution came from the X-Active-Org-ID
+	// header. Two simultaneous tabs pinned to different orgs would otherwise
+	// fight to overwrite last_org_id on every request, causing the "neither
+	// tab is sticky" symptom on cold load. The header is the client's
+	// authoritative declaration; the session hint should only track the
+	// session-level fallback (no header in flight).
+	if !fromHeader && activeOrgID != uuid.Nil && (session.LastOrgID == nil || *session.LastOrgID != activeOrgID) {
 		if updateErr := stores.Sessions.UpdateLastOrgID(r.Context(), token, &activeOrgID); updateErr != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(updateErr).Msg("failed to persist last_org_id")
 		}
@@ -203,32 +210,36 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 // allowing the user through to see the empty state. A non-nil error means
 // the client explicitly requested an org the user does not belong to, which
 // is a 403 (the client should re-resolve via /auth/me).
-func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUID, session models.AuthSession) (uuid.UUID, string, error) {
+//
+// The fromHeader return is true when the X-Active-Org-ID header drove the
+// choice; the caller uses that to skip the last_org_id write so two tabs
+// pinned to different orgs don't trample each other's session hint.
+func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUID, session models.AuthSession) (uuid.UUID, string, bool, error) {
 	// 1. Explicit header.
 	if raw := strings.TrimSpace(r.Header.Get(ActiveOrgHeader)); raw != "" {
 		requested, parseErr := uuid.Parse(raw)
 		if parseErr != nil {
-			return uuid.Nil, "", errors.New("invalid active org header")
+			return uuid.Nil, "", false, errors.New("invalid active org header")
 		}
 		m, err := stores.Memberships.Get(r.Context(), userID, requested)
 		if err == nil {
-			return m.OrgID, m.Role, nil
+			return m.OrgID, m.Role, true, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", err
+			return uuid.Nil, "", false, err
 		}
 		// Explicit request for an org the user does not belong to — refuse.
-		return uuid.Nil, "", errors.New("not a member of requested org")
+		return uuid.Nil, "", false, errors.New("not a member of requested org")
 	}
 
 	// 2. Session hint.
 	if session.LastOrgID != nil {
 		m, err := stores.Memberships.Get(r.Context(), userID, *session.LastOrgID)
 		if err == nil {
-			return m.OrgID, m.Role, nil
+			return m.OrgID, m.Role, false, nil
 		}
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", err
+			return uuid.Nil, "", false, err
 		}
 		// Session hint is stale (membership revoked or org deleted) — fall
 		// through to oldest membership.
@@ -238,11 +249,11 @@ func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUI
 	m, err := stores.Memberships.OldestForUser(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", nil
+			return uuid.Nil, "", false, nil
 		}
-		return uuid.Nil, "", err
+		return uuid.Nil, "", false, err
 	}
-	return m.OrgID, m.Role, nil
+	return m.OrgID, m.Role, false, nil
 }
 
 func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthSessionStore, csrfKey []byte, logger zerolog.Logger, session models.AuthSession) {

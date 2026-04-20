@@ -260,6 +260,26 @@ func TestUserStore_GetByIDGlobal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// GetByIDGlobal wraps Query errors with a "query user" prefix so callers
+// can distinguish "database unreachable" from "no such row".
+func TestUserStore_GetByIDGlobal_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+
+	_, err = store.GetByIDGlobal(context.Background(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query user")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUserStore_GetByIDGlobal_NotFound(t *testing.T) {
 	t.Parallel()
 
