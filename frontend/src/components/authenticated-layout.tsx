@@ -50,14 +50,20 @@ function VersionMenuItem() {
 
   const handleCopy = useCallback((e: Event) => {
     e.preventDefault();
-    navigator.clipboard.writeText(buildSha);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(buildSha).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {},
+    );
   }, []);
 
   return (
     <DropdownMenuItem
       onSelect={handleCopy}
+      aria-label="Copy version SHA"
       className="gap-2 text-xs text-muted-foreground focus:text-muted-foreground"
     >
       <Info className="h-3.5 w-3.5 opacity-60" />
@@ -278,7 +284,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
                   <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" side="top" className="w-56">
+              <DropdownMenuContent align="start" side="top" className="w-48">
                 <DropdownMenuItem onClick={logout}>
                   <LogOut className="h-4 w-4" />
                   Log out
