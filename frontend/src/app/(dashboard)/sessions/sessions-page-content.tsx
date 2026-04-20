@@ -38,6 +38,7 @@ import {
   workingSet,
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
+import { getCountForTab, renderCount } from "@/lib/session-counts";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -221,8 +222,9 @@ export function SessionsPageContent() {
   const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Pagination state. See automations/[id]/page.tsx for the reasoning behind
-  // storing pages locally and pausing polling once the user paginates.
+  // Pagination state. Once the user clicks "Show more" we stop polling entirely
+  // (page 0 included) — refreshing page 0 while extra pages are held locally
+  // would invalidate the cursor that produced them. See automations/[id]/page.tsx.
   const [extraPages, setExtraPages] = useState<SessionListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
   const isPaginated = extraPages.length > 0;
@@ -294,18 +296,6 @@ export function SessionsPageContent() {
   const counts = countsData?.data;
   const workingCount = counts?.active ?? 0;
 
-  const renderCount = (value: number | undefined): string | undefined => {
-    if (value === undefined || !counts) return undefined;
-    return value >= counts.cap ? `${counts.cap - 1}+` : String(value);
-  };
-
-  const getCountForTab = (value: string): number | undefined => {
-    if (!counts) return undefined;
-    if (value === "all") return counts.all;
-    if (value === "active") return counts.active;
-    return undefined;
-  };
-
   // Total for the currently-visible tab (used for "Showing N of M" footer).
   // Falls back to loaded length when counts haven't arrived yet or when the cap
   // is hit (the cap is represented by "M+" via renderCount).
@@ -340,12 +330,13 @@ export function SessionsPageContent() {
         <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto overflow-y-hidden scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
-            const count = getCountForTab(tab.value);
-            const label = renderCount(count);
+            const count = getCountForTab(tab.value, counts);
+            const label = renderCount(count, counts);
             // Active uses the existing attention-grabbing pill; All gets a muted
             // inline number. Decisions is a client-only view with no count.
+            // Zero buckets render nothing — a "0" badge is noise.
             const isActivePill = tab.value === "active" && count !== undefined && count > 0;
-            const isMutedNumber = !isActivePill && label !== undefined;
+            const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
             return (
               <button
                 key={tab.value}
@@ -466,7 +457,7 @@ export function SessionsPageContent() {
               <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-border/50 bg-muted/20">
                 <span className="text-xs text-muted-foreground/70 tabular-nums">
                   {currentTabTotal !== undefined
-                    ? `Showing ${filteredSessions.length} of ${renderCount(currentTabTotal)}`
+                    ? `Showing ${filteredSessions.length} of ${renderCount(currentTabTotal, counts)}`
                     : `${filteredSessions.length} session${filteredSessions.length !== 1 ? "s" : ""}`}
                 </span>
                 <div className="flex items-center gap-3">

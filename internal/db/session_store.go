@@ -51,6 +51,15 @@ type SessionCountsFilters struct {
 // sessionCountsCap bounds each count subquery so a single user with millions
 // of sessions can't turn the counts endpoint into a table scan. Clients render
 // any bucket that hits the cap as e.g. "99+".
+//
+// LIMIT only short-circuits when an index lets Postgres stop early. The three
+// buckets rely on:
+//   - all:      idx_sessions_not_archived (archived_at IS NULL, deleted_at IS NULL)
+//   - active:   idx_sessions_not_archived, filtered in-line by status
+//   - archived: idx_sessions_archived     (archived_at IS NOT NULL, deleted_at IS NULL)
+//
+// If either partial index is missing, an empty bucket can still force a full
+// slice scan of the (org_id, created_at) range — keep both in place.
 const sessionCountsCap = 100
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
@@ -182,7 +191,8 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 
 // CountsByOrg returns non-archived, active, and archived session counts for
 // the org, optionally narrowed by repository and user. Each bucket is counted
-// via a LIMIT-bounded subquery so worst-case cost is O(cap) per bucket.
+// via a LIMIT-bounded subquery; worst-case cost is O(cap) per bucket as long
+// as an index with the bucket's predicate exists (see sessionCountsCap).
 func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters SessionCountsFilters) (models.SessionCounts, error) {
 	args := pgx.NamedArgs{
 		"org_id": orgID,

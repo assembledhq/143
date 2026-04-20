@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useDeferredValue, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
@@ -22,6 +22,7 @@ import {
   workingSet,
   filterToStatusParam,
 } from "@/lib/session-status-groups";
+import { getCountForTab, renderCount } from "@/lib/session-counts";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -152,9 +153,14 @@ export function SessionSidebar() {
   const { currentUserFilter, triggeredByUserId, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
-  // Deferred keeps keystroke renders snappy while still rebuilding the query key
-  // for the server-side search.
-  const deferredSearch = useDeferredValue(search);
+  // Debounce the search query so rapid typing doesn't fire a request per
+  // keystroke. useDeferredValue only lowers render priority — it does not
+  // throttle network calls.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(search.trim()), 200);
+    return () => clearTimeout(handle);
+  }, [search]);
 
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
@@ -165,15 +171,16 @@ export function SessionSidebar() {
   const isArchivedView = currentFilter === "archived";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Pagination state. Pages are stored so polling can refresh page 0 without
-  // blowing away any pages the user has loaded via "Load more". Polling pauses
-  // once the user has paginated to avoid cursor invalidation (see the matching
-  // comment in automations/[id]/page.tsx).
+  // Pagination state. Once the user clicks "Show more" we stop polling entirely
+  // (page 0 included) — refreshing page 0 while extra pages are held locally
+  // would invalidate the cursor that produced them. Pages re-hydrate on scope
+  // change via the scopeKey reset below. See automations/[id]/page.tsx for the
+  // same pattern.
   const [extraPages, setExtraPages] = useState<SessionListItem[][]>([]);
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
   const isPaginated = extraPages.length > 0;
 
-  const trimmedSearch = deferredSearch.trim();
+  const trimmedSearch = debouncedSearch;
 
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders — see
@@ -254,18 +261,6 @@ export function SessionSidebar() {
   );
 
   const counts = countsData?.data;
-  const renderCount = (value: number | undefined): string | undefined => {
-    if (value === undefined || !counts) return undefined;
-    return value >= counts.cap ? `${counts.cap - 1}+` : String(value);
-  };
-
-  const getCountForTab = (value: string): number | undefined => {
-    if (!counts) return undefined;
-    if (value === "all") return counts.all;
-    if (value === "active") return counts.active;
-    if (value === "archived") return counts.archived;
-    return undefined;
-  };
 
   const isNewSession = pathname === "/sessions/new";
 
@@ -316,12 +311,13 @@ export function SessionSidebar() {
         >
           <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
             {filterTabs.map((tab) => {
-              const count = getCountForTab(tab.value);
-              const label = renderCount(count);
+              const count = getCountForTab(tab.value, counts);
+              const label = renderCount(count, counts);
               // Active uses the existing attention-grabbing pill; All/Archived get a
               // muted inline number so totals are visible without being loud.
+              // Zero buckets render nothing — a "0" badge is noise.
               const isActivePill = tab.value === "active" && count !== undefined && count > 0;
-              const isMutedNumber = !isActivePill && label !== undefined;
+              const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
                   {tab.label}
