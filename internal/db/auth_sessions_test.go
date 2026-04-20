@@ -92,6 +92,43 @@ func TestAuthSessionStore_GetByToken_QueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAuthSessionStore_Touch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+	expiresAt := time.Now().Add(30 * 24 * time.Hour)
+
+	mock.ExpectExec("UPDATE auth_sessions SET expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.Touch(context.Background(), "test-token", expiresAt)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAuthSessionStore_Touch_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+
+	mock.ExpectExec("UPDATE auth_sessions SET expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection lost"))
+
+	err = store.Touch(context.Background(), "bad-token", time.Now())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAuthSessionStore_DeleteByToken(t *testing.T) {
 	t.Parallel()
 

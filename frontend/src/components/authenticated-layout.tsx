@@ -89,7 +89,16 @@ const navItems = [
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoading, isAuthenticated, logout } = useAuth();
+  const {
+    user,
+    isLoading,
+    isFetching,
+    isAuthenticated,
+    isUnauthorized,
+    isTransientError,
+    refetchUser,
+    logout,
+  } = useAuth();
 
   const { data: proposalSummary } = useQuery({
     queryKey: ["proposalSummary"],
@@ -124,12 +133,52 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const handlePaletteOpen = useCallback(() => setPaletteOpen(true), []);
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
+    // Only redirect on a confirmed 401. Transient network errors (5xx during
+    // a rolling deploy, offline blips) leave isAuthenticated false but must
+    // not kick the user to /login — the query will retry and recover.
+    if (!isLoading && isUnauthorized) {
       router.replace("/login");
     }
-  }, [isLoading, isAuthenticated, router]);
+  }, [isLoading, isUnauthorized, router]);
 
-  if (isLoading) {
+  // Show the loading skeleton while the initial /me call is in flight OR
+  // while retries are still in progress without a cached user. Confirmed
+  // 401s fall through to the redirect path; exhausted non-401 retries fall
+  // through to the error UI below.
+  const showLoadingSkeleton =
+    !user && !isUnauthorized && !isTransientError && isLoading;
+
+  if (!user && isTransientError) {
+    return (
+      <div
+        role="alert"
+        aria-live="polite"
+        className="flex h-screen items-center justify-center bg-background px-6"
+      >
+        <div className="max-w-sm text-center space-y-4">
+          <h2 className="text-base font-semibold text-foreground">
+            Can&apos;t reach the server
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            We couldn&apos;t load your session. This usually clears up on its own
+            during a deploy.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isFetching}
+            onClick={() => {
+              void refetchUser();
+            }}
+          >
+            {isFetching ? "Retrying…" : "Try again"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (showLoadingSkeleton) {
     return (
       <div className="flex h-screen">
         <aside className="w-[260px] border-r border-border bg-sidebar flex flex-col">
@@ -169,7 +218,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     );
   }
 
-  if (!isAuthenticated) {
+  if (isUnauthorized || !user) {
     return null;
   }
 

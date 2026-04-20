@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -48,6 +49,16 @@ func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models
 		return models.AuthSession{}, fmt.Errorf("query session: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.AuthSession])
+}
+
+// Touch extends the session's expires_at to the given time. Used by the
+// Auth middleware to implement sliding-window session refresh so active
+// users aren't forcibly logged out at the 30-day boundary.
+// lint:allow-no-orgid reason="touched by opaque token during request auth"
+func (s *AuthSessionStore) Touch(ctx context.Context, token string, expiresAt time.Time) error {
+	query := `UPDATE auth_sessions SET expires_at = @expires_at WHERE token = @token`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"token": token, "expires_at": expiresAt})
+	return err
 }
 
 // DeleteByToken removes the session for the given opaque token (logout).

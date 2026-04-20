@@ -225,6 +225,78 @@ func TestCSRF(t *testing.T) {
 	}
 }
 
+func TestExtendCSRFCookie(t *testing.T) {
+	t.Parallel()
+
+	key := []byte(testCSRFKey)
+
+	t.Run("preserves an existing valid cookie and refreshes MaxAge", func(t *testing.T) {
+		t.Parallel()
+
+		existing := mustGenerateToken(t, testCSRFKey)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: existing})
+		w := httptest.NewRecorder()
+
+		require.NoError(t, ExtendCSRFCookie(w, req, key))
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		var got *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == CSRFCookieName {
+				got = c
+			}
+		}
+		require.NotNil(t, got, "CSRF cookie should be re-emitted")
+		require.Equal(t, existing, got.Value, "existing token value should be preserved to avoid breaking in-flight requests")
+		require.Equal(t, int(SessionTTL.Seconds()), got.MaxAge, "re-emitted cookie should use the session TTL")
+	})
+
+	t.Run("issues a fresh token when no valid cookie is present", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+
+		require.NoError(t, ExtendCSRFCookie(w, req, key))
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		var got *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == CSRFCookieName {
+				got = c
+			}
+		}
+		require.NotNil(t, got, "CSRF cookie should be issued when none is present")
+		require.True(t, validSignedToken(got.Value, key), "issued token should be validly signed")
+		require.Equal(t, int(SessionTTL.Seconds()), got.MaxAge, "issued cookie should use the session TTL")
+	})
+
+	t.Run("replaces an invalid cookie with a fresh token", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: "garbage.badsig"})
+		w := httptest.NewRecorder()
+
+		require.NoError(t, ExtendCSRFCookie(w, req, key))
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		var got *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == CSRFCookieName {
+				got = c
+			}
+		}
+		require.NotNil(t, got, "CSRF cookie should be re-issued when existing is invalid")
+		require.NotEqual(t, "garbage.badsig", got.Value, "invalid token should not be re-emitted")
+		require.True(t, validSignedToken(got.Value, key), "replacement token should be validly signed")
+	})
+}
+
 func TestGenerateSignedToken(t *testing.T) {
 	t.Parallel()
 
