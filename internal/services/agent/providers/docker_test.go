@@ -669,6 +669,39 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
 	})
 
+	t.Run("bootstrap runs as root without sudo", func(t *testing.T) {
+		t.Parallel()
+
+		// The bootstrap mkdir/chown must NOT shell out to `sudo`: under gVisor
+		// (and no-new-privileges / userns-remap / any nosuid mount) the setuid
+		// bit on /usr/bin/sudo is stripped, producing "sudo: effective uid is
+		// not 0 ... nosuid" and failing session startup. Running the exec with
+		// ExecOptions.User="root" goes through Docker's control plane instead,
+		// so it works under every runtime and security profile we support.
+		var execCfgs []container.ExecOptions
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "bootstrap-root"}, nil
+		}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCfgs = append(execCfgs, config)
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", len(execCfgs))}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.NoError(t, err)
+
+		require.Len(t, execCfgs, 1, "Create should issue exactly one bootstrap exec")
+		boot := execCfgs[0]
+		require.Equal(t, "root", boot.User, "bootstrap exec must run as root via ExecOptions.User (not via sudo)")
+		require.Len(t, boot.Cmd, 3, "bootstrap cmd should be wrapped by sh -c")
+		require.NotContains(t, boot.Cmd[2], "sudo", "bootstrap shell cmd must not invoke sudo — the setuid bit is stripped under gVisor/no-new-privileges")
+		require.Contains(t, boot.Cmd[2], "mkdir -p", "bootstrap must still create the workdir idempotently")
+		require.Contains(t, boot.Cmd[2], "chown sandbox:sandbox", "bootstrap must chown the workdir to the sandbox user")
+	})
+
 	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
 		t.Parallel()
 

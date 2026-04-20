@@ -382,13 +382,20 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// idempotently so the case where WorkDir already exists (e.g. /workspace
 	// baked into the image) is a harmless no-op too. Run with WorkDir="/" so
 	// the exec's own cwd doesn't race with creation.
+	//
+	// Invoke docker exec with User="root" rather than prefixing `sudo`: sudo
+	// relies on its setuid bit, which the kernel strips under gVisor (and
+	// under no-new-privileges, userns-remap, or any nosuid mount), yielding
+	// "sudo: effective uid is not 0, is /usr/bin/sudo on a file system with
+	// the 'nosuid' option set". The exec API sets the uid via the runtime's
+	// control plane, so no setuid is involved.
 	bootstrapSB := &agent.Sandbox{ID: resp.ID, Provider: "docker", WorkDir: "/"}
 	bootstrapCmd := fmt.Sprintf(
-		"sudo mkdir -p '%s' && sudo chown sandbox:sandbox '%s'",
+		"mkdir -p '%s' && chown sandbox:sandbox '%s'",
 		shellEscape(cfg.WorkDir), shellEscape(cfg.WorkDir),
 	)
 	var bootErr bytes.Buffer
-	if code, err := d.Exec(ctx, bootstrapSB, bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
+	if code, err := d.execAs(ctx, bootstrapSB, "root", bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
 		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		if removeErr != nil {
 			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
@@ -460,12 +467,23 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 // Exec runs a command inside the sandbox container and streams output to the
 // provided writers. Returns the command's exit code.
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	return d.execAs(ctx, sb, "", cmd, stdout, stderr)
+}
+
+// execAs runs a command in the container as a specific user. An empty user
+// means "use the container's default" (sandbox, per containerCfg.User).
+// Bootstrap uses user="root" to mkdir/chown without relying on sudo's setuid
+// bit, which the kernel strips under gVisor / no-new-privileges / userns.
+func (d *DockerProvider) execAs(ctx context.Context, sb *agent.Sandbox, user, cmd string, stdout, stderr io.Writer) (int, error) {
 	log := d.scopedLogger(sb)
-	log.Debug().
-		Str("cmd", cmd).
-		Msg("executing command in sandbox")
+	logEvent := log.Debug().Str("cmd", cmd)
+	if user != "" {
+		logEvent = logEvent.Str("user", user)
+	}
+	logEvent.Msg("executing command in sandbox")
 
 	execCfg := container.ExecOptions{
+		User:         user,
 		Cmd:          []string{"sh", "-c", cmd},
 		AttachStdout: true,
 		AttachStderr: true,
