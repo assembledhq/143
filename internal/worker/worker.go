@@ -163,9 +163,12 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	handlerCtx := withJobOrgID(ctx, orgID)
-	// attempts is the pre-UPDATE count; the DB row was just incremented to
-	// attempts+1, so that's the attempt number the handler is running as.
-	handlerCtx = jobctx.WithAttempt(handlerCtx, attempts+1, maxAttempts)
+	// Install a fresh per-attempt dead-letter hook registry so handlers can
+	// defer user-visible side effects (error messages, status transitions)
+	// until the worker actually decides to dead-letter the job — covering
+	// FatalError, retryable timeout, and retries-exhausted uniformly
+	// instead of forcing each handler to guess which branch it's on.
+	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
 		// FatalError means the failure is persistent — dead-letter immediately
@@ -173,6 +176,7 @@ func (w *Worker) poll(ctx context.Context) {
 		var fatal *FatalError
 		if errors.As(err, &fatal) {
 			w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed (fatal, skipping retries)")
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			w.deadLetterJob(ctx, jobID, err.Error())
 			return
 		}
@@ -187,7 +191,9 @@ func (w *Worker) poll(ctx context.Context) {
 					Str("job_id", jobID.String()).
 					Dur("age", time.Since(jobCreatedAt)).
 					Msg("retryable job exceeded max duration, dead-lettering")
-				w.deadLetterJob(ctx, jobID, fmt.Sprintf("retryable job timed out after %s: %s", maxRetryableDuration, err.Error()))
+				timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
+				jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
+				w.deadLetterJob(ctx, jobID, timeoutErr.Error())
 				return
 			}
 			w.logger.Info().Err(err).Str("job_id", jobID.String()).Msg("job deferred (retryable)")
@@ -196,6 +202,7 @@ func (w *Worker) poll(ctx context.Context) {
 		}
 		w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed")
 		if attempts+1 >= maxAttempts {
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			w.deadLetterJob(ctx, jobID, err.Error())
 		} else {
 			w.retryJob(ctx, jobID, err.Error(), attempts+1)

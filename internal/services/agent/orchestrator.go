@@ -791,21 +791,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
 		}
-		// Only surface a user-facing message when this is the final retry —
-		// otherwise the job's automatic retries produce one duplicate message
-		// per attempt before the worker finally gives up.
-		if o.sessionMessages != nil && jobctx.IsFinalAttempt(ctx) {
-			errMsg := &models.SessionMessage{
-				SessionID:  session.ID,
-				OrgID:      session.OrgID,
-				TurnNumber: session.CurrentTurn + 1,
-				Role:       models.MessageRoleAssistant,
-				Content:    fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
-			}
-			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
-				log.Error().Err(createErr).Msg("failed to create error message for workdir resolution failure")
-			}
-		}
+		// Defer the user-facing message to the worker's dead-letter path so
+		// intermediate retries stay silent; when the worker gives up (for
+		// any reason — FatalError, retryable timeout, retries exhausted)
+		// the hook fires once and the user sees exactly one message.
+		// Direct callers without a worker registry drop the hook and are
+		// expected to surface the returned error themselves.
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
+			"workdir resolution",
+		)
 		return fmt.Errorf("resolve workdir: %w", slugErr)
 	}
 	if slug != "" {
@@ -828,20 +825,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
 		}
 		// Same rationale as the workdir-resolution branch above: defer the
-		// user-visible message to the final retry so a flaky Docker daemon
-		// doesn't produce N identical assistant messages.
-		if o.sessionMessages != nil && jobctx.IsFinalAttempt(ctx) {
-			errMsg := &models.SessionMessage{
-				SessionID:  session.ID,
-				OrgID:      session.OrgID,
-				TurnNumber: session.CurrentTurn + 1,
-				Role:       models.MessageRoleAssistant,
-				Content:    fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
-			}
-			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
-				log.Error().Err(createErr).Msg("failed to create error message for sandbox failure")
-			}
-		}
+		// user-visible message to the worker's dead-letter hook so a flaky
+		// Docker daemon doesn't produce N identical assistant messages,
+		// and so FatalError / retryable-timeout paths still surface a
+		// message rather than silently dead-lettering.
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
+			"sandbox creation",
+		)
 		return fmt.Errorf("create sandbox: %w", err)
 	}
 	containerStartedAt := time.Now()
@@ -1096,6 +1089,45 @@ func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Sess
 		return "", fmt.Errorf("fetch repo for session workdir: %w", err)
 	}
 	return SlugForRepo(repo.FullName), nil
+}
+
+// registerSandboxFailureMessage queues a user-visible assistant message to
+// be posted if — and only if — the current continue_session job attempt is
+// dead-lettered by the worker. See internal/jobctx: the worker runs
+// registered hooks from every dead-letter path (FatalError, retryable
+// timeout, retries exhausted), so the user gets exactly one message on
+// terminal failure and no message on mid-retry attempts. When there is no
+// worker registry on the context (e.g. a direct test/CLI caller), the
+// hook is dropped and the caller must act on the returned error.
+//
+// stage is a short phrase used only for the warn-level log emitted if the
+// DB insert fails inside the hook (e.g. "workdir resolution",
+// "sandbox creation").
+func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, session *models.Session, content, stage string) {
+	if o.sessionMessages == nil {
+		return
+	}
+	sessionMessages := o.sessionMessages
+	sessionID := session.ID
+	orgID := session.OrgID
+	turnNumber := session.CurrentTurn + 1
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+		errMsg := &models.SessionMessage{
+			SessionID:  sessionID,
+			OrgID:      orgID,
+			TurnNumber: turnNumber,
+			Role:       models.MessageRoleAssistant,
+			Content:    content,
+		}
+		if createErr := sessionMessages.Create(hookCtx, errMsg); createErr != nil {
+			o.logger.Error().
+				Err(createErr).
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Str("stage", stage).
+				Msg("failed to create dead-letter error message")
+		}
+	})
 }
 
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff

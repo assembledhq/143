@@ -1530,13 +1530,16 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 	}
 }
 
-// TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt locks in the
-// behavior that when sandbox preparation fails, ContinueSession posts the
-// user-visible assistant message only on the final retry attempt.
-// Intermediate attempts must stay silent so the worker's automatic retry
-// loop doesn't flood the session with duplicates. Exercised for both the
-// sandbox-creation branch and the sibling workdir-resolution branch.
-func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
+// TestContinueSession_ErrorMessageDeferredToDeadLetterHook locks in the
+// behavior that when sandbox preparation fails, ContinueSession does NOT
+// post the user-visible assistant message inline. Instead it registers a
+// dead-letter hook that the worker runs only when it decides to stop
+// retrying — so a mid-retry attempt stays silent, but a dead-lettered job
+// (for any reason: FatalError, retryable timeout, retries exhausted)
+// produces exactly one message. Exercised for both the sandbox-creation
+// branch and the sibling workdir-resolution branch, plus the direct
+// caller case (no registry on ctx).
+func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 	t.Parallel()
 
 	type failureMode int
@@ -1546,46 +1549,57 @@ func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
 	)
 
 	cases := []struct {
-		name            string
-		failure         failureMode
-		ctx             func() context.Context
-		wantErrorPosted bool
-		wantErrMatch    string
+		name              string
+		failure           failureMode
+		withRegistry      bool
+		runHooks          bool
+		wantMessageInline bool
+		wantMessageAfter  bool
+		wantErrMatch      string
 	}{
 		{
-			name:            "sandbox-create: no attempt metadata does not post",
-			failure:         sandboxCreateFailure,
-			ctx:             context.Background,
-			wantErrorPosted: false,
-			wantErrMatch:    "create sandbox",
+			name:              "sandbox-create: direct caller without registry posts nothing",
+			failure:           sandboxCreateFailure,
+			withRegistry:      false,
+			wantMessageInline: false,
+			wantMessageAfter:  false,
+			wantErrMatch:      "create sandbox",
 		},
 		{
-			name:            "sandbox-create: mid-retry attempt does not post",
-			failure:         sandboxCreateFailure,
-			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 1, 3) },
-			wantErrorPosted: false,
-			wantErrMatch:    "create sandbox",
+			name:              "sandbox-create: mid-retry (registry present, hooks not fired) stays silent",
+			failure:           sandboxCreateFailure,
+			withRegistry:      true,
+			runHooks:          false,
+			wantMessageInline: false,
+			wantMessageAfter:  false,
+			wantErrMatch:      "create sandbox",
 		},
 		{
-			name:            "sandbox-create: final attempt posts",
-			failure:         sandboxCreateFailure,
-			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 3, 3) },
-			wantErrorPosted: true,
-			wantErrMatch:    "create sandbox",
+			name:              "sandbox-create: dead-letter (hooks fired) posts exactly one message",
+			failure:           sandboxCreateFailure,
+			withRegistry:      true,
+			runHooks:          true,
+			wantMessageInline: false,
+			wantMessageAfter:  true,
+			wantErrMatch:      "create sandbox",
 		},
 		{
-			name:            "workdir-resolve: mid-retry attempt does not post",
-			failure:         workdirResolveFailure,
-			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 1, 3) },
-			wantErrorPosted: false,
-			wantErrMatch:    "resolve workdir",
+			name:              "workdir-resolve: mid-retry stays silent",
+			failure:           workdirResolveFailure,
+			withRegistry:      true,
+			runHooks:          false,
+			wantMessageInline: false,
+			wantMessageAfter:  false,
+			wantErrMatch:      "resolve workdir",
 		},
 		{
-			name:            "workdir-resolve: final attempt posts",
-			failure:         workdirResolveFailure,
-			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 3, 3) },
-			wantErrorPosted: true,
-			wantErrMatch:    "resolve workdir",
+			name:              "workdir-resolve: dead-letter posts exactly one message",
+			failure:           workdirResolveFailure,
+			withRegistry:      true,
+			runHooks:          true,
+			wantMessageInline: false,
+			wantMessageAfter:  true,
+			wantErrMatch:      "resolve workdir",
 		},
 	}
 
@@ -1626,25 +1640,83 @@ func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
 				d.issues.err = errors.New("db flaky")
 			}
 
+			ctx := context.Background()
+			if c.withRegistry {
+				ctx = jobctx.WithDeadLetterHooks(ctx)
+			}
+
 			orch := buildOrchestrator(d)
-			err := orch.ContinueSession(c.ctx(), session)
+			err := orch.ContinueSession(ctx, session)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), c.wantErrMatch)
 
-			var errorMessages int
-			for _, m := range d.messages.getMessages() {
-				if m.Role == models.MessageRoleAssistant &&
-					m.SessionID == session.ID {
-					errorMessages++
+			countAssistantMessages := func() int {
+				var n int
+				for _, m := range d.messages.getMessages() {
+					if m.Role == models.MessageRoleAssistant && m.SessionID == session.ID {
+						n++
+					}
 				}
+				return n
 			}
-			if c.wantErrorPosted {
-				require.Equal(t, 1, errorMessages, "final attempt should post exactly one error message")
+
+			if c.wantMessageInline {
+				require.Equal(t, 1, countAssistantMessages(), "inline assistant message expected before hook runs")
 			} else {
-				require.Zero(t, errorMessages, "non-final attempts must not post error messages")
+				require.Zero(t, countAssistantMessages(), "no assistant message should be posted inline")
+			}
+
+			if c.runHooks {
+				jobctx.RunDeadLetterHooks(ctx, err)
+			}
+
+			if c.wantMessageAfter {
+				require.Equal(t, 1, countAssistantMessages(), "dead-letter hook should post exactly one assistant message")
+			} else {
+				require.Zero(t, countAssistantMessages(), "no assistant message should be posted when hook does not fire")
 			}
 		})
 	}
+}
+
+// TestContinueSession_DeadLetterHookIdempotent ensures repeated invocations
+// of the hook registry — which can happen if multiple worker dead-letter
+// branches coordinate or tests drive it defensively — still produce only
+// one user-visible message.
+func TestContinueSession_DeadLetterHookIdempotent(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+		Role: models.MessageRoleUser, Content: "continue please",
+	}}
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		return nil, errForcedCreateFailure
+	}
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(ctx, session)
+	require.Error(t, err)
+
+	jobctx.RunDeadLetterHooks(ctx, err)
+	jobctx.RunDeadLetterHooks(ctx, err)
+
+	var assistantMessages int
+	for _, m := range d.messages.getMessages() {
+		if m.Role == models.MessageRoleAssistant && m.SessionID == session.ID {
+			assistantMessages++
+		}
+	}
+	require.Equal(t, 1, assistantMessages, "repeated RunDeadLetterHooks must not produce duplicate messages")
 }
 
 // ---------------------------------------------------------------------------
