@@ -66,6 +66,9 @@ export function ManualSessionCreatePageContent() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  // Synchronous guard: React Query's isPending flips on the next render, so
+  // rapid Enter presses can all pass the isPending check in the same tick.
+  const submittingRef = useRef(false);
 
   // Read the currently selected repository from the URL query params
   // (set by the RepoContextSwitcher) so we clone the codebase into the sandbox.
@@ -203,8 +206,16 @@ export function ManualSessionCreatePageContent() {
       setCreationError(
         error instanceof Error ? error.message : "Could not start session. Please try again.",
       );
+      submittingRef.current = false;
     },
   });
+
+  function submitManualSession() {
+    if (submittingRef.current) return;
+    if (message.trim().length === 0) return;
+    submittingRef.current = true;
+    createManualSessionMutation.mutate();
+  }
 
   function resizeMessageInput() {
     const element = messageInputRef.current;
@@ -354,9 +365,7 @@ export function ManualSessionCreatePageContent() {
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  if (message.trim().length > 0 && !createManualSessionMutation.isPending) {
-                    createManualSessionMutation.mutate();
-                  }
+                  submitManualSession();
                 }
               }}
               placeholder="Tell the agent what to do..."
@@ -553,7 +562,7 @@ export function ManualSessionCreatePageContent() {
                 <Button
                   type="button"
                   size="icon"
-                  onClick={() => createManualSessionMutation.mutate()}
+                  onClick={submitManualSession}
                   disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
                   className="h-8 w-8 rounded-full"
                   aria-label="Start session"
