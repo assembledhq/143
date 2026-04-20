@@ -142,7 +142,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	if platformModel == "" {
 		platformModel = "gpt-5-nano"
 	}
-	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeAgentEnv(), cfg.SafeLLMEnv(), platformModel)
+	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv(), platformModel)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
@@ -474,7 +474,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/sessions/{id}/files/content", sessionFileHandler.GetFileContent)
 			r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 			r.Get("/api/v1/settings", settingsHandler.Get)
-			r.Get("/api/v1/settings/agent-defaults", settingsHandler.GetAgentDefaults)
 			r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 			r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 			r.Get("/api/v1/pm/current", pmHandler.Current)

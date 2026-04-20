@@ -11,7 +11,6 @@ import (
 
 type SettingsHandler struct {
 	orgStore      *db.OrganizationStore
-	agentDefaults map[string]map[string]string
 	llmDefaults   map[string]string // provider name → masked key (from server env)
 	platformModel string            // cheap model used for internal features (e.g. "gpt-5-nano")
 	audit         *db.AuditEmitter
@@ -22,8 +21,8 @@ func (h *SettingsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, agentDefaults map[string]map[string]string, llmDefaults map[string]string, platformModel string) *SettingsHandler {
-	return &SettingsHandler{orgStore: orgStore, agentDefaults: agentDefaults, llmDefaults: llmDefaults, platformModel: platformModel}
+func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string, platformModel string) *SettingsHandler {
+	return &SettingsHandler{orgStore: orgStore, llmDefaults: llmDefaults, platformModel: platformModel}
 }
 
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -34,12 +33,6 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
-}
-
-// GetAgentDefaults returns the server-level agent environment variable defaults
-// with API keys masked. Allows the frontend to show what's configured.
-func (h *SettingsHandler) GetAgentDefaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": h.agentDefaults})
 }
 
 // GetLLMDefaults returns which LLM providers have platform-level API keys

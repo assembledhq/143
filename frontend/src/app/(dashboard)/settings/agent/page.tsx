@@ -112,12 +112,6 @@ export default function AgentPage() {
     enabled: isAdmin,
   });
 
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: ["agent-defaults"],
-    queryFn: () => api.settings.getAgentDefaults(),
-    enabled: isAdmin,
-  });
-
   const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
 
   /* ---------- Org settings state (agent config + execution combined) ---------- */
@@ -144,10 +138,9 @@ export default function AgentPage() {
   const maxConcurrent = maxConcurrentOverride ?? String(orgSettings?.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs);
 
   const hasCodexAPIKey = useMemo(() => {
-    const codexServerDefaults = (agentDefaultsResponse?.data ?? {}).codex ?? {};
     const codexOrgConfig = agentConfig.codex ?? {};
-    return Boolean(codexOrgConfig.OPENAI_API_KEY || codexServerDefaults.OPENAI_API_KEY);
-  }, [agentConfig.codex, agentDefaultsResponse?.data]);
+    return Boolean(codexOrgConfig.OPENAI_API_KEY);
+  }, [agentConfig.codex]);
 
   const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
     hasCodexAPIKey && activeSubscriptions.length === 0 && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
@@ -181,14 +174,12 @@ export default function AgentPage() {
   });
 
   function handleSaveOrgSettings() {
-    const serverAgentDefaults = agentDefaultsResponse?.data ?? {};
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
 
     for (const [agentKey, vars] of Object.entries(agentConfig)) {
       const filtered: Record<string, string> = {};
-      const serverVars = serverAgentDefaults[agentKey] ?? {};
       for (const [key, value] of Object.entries(vars)) {
-        if (value && value !== serverVars[key]) {
+        if (value) {
           filtered[key] = value;
         }
       }
@@ -324,7 +315,6 @@ export default function AgentPage() {
 
   function renderOrgAgentConfigCard(): ReactNode {
     const agent = AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? AGENT_TYPES[0];
-    const serverVars = (agentDefaultsResponse?.data ?? {})[agent.key] ?? {};
     const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
     const r = resolved.find((c) => c.provider === agent.providerKey);
     const source = r?.source ?? "none";
@@ -377,10 +367,7 @@ export default function AgentPage() {
 
         {/* Env var fields */}
         {envVarsToRender.map((envVar) => {
-          const serverDefault = serverVars[envVar.name] ?? "";
-          const orgOverride = agentConfig[agent.key]?.[envVar.name] ?? "";
-          const displayValue = orgOverride || serverDefault;
-          const isServerDefault = !orgOverride && !!serverDefault;
+          const displayValue = agentConfig[agent.key]?.[envVar.name] ?? "";
 
           return (
             <div key={envVar.name} className="space-y-1">
@@ -388,9 +375,6 @@ export default function AgentPage() {
                 <Label htmlFor={`org-${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
                   {envVar.label}
                 </Label>
-                {isServerDefault && (
-                  <span className="text-xs text-muted-foreground">server default</span>
-                )}
               </div>
               {envVar.options ? (
                 <Select
@@ -408,7 +392,6 @@ export default function AgentPage() {
                   <SelectTrigger
                     id={`org-${agent.key}-${envVar.name}`}
                     aria-label={envVar.label}
-                    className={isServerDefault ? "text-muted-foreground" : ""}
                   >
                     <SelectValue placeholder="Select a model" />
                   </SelectTrigger>
@@ -426,7 +409,7 @@ export default function AgentPage() {
                   type={envVar.sensitive ? "password" : "text"}
                   placeholder={envVar.placeholder ?? "Not set"}
                   value={displayValue}
-                  className={`font-mono text-xs ${isServerDefault ? "text-muted-foreground" : ""}`}
+                  className="font-mono text-xs"
                   onChange={(e) => {
                     setAgentConfigOverride({
                       ...(agentConfigOverride ?? agentConfig),

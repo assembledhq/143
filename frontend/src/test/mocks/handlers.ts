@@ -438,12 +438,6 @@ export const handlers = [
     });
   }),
 
-  http.get('/api/v1/settings/agent-defaults', () => {
-    return HttpResponse.json({
-      data: {},
-    });
-  }),
-
   http.get('/api/v1/settings/codex-auth/status', () => {
     return HttpResponse.json({
       data: { status: 'none' },

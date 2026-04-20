@@ -21,7 +21,6 @@ describe("AutopilotSettingsPage", () => {
           updated_at: "2026-03-20T00:00:00Z",
         },
       })),
-      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} }))
     );
 
@@ -50,7 +49,6 @@ describe("AutopilotSettingsPage", () => {
           updated_at: "2026-03-20T00:00:00Z",
         },
       })),
-      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
       http.patch("/api/v1/settings", async ({ request }) => {
         capturedBody = await request.json();
@@ -96,7 +94,6 @@ describe("AutopilotSettingsPage", () => {
           updated_at: "2026-03-20T00:00:00Z",
         },
       })),
-      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} }))
     );
 
@@ -128,7 +125,6 @@ describe("AutopilotSettingsPage", () => {
           updated_at: "2026-03-20T00:00:00Z",
         },
       })),
-      http.get("/api/v1/settings/agent-defaults", () => HttpResponse.json({ data: {} })),
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
       http.patch("/api/v1/settings", async ({ request }) => {
         capturedBody = await request.json();
