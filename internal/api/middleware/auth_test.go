@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -240,6 +241,56 @@ func TestAuth(t *testing.T) {
 				require.Equal(t, uuid.MustParse("bbbbbbbb-0000-0000-0000-000000000002"), user.ID, "should set correct user ID in context")
 			},
 			checkResponse: nil,
+		},
+		{
+			name: "does not refresh bearer-token session even when inside refresh window",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000001"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000002"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000003"),
+						"stale-bearer-token",
+						now.Add(24*time.Hour), // well inside the refresh window
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				ghID := int64(12345)
+				ghLogin := "testuser"
+				avatarURL := "https://example.com/avatar.png"
+				userRows := pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}).
+					AddRow(
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000002"),
+						uuid.MustParse("cccccccc-0000-0000-0000-000000000003"),
+						"test@example.com", "Test User", "member",
+						&ghID, &ghLogin, &avatarURL, nil, nil, now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(userRows)
+				// Deliberately no UPDATE expectation: bearer tokens must not
+				// trigger sliding refresh. pgxmock fails on unexpected calls.
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.Header.Set("Authorization", "Bearer stale-bearer-token")
+				return req
+			},
+			expectedCode: http.StatusOK,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName || c.Name == CSRFCookieName {
+						t.Fatalf("bearer-token auth must not emit %s cookie, got %+v", c.Name, c)
+					}
+				}
+			},
 		},
 		{
 			name:      "returns 401 when no cookie and no authorization header present",
@@ -505,7 +556,7 @@ func TestAuth(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			})
 
-			handler := Auth(sessionStore, userStore, []byte("test-signing-key-that-is-long-enough-for-hmac"))(next)
+			handler := Auth(sessionStore, userStore, []byte("test-signing-key-that-is-long-enough-for-hmac"), zerolog.Nop())(next)
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req = tt.setupRequest(req)
 			w := httptest.NewRecorder()

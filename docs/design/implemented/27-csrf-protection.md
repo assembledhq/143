@@ -188,7 +188,7 @@ Apply the CSRF middleware **only to the protected route group**, after auth midd
 ```go
 // Protected routes (authenticated)
 r.Group(func(r chi.Router) {
-    r.Use(middleware.Auth(sessionStore, userStore, []byte(cfg.CSRFSigningKey)))
+    r.Use(middleware.Auth(sessionStore, userStore, []byte(cfg.CSRFSigningKey), logger))
     r.Use(middleware.OrgContext)
     r.Use(middleware.CSRF(cfg.CSRFSigningKey))  // <-- ADD HERE
 

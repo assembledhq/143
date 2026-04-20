@@ -3,9 +3,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
-// Duck-typed 401 check. The backend's Auth middleware writes error.code =
-// "UNAUTHORIZED" for every 401. Using a duck check (not `instanceof ApiError`)
-// means component test mocks don't need to re-export ApiError to interop.
+// Duck-typed 401 check. The backend's `writeError` helper is the single
+// source of truth for this contract: every 401 response carries
+// error.code = "UNAUTHORIZED" (see internal/api/middleware/auth.go and
+// callers of writeError with http.StatusUnauthorized). Using a duck
+// check (not `instanceof ApiError`) means component test mocks don't
+// need to re-export ApiError to interop.
 function isUnauthorizedError(err: unknown): boolean {
   return (
     typeof err === "object" &&
