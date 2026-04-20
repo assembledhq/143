@@ -384,7 +384,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	// 8. Update agent run status.
 	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
-		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
+		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
 	// 9. Update issue status (only when an issue is attached).

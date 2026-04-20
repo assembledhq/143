@@ -71,7 +71,7 @@ func TestUsageTracker_ContainerLifecycle(t *testing.T) {
 	require.Equal(t, 4096, store.startCalls[0].MemoryLimitMB)
 	require.Equal(t, startedAt, store.startCalls[0].StartedAt, "DB and caller should use the same timestamp")
 
-	tracker.ContainerStopped(context.Background(), orgID, eventID, startedAt, "completed")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "completed")
 	require.Len(t, store.stopCalls, 1)
 	require.Equal(t, eventID, store.stopCalls[0].EventID)
 	require.Equal(t, "completed", store.stopCalls[0].ExitReason)
@@ -90,6 +90,6 @@ func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
 
 	startedAt := time.Now()
 	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg, startedAt)
-	tracker.ContainerStopped(context.Background(), orgID, eventID, startedAt, "completed")
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "completed")
 	// No panic = success.
 }

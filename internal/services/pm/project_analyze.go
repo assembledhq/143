@@ -69,6 +69,8 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 
 	// Create sandbox and clone repo.
 	sbCfg := pmSandboxConfig()
+	sbCfg.OrgID = orgID.String()
+	sbCfg.Purpose = "pm_project_analyze"
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
@@ -127,13 +129,13 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 
 	// Create a lightweight PM plan record to link the cycle.
 	plan := &models.PMPlan{
-		OrgID:       orgID,
-		Status:      models.PMPlanStatusCompleted,
-		Analysis:    pp.CycleAnalysis,
-		Tasks:       []byte("[]"),
-		Clusters:    []byte("[]"),
+		OrgID:         orgID,
+		Status:        models.PMPlanStatusCompleted,
+		Analysis:      pp.CycleAnalysis,
+		Tasks:         []byte("[]"),
+		Clusters:      []byte("[]"),
 		SkippedIssues: []byte("[]"),
-		TriggeredBy: models.PMTriggerCron,
+		TriggeredBy:   models.PMTriggerCron,
 	}
 	if result.TokenUsage != (agent.TokenUsage{}) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)

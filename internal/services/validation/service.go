@@ -83,8 +83,8 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 
 	v := &models.Validation{
 		SessionID: agentRun.ID,
-		OrgID:      agentRun.OrgID,
-		Status:     "running",
+		OrgID:     agentRun.OrgID,
+		Status:    "running",
 	}
 	if err := s.validations.Create(ctx, v); err != nil {
 		return fmt.Errorf("create validation: %w", err)
@@ -103,7 +103,10 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 	if s.orgs != nil {
 		fetched, err := s.orgs.GetByID(ctx, agentRun.OrgID)
 		if err != nil {
-			s.logger.Warn().Err(err).Msg("failed to fetch org for direction check, will skip direction context")
+			s.logger.Warn().Err(err).
+				Str("session_id", agentRun.ID.String()).
+				Str("org_id", agentRun.OrgID.String()).
+				Msg("failed to fetch org for direction check, will skip direction context")
 		} else {
 			org = &fetched
 		}
@@ -146,6 +149,8 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 		}
 
 		s.logger.Info().
+			Str("session_id", agentRun.ID.String()).
+			Str("validation_id", v.ID.String()).
 			Str("check", c.name).
 			Str("result", result).
 			Msg("validation check completed")
@@ -167,7 +172,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 		}
 		payload := map[string]string{
 			"session_id": agentRun.ID.String(),
-			"org_id":       agentRun.OrgID.String(),
+			"org_id":     agentRun.OrgID.String(),
 		}
 		dedupeKey := fmt.Sprintf("open_pr:%s", agentRun.ID.String())
 		if _, err := s.jobs.Enqueue(ctx, agentRun.OrgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
