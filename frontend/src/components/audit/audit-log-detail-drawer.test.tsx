@@ -84,6 +84,31 @@ describe('AuditLogDetailDrawer', () => {
     expect(screen.getByText('42')).toBeInTheDocument();
   });
 
+  it('renders automation update changes as before/after diff', () => {
+    render(
+      <AuditLogDetailDrawer
+        entry={makeEntry({
+          action: 'automation.updated',
+          resource_type: 'automation',
+          details: {
+            name: 'My automation',
+            changes: {
+              name: { before: 'old name', after: 'new name' },
+              priority: { before: 50, after: 75 },
+            },
+          },
+        })}
+        onClose={vi.fn()}
+        members={mockMembers}
+      />
+    );
+
+    expect(screen.getByText('old name')).toBeInTheDocument();
+    expect(screen.getByText('new name')).toBeInTheDocument();
+    expect(screen.getByText('50')).toBeInTheDocument();
+    expect(screen.getByText('75')).toBeInTheDocument();
+  });
+
   it('renders correlation IDs when present', () => {
     render(
       <AuditLogDetailDrawer

@@ -638,10 +638,6 @@ export interface Project {
   source_issue_ids?: string[];
   proposal_reasoning?: string;
   similar_projects?: ProposalOverlap[];
-  schedule_enabled: boolean;
-  schedule_interval: number;
-  schedule_unit: 'hours' | 'days' | 'weeks';
-  next_run_at?: string;
   created_by?: string;
   created_at: string;
   updated_at: string;
@@ -771,7 +767,7 @@ export interface AIImprovementResponse {
 
 // Audit log types
 export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
 
 export interface AuditLog {
   id: number;
@@ -1082,4 +1078,54 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface AutomationRunStatsBucket {
+  bucket: string;
+  total: number;
+  completed: number;
+  completed_noop: number;
+  failed: number;
+  skipped: number;
+  running: number;
+  pending: number;
+  avg_duration_seconds: number;
+}
+
+export interface AutomationRunStatsTotals {
+  total: number;
+  completed: number;
+  completed_noop: number;
+  failed: number;
+  skipped: number;
+  running: number;
+  pending: number;
+  success_rate: number;
+  avg_duration_seconds: number;
+}
+
+export interface AutomationRunStats {
+  since: string;
+  until: string;
+  buckets: AutomationRunStatsBucket[];
+  totals: AutomationRunStatsTotals;
+}
+
+// AutomationBulkFixupFailure names a cron automation that was resumed by a
+// bulk action but whose next_run_at could not be recomputed — usually because
+// cron_expression no longer parses. The row was still flipped enabled, but
+// the scheduler will skip it until a user edits the expression.
+export interface AutomationBulkFixupFailure {
+  automation_id: string;
+  reason: string;
+}
+
+// AutomationBulkResponse is the 200 OK body returned by POST /automations/bulk.
+// `affected` lists the automation IDs that actually changed state (cross-org
+// or deleted IDs are silently dropped). `fixup_failures` is always present but
+// only populated on resume; callers should surface it so users understand why
+// a "resumed" automation isn't firing.
+export interface AutomationBulkResponse {
+  affected: string[];
+  fixup_failures: AutomationBulkFixupFailure[];
 }

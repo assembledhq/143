@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 // automationListDefaultLimit and automationListMaxLimit must match the
@@ -23,6 +24,15 @@ import (
 const (
 	automationListDefaultLimit = 25
 	automationListMaxLimit     = 100
+
+	// automationStatsDefaultWindow is the default since→until span used when
+	// the caller omits ?since (or both). automationStatsMaxWindow is the
+	// hard cap; a wider window would force a scan past the
+	// (org_id, automation_id, triggered_at DESC) index's hot range. Keep
+	// these in sync with the frontend STATS_WINDOW_DAYS (default) — the
+	// UI doesn't expose a picker yet but still displays "last 30 days".
+	automationStatsDefaultWindow = 30 * 24 * time.Hour
+	automationStatsMaxWindow     = 90 * 24 * time.Hour
 )
 
 type AutomationHandler struct {
@@ -32,6 +42,7 @@ type AutomationHandler struct {
 	jobStore           *db.JobStore
 	audit              *db.AuditEmitter
 	pool               db.TxStarter // needed for transactional RunNow
+	logger             zerolog.Logger
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
@@ -44,6 +55,7 @@ func NewAutomationHandler(automationStore *db.AutomationStore, automationRunStor
 	return &AutomationHandler{
 		automationStore:    automationStore,
 		automationRunStore: automationRunStore,
+		logger:             zerolog.Nop(),
 	}
 }
 
@@ -65,6 +77,14 @@ func (h *AutomationHandler) SetRepositoryStore(repoStore automationRepoLookup) {
 // and enqueue the job atomically.
 func (h *AutomationHandler) SetPool(pool db.TxStarter) {
 	h.pool = pool
+}
+
+// SetLogger wires a logger used for non-fatal diagnostics that should reach
+// stderr but not change the HTTP response (e.g. cron-fixup failures during
+// bulk resume — the row was still resumed but its next_run_at could not be
+// recomputed).
+func (h *AutomationHandler) SetLogger(logger zerolog.Logger) {
+	h.logger = logger
 }
 
 func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -164,32 +184,62 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	scheduleType := models.AutomationScheduleInterval
 	if req.ScheduleType != nil {
 		scheduleType = *req.ScheduleType
-		// ValidateAutomationScheduleSupported enforces both the allowed set
-		// AND the phase-2 cron gate (see models.AutomationCronSupported).
-		// Keeping both checks in one call means a future flip of the cron
-		// flag updates Create, Update, and any future caller in lockstep.
-		if err := models.ValidateAutomationScheduleSupported(scheduleType); err != nil {
+		if err := models.ValidateAutomationScheduleType(scheduleType); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
 		}
 	}
 
-	// Default interval: 1 day.
-	intervalValue := 1
-	intervalUnit := "days"
-	if req.IntervalValue != nil {
-		if *req.IntervalValue <= 0 || *req.IntervalValue > 365 {
-			writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_value must be between 1 and 365")
-			return
-		}
-		intervalValue = *req.IntervalValue
+	// Reject cross-typed schedule fields up front rather than silently dropping
+	// them: a cron payload that also includes interval_value almost certainly
+	// reflects a client bug, and silent normalisation would mask it.
+	if scheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+		return
 	}
-	if req.IntervalUnit != nil && *req.IntervalUnit != "" {
-		if err := models.ScheduleUnit(*req.IntervalUnit).Validate(); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
+	if scheduleType == models.AutomationScheduleInterval && req.CronExpression != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
+		return
+	}
+
+	// Interval fields are only meaningful for interval schedules; cron schedules
+	// persist them as NULL. The DB CHECK constraint
+	// (chk_automations_schedule_fields) also enforces this XOR relationship.
+	var intervalValuePtr *int
+	var intervalUnitPtr *string
+	if scheduleType == models.AutomationScheduleInterval {
+		intervalValue := 1
+		intervalUnit := "days"
+		if req.IntervalValue != nil {
+			if *req.IntervalValue <= 0 || *req.IntervalValue > 365 {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL", "interval_value must be between 1 and 365")
+				return
+			}
+			intervalValue = *req.IntervalValue
+		}
+		if req.IntervalUnit != nil && *req.IntervalUnit != "" {
+			if err := models.ScheduleUnit(*req.IntervalUnit).Validate(); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_UNIT", err.Error())
+				return
+			}
+			intervalUnit = *req.IntervalUnit
+		}
+		intervalValuePtr = &intervalValue
+		intervalUnitPtr = &intervalUnit
+	}
+
+	var cronExpressionPtr *string
+	if scheduleType == models.AutomationScheduleCron {
+		if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
+			writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "cron_expression is required for cron schedules")
 			return
 		}
-		intervalUnit = *req.IntervalUnit
+		expr := strings.TrimSpace(*req.CronExpression)
+		if err := models.ValidateCronExpression(expr); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CRON_EXPRESSION", err.Error())
+			return
+		}
+		cronExpressionPtr = &expr
 	}
 
 	execMode := "sequential"
@@ -243,12 +293,6 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		priority = *req.Priority
 	}
 
-	// Compute next_run_at. Only interval is supported here; cron was rejected
-	// above, so a missing next_run_at would be a code bug.
-	now := time.Now()
-	next := models.NextRunTime(now, intervalValue, intervalUnit)
-	nextRunAt := &next
-
 	automation := models.Automation{
 		OrgID:          orgID,
 		RepositoryID:   repoID,
@@ -261,15 +305,24 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent:  maxConcurrent,
 		BaseBranch:     baseBranch,
 		ScheduleType:   scheduleType,
-		IntervalValue:  &intervalValue,
-		IntervalUnit:   &intervalUnit,
-		CronExpression: req.CronExpression,
+		IntervalValue:  intervalValuePtr,
+		IntervalUnit:   intervalUnitPtr,
+		CronExpression: cronExpressionPtr,
 		Timezone:       timezone,
-		NextRunAt:      nextRunAt,
 		Enabled:        true,
 		CreatedBy:      &user.ID,
 		Priority:       priority,
 	}
+
+	// Centralise schedule branching in ComputeNextRunAt so a new schedule kind
+	// (event-based, combined interval+cron, etc.) only has to be added there.
+	now := time.Now()
+	next, err := automation.ComputeNextRunAt(now)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+		return
+	}
+	automation.NextRunAt = &next
 
 	if err := h.automationStore.Create(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create automation", err)
@@ -277,7 +330,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idStr := automation.ID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationCreated, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationCreated, models.AuditResourceAutomation, &idStr, nil, nil,
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -294,6 +348,10 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
 		return
 	}
+	// Snapshot before applying partial updates so the audit diff can report
+	// exact before/after values. Copying the value is cheap (no pointer fields
+	// are mutated in place below — the handler replaces pointers wholesale).
+	before := automation
 
 	var req struct {
 		Name           *string `json:"name"`
@@ -397,12 +455,55 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Handle schedule changes — recompute next_run_at.
 	scheduleChanged := false
+
+	// Determine the effective schedule type for this PATCH so we can reject
+	// cross-typed companion fields before mutating the model. The previous
+	// behaviour silently dropped mismatched fields (e.g. cron_expression sent
+	// against an interval automation) which masked client bugs.
+	effectiveScheduleType := automation.ScheduleType
 	if req.ScheduleType != nil {
-		// Shared gate with Create: rejects both invalid schedule types and
-		// schedule types the current build does not implement (cron today).
-		if err := models.ValidateAutomationScheduleSupported(*req.ScheduleType); err != nil {
+		if err := models.ValidateAutomationScheduleType(*req.ScheduleType); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
 			return
+		}
+		effectiveScheduleType = *req.ScheduleType
+	}
+	if effectiveScheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+		return
+	}
+	if effectiveScheduleType == models.AutomationScheduleInterval && req.CronExpression != nil && strings.TrimSpace(*req.CronExpression) != "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
+		return
+	}
+
+	if req.ScheduleType != nil {
+		// A schedule_type *switch* must carry the new type's companion fields
+		// in the same PATCH. Without this, we'd surface the error downstream
+		// at ComputeNextRunAt with a less precise message.
+		if *req.ScheduleType != automation.ScheduleType {
+			switch *req.ScheduleType {
+			case models.AutomationScheduleInterval:
+				if req.IntervalValue == nil {
+					writeError(w, r, http.StatusBadRequest, "MISSING_INTERVAL_VALUE", "switching to schedule_type=interval requires interval_value")
+					return
+				}
+				if req.IntervalUnit == nil || *req.IntervalUnit == "" {
+					writeError(w, r, http.StatusBadRequest, "MISSING_INTERVAL_UNIT", "switching to schedule_type=interval requires interval_unit")
+					return
+				}
+				// Switching away from cron: clear the cron field so the row
+				// satisfies chk_automations_schedule_fields.
+				automation.CronExpression = nil
+			case models.AutomationScheduleCron:
+				if req.CronExpression == nil || strings.TrimSpace(*req.CronExpression) == "" {
+					writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "switching to schedule_type=cron requires cron_expression")
+					return
+				}
+				// Switching away from interval: clear interval fields.
+				automation.IntervalValue = nil
+				automation.IntervalUnit = nil
+			}
 		}
 		automation.ScheduleType = *req.ScheduleType
 		scheduleChanged = true
@@ -424,20 +525,27 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		scheduleChanged = true
 	}
 	if req.CronExpression != nil {
-		automation.CronExpression = req.CronExpression
-		scheduleChanged = true
-	}
-	if scheduleChanged && automation.Enabled {
-		now := time.Now()
-		if automation.ScheduleType == models.AutomationScheduleInterval && automation.IntervalValue != nil && automation.IntervalUnit != nil {
-			next := models.NextRunTime(now, *automation.IntervalValue, *automation.IntervalUnit)
-			automation.NextRunAt = &next
+		trimmed := strings.TrimSpace(*req.CronExpression)
+		// Clearing cron_expression on a cron automation (without switching
+		// schedule_type in the same PATCH) would leave the row unschedulable.
+		// ComputeNextRunAt would eventually reject it, but with a generic
+		// INVALID_SCHEDULE message — surface the precise reason here instead.
+		if trimmed == "" && effectiveScheduleType == models.AutomationScheduleCron {
+			writeError(w, r, http.StatusBadRequest, "MISSING_CRON_EXPRESSION", "cron_expression cannot be cleared on a cron automation; switch schedule_type=interval in the same request to change schedule types")
+			return
 		}
-		// TODO(phase-3): when cron lands (design doc 48 §6.2), also recompute
-		// next_run_at from automation.CronExpression here. Today cron is
-		// rejected earlier in this handler, so a cron schedule_change cannot
-		// reach this block — but a pure CronExpression edit on an already-cron
-		// automation would silently leave next_run_at stale.
+		if trimmed != "" {
+			if err := models.ValidateCronExpression(trimmed); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CRON_EXPRESSION", err.Error())
+				return
+			}
+		}
+		if trimmed == "" {
+			automation.CronExpression = nil
+		} else {
+			automation.CronExpression = &trimmed
+		}
+		scheduleChanged = true
 	}
 
 	// Interval schedules ignore timezone. Enforce after all partial updates so
@@ -447,13 +555,32 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if scheduleChanged && automation.Enabled {
+		next, err := automation.ComputeNextRunAt(time.Now())
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+			return
+		}
+		automation.NextRunAt = &next
+	}
+
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
 		return
 	}
 
-	idStr := automationID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationUpdated, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	// Skip audit emit when no user-editable field actually changed — otherwise
+	// a no-op PATCH (e.g. a client re-sending the current values) would pollute
+	// the timeline with empty "updated" rows.
+	if changes := automationAuditDiff(&before, &automation); len(changes) > 0 {
+		idStr := automationID.String()
+		details := map[string]any{
+			"name":    automation.Name,
+			"changes": changes,
+		}
+		emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationUpdated, models.AuditResourceAutomation, &idStr, nil, nil,
+			marshalAuditDetails(h.logger, details))
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -465,13 +592,23 @@ func (h *AutomationHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch before delete so the audit entry can record the name and schedule
+	// context. The row is gone once SoftDelete returns, and chasing it through
+	// a tombstone query later is worse than one extra SELECT.
+	automation, err := h.automationStore.GetByID(r.Context(), orgID, automationID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+
 	if err := h.automationStore.SoftDelete(r.Context(), orgID, automationID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to delete automation", err)
 		return
 	}
 
 	idStr := automationID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationDeleted, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationDeleted, models.AuditResourceAutomation, &idStr, nil, nil,
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -507,7 +644,8 @@ func (h *AutomationHandler) Pause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idStr := automationID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationPaused, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationPaused, models.AuditResourceAutomation, &idStr, nil, nil,
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -530,30 +668,20 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Defense-in-depth: reject resume for schedule types the build doesn't yet
-	// implement. Create/Update already block cron via the same gate, so a cron
-	// row shouldn't exist today — but if one slipped in (legacy row, manual DB
-	// edit, future migration) we'd resume it with NextRunAt=NULL and the
-	// scheduler would silently never fire it. Fail loudly instead.
-	if err := models.ValidateAutomationScheduleSupported(automation.ScheduleType); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE_TYPE", err.Error())
-		return
-	}
-
 	automation.Enabled = true
 	automation.PausedBy = nil
 	automation.PausedAt = nil
 
-	// Recompute next run time.
-	now := time.Now()
-	if automation.ScheduleType == models.AutomationScheduleInterval && automation.IntervalValue != nil && automation.IntervalUnit != nil {
-		next := models.NextRunTime(now, *automation.IntervalValue, *automation.IntervalUnit)
-		automation.NextRunAt = &next
+	// Centralised schedule branching — see ComputeNextRunAt. If the stored
+	// schedule fields are malformed (e.g. a cron row with a missing expression
+	// from a legacy import), surface the error instead of silently leaving
+	// next_run_at stale so the scheduler never fires it.
+	next, err := automation.ComputeNextRunAt(time.Now())
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+		return
 	}
-	// TODO(phase-3): when cron lands, also recompute next_run_at from
-	// automation.CronExpression here. The gate above currently prevents a cron
-	// row from reaching this point; remove the gate in the same PR that wires
-	// the cron next_run_at computation.
+	automation.NextRunAt = &next
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to resume automation", err)
@@ -561,7 +689,8 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idStr := automationID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationResumed, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationResumed, models.AuditResourceAutomation, &idStr, nil, nil,
+		marshalAuditDetails(h.logger, automationAuditSnapshot(&automation)))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
 }
 
@@ -667,8 +796,32 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idStr := automationID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationRunTriggered, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+	details := map[string]any{
+		"name":   automation.Name,
+		"run_id": run.ID.String(),
+		"via":    "manual",
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationRunTriggered, models.AuditResourceAutomation, &idStr, nil, nil,
+		marshalAuditDetails(h.logger, details))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationRun]{Data: run})
+}
+
+// BulkCronFixupFailure is the wire representation of a cron row that was
+// resumed but whose next_run_at could not be recomputed. Surfacing these to the
+// client lets the UI explain why a "resumed" automation isn't firing instead
+// of the user having to scrape server logs.
+type BulkCronFixupFailure struct {
+	AutomationID string `json:"automation_id"`
+	Reason       string `json:"reason"`
+}
+
+// BulkResponse is the JSON body returned by the bulk endpoint. `affected` is
+// the set of automation IDs that actually changed (filtered by the store to
+// exclude cross-tenant / already-deleted IDs); `fixup_failures` is non-empty
+// only for resume with cron rows whose cron_expression no longer parses.
+type BulkResponse struct {
+	Affected      []string               `json:"affected"`
+	FixupFailures []BulkCronFixupFailure `json:"fixup_failures"`
 }
 
 // Bulk handles bulk pause/resume/delete operations.
@@ -693,9 +846,10 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 
 	var auditAction models.AuditAction
 	var affected []uuid.UUID
+	var fixupFailures []db.CronFixupFailure
 	switch req.Action {
 	case "pause":
-		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
+		ids, _, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, false, &user.ID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to pause automations", err)
 			return
@@ -703,12 +857,23 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 		affected = ids
 		auditAction = models.AuditActionAutomationPaused
 	case "resume":
-		ids, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
+		ids, failures, err := h.automationStore.BulkUpdateEnabled(r.Context(), orgID, req.AutomationIDs, true, &user.ID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "BULK_FAILED", "failed to resume automations", err)
 			return
 		}
+		// Cron-fixup failures: the row was resumed but its next_run_at is
+		// NULL, so the scheduler will skip it. Log per-automation so an
+		// operator chasing "why isn't this firing?" can grep by ID.
+		for _, f := range failures {
+			h.logger.Warn().
+				Str("automation_id", f.AutomationID.String()).
+				Str("org_id", orgID.String()).
+				Str("reason", f.Reason).
+				Msg("cron automation resumed without a computable next_run_at; scheduler will skip it until cron_expression is fixed")
+		}
 		affected = ids
+		fixupFailures = failures
 		auditAction = models.AuditActionAutomationResumed
 	case "delete":
 		ids, err := h.automationStore.BulkSoftDelete(r.Context(), orgID, req.AutomationIDs)
@@ -727,12 +892,54 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	// tenants or stale/deleted rows are filtered out at the store layer and
 	// must not pollute the audit log (cross-tenant probing would otherwise
 	// leave ghost events behind).
+	//
+	// Tag each entry with via=bulk so the viewer can collapse related rows
+	// that share the same request_id. A per-automation name lookup would cost
+	// an extra round-trip per ID; the resource_id is enough to let the UI
+	// hydrate on demand.
+	//
+	// Cron-fixup rows (resume path only) get an additional
+	// fixup_failure_reason so an auditor reading "automation.resumed" isn't
+	// misled: the row was flipped enabled but the scheduler will skip it
+	// until the cron_expression is fixed. Without this, a broken cron row
+	// looks identical in the audit log to a healthy resumed row.
+	fixupByID := make(map[uuid.UUID]string, len(fixupFailures))
+	for _, f := range fixupFailures {
+		fixupByID[f.AutomationID] = f.Reason
+	}
+	bulkSize := len(affected)
+	sharedBulkDetails := marshalAuditDetails(h.logger, map[string]any{
+		"via":       "bulk",
+		"bulk_size": bulkSize,
+	})
 	for _, id := range affected {
 		idStr := id.String()
-		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, nil)
+		details := sharedBulkDetails
+		if reason, ok := fixupByID[id]; ok {
+			details = marshalAuditDetails(h.logger, map[string]any{
+				"via":                  "bulk",
+				"bulk_size":            bulkSize,
+				"fixup_failure_reason": reason,
+				"scheduler_will_fire":  false,
+			})
+		}
+		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, details)
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	resp := BulkResponse{
+		Affected:      make([]string, 0, len(affected)),
+		FixupFailures: make([]BulkCronFixupFailure, 0, len(fixupFailures)),
+	}
+	for _, id := range affected {
+		resp.Affected = append(resp.Affected, id.String())
+	}
+	for _, f := range fixupFailures {
+		resp.FixupFailures = append(resp.FixupFailures, BulkCronFixupFailure{
+			AutomationID: f.AutomationID.String(),
+			Reason:       f.Reason,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ListRuns returns paginated runs for an automation.
@@ -773,6 +980,82 @@ func (h *AutomationHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 		Data: runs,
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
+}
+
+// Stats returns per-day run aggregates for an automation.
+//
+// Query params:
+//   - since: RFC3339 lower bound (inclusive). Defaults to until -
+//     automationStatsDefaultWindow.
+//   - until: RFC3339 upper bound (exclusive). Defaults to now.
+//
+// The window is capped at automationStatsMaxWindow so a malformed since=
+// can't trigger a table scan — the automation_runs index on (org_id,
+// automation_id, triggered_at DESC) still handles everything inside that
+// window cheaply.
+func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
+		return
+	}
+
+	// Validate query params before hitting the DB — a malformed since/until
+	// should return 400 without burning an automations lookup.
+	//
+	// Quantize the default `until` to the start of the current minute so two
+	// callers who both omit ?until in the same wall-clock minute compute the
+	// same window. Frontends that pass an explicit RFC3339 ?until keep their
+	// own value, so this only matters when the caller is relying on server-
+	// side defaults.
+	now := time.Now().UTC().Truncate(time.Minute)
+	until := now
+	if v := r.URL.Query().Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_UNTIL", "until must be RFC3339")
+			return
+		}
+		until = t.UTC()
+	}
+	since := until.Add(-automationStatsDefaultWindow)
+	if v := r.URL.Query().Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SINCE", "since must be RFC3339")
+			return
+		}
+		since = t.UTC()
+	}
+	if !since.Before(until) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_WINDOW", "since must be before until")
+		return
+	}
+	if until.Sub(since) > automationStatsMaxWindow {
+		writeError(w, r, http.StatusBadRequest, "WINDOW_TOO_LARGE", fmt.Sprintf("window must be <= %d days", int(automationStatsMaxWindow/(24*time.Hour))))
+		return
+	}
+
+	// Verify the automation belongs to this org. Without this, a leaked
+	// automation UUID from another tenant could be probed via the stats
+	// endpoint (the aggregate query does filter by org_id, but a 404 here
+	// is cheaper than an empty bucket set and removes the ambiguity).
+	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+
+	stats, err := h.automationRunStore.GetStats(r.Context(), orgID, automationID, since, until)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "STATS_FAILED", "failed to compute stats", err)
+		return
+	}
+	if stats.Buckets == nil {
+		stats.Buckets = []models.AutomationRunStatsBucket{}
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationRunStats]{Data: stats})
 }
 
 // GetRun returns a single run detail.
