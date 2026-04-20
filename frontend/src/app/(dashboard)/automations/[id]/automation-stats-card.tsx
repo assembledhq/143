@@ -10,6 +10,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  type TooltipContentProps,
 } from "recharts";
 import { api } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
@@ -22,9 +23,10 @@ interface AutomationStatsCardProps {
   automationId: string;
 }
 
-// Window length for the runs chart. Fixed at 30 days — the backend caps the
-// window at 90 and we haven't surfaced a picker yet, so a prop would advertise
-// flexibility the UI doesn't actually offer.
+// Window length for the runs chart. 30 days matches the backend's default
+// window; the backend caps any caller-supplied window at 90. We haven't
+// surfaced a picker yet, so hardcoding avoids advertising flexibility the UI
+// doesn't actually offer.
 const STATS_WINDOW_DAYS = 30;
 
 interface ChartDatum {
@@ -102,26 +104,18 @@ function formatDuration(seconds: number): string {
   return remMins === 0 ? `${hours}h` : `${hours}h ${remMins}m`;
 }
 
-interface TooltipPayloadEntry {
-  value: number;
-  dataKey: string;
-  color: string;
-  name: string;
-  payload?: ChartDatum;
-}
-
-interface ChartTooltipProps {
-  active?: boolean;
-  payload?: TooltipPayloadEntry[];
-  label?: string;
-}
-
-function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
+function ChartTooltip({ active, payload, label }: TooltipContentProps) {
   if (!active || !payload?.length) return null;
-  const total = payload.reduce((acc, p) => acc + (p.value ?? 0), 0);
+  const total = payload.reduce(
+    (acc, p) => acc + (typeof p.value === "number" ? p.value : 0),
+    0,
+  );
   // Prefer the row's tooltipLabel (e.g. "4/19 (UTC)") so the user sees the
-  // bucket timezone explicitly; fall back to the XAxis label if unset.
-  const headerLabel = payload[0]?.payload?.tooltipLabel ?? label;
+  // bucket timezone explicitly; fall back to the XAxis label if unset. The
+  // `payload` field on each recharts entry is typed `any` because it carries
+  // the full row of chart data — narrow it to ChartDatum at this boundary.
+  const datum = payload[0]?.payload as ChartDatum | undefined;
+  const headerLabel = datum?.tooltipLabel ?? label;
   if (total === 0) {
     // A gap-filled zero day: show a minimal tooltip so the user gets feedback
     // on hover. Returning null here would make the cursor highlight appear
@@ -137,13 +131,15 @@ function ChartTooltip({ active, payload, label }: ChartTooltipProps) {
     <div className="rounded-lg border bg-background px-3 py-2 shadow-sm text-xs">
       <p className="font-medium text-foreground mb-1">{headerLabel}</p>
       {payload.map((p) => (
-        <div key={p.dataKey} className="flex items-center gap-2">
+        <div key={String(p.dataKey ?? "")} className="flex items-center gap-2">
           <span
             className="inline-block h-2 w-2 rounded-sm"
             style={{ backgroundColor: p.color }}
           />
-          <span className="text-muted-foreground">{p.name}</span>
-          <span className="ml-auto font-mono text-foreground">{p.value}</span>
+          <span className="text-muted-foreground">{String(p.name ?? "")}</span>
+          <span className="ml-auto font-mono text-foreground">
+            {typeof p.value === "number" ? p.value : 0}
+          </span>
         </div>
       ))}
     </div>
@@ -237,13 +233,7 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
                 allowDecimals={false}
               />
               <Tooltip
-                content={({ active, payload, label }) => (
-                  <ChartTooltip
-                    active={active}
-                    payload={payload as unknown as ChartTooltipProps["payload"]}
-                    label={label as string}
-                  />
-                )}
+                content={ChartTooltip}
                 cursor={{ fill: "hsl(var(--muted))", opacity: 0.3 }}
               />
               {/*

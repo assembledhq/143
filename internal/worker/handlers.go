@@ -350,6 +350,15 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			// "truly missing" and "soft-deleted" — mark skipped so the run
 			// doesn't sit pending forever. Any other error is treated as
 			// transient and returned so the job can be retried.
+			//
+			// SoftDelete cascades to cancel pending runs in the same tx
+			// (see AutomationStore.SoftDelete), so a delete committed
+			// before this fetch will already have flipped the run row out
+			// of pending — the !pending fast-path above catches that case.
+			// This branch handles the narrow window where this worker
+			// observed pending *before* SoftDelete's tx committed; the
+			// CAS below would also fail safely, but skipping early avoids
+			// building a session for a doomed run.
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("fetch automation: %w", err)
 			}
@@ -365,6 +374,17 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// we only get here when a scheduled run slipped through before a
 		// pause landed. Mark skipped so the scheduler can fire cleanly on
 		// the next resume without a ghost run sitting pending.
+		//
+		// There is a narrow TOCTOU window between this !Enabled check and
+		// the pending→running transition below: if a user pauses *between*
+		// those two statements, this worker still claims the row and starts
+		// a session. That's acceptable — pause does not cancel in-flight
+		// runs by design (see Pause handler — it clears next_run_at but
+		// leaves pending/running rows alone), and the next scheduled tick
+		// simply won't fire. Folding the enabled check into the CAS would
+		// require coupling automations and automation_runs tables into one
+		// UPDATE, which isn't worth the complexity for a race that only
+		// starts *one* extra session.
 		if !automation.Enabled {
 			now := time.Now()
 			summary := "automation paused before run could start"

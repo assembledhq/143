@@ -24,6 +24,15 @@ import (
 const (
 	automationListDefaultLimit = 25
 	automationListMaxLimit     = 100
+
+	// automationStatsDefaultWindow is the default since→until span used when
+	// the caller omits ?since (or both). automationStatsMaxWindow is the
+	// hard cap; a wider window would force a scan past the
+	// (org_id, automation_id, triggered_at DESC) index's hot range. Keep
+	// these in sync with the frontend STATS_WINDOW_DAYS (default) — the
+	// UI doesn't expose a picker yet but still displays "last 30 days".
+	automationStatsDefaultWindow = 30 * 24 * time.Hour
+	automationStatsMaxWindow     = 90 * 24 * time.Hour
 )
 
 type AutomationHandler struct {
@@ -46,6 +55,7 @@ func NewAutomationHandler(automationStore *db.AutomationStore, automationRunStor
 	return &AutomationHandler{
 		automationStore:    automationStore,
 		automationRunStore: automationRunStore,
+		logger:             zerolog.Nop(),
 	}
 }
 
@@ -887,10 +897,33 @@ func (h *AutomationHandler) Bulk(w http.ResponseWriter, r *http.Request) {
 	// that share the same request_id. A per-automation name lookup would cost
 	// an extra round-trip per ID; the resource_id is enough to let the UI
 	// hydrate on demand.
-	bulkDetails := marshalAuditDetails(h.logger, map[string]any{"via": "bulk"})
+	//
+	// Cron-fixup rows (resume path only) get an additional
+	// fixup_failure_reason so an auditor reading "automation.resumed" isn't
+	// misled: the row was flipped enabled but the scheduler will skip it
+	// until the cron_expression is fixed. Without this, a broken cron row
+	// looks identical in the audit log to a healthy resumed row.
+	fixupByID := make(map[uuid.UUID]string, len(fixupFailures))
+	for _, f := range fixupFailures {
+		fixupByID[f.AutomationID] = f.Reason
+	}
+	bulkSize := len(affected)
+	sharedBulkDetails := marshalAuditDetails(h.logger, map[string]any{
+		"via":       "bulk",
+		"bulk_size": bulkSize,
+	})
 	for _, id := range affected {
 		idStr := id.String()
-		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, bulkDetails)
+		details := sharedBulkDetails
+		if reason, ok := fixupByID[id]; ok {
+			details = marshalAuditDetails(h.logger, map[string]any{
+				"via":                  "bulk",
+				"bulk_size":            bulkSize,
+				"fixup_failure_reason": reason,
+				"scheduler_will_fire":  false,
+			})
+		}
+		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceAutomation, &idStr, nil, nil, details)
 	}
 
 	resp := BulkResponse{
@@ -952,12 +985,14 @@ func (h *AutomationHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 // Stats returns per-day run aggregates for an automation.
 //
 // Query params:
-//   - since: RFC3339 lower bound (inclusive). Defaults to until - 30d.
+//   - since: RFC3339 lower bound (inclusive). Defaults to until -
+//     automationStatsDefaultWindow.
 //   - until: RFC3339 upper bound (exclusive). Defaults to now.
 //
-// The window is capped at 90 days so a malformed since= can't trigger a
-// table scan — the automation_runs index on (org_id, automation_id,
-// triggered_at DESC) still handles everything inside that window cheaply.
+// The window is capped at automationStatsMaxWindow so a malformed since=
+// can't trigger a table scan — the automation_runs index on (org_id,
+// automation_id, triggered_at DESC) still handles everything inside that
+// window cheaply.
 func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -968,7 +1003,12 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	// Validate query params before hitting the DB — a malformed since/until
 	// should return 400 without burning an automations lookup.
-	now := time.Now().UTC()
+	//
+	// Quantize the default `until` to the start of the current minute so two
+	// requests that land in the same wall-clock minute compute identical
+	// (since, until) pairs — that lets HTTP and DB-layer caching key on the
+	// window without thrashing on sub-second drift.
+	now := time.Now().UTC().Truncate(time.Minute)
 	until := now
 	if v := r.URL.Query().Get("until"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
@@ -978,7 +1018,7 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		}
 		until = t.UTC()
 	}
-	since := until.Add(-30 * 24 * time.Hour)
+	since := until.Add(-automationStatsDefaultWindow)
 	if v := r.URL.Query().Get("since"); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
@@ -991,8 +1031,8 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_WINDOW", "since must be before until")
 		return
 	}
-	if until.Sub(since) > 90*24*time.Hour {
-		writeError(w, r, http.StatusBadRequest, "WINDOW_TOO_LARGE", "window must be <= 90 days")
+	if until.Sub(since) > automationStatsMaxWindow {
+		writeError(w, r, http.StatusBadRequest, "WINDOW_TOO_LARGE", fmt.Sprintf("window must be <= %d days", int(automationStatsMaxWindow/(24*time.Hour))))
 		return
 	}
 

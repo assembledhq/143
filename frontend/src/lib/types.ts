@@ -1110,3 +1110,22 @@ export interface AutomationRunStats {
   buckets: AutomationRunStatsBucket[];
   totals: AutomationRunStatsTotals;
 }
+
+// AutomationBulkFixupFailure names a cron automation that was resumed by a
+// bulk action but whose next_run_at could not be recomputed — usually because
+// cron_expression no longer parses. The row was still flipped enabled, but
+// the scheduler will skip it until a user edits the expression.
+export interface AutomationBulkFixupFailure {
+  automation_id: string;
+  reason: string;
+}
+
+// AutomationBulkResponse is the 200 OK body returned by POST /automations/bulk.
+// `affected` lists the automation IDs that actually changed state (cross-org
+// or deleted IDs are silently dropped). `fixup_failures` is always present but
+// only populated on resume; callers should surface it so users understand why
+// a "resumed" automation isn't firing.
+export interface AutomationBulkResponse {
+  affected: string[];
+  fixup_failures: AutomationBulkFixupFailure[];
+}

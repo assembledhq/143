@@ -519,7 +519,7 @@ export const api = {
     runNow: (id: string) =>
       post<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/run`),
     bulk: (body: { action: 'pause' | 'resume' | 'delete'; automation_ids?: string[] }) =>
-      post('/api/v1/automations/bulk', body),
+      post<import('./types').AutomationBulkResponse>('/api/v1/automations/bulk', body),
     listRuns: (id: string, params?: { cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);
