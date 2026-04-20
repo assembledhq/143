@@ -19,7 +19,7 @@ const refreshSuggestionsPath = "/workspace/.pm-context/SUGGESTIONS.md"
 // to update it, and stores the result as a pending refresh for operator review.
 func (s *Service) RunRefresh(ctx context.Context, orgID uuid.UUID) error {
 	if len(s.adapters) == 0 || s.sandbox == nil {
-		return fmt.Errorf("pm adapter or sandbox not configured")
+		return fmt.Errorf("pm adapters or sandbox not configured")
 	}
 	if s.pmDocuments == nil {
 		return fmt.Errorf("pm document store not configured")

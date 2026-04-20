@@ -281,7 +281,7 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
 	if len(s.adapters) == 0 || s.sandbox == nil {
-		return nil, fmt.Errorf("pm adapter or sandbox not configured")
+		return nil, fmt.Errorf("pm adapters or sandbox not configured")
 	}
 	if err := trigger.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid trigger: %w", err)
@@ -339,6 +339,13 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	ctxBundle, err := s.gatherContext(ctx, orgID, &repo)
 	if err != nil {
 		return nil, failSession("gather context", err)
+	}
+
+	// Resolve the agent adapter up front so a misconfigured org fails fast
+	// before we pay for sandbox create/clone.
+	adapter, err := s.resolveAgentAdapter(ctxBundle.settings)
+	if err != nil {
+		return nil, failSession("resolve adapter", err)
 	}
 
 	sbCfg := pmSandboxConfig()
@@ -432,13 +439,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		defer logWg.Done()
 		s.streamPMLogs(ctx, pmSession, logCh)
 	}()
-
-	adapter, err := s.resolveAgentAdapter(ctxBundle.settings)
-	if err != nil {
-		close(logCh)
-		logWg.Wait()
-		return nil, failSession("resolve adapter", err)
-	}
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
 	result, err := adapter.Execute(execCtx, sb, prompt, logCh)

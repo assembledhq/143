@@ -126,7 +126,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 // The output is extracted from the sandbox and stored in pm_documents.
 func (s *Service) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
 	if len(s.adapters) == 0 || s.sandbox == nil {
-		return fmt.Errorf("pm adapter or sandbox not configured")
+		return fmt.Errorf("pm adapters or sandbox not configured")
 	}
 	if s.pmDocuments == nil {
 		return fmt.Errorf("pm document store not configured")

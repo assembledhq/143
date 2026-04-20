@@ -20,7 +20,7 @@ import (
 // and dispatch runs. This is the entry point for the project_cycle job.
 func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
 	if len(s.adapters) == 0 || s.sandbox == nil {
-		return fmt.Errorf("pm adapter or sandbox not configured")
+		return fmt.Errorf("pm adapters or sandbox not configured")
 	}
 	if s.projects == nil || s.projectTasks == nil || s.projectCycles == nil {
 		return fmt.Errorf("project stores not configured")
