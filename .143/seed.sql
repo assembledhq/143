@@ -363,8 +363,35 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
--- PR-preview tracking for the "pr_created" session. pr_number is placeholder;
--- no real PR exists on GitHub in the dogfood.
+-- Pull request row backing the pr_preview_state below. Any UI that joins
+-- pr_preview_state to pull_requests (by org_id + github_repo + pr_number)
+-- needs a pull_requests row to render a working link — without this, the
+-- PR preview panel renders a broken "PR #42" link in the dogfood.
+-- Note: github_pr_url points at a real PR on the public repo so the link
+-- resolves; nothing in the dogfood actually calls the GitHub API.
+INSERT INTO pull_requests (
+  id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
+  title, body, status, review_status, authored_by, created_at, updated_at
+)
+VALUES (
+  '00000000-0000-4000-a000-000000000501'::uuid,
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000001'::uuid,
+  42,
+  'https://github.com/assembledhq/143/pull/42',
+  'assembledhq/143',
+  'Ship PR preview auto-teardown',
+  'Wire preview teardown into pull_request.closed / merged.',
+  'open',
+  'pending',
+  'app',
+  now() - interval '30 minutes',
+  now() - interval '2 minutes'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- PR-preview tracking for the "pr_created" session, backed by the seeded
+-- pull_requests row above.
 INSERT INTO pr_preview_state (
   id, org_id, repo_id, pr_number, last_preview_instance_id, status, created_at, updated_at
 )

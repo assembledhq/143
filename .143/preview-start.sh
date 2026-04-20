@@ -35,12 +35,15 @@ echo '[143-preview] running migrations...'
 /tmp/143-migrate up
 
 echo '[143-preview] seeding database...'
-psql "$DATABASE_URL" -f .143/seed.sql
+psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f .143/seed.sql
 
 mkdir -p "$SECRET_DIR"
 chmod 700 "$SECRET_DIR"
 if [ ! -s "$SECRET_FILE" ]; then
-    head -c 32 /dev/urandom | base64 > "$SECRET_FILE"
+    # tr strips the trailing newline base64 appends — SESSION_SECRET is
+    # consumed as an opaque byte string and a stray \n causes subtle
+    # value-mismatch bugs if anything byte-compares it.
+    head -c 32 /dev/urandom | base64 | tr -d '\n' > "$SECRET_FILE"
     chmod 600 "$SECRET_FILE"
 fi
 SESSION_SECRET="$(cat "$SECRET_FILE")"

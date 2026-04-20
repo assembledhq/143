@@ -371,6 +371,12 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 			logger.Warn().
 				Msg("DEMO_EMAIL or DEMO_PASSWORD overridden but the seeded admin in .143/seed.sql still uses the defaults — the login banner will advertise credentials that don't sign in. Regenerate the bcrypt hash in the seed, or unset the override.")
 		}
+		// Operators enabling DemoMode on top of real GitHub App credentials
+		// will see integrations silently no-op. Call that out so the cause
+		// is easy to find in logs.
+		if c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "" {
+			logger.Warn().Msg("DEMO_MODE suppresses the configured GitHub App — integrations will be skipped. Unset DEMO_MODE to re-enable.")
+		}
 	}
 }
 

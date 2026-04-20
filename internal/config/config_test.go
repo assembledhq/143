@@ -420,6 +420,67 @@ func TestLogStatus_DemoCredentialMismatch(t *testing.T) {
 	}
 }
 
+// TestLogStatus_DemoSuppressesGitHubApp covers the boot-time warning emitted
+// when DemoMode is on but GitHub App credentials are also configured — the
+// integration is silently suppressed, so we log once at startup so the cause
+// is easy to find in logs.
+func TestLogStatus_DemoSuppressesGitHubApp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "demo on + github app creds warns",
+			cfg: Config{
+				SessionSecret:       "s",
+				CSRFSigningKey:      "c",
+				DemoMode:            true,
+				GitHubAppID:         123,
+				GitHubAppPrivateKey: "key",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo on + no github app creds does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+			},
+			wantWarn: false,
+		},
+		{
+			name: "demo off + github app creds does not warn",
+			cfg: Config{
+				SessionSecret:       "s",
+				CSRFSigningKey:      "c",
+				GitHubAppID:         123,
+				GitHubAppPrivateKey: "key",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "DEMO_MODE suppresses the configured GitHub App")
+			} else {
+				require.NotContains(t, buf.String(), "DEMO_MODE suppresses the configured GitHub App")
+			}
+		})
+	}
+}
+
 func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
 	t.Parallel()
 

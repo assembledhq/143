@@ -25,9 +25,11 @@ The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was starte
 
 | Works | Does not work |
 |---|---|
-| Browse seeded sessions / PR previews / activity | Start a new agent session (no Docker socket inside the sandbox) |
-| Sign in as the seeded admin | Spin up a nested preview from inside the dogfood |
-| Open the session detail / messages | Any flow that calls the GitHub API (stubbed — no real GitHub App) |
+| Browse seeded sessions / PR previews / activity | **Start session** (no Docker socket — the button will error) |
+| Sign in as the seeded admin | **Connect GitHub** on Settings → Integrations (no OAuth app; button is hidden) |
+| Open the session detail, messages, logs | **Import repositories** (no GitHub App; install-redirect no-ops) |
+| View the seeded PR preview panel and its linked PR | **Comment on a PR / retry CI / merge** (all route through the GitHub API) |
+| Navigate projects, sessions list, activity feed | **Start Preview** from a new session (needs a live sandbox) |
 
 The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
 
