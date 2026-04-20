@@ -101,6 +101,16 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   return `${mins}m ${secs}s`;
 }
 
+// Live counter that ticks every second; isolated so only the text node re-renders.
+function LiveDuration({ startedAt }: { startedAt?: string }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <>{formatDuration(startedAt)}</>;
+}
+
 /** Returns true if the session has been pending for more than 2 minutes. */
 function isPendingTooLong(createdAt: string): boolean {
   return Date.now() - new Date(createdAt).getTime() > 2 * 60 * 1000;
@@ -134,14 +144,6 @@ const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "c
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
-
-  // Force re-render every 5s while the session is active so elapsed time stays current.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (terminalSessionStatuses.has(session.status)) return;
-    const id = setInterval(() => setTick((t) => t + 1), 5000);
-    return () => clearInterval(id);
-  }, [session.status]);
 
   const isCodexAuthFailure = session.failure_category === FAILURE_CATEGORY_CODEX_AUTH;
 
@@ -280,9 +282,9 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             <>
               <span>
                 {session.status === "pending"
-                  ? formatDuration(session.created_at)
+                  ? <LiveDuration startedAt={session.created_at} />
                   : isActive
-                    ? formatDuration(session.started_at)
+                    ? <LiveDuration startedAt={session.started_at} />
                     : formatDuration(session.started_at, session.completed_at)}
               </span>
               <span aria-hidden="true" className="text-muted-foreground/50">·</span>
