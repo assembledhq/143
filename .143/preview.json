@@ -19,7 +19,7 @@
       "command": [
         "sh",
         "-c",
-        "go run ./cmd/migrate up && psql \"$DATABASE_URL\" -f .143/seed.sql && BASE_URL=\"$PREVIEW_ORIGIN\" FRONTEND_URL=\"$PREVIEW_ORIGIN\" go run ./cmd/server"
+        "go run ./cmd/migrate up && psql \"$DATABASE_URL\" -f .143/seed.sql && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:3000}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:3000}\" go run ./cmd/server"
       ],
       "port": 8080,
       "env": {

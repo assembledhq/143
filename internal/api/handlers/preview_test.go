@@ -466,13 +466,30 @@ func TestReadWorkspacePreviewConfig_NilReader(t *testing.T) {
 	require.Nil(t, cfg)
 }
 
-func TestReadWorkspacePreviewConfig_ReadError(t *testing.T) {
+func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 	t.Parallel()
 
-	// A read error is the common "file not present" case and must NOT bubble
-	// up to the user — the caller falls back to built-in defaults.
+	// The common "no .143/preview.json committed" case: the underlying FileReader
+	// wraps `head: ... No such file or directory` from the sandbox exec. Must
+	// NOT bubble up — caller falls back to built-in defaults.
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{err: errors.New("not found")},
+		fileReader: fakeFileReader{err: errors.New("read file .143/preview.json: head: cannot open '/workspace/.143/preview.json' for reading: No such file or directory")},
+		logger:     zerolog.Nop(),
+	}
+	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.False(t, ok)
+	require.Nil(t, cfg)
+}
+
+func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
+	t.Parallel()
+
+	// A non-"not found" read error (docker exec failure, context cancel, sandbox
+	// gone) must still fall through to defaults so a broken sandbox doesn't
+	// block StartPreview entirely. The handler logs it at Warn, but callers
+	// still see (nil, false).
+	h := &PreviewHandler{
+		fileReader: fakeFileReader{err: errors.New("docker exec failed: container not running")},
 		logger:     zerolog.Nop(),
 	}
 	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())

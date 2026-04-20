@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -100,13 +101,24 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 	}
 	content, _, err := h.fileReader.ReadFile(ctx, sb.ID, sb.WorkDir, workspacePreviewConfigPath)
 	if err != nil {
-		// File most likely doesn't exist; log at debug so a missing file
-		// doesn't spam warnings on every autodetect attempt.
-		h.logger.Debug().
-			Err(err).
-			Str("session_id", sessionID.String()).
-			Str("path", workspacePreviewConfigPath).
-			Msg("no committed preview config in workspace")
+		// The FileReader does not expose a dedicated "not found" sentinel, so
+		// pattern-match on the wrapped `head` stderr ("No such file or
+		// directory") to distinguish the expected "no committed config" case
+		// from real breakage (docker exec failure, context cancellation,
+		// sandbox gone). Missing file → debug, everything else → warn so
+		// unexpected failures don't fall through silently.
+		if strings.Contains(err.Error(), "No such file or directory") {
+			h.logger.Debug().
+				Str("session_id", sessionID.String()).
+				Str("path", workspacePreviewConfigPath).
+				Msg("no committed preview config in workspace")
+		} else {
+			h.logger.Warn().
+				Err(err).
+				Str("session_id", sessionID.String()).
+				Str("path", workspacePreviewConfigPath).
+				Msg("failed to read committed preview config; falling back to defaults")
+		}
 		return nil, false
 	}
 	cfg, err := preview.ParseConfig([]byte(content))
