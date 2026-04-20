@@ -140,7 +140,7 @@ type Session struct {
 	AgentSessionID      *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
 	CurrentTurn         int             `db:"current_turn" json:"current_turn"`
 	// LastActivityAt is the timestamp of the last write to this session — used
-	// as the MRU sort key in ListByOrg. NOT NULL since migration 000076;
+	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
 	LastActivityAt time.Time       `db:"last_activity_at" json:"last_activity_at"`
 	SandboxState   string          `db:"sandbox_state" json:"sandbox_state"`

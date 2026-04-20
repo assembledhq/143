@@ -11,11 +11,17 @@
 -- Roll out: apply migration -> verify index is present -> deploy backend.
 --
 -- LARGE-TABLE NOTE: on deployments where `sessions` has grown past ~1M rows,
--- do not rely on this migration's inline steps to finish quickly. The inline
--- `SET NOT NULL` falls back to a full-table ACCESS EXCLUSIVE scan when the
--- CHECK NOT VALID / VALIDATE runbook hasn't been completed. Run the full
--- runbook below out-of-band first; the migration then finishes in
--- milliseconds.
+-- do not rely on this migration's inline steps to finish quickly. Two things
+-- bite on a big table:
+--   (a) the inline `SET NOT NULL` below falls back to a full-table ACCESS
+--       EXCLUSIVE scan when the CHECK NOT VALID / VALIDATE runbook hasn't
+--       been completed, and
+--   (b) the inline `UPDATE sessions SET last_activity_at = COALESCE(...)`
+--       safety net writes every NULL row in a single transaction, ballooning
+--       WAL and holding row locks for the duration of the scan.
+-- Run the full runbook below out-of-band first (backfill in batches if the
+-- NULL set is large); the migration then finishes in milliseconds and the
+-- safety-net UPDATE is a no-op.
 --
 -- PRODUCTION RUNBOOK (do these out-of-band BEFORE running this migration so
 -- the migrate step is fast and lock-light):
@@ -70,9 +76,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_last_activity
     ON sessions (org_id, last_activity_at DESC, id DESC)
     WHERE deleted_at IS NULL;
 
--- Drop the old MRU index — its sole consumer was ListByOrg's previous
--- `ORDER BY created_at DESC, id DESC`, which now uses idx_sessions_last_activity.
--- DROP INDEX takes a brief ACCESS EXCLUSIVE lock; in production prefer running
--- `DROP INDEX CONCURRENTLY IF EXISTS idx_sessions_deleted;` out-of-band before
--- this migration. IF EXISTS keeps the migration idempotent either way.
-DROP INDEX IF EXISTS idx_sessions_deleted;
+-- NOTE: idx_sessions_deleted (org_id, created_at DESC, id DESC) WHERE deleted_at
+-- IS NULL is intentionally kept. Although ListByOrg no longer consumes it,
+-- SessionStore.ListByIssue and SessionStore.ListRecentByOrg still
+-- `ORDER BY created_at DESC` — dropping the index would push those queries to
+-- a seq scan + sort on every call. The existing idx_sessions_not_archived /
+-- idx_sessions_archived are partial on archived_at, which the planner cannot
+-- use when the query does not reference archived_at. Revisit dropping once
+-- those queries are migrated to last_activity_at (or to a (org_id, issue_id)
+-- / (org_id, status) index).

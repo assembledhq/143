@@ -484,16 +484,18 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	// Pinned: UpdatePMPlanID must NOT write last_activity_at. It is always
-	// called immediately after the PM session's final UpdateResult (which
-	// bumps the timestamp), so a second bump here would be redundant.
-	mock.ExpectExec(`^UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id$`).
+	// Pinned (intentional tripwire — exact-match regex): UpdatePMPlanID must
+	// bump last_activity_at so the method is self-contained. Today's sole
+	// caller also calls UpdateResult immediately before this, so the bump is
+	// technically redundant on the hot path, but removing it couples
+	// correctness to an unwritten caller contract.
+	mock.ExpectExec(`^UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id$`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
 	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet(), "UpdatePMPlanID must not write last_activity_at")
+	require.NoError(t, mock.ExpectationsWereMet(), "UpdatePMPlanID must bump last_activity_at")
 }
 
 func TestSessionStore_ResetForRetry(t *testing.T) {
@@ -838,13 +840,15 @@ func TestSessionStore_Unarchive(t *testing.T) {
 
 		store := NewSessionStore(mock)
 
-		mock.ExpectExec("UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL").
+		// Pinned: Unarchive must bump last_activity_at so the restored session
+		// surfaces at the top of the MRU list, not pages deep at its old slot.
+		mock.ExpectExec(`UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, last_activity_at = now\(\)`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		err = store.Unarchive(context.Background(), uuid.New(), uuid.New())
 		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
+		require.NoError(t, mock.ExpectationsWereMet(), "Unarchive must bump last_activity_at")
 	})
 
 	t.Run("returns error when session not found or not archived", func(t *testing.T) {
@@ -855,7 +859,7 @@ func TestSessionStore_Unarchive(t *testing.T) {
 
 		store := NewSessionStore(mock)
 
-		mock.ExpectExec("UPDATE sessions SET archived_at = NULL").
+		mock.ExpectExec(`UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, last_activity_at = now\(\)`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 

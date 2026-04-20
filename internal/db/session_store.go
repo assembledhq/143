@@ -330,12 +330,14 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return err
 }
 
-// UpdatePMPlanID links a session to a PM plan. Deliberately does NOT touch
-// last_activity_at: the only caller invokes this immediately after the PM
-// session's final UpdateResult (which already bumps the timestamp), so a
-// second bump here would be a redundant write on every plan creation.
+// UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
+// method is self-contained — callers do not have to remember to pair it with
+// a separate activity bump. Today's sole caller already calls UpdateResult
+// microseconds earlier, so this is a redundant write on the hot path, but the
+// cost (one UPDATE per plan creation) is negligible versus the coupling risk
+// of a future caller silently skipping the MRU bump.
 func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
-	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":         runID,
 		"org_id":     orgID,
@@ -780,8 +782,10 @@ func (s *SessionStore) ArchiveSystem(ctx context.Context, orgID, sessionID uuid.
 }
 
 // Unarchive removes the archived flag from a session, restoring it to default views.
+// Bumps last_activity_at so the restored session surfaces at the top of the
+// MRU-ordered list rather than reappearing pages deep at its old position.
 func (s *SessionStore) Unarchive(ctx context.Context, orgID, sessionID uuid.UUID) error {
-	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
+	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
