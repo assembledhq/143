@@ -516,8 +516,9 @@ func (d *DockerProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) 
 // Snapshot tars the workspace and agent state directories from the container.
 // The returned reader streams a compressed tar archive; the caller must close it.
 func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
-	log := d.scopedLogger(sb)
-	log.Info().Msg("snapshotting sandbox")
+	d.logger.Info().
+		Str("container_id", sb.ID).
+		Msg("snapshotting sandbox")
 
 	// Tar workspace + agent state dirs. --ignore-failed-read handles missing dirs gracefully.
 	// Agent state dirs (e.g. .claude/, .codex/, .gemini/) live under WorkDir since
@@ -558,8 +559,9 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 
 // Restore extracts a snapshot tarball into the sandbox container.
 func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
-	log := d.scopedLogger(sb)
-	log.Info().Msg("restoring snapshot into sandbox")
+	d.logger.Info().
+		Str("container_id", sb.ID).
+		Msg("restoring snapshot into sandbox")
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"tar", "xzf", "-", "-C", "/"},
@@ -618,8 +620,8 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 // newline-delimited line of stdout as it arrives. This enables real-time
 // streaming of agent output to log channels.
 func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
-	log := d.scopedLogger(sb)
-	log.Debug().
+	d.logger.Debug().
+		Str("container_id", sb.ID).
 		Str("cmd", cmd).
 		Msg("exec-stream command in sandbox")
 
