@@ -586,6 +586,69 @@ func TestTeamHandler_RemoveMember_DeleteSessionsErrorIsLogged(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, w.Code)
 }
 
+// CreateInvitation rejects with 409 when the GitHub-username branch finds
+// an existing member: the dedup join across organization_memberships
+// catches users whose only membership in this org is non-primary.
+func TestTeamHandler_CreateInvitation_GitHubAlreadyMember(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+				return true, nil
+			},
+		},
+		nil, nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{
+		"email":           "octocat@example.com",
+		"github_username": "octocat",
+		"role":            "member",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "ALREADY_MEMBER")
+}
+
+// CreateInvitation surfaces a 500 when the GitHub-username dedup lookup
+// fails with a DB error — we cannot safely invite if dedup is unreliable.
+func TestTeamHandler_CreateInvitation_GitHubDedupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+				return false, fmt.Errorf("db down")
+			},
+		},
+		nil, nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{
+		"email":           "octocat@example.com",
+		"github_username": "octocat",
+		"role":            "member",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
 // CreateInvitation surfaces a 500 when the email-dedup membership lookup
 // fails with a non-ErrNoRows error — we don't invite into an org we can't
 // reliably check dedup against.

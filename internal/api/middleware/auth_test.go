@@ -633,6 +633,65 @@ func TestAuth_HeaderResolutionDoesNotUpdateLastOrgID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// When the last_org_id update fails after a successful resolution, the
+// middleware logs the warning but still serves the request — the hint is a
+// convenience for the next cold load, not load-bearing for this one.
+func TestAuth_LastOrgIDUpdateFailureNonFatal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	// Session has no last_org_id — we'll fall through to OldestForUser and
+	// then attempt to persist the resolution.
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, nil, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ ORDER BY created_at").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgA, "admin", now),
+		)
+	mock.ExpectExec("UPDATE auth_sessions SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	nextCalled := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(next).ServeHTTP(w, req)
+
+	require.True(t, nextCalled, "request must still succeed despite last_org_id update failure")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // When OldestForUser errors (not ErrNoRows), the middleware surfaces 403
 // rather than pretending the user has no memberships.
 func TestAuth_OldestForUserError(t *testing.T) {

@@ -537,3 +537,205 @@ func TestOrganizationMembershipStore_ListUserIDsByOrg(t *testing.T) {
 	require.Equal(t, []uuid.UUID{u1, u2}, ids)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// UpdateRoleGuarded promotes a member to admin atomically: it acquires the
+// admin-row lock first, then reads + updates the target row inside the same
+// tx so concurrent demotions can't race the count.
+func TestOrganizationMembershipStore_UpdateRoleGuarded_Promote(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec("(?s)UPDATE organization_memberships.+SET role").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
+		context.Background(), uuid.New(), uuid.New(), "admin",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "member", prev)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// UpdateRoleGuarded skips the UPDATE when the target's role already matches
+// the requested role — the prevRole is still returned so the caller can audit.
+func TestOrganizationMembershipStore_UpdateRoleGuarded_NoChange(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+	mock.ExpectCommit()
+
+	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
+		context.Background(), uuid.New(), uuid.New(), "admin",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "admin", prev)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// UpdateRoleGuarded refuses to demote the only remaining admin: the locked
+// admin count is 1 and the target *is* that admin, so demotion would leave
+// the org with no admins.
+func TestOrganizationMembershipStore_UpdateRoleGuarded_LastAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+	mock.ExpectRollback()
+
+	prev, err := NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
+		context.Background(), uuid.New(), uuid.New(), "member",
+	)
+	require.ErrorIs(t, err, ErrLastAdmin)
+	require.Equal(t, "admin", prev)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// UpdateRoleGuarded surfaces pgx.ErrNoRows when the membership row is missing
+// so the handler returns 404 rather than silently no-oping.
+func TestOrganizationMembershipStore_UpdateRoleGuarded_NoMembership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, err = NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
+		context.Background(), uuid.New(), uuid.New(), "member",
+	)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOrganizationMembershipStore_UpdateRoleGuarded_InvalidRole(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	_, err = NewOrganizationMembershipStore(mock).UpdateRoleGuarded(
+		context.Background(), uuid.New(), uuid.New(), "owner",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid role")
+}
+
+// RemoveGuarded removes a non-last-admin successfully: the locked admin count
+// is >1 (or the role is non-admin) and the underlying Remove CTE runs inside
+// the same tx.
+func TestOrganizationMembershipStore_RemoveGuarded_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+	mock.ExpectQuery("(?s)WITH deleted_membership.+cleared_answers").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectCommit()
+
+	prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+		context.Background(), uuid.New(), uuid.New(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "admin", prev)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// RemoveGuarded refuses to remove the only admin in the org.
+func TestOrganizationMembershipStore_RemoveGuarded_LastAdmin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+	mock.ExpectRollback()
+
+	prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+		context.Background(), uuid.New(), uuid.New(),
+	)
+	require.ErrorIs(t, err, ErrLastAdmin)
+	require.Equal(t, "admin", prev)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// RemoveGuarded surfaces pgx.ErrNoRows when the membership doesn't exist so
+// the handler can return 404 rather than 500.
+func TestOrganizationMembershipStore_RemoveGuarded_NoMembership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	_, err = NewOrganizationMembershipStore(mock).RemoveGuarded(
+		context.Background(), uuid.New(), uuid.New(),
+	)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

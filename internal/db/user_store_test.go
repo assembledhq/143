@@ -618,3 +618,70 @@ func TestUserStore_Delete(t *testing.T) {
 		})
 	}
 }
+
+// IsGitHubLoginMemberOfOrg short-circuits on empty login: invitations created
+// without a github_username must not run a DB lookup that would dedup against
+// every NULL github_login row in the org.
+func TestUserStore_IsGitHubLoginMemberOfOrg_EmptyLogin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	got, err := NewUserStore(mock).IsGitHubLoginMemberOfOrg(context.Background(), "", uuid.New())
+	require.NoError(t, err)
+	require.False(t, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_IsGitHubLoginMemberOfOrg_True(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)SELECT EXISTS.+JOIN organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	got, err := NewUserStore(mock).IsGitHubLoginMemberOfOrg(context.Background(), "octocat", uuid.New())
+	require.NoError(t, err)
+	require.True(t, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_IsGitHubLoginMemberOfOrg_False(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)SELECT EXISTS.+JOIN organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	got, err := NewUserStore(mock).IsGitHubLoginMemberOfOrg(context.Background(), "octocat", uuid.New())
+	require.NoError(t, err)
+	require.False(t, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_IsGitHubLoginMemberOfOrg_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)SELECT EXISTS.+JOIN organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, err = NewUserStore(mock).IsGitHubLoginMemberOfOrg(context.Background(), "octocat", uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "check github login membership")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
