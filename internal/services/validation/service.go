@@ -103,10 +103,7 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 	if s.orgs != nil {
 		fetched, err := s.orgs.GetByID(ctx, agentRun.OrgID)
 		if err != nil {
-			s.logger.Warn().Err(err).
-				Str("session_id", agentRun.ID.String()).
-				Str("org_id", agentRun.OrgID.String()).
-				Msg("failed to fetch org for direction check, will skip direction context")
+			s.logger.Warn().Err(err).Msg("failed to fetch org for direction check, will skip direction context")
 		} else {
 			org = &fetched
 		}
@@ -149,8 +146,6 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 		}
 
 		s.logger.Info().
-			Str("session_id", agentRun.ID.String()).
-			Str("validation_id", v.ID.String()).
 			Str("check", c.name).
 			Str("result", result).
 			Msg("validation check completed")

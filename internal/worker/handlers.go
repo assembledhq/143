@@ -327,7 +327,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		log := logger.With().
 			Str("org_id", orgID.String()).
 			Str("automation_id", automationID.String()).
-			Str("automation_run_id", runID.String()).
+			Str("run_id", runID.String()).
 			Logger()
 		log.Info().Msg("running automation_run job")
 
@@ -902,11 +902,7 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Msg("starting validate job")
 
 		// Create a sandbox for CI checks.
-		validationCfg := agent.DefaultSandboxConfig()
-		validationCfg.SessionID = runID.String()
-		validationCfg.OrgID = orgID.String()
-		validationCfg.Purpose = "validation"
-		sandbox, err := services.SandboxProvider.Create(ctx, validationCfg)
+		sandbox, err := services.SandboxProvider.Create(ctx, agent.DefaultSandboxConfig())
 		if err != nil {
 			return fmt.Errorf("create sandbox for validation: %w", err)
 		}
@@ -1373,8 +1369,6 @@ func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run
 	// 2. Create sandbox
 	sandboxCfg := agent.DefaultSandboxConfig()
 	sandboxCfg.Timeout = 10 * time.Minute // evals may take longer than default 5min
-	sandboxCfg.OrgID = task.OrgID.String()
-	sandboxCfg.Purpose = "eval_run"
 	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
 	if err != nil {
 		return evalFailed("create sandbox: %v", err)
@@ -1961,8 +1955,6 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 	logWriter.log(ctx, "info", "Creating sandbox environment...")
 	sandboxCfg := agent.DefaultSandboxConfig()
 	sandboxCfg.Timeout = 15 * time.Minute
-	sandboxCfg.OrgID = orgID.String()
-	sandboxCfg.Purpose = "eval_bootstrap"
 	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox: %w", err)

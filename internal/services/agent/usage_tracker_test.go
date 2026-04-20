@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,8 +17,9 @@ import (
 
 // mockContainerUsageStore records calls for verification.
 type mockContainerUsageStore struct {
-	startCalls []models.ContainerUsageEvent
-	stopCalls  []stopCall
+	startCalls    []models.ContainerUsageEvent
+	stopCalls     []stopCall
+	recordStopErr error
 }
 
 type stopCall struct {
@@ -33,7 +35,7 @@ func (m *mockContainerUsageStore) RecordStart(_ context.Context, event *models.C
 
 func (m *mockContainerUsageStore) RecordStop(_ context.Context, eventID uuid.UUID, stoppedAt time.Time, exitReason string) error {
 	m.stopCalls = append(m.stopCalls, stopCall{EventID: eventID, StoppedAt: stoppedAt, ExitReason: exitReason})
-	return nil
+	return m.recordStopErr
 }
 
 // testBillingMetrics creates BillingMetrics for testing. Uses the global
@@ -92,4 +94,39 @@ func TestUsageTracker_NilStoreAndMetrics(t *testing.T) {
 	eventID := tracker.ContainerStarted(context.Background(), orgID, sessionID, sandbox, cfg, startedAt)
 	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "completed")
 	// No panic = success.
+}
+
+func TestUsageTracker_RecordStopFailureLogsSessionID(t *testing.T) {
+	t.Parallel()
+
+	// When RecordStop fails, the tracker logs with session_id so the failure
+	// can be traced back to the owning session in Grafana. This test covers
+	// both the sessionID != uuid.Nil branch and the uuid.Nil guard branch.
+	store := &mockContainerUsageStore{recordStopErr: fmt.Errorf("db down")}
+	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	eventID := uuid.New()
+	startedAt := time.Now().Add(-time.Minute)
+
+	// Happy case: sessionID set — should include session_id in the error log.
+	tracker.ContainerStopped(context.Background(), orgID, sessionID, eventID, startedAt, "failed")
+	require.Len(t, store.stopCalls, 1, "RecordStop should be invoked even when it errors")
+
+	// Nil-session guard: RecordStop still called but session_id field skipped.
+	tracker.ContainerStopped(context.Background(), orgID, uuid.Nil, eventID, startedAt, "failed")
+	require.Len(t, store.stopCalls, 2)
+}
+
+func TestUsageTracker_RecordStopSkippedOnNilEventID(t *testing.T) {
+	t.Parallel()
+
+	// When ContainerStarted failed (and returned uuid.Nil), ContainerStopped
+	// must skip the DB write instead of spuriously logging a failure.
+	store := &mockContainerUsageStore{recordStopErr: fmt.Errorf("should not be called")}
+	tracker := agent.NewUsageTracker(store, testBillingMetrics(t), zerolog.Nop())
+
+	tracker.ContainerStopped(context.Background(), uuid.New(), uuid.New(), uuid.Nil, time.Now(), "failed")
+	require.Empty(t, store.stopCalls, "RecordStop should be skipped when eventID is Nil")
 }

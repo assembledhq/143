@@ -57,8 +57,6 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	creds.github = ghToken != ""
 
 	sbCfg := bootstrapSandboxConfig()
-	sbCfg.OrgID = params.orgID.String()
-	sbCfg.Purpose = params.logName
 	sbCfg.Env = resolveBootstrapEnv(&creds, ghToken, &repo)
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {

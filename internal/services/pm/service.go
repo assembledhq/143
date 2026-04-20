@@ -263,18 +263,9 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		TokenMode:     "high",
 	}
 	if err := s.sessions.Create(ctx, pmSession); err != nil {
-		s.logger.Error().Err(err).Str("org_id", orgID.String()).Msg("failed to create PM session — continuing without session logging")
+		s.logger.Error().Err(err).Msg("failed to create PM session — continuing without session logging")
 		pmSession = nil
 	}
-
-	// pmLog is a scoped logger that carries session_id/org_id on every PM log
-	// line so operators can grep the whole analysis by session_id in Grafana.
-	// Falls back to a plain logger if the PM session failed to create.
-	pmLog := s.logger.With().Str("org_id", orgID.String())
-	if pmSession != nil {
-		pmLog = pmLog.Str("session_id", pmSession.ID.String())
-	}
-	pmLogger := pmLog.Logger()
 
 	// failSession marks the PM session as failed, capturing the error message on
 	// the session record and writing a session log entry (matching the manual-session
@@ -287,7 +278,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 				Error: strPtr(errMsg),
 			}
 			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
-				pmLogger.Error().Err(err).Msg("failed to mark PM session as failed")
+				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
 			// Write an error-level session log so the failure appears in the activity stream.
 			if s.sessionLogs != nil {
@@ -298,7 +289,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 					Message:   errMsg,
 				}
 				if err := s.sessionLogs.Create(ctx, log); err != nil {
-					pmLogger.Error().Err(err).Msg("failed to write PM failure session log")
+					s.logger.Error().Err(err).Msg("failed to write PM failure session log")
 				}
 			}
 		}
@@ -311,11 +302,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	sbCfg := pmSandboxConfig()
-	sbCfg.OrgID = orgID.String()
-	sbCfg.Purpose = "pm_analyze"
-	if pmSession != nil {
-		sbCfg.SessionID = pmSession.ID.String()
-	}
 
 	// Inject internal API credentials so the PM agent can create issues.
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
@@ -323,7 +309,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		tokenTTL := sbCfg.Timeout + 5*time.Minute
 		internalToken, tokenErr := auth.GenerateInternalToken(s.internalAPISecret, orgID, repo.ID, tokenTTL)
 		if tokenErr != nil {
-			pmLogger.Warn().Err(tokenErr).Msg("failed to generate internal API token — issue creation will be unavailable")
+			s.logger.Warn().Err(tokenErr).Msg("failed to generate internal API token — issue creation will be unavailable")
 		} else {
 			if sbCfg.Env == nil {
 				sbCfg.Env = make(map[string]string)
@@ -339,7 +325,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 	defer func() {
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
-			pmLogger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
+			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
 		}
 	}()
 
@@ -357,13 +343,13 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	if ctxBundle.productContext != nil {
 		if err := s.writeProductContextToAgentsMD(ctx, sb, ctxBundle.productContext); err != nil {
-			pmLogger.Warn().Err(err).Msg("failed to write product context to AGENTS.md")
+			s.logger.Warn().Err(err).Msg("failed to write product context to AGENTS.md")
 		}
 	}
 
 	if len(ctxBundle.pmDocuments) > 0 {
 		if err := s.writePMDocumentsToWorkspace(ctx, sb, ctxBundle.pmDocuments); err != nil {
-			pmLogger.Warn().Err(err).Msg("failed to write PM documents to workspace")
+			s.logger.Warn().Err(err).Msg("failed to write PM documents to workspace")
 		}
 	}
 
@@ -378,7 +364,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	// Write full Slack thread files to the sandbox for PM drill-down.
 	if ctxBundle.slackThreads != nil {
 		if err := s.writeSlackThreadFiles(ctx, sb, ctxBundle.slackThreads); err != nil {
-			pmLogger.Warn().Err(err).Msg("failed to write slack thread files to sandbox")
+			s.logger.Warn().Err(err).Msg("failed to write slack thread files to sandbox")
 		}
 	}
 
@@ -422,12 +408,17 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		if len(logOutput) > 2000 {
 			logOutput = logOutput[:2000] + "...(truncated)"
 		}
-		pmLogger.Error().
+		sessionID := ""
+		if pmSession != nil {
+			sessionID = pmSession.ID.String()
+		}
+		s.logger.Error().
+			Str("session_id", sessionID).
 			Str("agent_output", logOutput).
 			Err(err).
 			Msg("failed to parse PM plan from agent output")
-		if pmSession != nil {
-			return nil, fmt.Errorf("parse plan [session_id=%s]: %w", pmSession.ID.String(), err)
+		if sessionID != "" {
+			return nil, fmt.Errorf("parse plan [session_id=%s]: %w", sessionID, err)
 		}
 		return nil, sessionErr
 	}
@@ -439,7 +430,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if result.TokenUsage != (agent.TokenUsage{}) {
 		tokenJSON, err := json.Marshal(result.TokenUsage)
 		if err != nil {
-			pmLogger.Warn().Err(err).Msg("failed to marshal token usage")
+			s.logger.Warn().Err(err).Msg("failed to marshal token usage")
 			tokenJSON = nil
 		}
 		plan.TokenUsage = tokenJSON
@@ -458,7 +449,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	// Link PM session to the plan.
 	if pmSession != nil {
 		if err := s.sessions.UpdatePMPlanID(ctx, orgID, pmSession.ID, planModel.ID); err != nil {
-			pmLogger.Error().Err(err).Msg("failed to link PM session to plan")
+			s.logger.Error().Err(err).Msg("failed to link PM session to plan")
 		}
 	}
 
@@ -467,7 +458,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		for _, entry := range entries {
 			entry.OrgID = orgID
 			if err := s.decisionLog.Create(ctx, &entry); err != nil {
-				pmLogger.Error().Err(err).Msg("failed to write decision log entry")
+				s.logger.Error().Err(err).Msg("failed to write decision log entry")
 			}
 		}
 	}
@@ -480,7 +471,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if s.projects != nil && s.projectTasks != nil && s.projectCycles != nil {
 		for _, pp := range plan.ProjectPlans {
 			if err := s.executeProjectPlan(ctx, orgID, &pp, ctxBundle.settings, plan.ID); err != nil {
-				pmLogger.Error().Err(err).Str("project_id", pp.ProjectID.String()).Msg("failed to execute project plan")
+				s.logger.Error().Err(err).Str("project_id", pp.ProjectID.String()).Msg("failed to execute project plan")
 			}
 		}
 	}
@@ -495,7 +486,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return plan, nil
 	}
 	if err := s.plans.Update(ctx, updatedModel); err != nil {
-		pmLogger.Error().Err(err).Msg("failed to persist completed plan status")
+		s.logger.Error().Err(err).Msg("failed to persist completed plan status")
 	}
 
 	// Mark PM session as completed, persisting token usage on the session record.
@@ -504,7 +495,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			TokenUsage: plan.TokenUsage,
 		}
 		if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "completed", sessionResult); err != nil {
-			pmLogger.Error().Err(err).Msg("failed to mark PM session as completed")
+			s.logger.Error().Err(err).Msg("failed to mark PM session as completed")
 		}
 	}
 
@@ -520,10 +511,7 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		}
 		metadata, err := json.Marshal(entry.Metadata)
 		if err != nil {
-			s.logger.Warn().Err(err).
-				Str("session_id", pmSession.ID.String()).
-				Str("org_id", pmSession.OrgID.String()).
-				Msg("failed to marshal PM log entry metadata")
+			s.logger.Warn().Err(err).Msg("failed to marshal PM log entry metadata")
 			metadata = nil
 		}
 		log := &models.SessionLog{
@@ -534,10 +522,7 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 			Metadata:  metadata,
 		}
 		if err := s.sessionLogs.Create(ctx, log); err != nil {
-			s.logger.Error().Err(err).
-				Str("session_id", pmSession.ID.String()).
-				Str("org_id", pmSession.OrgID.String()).
-				Msg("failed to persist PM log entry")
+			s.logger.Error().Err(err).Msg("failed to persist PM log entry")
 		}
 	}
 }

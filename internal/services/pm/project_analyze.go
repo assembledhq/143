@@ -69,8 +69,6 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 
 	// Create sandbox and clone repo.
 	sbCfg := pmSandboxConfig()
-	sbCfg.OrgID = orgID.String()
-	sbCfg.Purpose = "pm_project_analyze"
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
