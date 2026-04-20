@@ -84,10 +84,10 @@ function VersionInfo() {
 }
 
 const navItems = [
-  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
   { label: "Sessions", icon: Play, href: "/sessions", showProposalBadge: false },
-  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
   { label: "Automations", icon: RefreshCw, href: "/automations", showProposalBadge: false },
+  { label: "Projects", icon: FolderKanban, href: "/projects", showProposalBadge: true },
+  { label: "Autopilot", icon: Zap, href: "/autopilot", showProposalBadge: false },
 ];
 
 export function AuthenticatedLayout({ children }: { children: React.ReactNode }) {
@@ -184,7 +184,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         <div className="relative flex items-center justify-between px-4 py-3.5">
           <div className="flex items-center gap-1.5 min-w-0">
             <Link
-              href="/autopilot"
+              href="/sessions"
               className="flex items-center gap-1.5 min-w-0 rounded-md px-1.5 py-1 -ml-1.5 hover:bg-sidebar-accent transition-colors"
             >
               <div className="flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-xs font-semibold shrink-0">

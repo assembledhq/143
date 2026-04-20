@@ -61,7 +61,7 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
-      window.location.href = "/autopilot";
+      window.location.href = "/sessions";
     } catch (err: unknown) {
       captureError(err, { feature: "auth-signin" });
       const message = err instanceof Error ? err.message : "Sign in failed";
@@ -77,7 +77,7 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.register(signUpEmail, signUpPassword, signUpName, invitation);
-      window.location.href = "/autopilot";
+      window.location.href = "/sessions";
     } catch (err: unknown) {
       captureError(err, { feature: "auth-signup" });
       const message = err instanceof Error ? err.message : "Sign up failed";
