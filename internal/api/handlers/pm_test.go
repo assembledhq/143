@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -324,8 +325,8 @@ func TestPMHandler_StatusNextRunAtAccountsForFailure(t *testing.T) {
 
 	orgID := uuid.New()
 	now := time.Now()
-	planCreatedAt := now.Add(-5 * time.Hour)  // plan was 5h ago
-	failedAt := now.Add(-30 * time.Minute)    // failure was 30min ago (more recent)
+	planCreatedAt := now.Add(-5 * time.Hour) // plan was 5h ago
+	failedAt := now.Add(-30 * time.Minute)   // failure was 30min ago (more recent)
 
 	// Mock GetLatestByOrg — old successful plan.
 	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
@@ -566,7 +567,7 @@ func TestPMHandler_AcceptRefresh(t *testing.T) {
 					true, activeID, "",
 					nil, now, now),
 		)
-	mock.ExpectCommit()  // savepoint release
+	mock.ExpectCommit()   // savepoint release
 	mock.ExpectRollback() // deferred rollback (no-op after commit)
 
 	// Delete is now soft-delete (UPDATE SET active = false).
@@ -574,7 +575,7 @@ func TestPMHandler_AcceptRefresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	mock.ExpectCommit()  // outer tx commit
+	mock.ExpectCommit()   // outer tx commit
 	mock.ExpectRollback() // deferred rollback (no-op)
 
 	rctx := chi.NewRouteContext()
@@ -792,5 +793,102 @@ func TestPMHandler_CurrentNotFound(t *testing.T) {
 	handler.Current(rr, req)
 
 	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404 when no plan exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_Latest_NoPlan_Returns200Null(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pmPlanColumnsWithContext))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/plans/latest", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Latest(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "empty state should be 200, not 404")
+	require.JSONEq(t, `{"data":null}`, rr.Body.String(), "body should be data:null")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_Latest_ReturnsPlan(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+	planID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(pmPlanColumnsWithContext).
+				AddRow(planID, orgID, nil, "completed", "analysis",
+					json.RawMessage(`[]`), json.RawMessage(`[]`), json.RawMessage(`[]`),
+					1, 2, 3, 4, 5, 6,
+					json.RawMessage(`{}`), json.RawMessage(`{}`), "cron",
+					now, &now,
+				),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/plans/latest", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Latest(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "should return OK")
+	require.Contains(t, rr.Body.String(), planID.String(), "body should include the plan id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_Latest_DBError_Returns500(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("db exploded"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/plans/latest", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Latest(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "real DB errors should 500, not 200")
+	require.Contains(t, rr.Body.String(), "INTERNAL_ERROR", "error code should surface")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

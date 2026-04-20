@@ -615,7 +615,9 @@ func (h *SessionHandler) GetValidation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Validation]{Data: v})
 }
 
-// GetPullRequest returns the PR associated with an agent run.
+// GetPullRequest returns the PR associated with an agent run, or null if none exists.
+// "No PR yet" is a normal empty state for an active session, not a missing resource,
+// so we return 200 with a null body rather than 404.
 func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -626,10 +628,15 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 
 	pr, err := h.pullRequestStore.GetBySessionID(r.Context(), orgID, runID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: nil})
+			return
+		}
+		zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to load PR for session")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load pull request", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequest]{Data: pr})
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: &pr})
 }
 
 // CreatePR handles POST /sessions/{id}/pr — enqueues a job to create a GitHub
