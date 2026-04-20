@@ -918,7 +918,7 @@ func TestSummarizeIssue_NilDescription(t *testing.T) {
 func TestAnalyze_NilAdapterOrSandbox(t *testing.T) {
 	t.Parallel()
 
-	svc := &Service{adapter: nil, sandbox: nil}
+	svc := &Service{adapters: nil, sandbox: nil}
 	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not configured")
@@ -928,8 +928,8 @@ func TestAnalyze_InvalidTrigger(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{}),
+		sandbox:  &pmSandboxMock{},
 	}
 	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTrigger("invalid"), nil)
 	require.Error(t, err)
@@ -964,9 +964,9 @@ func TestAnalyze_NoRepositories(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{},
-		sandbox: &pmSandboxMock{},
-		repos:   &mockRepoStore{repos: []models.Repository{}},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{}),
+		sandbox:  &pmSandboxMock{},
+		repos:    &mockRepoStore{repos: []models.Repository{}},
 	}
 	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
 	require.Error(t, err)
@@ -980,8 +980,8 @@ func TestAnalyze_RepoNotFound(t *testing.T) {
 	otherRepoID := uuid.New()
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: otherRepoID, Status: "active"},
 		}},
@@ -995,9 +995,9 @@ func TestAnalyze_RepoListError(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{},
-		sandbox: &pmSandboxMock{},
-		repos:   &mockRepoStore{err: fmt.Errorf("db error")},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{}),
+		sandbox:  &pmSandboxMock{},
+		repos:    &mockRepoStore{err: fmt.Errorf("db error")},
 	}
 	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
 	require.Error(t, err)
@@ -1025,8 +1025,8 @@ func TestAnalyze_SelectsActiveRepo(t *testing.T) {
 </pm-plan>`, issueID)
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: inactiveRepoID, Status: "inactive", OrgID: orgID},
 			{ID: activeRepoID, Status: "active", OrgID: orgID},
@@ -1422,8 +1422,8 @@ func TestAnalyze_WithSpecificRepoID(t *testing.T) {
 </pm-plan>`, issueID)
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID},
 		}},
@@ -1464,8 +1464,8 @@ func TestAnalyze_WritesDecisionLog(t *testing.T) {
 	decisionLog := &gatherDecisionStoreMock{}
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID},
 		}},
@@ -1515,8 +1515,8 @@ func TestAnalyze_WithProductContext(t *testing.T) {
 </pm-plan>`, issueID)
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: planOutput}}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID},
 		}},
@@ -1544,8 +1544,8 @@ func TestAnalyze_ParsePlanError(t *testing.T) {
 	settingsJSON, _ := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3})
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: "no plan tags"}},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeResult: &agent.AgentResult{Summary: "no plan tags"}}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID},
 		}},
@@ -1571,8 +1571,8 @@ func TestAnalyze_ExecuteError(t *testing.T) {
 	settingsJSON, _ := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3})
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{executeErr: fmt.Errorf("execution failed")},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{executeErr: fmt.Errorf("execution failed")}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID},
 		}},
@@ -1610,8 +1610,8 @@ func TestAnalyze_GitHubTokenError(t *testing.T) {
 	settingsJSON, _ := json.Marshal(models.OrgSettings{MaxConcurrentRuns: 3})
 
 	svc := &Service{
-		adapter: &pmInnerAdapterMock{},
-		sandbox: &pmSandboxMock{},
+		adapters: singleTestAdapterMap(&pmInnerAdapterMock{}),
+		sandbox:  &pmSandboxMock{},
 		repos: &mockRepoStore{repos: []models.Repository{
 			{ID: repoID, Status: "active", OrgID: orgID, InstallationID: 12345},
 		}},

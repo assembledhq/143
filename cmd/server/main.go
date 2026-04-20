@@ -451,7 +451,6 @@ func buildServices(
 		sessionStore, orgStore, jobStore, llmClient, logger,
 	)
 
-	pmAdapter := adapters.NewClaudeCodeAdapter(logger)
 	pmSvc := pm.NewService(
 		issueStore,
 		sessionStore,
@@ -462,7 +461,7 @@ func buildServices(
 		pmPlanStore,
 		pmDecisionLogStore,
 		sandboxProvider,
-		pmAdapter,
+		agentAdapters,
 		ghSvc,
 		logger,
 	)

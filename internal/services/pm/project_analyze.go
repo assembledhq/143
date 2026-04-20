@@ -19,7 +19,7 @@ import (
 // with a project-focused prompt, and calls executeProjectPlan to create tasks
 // and dispatch runs. This is the entry point for the project_cycle job.
 func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
-	if s.adapter == nil || s.sandbox == nil {
+	if len(s.adapters) == 0 || s.sandbox == nil {
 		return fmt.Errorf("pm adapter or sandbox not configured")
 	}
 	if s.projects == nil || s.projectTasks == nil || s.projectCycles == nil {
@@ -35,13 +35,16 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		return nil
 	}
 
-	org, err := s.orgs.GetByID(ctx, orgID)
+	settings, err := s.loadOrgSettings(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("get org: %w", err)
+		return err
 	}
-	settings, parseErr := models.ParseOrgSettings(org.Settings)
-	if parseErr != nil {
-		return fmt.Errorf("parse org settings: %w", parseErr)
+
+	// Resolve the agent adapter up front so a misconfigured org fails fast
+	// before we pay for sandbox create/clone.
+	adapter, err := s.resolveAgentAdapter(settings)
+	if err != nil {
+		return fmt.Errorf("resolve adapter: %w", err)
 	}
 
 	// Fetch the repository for this project.
@@ -114,7 +117,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	defer close(logCh)
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	if err != nil {
 		return fmt.Errorf("project pm agent execution: %w", err)
 	}

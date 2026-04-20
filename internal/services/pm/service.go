@@ -135,7 +135,7 @@ type Service struct {
 	credentials       credentialStore   // nil-safe
 	skills            SkillsBuilder     // nil-safe: bootstrap disabled if nil
 	sandbox           agent.SandboxProvider
-	adapter           agent.AgentAdapter
+	adapters          map[models.AgentType]agent.AgentAdapter
 	github            agent.GitHubTokenProvider
 	internalAPIURL    string // base URL for internal API (e.g. "http://server:8080/api/v1/internal")
 	internalAPISecret string // signing secret for internal API tokens
@@ -152,7 +152,7 @@ func NewService(
 	plans planStore,
 	decisionLog decisionLogStore,
 	sandbox agent.SandboxProvider,
-	adapter agent.AgentAdapter,
+	adapters map[models.AgentType]agent.AgentAdapter,
 	github agent.GitHubTokenProvider,
 	logger zerolog.Logger,
 ) *Service {
@@ -166,10 +166,50 @@ func NewService(
 		plans:        plans,
 		decisionLog:  decisionLog,
 		sandbox:      sandbox,
-		adapter:      adapter,
+		adapters:     adapters,
 		github:       github,
 		logger:       logger,
 	}
+}
+
+// loadOrgSettings fetches the org row and parses its settings JSON. Shared by
+// any entry point that needs settings (adapter resolution, token limits, etc.).
+func (s *Service) loadOrgSettings(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+	org, err := s.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return models.OrgSettings{}, fmt.Errorf("get org: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return models.OrgSettings{}, fmt.Errorf("parse org settings: %w", err)
+	}
+	return settings, nil
+}
+
+// resolveAgentAdapter picks the underlying coding-agent adapter for a PM run.
+// It mirrors the agent-type selection used for fix sessions: org settings pick
+// the adapter, falling back to DefaultDefaultAgentType if unset.
+func (s *Service) resolveAgentAdapter(settings models.OrgSettings) (agent.AgentAdapter, error) {
+	agentType := settings.DefaultAgentType
+	if agentType == "" {
+		agentType = models.DefaultDefaultAgentType
+	}
+	adapter, ok := s.adapters[agentType]
+	if !ok {
+		return nil, fmt.Errorf("no adapter configured for agent type %q", agentType)
+	}
+	return adapter, nil
+}
+
+// resolveAdapterForOrg loads org settings and resolves the PM coding-agent
+// adapter. Used by entry points (bootstrap/refresh) that don't already have
+// settings in hand.
+func (s *Service) resolveAdapterForOrg(ctx context.Context, orgID uuid.UUID) (agent.AgentAdapter, error) {
+	settings, err := s.loadOrgSettings(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return s.resolveAgentAdapter(settings)
 }
 
 // SetProjectStores injects project store dependencies. Nil-safe: if not called, projects feature is disabled.
@@ -240,7 +280,7 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 }
 
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
-	if s.adapter == nil || s.sandbox == nil {
+	if len(s.adapters) == 0 || s.sandbox == nil {
 		return nil, fmt.Errorf("pm adapter or sandbox not configured")
 	}
 	if err := trigger.Validate(); err != nil {
@@ -393,8 +433,15 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		s.streamPMLogs(ctx, pmSession, logCh)
 	}()
 
+	adapter, err := s.resolveAgentAdapter(ctxBundle.settings)
+	if err != nil {
+		close(logCh)
+		logWg.Wait()
+		return nil, failSession("resolve adapter", err)
+	}
+
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 	if err != nil {

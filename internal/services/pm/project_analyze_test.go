@@ -28,7 +28,7 @@ func (m *mockAdapter) Execute(ctx context.Context, sb *agent.Sandbox, prompt *ag
 // mockSandbox is a minimal stub for agent.SandboxProvider.
 type mockSandbox struct{}
 
-func (m *mockSandbox) Name() string                      { return "mock" }
+func (m *mockSandbox) Name() string { return "mock" }
 func (m *mockSandbox) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 	return &agent.Sandbox{}, nil
 }
@@ -121,7 +121,7 @@ func TestAnalyzeProject_ProjectNotFound(t *testing.T) {
 
 	projectID := uuid.New()
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      singleTestAdapterMap(&mockAdapter{}),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(), // empty store
 		projectTasks:  &mockProjectTaskStore{},
@@ -144,7 +144,7 @@ func TestAnalyzeProject_ProjectNotActive(t *testing.T) {
 		Status: models.ProjectStatusDraft,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      singleTestAdapterMap(&mockAdapter{}),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -184,7 +184,7 @@ func TestAnalyzeProject_RepoNotFound(t *testing.T) {
 		Status:       models.ProjectStatusActive,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      singleTestAdapterMap(&mockAdapter{}),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -215,7 +215,7 @@ func TestAnalyzeProject_OrgNotFound(t *testing.T) {
 		Status: models.ProjectStatusActive,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      singleTestAdapterMap(&mockAdapter{}),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -241,9 +241,9 @@ func TestAnalyzeProject_NilProjectStores(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &mockAdapter{},
-		sandbox: &mockSandbox{},
-		logger:  zerolog.Nop(),
+		adapters: singleTestAdapterMap(&mockAdapter{}),
+		sandbox:  &mockSandbox{},
+		logger:   zerolog.Nop(),
 	}
 	err := svc.AnalyzeProject(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err, "AnalyzeProject should fail when project stores are nil")

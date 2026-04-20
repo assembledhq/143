@@ -25,6 +25,7 @@ const bootstrapInputPath = "/workspace/.bootstrap-input.json"
 // Shared by RunBootstrap and RunRefresh to avoid duplicating setup logic.
 type sandboxRunParams struct {
 	orgID   uuid.UUID
+	adapter agent.AgentAdapter // resolved per run from org settings
 	prompt  *agent.AgentPrompt
 	logName string // e.g. "bootstrap-agent", "refresh-agent"
 
@@ -108,7 +109,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	if _, err := s.adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
+	if _, err := params.adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
 		close(logCh)
 		logWg.Wait()
 		cleanup()
@@ -124,11 +125,16 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 // integrations and the codebase, then writes a structured PM context file.
 // The output is extracted from the sandbox and stored in pm_documents.
 func (s *Service) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
-	if s.adapter == nil || s.sandbox == nil {
+	if len(s.adapters) == 0 || s.sandbox == nil {
 		return fmt.Errorf("pm adapter or sandbox not configured")
 	}
 	if s.pmDocuments == nil {
 		return fmt.Errorf("pm document store not configured")
+	}
+
+	adapter, err := s.resolveAdapterForOrg(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("resolve adapter: %w", err)
 	}
 
 	skillsDoc := s.buildSkillsDoc(ctx, orgID)
@@ -148,6 +154,7 @@ func (s *Service) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
 
 	sb, cleanup, err := s.runAgentInSandbox(ctx, sandboxRunParams{
 		orgID:   orgID,
+		adapter: adapter,
 		prompt:  prompt,
 		logName: "bootstrap-agent",
 	})
