@@ -324,8 +324,8 @@ func TestPMHandler_StatusNextRunAtAccountsForFailure(t *testing.T) {
 
 	orgID := uuid.New()
 	now := time.Now()
-	planCreatedAt := now.Add(-5 * time.Hour)  // plan was 5h ago
-	failedAt := now.Add(-30 * time.Minute)    // failure was 30min ago (more recent)
+	planCreatedAt := now.Add(-5 * time.Hour) // plan was 5h ago
+	failedAt := now.Add(-30 * time.Minute)   // failure was 30min ago (more recent)
 
 	// Mock GetLatestByOrg — old successful plan.
 	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
@@ -566,7 +566,7 @@ func TestPMHandler_AcceptRefresh(t *testing.T) {
 					true, activeID, "",
 					nil, now, now),
 		)
-	mock.ExpectCommit()  // savepoint release
+	mock.ExpectCommit()   // savepoint release
 	mock.ExpectRollback() // deferred rollback (no-op after commit)
 
 	// Delete is now soft-delete (UPDATE SET active = false).
@@ -574,7 +574,7 @@ func TestPMHandler_AcceptRefresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	mock.ExpectCommit()  // outer tx commit
+	mock.ExpectCommit()   // outer tx commit
 	mock.ExpectRollback() // deferred rollback (no-op)
 
 	rctx := chi.NewRouteContext()
@@ -792,5 +792,34 @@ func TestPMHandler_CurrentNotFound(t *testing.T) {
 	handler.Current(rr, req)
 
 	require.Equal(t, http.StatusNotFound, rr.Code, "should return 404 when no plan exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_Latest_NoPlan_Returns200Null(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	jobStore := db.NewJobStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM pm_plans WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pmPlanColumnsWithContext))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pm/plans/latest", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Latest(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "empty state should be 200, not 404")
+	require.JSONEq(t, `{"data":null}`, rr.Body.String(), "body should be data:null")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

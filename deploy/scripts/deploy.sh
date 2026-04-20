@@ -113,7 +113,7 @@ if [ "$ROLE" = "worker" ]; then
   # If sudo has no NOPASSWD entry, `sudo -n` exits immediately instead of
   # hanging waiting for a password that CI can't provide.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>/dev/null || true"
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>&1 | sed 's/^/  chown: /' || true"
   if ! scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
       deploy@"$HOST":/opt/143/deploy/scripts/; then
     echo "ERROR: scp of sandbox-firewall.sh failed."
