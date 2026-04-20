@@ -88,19 +88,28 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
 
-	// Create PRService if GitHub App credentials are configured.
-	var prService *ghservice.PRService
+	// Build the GitHub App service once and reuse it across PRService, the
+	// integration handler, and the team handler. Left nil when the app is
+	// disabled or its credentials fail to parse — downstream sites nil-check
+	// before using it.
+	var ghSvc *ghservice.Service
 	if cfg.GitHubAppEnabled() {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		svc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
-			prService = ghservice.NewPRService(
-				ghSvc, pullRequestStore, sessionStore, issueStore,
-				deployStore, validationStore, repoStore, jobStore, logger,
-			)
-			prService.SetReviewCommentStore(reviewCommentStore)
+			ghSvc = svc
 		}
+	}
+
+	// Create PRService if the GitHub App service is available.
+	var prService *ghservice.PRService
+	if ghSvc != nil {
+		prService = ghservice.NewPRService(
+			ghSvc, pullRequestStore, sessionStore, issueStore,
+			deployStore, validationStore, repoStore, jobStore, logger,
+		)
+		prService.SetReviewCommentStore(reviewCommentStore)
 	}
 
 	// Create handlers
@@ -118,11 +127,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	// If the GitHub App service is available, let the integration handler
 	// fetch repos directly from the API during the install redirect.
-	if cfg.GitHubAppEnabled() {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
-		if err == nil {
-			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
-		}
+	if ghSvc != nil {
+		integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -190,11 +196,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
-	if cfg.GitHubAppEnabled() {
-		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
-		if err == nil {
-			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
-		}
+	if ghSvc != nil {
+		teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
 	}
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)

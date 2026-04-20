@@ -345,6 +345,81 @@ func TestLogStatus_DemoModeWarns(t *testing.T) {
 	require.Contains(t, buf.String(), "DEMO_MODE is enabled", "LogStatus should warn when DemoMode is set")
 }
 
+// TestLogStatus_DemoCredentialMismatch covers the boot-time warning emitted
+// when DemoMode is on but DemoEmail/DemoPassword have been overridden away
+// from the seeded defaults — the banner would advertise credentials that
+// don't actually sign in against the seeded bcrypt hash.
+func TestLogStatus_DemoCredentialMismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "demo on + defaults does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: false,
+		},
+		{
+			name: "demo on + overridden password warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   "something-else",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo on + overridden email warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      "other@example.com",
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo off + overridden creds does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       false,
+				DemoEmail:      "other@example.com",
+				DemoPassword:   "something-else",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden")
+			} else {
+				require.NotContains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden")
+			}
+		})
+	}
+}
+
 func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
 	t.Parallel()
 

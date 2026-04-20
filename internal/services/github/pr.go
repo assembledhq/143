@@ -531,7 +531,7 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 		return
 	}
 
-	repo, err := s.repos.GetByFullName(ctx, pr.GitHubRepo)
+	repo, err := s.repos.GetByFullName(ctx, pr.OrgID, pr.GitHubRepo)
 	if err != nil {
 		s.logger.Debug().Err(err).Str("repo", pr.GitHubRepo).Msg("no repo row for PR preview teardown")
 		return

@@ -154,6 +154,15 @@ ON CONFLICT (id) DO NOTHING;
 -- preview_instances.worker_node_id is set to the sentinel 'seeded' so the
 -- real RecycleWorker (which scans WHERE worker_node_id = <this worker>) never
 -- touches these rows. expires_at is far in the future for the same reason.
+--
+-- Idempotency: rows with fixed PKs use ON CONFLICT (id) DO NOTHING. Rows in
+-- tables where we don't own an id (session_messages, session_logs) have no
+-- unique constraint on the seeded columns, so ON CONFLICT alone cannot
+-- deduplicate them. To stay idempotent across repeated seed runs (e.g. a
+-- sandbox restart against a persistent Postgres volume) we DELETE the seed
+-- rows by their fixed session_ids before re-INSERTing. The session_ids
+-- 00000000-0000-4000-a000-00000000030x are owned by this seed and cannot
+-- collide with real sessions, which use gen_random_uuid().
 -- =============================================================================
 
 -- Three sessions: one "active PR", one "completed", one "idle" -- spread
@@ -226,6 +235,13 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- A few chat messages per session so the detail pages render a conversation.
+-- DELETE first to keep reseeds idempotent (see note at top of the illusory
+-- section — session_messages has no unique constraint on the seeded cols).
+DELETE FROM session_messages WHERE session_id IN (
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000301'::uuid,
+  '00000000-0000-4000-a000-000000000302'::uuid
+);
 INSERT INTO session_messages (session_id, org_id, user_id, turn_number, role, content, created_at)
 VALUES
   (
@@ -279,6 +295,12 @@ VALUES
 ON CONFLICT DO NOTHING;
 
 -- A few log lines per session so the log stream UI has something to show.
+-- DELETE first for the same idempotency reason as session_messages above.
+DELETE FROM session_logs WHERE session_id IN (
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000301'::uuid,
+  '00000000-0000-4000-a000-000000000302'::uuid
+);
 INSERT INTO session_logs (session_id, org_id, timestamp, level, message, turn_number)
 VALUES
   ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, now() - interval '34 minutes', 'info', 'sandbox provisioned', 1),

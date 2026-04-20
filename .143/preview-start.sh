@@ -12,10 +12,20 @@
 # SESSION_SECRET intentionally lives in /tmp/ (not committed): a full
 # sandbox recycle generates a fresh secret, at which point the reviewer
 # simply re-signs-in with the public demo credentials.
-set -e
+#
+# -u catches typos in required env vars (DATABASE_URL, PREVIEW_ORIGIN)
+# instead of silently substituting empty strings and failing downstream.
+set -eu
 
 SECRET_DIR=/tmp/143-preview
 SECRET_FILE="${SECRET_DIR}/session_secret"
+
+# Persist the Go build cache across in-sandbox server restarts so rebuilds
+# after a code edit reuse object files instead of recompiling the world.
+# A full sandbox recycle wipes /tmp and pays the cold-build cost once.
+GOCACHE="${SECRET_DIR}/gocache"
+export GOCACHE
+mkdir -p "$GOCACHE"
 
 echo '[143-preview] building binaries...'
 go build -o /tmp/143-migrate ./cmd/migrate
