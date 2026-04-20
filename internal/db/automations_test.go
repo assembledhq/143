@@ -33,6 +33,16 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 	)
 }
 
+// bulkUpdateEnabledColumns mirrors the narrow RETURNING used by
+// BulkUpdateEnabled — only the fields ComputeNextRunAt needs for cron fixup.
+func bulkUpdateEnabledColumns() []string {
+	return []string{"id", "schedule_type", "cron_expression", "timezone"}
+}
+
+func addBulkUpdateEnabledRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
+	return rows.AddRow(a.ID, a.ScheduleType, a.CronExpression, a.Timezone)
+}
+
 func TestAutomationStore_Create(t *testing.T) {
 	t.Parallel()
 
@@ -270,7 +280,7 @@ func TestAutomationStore_BulkUpdateEnabled_Pause(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(addAutomationRow(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1), a2))
+		WillReturnRows(addBulkUpdateEnabledRow(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1), a2))
 	mock.ExpectCommit()
 
 	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, false, &userID)
@@ -304,7 +314,7 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	// a silent regression to `NULL` would pass the looser UPDATE check.
 	mock.ExpectQuery(`interval_value::text \|\| ' ' \|\| interval_unit\)::interval`).
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1))
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
 	// No cron fixup expected for interval-only rows.
 	mock.ExpectCommit()
 
@@ -340,7 +350,7 @@ func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixup(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1))
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
 	mock.ExpectExec("UPDATE automations SET next_run_at").
 		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -383,7 +393,7 @@ func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure(t *testing.T)
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), a1))
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
 	// No follow-up UPDATE expected — the per-row fixup is skipped on parse error.
 	mock.ExpectCommit()
 

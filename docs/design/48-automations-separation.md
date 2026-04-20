@@ -585,7 +585,7 @@ Templates pre-fill name, goal, and schedule. User picks a repo and clicks create
 
 1. ~~Audit log entries for automation changes (who edited/paused/enabled).~~ ✅
 2. ~~Run trend visualizations (aggregated from `automation_runs`, not sessions).~~ ✅
-3. ~~Drop legacy schedule fields from projects (Migration Stage 4).~~ ✅ (migration 000070)
+3. ~~Drop legacy schedule fields from projects (Migration Stage 4).~~ ✅ (migration 000075)
 4. ~~Wire automation execution end-to-end: worker handler creates a session per run and dispatches `run_agent`; orchestrator's completion hook (`internal/services/automations/hooks.go`) maps terminal session status back to the `automation_runs` row.~~ ✅
 
 **Deferred to [doc 49](49-automation-notifications.md):** per-automation notification preferences (Slack/email on completion/failure) and repeated-failure alerting. These depend on the notification infrastructure in [doc 22](future/22-notifications.md) landing first, so they are scoped out of doc 48.

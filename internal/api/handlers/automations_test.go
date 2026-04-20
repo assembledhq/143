@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -978,29 +979,14 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 	defer mock.Close()
 
 	// BulkUpdateEnabled wraps the UPDATE in a tx so cron rows can be fixed up
-	// in the same atomic step. The UPDATE returns the full automation row
-	// (not just id) because the caller needs schedule_type to decide whether
-	// a cron fixup is required.
-	now := time.Now()
-	a1 := models.Automation{
-		ID: uuid.New(), OrgID: uuid.New(), Name: "a1", Goal: "g",
-		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
-		Timezone: "UTC", Enabled: false, CreatedAt: now, UpdatedAt: now,
-	}
-	a2 := a1
-	a2.ID = uuid.New()
-	a2.Name = "a2"
-	pauseRows := pgxmock.NewRows(automationTestColumns()).
-		AddRow(a1.ID, a1.OrgID, a1.RepositoryID, a1.Name, a1.Goal, a1.Scope,
-			a1.AgentType, a1.ModelOverride, a1.ExecutionMode, a1.MaxConcurrent, a1.BaseBranch,
-			a1.ScheduleType, a1.IntervalValue, a1.IntervalUnit, a1.CronExpression, a1.Timezone,
-			a1.NextRunAt, a1.LastRunAt, a1.Enabled, a1.CreatedBy, a1.PausedBy, a1.PausedAt,
-			a1.Priority, a1.CreatedAt, a1.UpdatedAt, a1.DeletedAt).
-		AddRow(a2.ID, a2.OrgID, a2.RepositoryID, a2.Name, a2.Goal, a2.Scope,
-			a2.AgentType, a2.ModelOverride, a2.ExecutionMode, a2.MaxConcurrent, a2.BaseBranch,
-			a2.ScheduleType, a2.IntervalValue, a2.IntervalUnit, a2.CronExpression, a2.Timezone,
-			a2.NextRunAt, a2.LastRunAt, a2.Enabled, a2.CreatedBy, a2.PausedBy, a2.PausedAt,
-			a2.Priority, a2.CreatedAt, a2.UpdatedAt, a2.DeletedAt)
+	// in the same atomic step. The UPDATE's RETURNING is narrowed to only the
+	// fields ComputeNextRunAt needs (schedule_type / cron_expression /
+	// timezone) plus id — mirror that here.
+	a1 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
+	a2 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
+	pauseRows := pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
+		AddRow(a1.ID, a1.ScheduleType, a1.CronExpression, a1.Timezone).
+		AddRow(a2.ID, a2.ScheduleType, a2.CronExpression, a2.Timezone)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
@@ -1050,6 +1036,61 @@ func TestAutomationHandler_Bulk_DeleteOK(t *testing.T) {
 	require.Len(t, resp.Affected, 1)
 	require.Empty(t, resp.FixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_Bulk_ResumeCronFixupFailure exercises the resume path
+// when a cron row's expression no longer parses: the row must still be flipped
+// enabled, the response must carry a fixup_failures entry keyed by that row's
+// ID, and the per-row audit emit must include fixup_failure_reason so an
+// auditor reading "automation.resumed" sees why the scheduler will skip it.
+// This is the only test that covers the full resume-with-fixup branch through
+// the handler — the store-layer test (TestAutomationStore_BulkUpdateEnabled_
+// Resume_CronFixupFailure) stops at the store boundary.
+func TestAutomationHandler_Bulk_ResumeCronFixupFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	automationID := uuid.New()
+	brokenCron := "this is not a cron expression"
+
+	// BulkUpdateEnabled's UPDATE ... RETURNING returns only the four columns
+	// the post-update cron-fixup pass needs. Match that narrow projection so
+	// the handler test reflects the real store contract.
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(testAnyArgs(5)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
+				AddRow(automationID, "cron", &brokenCron, "UTC"),
+		)
+	mock.ExpectCommit()
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"action": "resume", "automation_ids": []string{automationID.String()}}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/bulk", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Bulk(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp BulkResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, []string{automationID.String()}, resp.Affected, "row was still resumed")
+	require.Len(t, resp.FixupFailures, 1, "broken cron must surface to the caller")
+	require.Equal(t, automationID.String(), resp.FixupFailures[0].AutomationID)
+	require.NotEmpty(t, resp.FixupFailures[0].Reason)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_SetLogger exercises the logger setter — trivial, but
+// unexercised setters otherwise drag diff coverage down.
+func TestAutomationHandler_SetLogger(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	h.SetLogger(zerolog.Nop())
 }
 
 // --- ListRuns / GetRun ---

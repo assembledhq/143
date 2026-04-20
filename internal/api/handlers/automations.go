@@ -1005,9 +1005,10 @@ func (h *AutomationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	// should return 400 without burning an automations lookup.
 	//
 	// Quantize the default `until` to the start of the current minute so two
-	// requests that land in the same wall-clock minute compute identical
-	// (since, until) pairs — that lets HTTP and DB-layer caching key on the
-	// window without thrashing on sub-second drift.
+	// callers who both omit ?until in the same wall-clock minute compute the
+	// same window. Frontends that pass an explicit RFC3339 ?until keep their
+	// own value, so this only matters when the caller is relying on server-
+	// side defaults.
 	now := time.Now().UTC().Truncate(time.Minute)
 	until := now
 	if v := r.URL.Query().Get("until"); v != "" {

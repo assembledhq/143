@@ -372,6 +372,10 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		nextRunAtExpr = `NULL`
 	}
 
+	// RETURNING only the fields the Go-side cron fixup pass needs
+	// (ComputeNextRunAt reads schedule_type, cron_expression, timezone). Scanning
+	// the full row here would pull 20+ columns back over the wire on every bulk
+	// pause/resume for no reason.
 	query := fmt.Sprintf(`UPDATE automations SET
 			enabled = @enabled,
 			paused_by = @paused_by,
@@ -379,7 +383,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			next_run_at = %s,
 			updated_at = now()
 		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
-		RETURNING %s`, nextRunAtExpr, automationColumns)
+		RETURNING id, schedule_type, cron_expression, timezone`, nextRunAtExpr)
 
 	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
@@ -391,29 +395,50 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	if err != nil {
 		return nil, nil, err
 	}
-	affected, err := scanAutomations(rows)
+	type affectedRow struct {
+		id             uuid.UUID
+		scheduleType   string
+		cronExpression *string
+		timezone       string
+	}
+	var affected []affectedRow
+	for rows.Next() {
+		var r affectedRow
+		if err := rows.Scan(&r.id, &r.scheduleType, &r.cronExpression, &r.timezone); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		affected = append(affected, r)
+	}
 	rows.Close()
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
 
 	affectedIDs = make([]uuid.UUID, 0, len(affected))
 	now := time.Now()
-	for i := range affected {
-		a := &affected[i]
-		affectedIDs = append(affectedIDs, a.ID)
+	for _, r := range affected {
+		affectedIDs = append(affectedIDs, r.id)
 
 		// Resume-side fixup for cron rows. On pause we leave next_run_at NULL.
-		if !enabled || a.ScheduleType != models.AutomationScheduleCron {
+		if !enabled || r.scheduleType != models.AutomationScheduleCron {
 			continue
 		}
-		next, computeErr := a.ComputeNextRunAt(now)
+		// ComputeNextRunAt only reads the schedule fields we populated above,
+		// so a partial Automation is safe here.
+		partial := &models.Automation{
+			ID:             r.id,
+			ScheduleType:   r.scheduleType,
+			CronExpression: r.cronExpression,
+			Timezone:       r.timezone,
+		}
+		next, computeErr := partial.ComputeNextRunAt(now)
 		if computeErr != nil {
 			// Record the failure so the caller can surface it. Don't abort
 			// the bulk: a single malformed cron shouldn't block resuming
 			// every other automation in the request.
 			cronFixupFailures = append(cronFixupFailures, CronFixupFailure{
-				AutomationID: a.ID,
+				AutomationID: r.id,
 				Reason:       computeErr.Error(),
 			})
 			continue
@@ -421,7 +446,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		if _, err := tx.Exec(ctx,
 			`UPDATE automations SET next_run_at = @next_run_at, updated_at = now()
 				WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
-			pgx.NamedArgs{"id": a.ID, "org_id": orgID, "next_run_at": next},
+			pgx.NamedArgs{"id": r.id, "org_id": orgID, "next_run_at": next},
 		); err != nil {
 			return nil, nil, fmt.Errorf("update cron next_run_at: %w", err)
 		}
