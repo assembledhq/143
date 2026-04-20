@@ -165,10 +165,10 @@ type Orchestrator struct {
 	github            GitHubTokenProvider
 	codexAuth         CodexAuthProvider // can be nil
 	credentials       CredentialProvider
-	memory            MemoryService // can be nil
+	memory            MemoryService          // can be nil
 	userCredentials   UserCredentialProvider // can be nil
-	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
-	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
+	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -181,24 +181,24 @@ type OrchestratorConfig struct {
 	Sessions         SessionStore
 	SessionLogs      SessionLogStore
 	SessionQuestions SessionQuestionStore
-	SessionMessages   SessionMessageStore
-	DecisionLog       DecisionLogStore
-	ProjectTasks      ProjectTaskUpdater   // optional — updates project tasks on run completion
-	AutomationRuns    AutomationRunUpdater // optional — updates automation_runs on session completion
-	Issues            IssueStore
-	Repositories      RepositoryStore
-	Orgs              OrgStore
-	Jobs              JobStore
-	GitHub            GitHubTokenProvider
-	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
-	Credentials       CredentialProvider
-	Memory            MemoryService // optional — injects learned memories into agent prompts
-	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
-	Snapshots         storage.SnapshotStore // optional — enables multi-turn snapshot/restore
-	UsageTracker      UsageRecorder         // optional — enables billing observability
-	Cancels           *CancelRegistry       // optional — enables session cancellation from API
-	Logger            zerolog.Logger
-	MaxConcurrent     int
+	SessionMessages  SessionMessageStore
+	DecisionLog      DecisionLogStore
+	ProjectTasks     ProjectTaskUpdater   // optional — updates project tasks on run completion
+	AutomationRuns   AutomationRunUpdater // optional — updates automation_runs on session completion
+	Issues           IssueStore
+	Repositories     RepositoryStore
+	Orgs             OrgStore
+	Jobs             JobStore
+	GitHub           GitHubTokenProvider
+	CodexAuth        CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
+	Credentials      CredentialProvider
+	Memory           MemoryService          // optional — injects learned memories into agent prompts
+	UserCredentials  UserCredentialProvider // optional — enables personal/team credential resolution
+	Snapshots        storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
+	UsageTracker     UsageRecorder          // optional — enables billing observability
+	Cancels          *CancelRegistry        // optional — enables session cancellation from API
+	Logger           zerolog.Logger
+	MaxConcurrent    int
 }
 
 // NewOrchestrator creates an Orchestrator with the given dependencies.

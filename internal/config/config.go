@@ -64,16 +64,16 @@ type Config struct {
 	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
 	PlatformLLMModel   string `env:"PLATFORM_LLM_MODEL"    envDefault:"gpt-5-nano"`
 	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
-	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
-	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
-	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
-	OpenAIBaseURL     string `env:"OPENAI_BASE_URL"`
-	OpenAIAPIType     string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
-	OpenAIModel       string `env:"OPENAI_MODEL"`
-	OpenRouterAPIKey  string `env:"OPENROUTER_API_KEY"`
-	OpenRouterBaseURL string `env:"OPENROUTER_BASE_URL"`
-	OpenRouterAppName string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
-	OpenRouterSiteURL string `env:"OPENROUTER_SITE_URL"`
+	AnthropicBaseURL   string `env:"ANTHROPIC_BASE_URL"`
+	AnthropicModel     string `env:"ANTHROPIC_MODEL"`
+	OpenAIAPIKey       string `env:"OPENAI_API_KEY"`
+	OpenAIBaseURL      string `env:"OPENAI_BASE_URL"`
+	OpenAIAPIType      string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
+	OpenAIModel        string `env:"OPENAI_MODEL"`
+	OpenRouterAPIKey   string `env:"OPENROUTER_API_KEY"`
+	OpenRouterBaseURL  string `env:"OPENROUTER_BASE_URL"`
+	OpenRouterAppName  string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
+	OpenRouterSiteURL  string `env:"OPENROUTER_SITE_URL"`
 
 	// Gemini CLI
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
@@ -87,7 +87,7 @@ type Config struct {
 	SMTPFrom     string `env:"SMTP_FROM"`
 
 	// Sandbox
-	SandboxRuntime     string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
 	// Data retention
 	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
@@ -95,12 +95,12 @@ type Config struct {
 	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
 
 	// Upload storage (images/files attached to session messages)
-	UploadStorageDir      string `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
-	UploadS3Bucket        string `env:"UPLOAD_S3_BUCKET"`
-	UploadS3Prefix        string `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
-	UploadS3Endpoint      string `env:"UPLOAD_S3_ENDPOINT"`      // e.g. https://mybucket.s3.amazonaws.com
-	UploadS3Region        string `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
-	UploadMaxAge          time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
+	UploadStorageDir string        `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
+	UploadS3Bucket   string        `env:"UPLOAD_S3_BUCKET"`
+	UploadS3Prefix   string        `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
+	UploadS3Endpoint string        `env:"UPLOAD_S3_ENDPOINT"` // e.g. https://mybucket.s3.amazonaws.com
+	UploadS3Region   string        `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
+	UploadMaxAge     time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
 
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
@@ -109,11 +109,11 @@ type Config struct {
 	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 
 	// Preview system
-	ChromeWSURL            string `env:"CHROME_WS_URL"`                                                        // e.g. "ws://chrome:9222"
-	PreviewOriginTemplate  string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
-	PreviewGatewayPort     int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
 	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
-	PreviewHMRBlobDir      string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
 
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
