@@ -232,6 +232,7 @@ func main() {
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger,
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
+			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 		)
 		go reaper.Run(ctx)
 

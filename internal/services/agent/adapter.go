@@ -149,12 +149,23 @@ type SandboxProvider interface {
 	ExecStream(ctx context.Context, sb *Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error)
 }
 
+// DefaultSandboxTimeout is the default maximum wall-clock duration for an
+// agent execution inside a sandbox. Org admins can override this per-org via
+// OrgSettings.MaxSessionDurationSeconds.
+const DefaultSandboxTimeout = 25 * time.Minute
+
+// HandlerCleanupBuffer is the slack added on top of the resolved session
+// timeout at the worker handler boundary, giving the orchestrator time to
+// destroy the container, persist a terminal status, and enqueue follow-up
+// jobs after a session hits its wall-clock limit.
+const HandlerCleanupBuffer = 2 * time.Minute
+
 // SandboxConfig holds the resource limits and settings for creating a sandbox.
 type SandboxConfig struct {
 	Image         string            // base image with agent CLI tools pre-installed
 	CPULimit      float64           // CPU cores (default: 2)
 	MemoryLimitMB int               // memory in MB (default: 4096)
-	Timeout       time.Duration     // max execution time (default: 5 min)
+	Timeout       time.Duration     // max execution time (default: DefaultSandboxTimeout)
 	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
 	WorkDir       string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
 	HomeDir       string            // sandbox user's home dir (e.g. /home/sandbox); HOME env var points here
@@ -185,7 +196,7 @@ func DefaultSandboxConfig() SandboxConfig {
 		CPULimit:      2,
 		MemoryLimitMB: 4096,
 		DiskLimitGB:   10,
-		Timeout:       5 * time.Minute,
+		Timeout:       DefaultSandboxTimeout,
 		NetworkPolicy: "restricted",
 		WorkDir:       "/workspace",
 		HomeDir:       "/home/sandbox",
