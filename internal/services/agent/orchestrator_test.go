@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/testutil"
@@ -1525,6 +1526,86 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			}
 			require.Equal(t, 1, createCalls, "Create should be called exactly once when workdir resolution succeeds")
 			require.Equal(t, c.wantWorkDir, gotWorkDir, "sessionRepoSlug should drive WorkDir selection")
+		})
+	}
+}
+
+// TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt locks in the
+// behavior that when sandbox creation fails, ContinueSession posts the
+// user-visible "Failed to start..." assistant message only on the final
+// retry attempt. Intermediate attempts must stay silent so the worker's
+// automatic retry loop doesn't flood the session with duplicates.
+func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name            string
+		ctx             func() context.Context
+		wantErrorPosted bool
+	}{
+		{
+			name:            "no attempt metadata does not post",
+			ctx:             context.Background,
+			wantErrorPosted: false,
+		},
+		{
+			name:            "mid-retry attempt does not post",
+			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 1, 3) },
+			wantErrorPosted: false,
+		},
+		{
+			name:            "final attempt posts",
+			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 3, 3) },
+			wantErrorPosted: true,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			session := testRun(orgID, issue.ID)
+			session.Status = string(models.SessionStatusIdle)
+			session.CurrentTurn = 1
+
+			d := defaultDeps()
+			d.issues.issue = issue
+
+			// Pre-populate a user message so ContinueSession reaches the
+			// provider.Create call that we'll force to fail.
+			d.messages.messages = []models.SessionMessage{{
+				ID:         1,
+				SessionID:  session.ID,
+				OrgID:      orgID,
+				TurnNumber: 2,
+				Role:       models.MessageRoleUser,
+				Content:    "continue please",
+			}}
+
+			d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				return nil, errForcedCreateFailure
+			}
+
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(c.ctx(), session)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "create sandbox")
+
+			var errorMessages int
+			for _, m := range d.messages.getMessages() {
+				if m.Role == models.MessageRoleAssistant &&
+					m.SessionID == session.ID {
+					errorMessages++
+				}
+			}
+			if c.wantErrorPosted {
+				require.Equal(t, 1, errorMessages, "final attempt should post exactly one error message")
+			} else {
+				require.Zero(t, errorMessages, "non-final attempts must not post error messages")
+			}
 		})
 	}
 }

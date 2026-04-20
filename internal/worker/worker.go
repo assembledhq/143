@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/jobctx"
 )
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
@@ -161,6 +163,9 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	handlerCtx := withJobOrgID(ctx, orgID)
+	// attempts is the pre-UPDATE count; the DB row was just incremented to
+	// attempts+1, so that's the attempt number the handler is running as.
+	handlerCtx = jobctx.WithAttempt(handlerCtx, attempts+1, maxAttempts)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
 		// FatalError means the failure is persistent — dead-letter immediately

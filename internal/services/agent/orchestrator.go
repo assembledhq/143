@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/mcp"
@@ -790,7 +791,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
 		}
-		if o.sessionMessages != nil {
+		// Only surface a user-facing message when this is the final retry —
+		// otherwise the job's automatic retries produce one duplicate message
+		// per attempt before the worker finally gives up.
+		if o.sessionMessages != nil && jobctx.IsFinalAttempt(ctx) {
 			errMsg := &models.SessionMessage{
 				SessionID:  session.ID,
 				OrgID:      session.OrgID,
@@ -823,7 +827,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
 		}
-		if o.sessionMessages != nil {
+		// Same rationale as the workdir-resolution branch above: defer the
+		// user-visible message to the final retry so a flaky Docker daemon
+		// doesn't produce N identical assistant messages.
+		if o.sessionMessages != nil && jobctx.IsFinalAttempt(ctx) {
 			errMsg := &models.SessionMessage{
 				SessionID:  session.ID,
 				OrgID:      session.OrgID,
