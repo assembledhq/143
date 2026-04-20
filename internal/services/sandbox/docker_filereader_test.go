@@ -278,6 +278,19 @@ func TestDockerFileReader_ReadFile_NonNotFoundNotSentinel(t *testing.T) {
 	require.NotErrorIs(t, err, ErrFileNotFound, "non-ENOENT errors must not be classified as file-not-found")
 }
 
+// TestDockerFileReader_ReadFileContext_NotFoundSentinel verifies that ENOENT
+// stderr from `sed` (used by ReadFileContext) surfaces as ErrFileNotFound,
+// matching ReadFile's behavior so callers can use a single sentinel.
+func TestDockerFileReader_ReadFileContext_NotFoundSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("sed: can't read /workspace/missing: No such file or directory", 1)
+	reader := NewDockerFileReader(client)
+	_, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", "missing", 5, 2, 2)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from sed must be surfaced as ErrFileNotFound")
+}
+
 // TestDockerFileReader_ForcesCLocale guards isNotFoundStderr: if the exec
 // environment ever stops pinning LC_ALL=C, a non-English container locale
 // would emit a translated ENOENT that our matcher would miss.

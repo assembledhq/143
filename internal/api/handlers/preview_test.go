@@ -546,6 +546,79 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 	require.Equal(t, 3000, cfg.Services["web"].Port)
 }
 
+// sessionRowColumns mirrors db.sessionSelectColumns. Kept inline so a
+// schema change in one file flips this test red instead of silently
+// returning the wrong shape from pgxmock.
+var sessionRowColumns = []string{
+	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"container_id", "started_at", "completed_at", "token_usage",
+	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"project_task_id", "model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at",
+	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
+	"repository_id", "diff_stats", "diff_history", "input_manifest",
+	"archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+}
+
+func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
+	return []interface{}{
+		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		nil, nil, nil, []string{},
+		&containerID, nil, nil, json.RawMessage(`{}`),
+		nil, nil, []string{}, false,
+		nil, json.RawMessage(`{}`), nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		0, nil,
+		"none", nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, time.Now(),
+	}
+}
+
+// TestPreviewHandler_StartPreview_AutoDetectInfraError exercises the auto-detect
+// branch of StartPreview when the workspace file reader returns a non-ENOENT
+// error. The handler must surface a 500 instead of silently swapping in Node.js
+// defaults — see readWorkspacePreviewConfig's docstring for the rationale.
+func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
+		)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = fakeFileReader{err: errors.New("docker exec failed: container not running")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "non-ENOENT read failure must surface as 500")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "PREVIEW_CONFIG_READ_FAILED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {
 	t.Parallel()
 
