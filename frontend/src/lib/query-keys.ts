@@ -31,7 +31,6 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
-    agentDefaults: ["agent-defaults"] as const,
   },
   credentials: {
     all: ["credentials"] as const,

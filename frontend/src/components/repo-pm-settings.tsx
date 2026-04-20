@@ -42,11 +42,6 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     queryFn: () => api.settings.get(),
   });
 
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: ["agent-defaults"],
-    queryFn: () => api.settings.getAgentDefaults(),
-  });
-
   const orgSettings = (orgResponse?.data?.settings ?? {}) as OrgSettings;
   const repoSettings = (repository.settings ?? {}) as RepoSettings;
   const hasCustomPM = repoSettings.pm != null;
@@ -91,17 +86,15 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
 
   const enabledPmModelGroups = useMemo(() => {
     const agentConfig = orgSettings.agent_config ?? {};
-    const serverDefaults = agentDefaultsResponse?.data ?? {};
     const defaultAgent = orgSettings.default_agent_type || "codex";
 
     return Object.entries(PM_MODELS_BY_PROVIDER)
       .filter(([providerKey, { apiKeyVar }]) => {
         const orgKey = agentConfig[providerKey]?.[apiKeyVar];
-        const serverKey = (serverDefaults[providerKey] ?? {})[apiKeyVar];
-        return Boolean(orgKey) || Boolean(serverKey) || providerKey === defaultAgent;
+        return Boolean(orgKey) || providerKey === defaultAgent;
       })
       .map(([, { label, models }]) => ({ label, models }));
-  }, [orgSettings.agent_config, orgSettings.default_agent_type, agentDefaultsResponse?.data]);
+  }, [orgSettings.agent_config, orgSettings.default_agent_type]);
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => api.repositories.update(repository.id, data),

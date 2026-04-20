@@ -30,10 +30,6 @@ export default function AutopilotSettingsPage() {
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: queryKeys.settings.agentDefaults,
-    queryFn: () => api.settings.getAgentDefaults(),
-  });
   const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
@@ -48,17 +44,15 @@ export default function AutopilotSettingsPage() {
 
   const enabledPmModelGroups = useMemo(() => {
     const agentConfig = settings.agent_config ?? {};
-    const serverDefaults = agentDefaultsResponse?.data ?? {};
     const defaultAgent = settings.default_agent_type || "codex";
 
     return Object.entries(PM_MODELS_BY_PROVIDER)
       .filter(([providerKey, { apiKeyVar }]) => {
         const orgKey = agentConfig[providerKey]?.[apiKeyVar];
-        const serverKey = (serverDefaults[providerKey] ?? {})[apiKeyVar];
-        return Boolean(orgKey) || Boolean(serverKey) || providerKey === defaultAgent;
+        return Boolean(orgKey) || providerKey === defaultAgent;
       })
       .map(([, { label, models }]) => ({ label, models }));
-  }, [agentDefaultsResponse?.data, settings.agent_config, settings.default_agent_type]);
+  }, [settings.agent_config, settings.default_agent_type]);
 
   const [scheduleHoursOverride, setScheduleHoursOverride] = useState<string | null>(null);
   const [pmModelOverride, setPmModelOverride] = useState<string | null>(null);
