@@ -31,6 +31,11 @@ export interface AgentMeta {
   models: readonly string[];
   envVars: AgentEnvVar[];
   note?: string;       // small inline note shown in the settings card
+  // inheritsProviderKeys is true for meta-agents (e.g. Pi) that route to other
+  // providers and have no dedicated credential store. The personal/team/org
+  // credential UIs skip these agents because there is no key to save — they
+  // reuse whatever the org has configured for the real provider agents.
+  inheritsProviderKeys?: boolean;
 }
 
 export const AGENTS: readonly AgentMeta[] = [
@@ -96,6 +101,7 @@ export const AGENTS: readonly AgentMeta[] = [
     description: "Pi — meta-agent that routes to many providers",
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
+    inheritsProviderKeys: true,
     note: "Pi reuses keys from your other configured agents by default. Set values here to override.",
     envVars: [
       { name: "PI_MODEL", label: "Default model", options: [...AVAILABLE_PI_MODELS] },

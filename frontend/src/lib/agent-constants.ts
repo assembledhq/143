@@ -12,7 +12,6 @@ export const KEY_PLACEHOLDERS: Record<string, string> = {
   openai: "sk-...",
   gemini: "AIza...",
   amp: "amp_...",
-  pi: "(see per-provider keys)",
 };
 
 export function sourceLabel(source: string): string {

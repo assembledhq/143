@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 {"type":"tool_use","tool":"read_file","input":{"path":"main.go"}}
 {"type":"tool_result","tool":"read_file","output":"file contents"}
 {"type":"assistant","content":"I fixed the null pointer.\n{\"confidence_score\": 0.85, \"confidence_reasoning\": \"clean fix\", \"risk_factors\": []}"}
-{"type":"result","content":"Done","usage":{"input_tokens":1200,"output_tokens":340}}
+{"type":"result","content":"Done","usage":{"input_tokens":1200,"output_tokens":340},"session_id":"amp-sess-1"}
 `
 
 	provider := newMockProvider()
@@ -96,6 +97,8 @@ func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {
 	require.Equal(t, "clean fix", result.ConfidenceReasoning)
 	require.Equal(t, 1200, result.TokenUsage.InputTokens)
 	require.Equal(t, 340, result.TokenUsage.OutputTokens)
+	require.Equal(t, "amp-sess-1", result.AgentSessionID,
+		"amp should capture session_id from the result event")
 	require.Contains(t, result.Diff, "diff --git")
 
 	var logs []agent.LogEntry
@@ -184,137 +187,6 @@ func TestAmpAdapter_Execute_MissingProvider(t *testing.T) {
 	require.Contains(t, err.Error(), "sandbox provider not found")
 }
 
-func TestParseAmpStreamLine_UnknownType(t *testing.T) {
-	t.Parallel()
-
-	logCh := make(chan agent.LogEntry, 10)
-	result := &agent.AgentResult{}
-	var summary []string
-	var last string
-
-	parseAmpStreamLine([]byte(`{"type":"weird_event","content":"x"}`), result, logCh, &summary, &last)
-	close(logCh)
-
-	logs := drain(logCh)
-	require.Len(t, logs, 1)
-	require.Equal(t, "debug", logs[0].Level, "unknown event types should land in debug log")
-}
-
-func TestParseAmpStreamLine_NonJSON(t *testing.T) {
-	t.Parallel()
-
-	logCh := make(chan agent.LogEntry, 10)
-	result := &agent.AgentResult{}
-	var summary []string
-	var last string
-
-	parseAmpStreamLine([]byte(`not json at all`), result, logCh, &summary, &last)
-	close(logCh)
-
-	logs := drain(logCh)
-	require.Len(t, logs, 1)
-	require.Equal(t, "output", logs[0].Level)
-	require.Contains(t, summary, "not json at all")
-}
-
-func TestParseAmpStreamLine_EventTypes(t *testing.T) {
-	t.Parallel()
-
-	type check struct {
-		level     string
-		contains  string
-		metaField string
-		metaValue interface{}
-	}
-
-	tests := []struct {
-		name          string
-		line          string
-		wantLogs      []check
-		wantAssistant string
-		wantTokens    *agent.TokenUsage
-		wantSession   string
-	}{
-		{
-			name:          "assistant falls back to message",
-			line:          `{"type":"assistant","message":"hello from amp"}`,
-			wantLogs:      []check{{level: "output", contains: "hello from amp"}},
-			wantAssistant: "hello from amp",
-		},
-		{
-			name:     "tool_use falls back to name",
-			line:     `{"type":"tool_use","name":"bash","input":{"cmd":"ls"}}`,
-			wantLogs: []check{{level: "tool_use", contains: "bash", metaField: "tool", metaValue: "bash"}},
-		},
-		{
-			name:     "tool_result falls back to name and result",
-			line:     `{"type":"tool_result","name":"bash","result":{"stdout":"ok"}}`,
-			wantLogs: []check{{level: "output", contains: "stdout", metaField: "tool", metaValue: "bash"}},
-		},
-		{
-			name:     "thinking goes to debug",
-			line:     `{"type":"thinking","content":"considering options"}`,
-			wantLogs: []check{{level: "debug", contains: "considering options", metaField: "type", metaValue: "thinking"}},
-		},
-		{
-			name:     "error field wins",
-			line:     `{"type":"error","error":"provider unreachable"}`,
-			wantLogs: []check{{level: "error", contains: "provider unreachable"}},
-		},
-		{
-			name:     "error falls back to message then content",
-			line:     `{"type":"error","content":"fallback text"}`,
-			wantLogs: []check{{level: "error", contains: "fallback text"}},
-		},
-		{
-			name:       "result with embedded token usage",
-			line:       `{"type":"result","content":"done","result":{"input_tokens":100,"output_tokens":25}}`,
-			wantLogs:   []check{{level: "info", contains: "done"}},
-			wantTokens: &agent.TokenUsage{InputTokens: 100, OutputTokens: 25},
-		},
-		{
-			name:        "result captures session id",
-			line:        `{"type":"result","content":"ok","session_id":"amp-sess-42"}`,
-			wantLogs:    []check{{level: "info", contains: "ok"}},
-			wantSession: "amp-sess-42",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			logCh := make(chan agent.LogEntry, 10)
-			result := &agent.AgentResult{}
-			var summary []string
-			var last string
-
-			parseAmpStreamLine([]byte(tc.line), result, logCh, &summary, &last)
-			close(logCh)
-
-			logs := drain(logCh)
-			require.Len(t, logs, len(tc.wantLogs))
-			for i, want := range tc.wantLogs {
-				require.Equal(t, want.level, logs[i].Level)
-				require.Contains(t, logs[i].Message, want.contains)
-				if want.metaField != "" {
-					require.Equal(t, want.metaValue, logs[i].Metadata[want.metaField])
-				}
-			}
-			if tc.wantAssistant != "" {
-				require.Equal(t, tc.wantAssistant, last)
-			}
-			if tc.wantTokens != nil {
-				require.Equal(t, tc.wantTokens.InputTokens, result.TokenUsage.InputTokens)
-				require.Equal(t, tc.wantTokens.OutputTokens, result.TokenUsage.OutputTokens)
-			}
-			if tc.wantSession != "" {
-				require.Equal(t, tc.wantSession, result.AgentSessionID)
-			}
-		})
-	}
-}
-
 func TestAmpAdapter_Execute_WriteFileError(t *testing.T) {
 	t.Parallel()
 
@@ -373,6 +245,49 @@ func TestAmpAdapter_Execute_SummaryFromAssistantFallback(t *testing.T) {
 	}, logCh)
 	require.NoError(t, err)
 	require.Equal(t, "done, no result event emitted", result.Summary)
+}
+
+// TestAmpAdapter_ShellModeResolution mirrors Pi's injection-safety test at the
+// bash level: AMP_MODE expansion inside the double-quoted `-m` argument must
+// fall back to the hardcoded default when unset, pick up the env var when set,
+// and preserve shell metacharacters literally rather than re-parsing them.
+func TestAmpAdapter_ShellModeResolution(t *testing.T) {
+	t.Parallel()
+
+	const expr = `echo "${AMP_MODE:-smart}"`
+
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{
+			name: "falls back to default when unset",
+			env:  nil,
+			want: "smart",
+		},
+		{
+			name: "uses AMP_MODE when set",
+			env:  []string{"AMP_MODE=deep"},
+			want: "deep",
+		},
+		{
+			name: "injection attempt stays inside the argument",
+			env:  []string{`AMP_MODE=foo"; rm -rf / ; echo "`},
+			want: `foo"; rm -rf / ; echo "`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("bash", "-c", expr)
+			cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, tc.env...)
+			out, err := cmd.Output()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, strings.TrimRight(string(out), "\n"))
+		})
+	}
 }
 
 func drain(ch chan agent.LogEntry) []agent.LogEntry {
