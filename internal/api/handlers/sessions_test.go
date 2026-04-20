@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -982,6 +983,36 @@ func TestSessionHandler_GetPullRequest_NoPR_Returns200Null(t *testing.T) {
 	handler.GetPullRequest(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "empty state should be 200, not 404")
 	require.JSONEq(t, `{"data":null}`, w.Body.String(), "body should be data:null")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_GetPullRequest_DBError_Returns500(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db exploded"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/pull-request", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetPullRequest(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code, "real DB errors should 500, not 200")
+	require.Contains(t, w.Body.String(), "INTERNAL_ERROR", "error code should surface")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
