@@ -3,15 +3,44 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
+// Duck-typed 401 check. The backend's `writeError` helper is the single
+// source of truth for this contract: every 401 response carries
+// error.code = "UNAUTHORIZED" (see internal/api/middleware/auth.go and
+// callers of writeError with http.StatusUnauthorized). Using a duck
+// check (not `instanceof ApiError`) means component test mocks don't
+// need to re-export ApiError to interop.
+function isUnauthorizedError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "UNAUTHORIZED"
+  );
+}
+
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["auth", "me"],
     queryFn: () => api.auth.me(),
-    retry: false,
+    // Only treat a confirmed 401 as terminal. Network blips and 5xx
+    // (e.g. during a rolling deploy) retry a few times instead of
+    // instantly logging the user out.
+    retry: (failureCount, err) => {
+      if (isUnauthorizedError(err)) return false;
+      return failureCount < 2;
+    },
+    // Short backoff so a transient deploy blip clears in under a second
+    // rather than stalling on React Query's default exponential backoff.
+    retryDelay: (attempt) => Math.min(200 * 2 ** attempt, 1000),
     staleTime: 5 * 60 * 1000,
   });
+
+  const isUnauthorized = isUnauthorizedError(error);
+  // Retries exhausted with a non-401 failure. Callers should render an
+  // explicit error state (with a retry affordance) rather than hang on a
+  // loading skeleton forever.
+  const isTransientError = !!error && !isUnauthorized;
 
   const logout = async () => {
     await api.auth.logout();
@@ -22,7 +51,11 @@ export function useAuth() {
   return {
     user: data?.data ?? null,
     isLoading,
-    isAuthenticated: !!data?.data && !isError,
+    isFetching,
+    isAuthenticated: !!data?.data,
+    isUnauthorized,
+    isTransientError,
+    refetchUser: refetch,
     logout,
   };
 }

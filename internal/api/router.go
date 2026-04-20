@@ -415,7 +415,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Protected routes (authenticated)
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(authSessionStore, userStore))
+		r.Use(middleware.Auth(authSessionStore, userStore, []byte(cfg.CSRFSigningKey), logger))
 		r.Use(middleware.OrgContext)
 		r.Use(middleware.LogContext(logger))
 		r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))

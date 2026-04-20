@@ -8,6 +8,13 @@ const meMock = vi.hoisted(() => vi.fn());
 const providersMock = vi.hoisted(() => vi.fn());
 const logoutMock = vi.hoisted(() => vi.fn());
 
+// Build an error object matching the ApiError duck-type (has a `code` field).
+function apiError(code: string, message: string): Error & { code: string } {
+  const err = new Error(message) as Error & { code: string };
+  err.code = code;
+  return err;
+}
+
 vi.mock('@/lib/api', () => ({
   api: {
     auth: {
@@ -48,8 +55,8 @@ describe('useAuth', () => {
     expect(result.current.user?.email).toBe('test@test.com');
   });
 
-  it('returns unauthenticated state when API returns error', async () => {
-    meMock.mockRejectedValue(new Error('Unauthorized'));
+  it('returns unauthenticated state when API returns 401', async () => {
+    meMock.mockRejectedValue(apiError('UNAUTHORIZED', 'Unauthorized'));
 
     const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
 
@@ -58,7 +65,38 @@ describe('useAuth', () => {
     });
 
     expect(result.current.isAuthenticated).toBe(false);
+    expect(result.current.isUnauthorized).toBe(true);
     expect(result.current.user).toBeNull();
+  });
+
+  it('does not mark unauthorized on transient non-401 errors', async () => {
+    meMock.mockRejectedValue(apiError('INTERNAL_ERROR', 'boom'));
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.isAuthenticated).toBe(false);
+    expect(result.current.isUnauthorized).toBe(false);
+    expect(result.current.isTransientError).toBe(true);
+    expect(result.current.user).toBeNull();
+  });
+
+  it('is neither unauthorized nor transient-error on success', async () => {
+    meMock.mockResolvedValue({
+      data: { id: '1', email: 'test@test.com', name: 'Test' },
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.isUnauthorized).toBe(false);
+    expect(result.current.isTransientError).toBe(false);
   });
 
   it('starts in loading state', () => {

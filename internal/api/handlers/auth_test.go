@@ -1149,3 +1149,98 @@ type mockInvitationLookupStore struct {
 func (m *mockInvitationLookupStore) GetByToken(ctx context.Context, token string) (models.Invitation, error) {
 	return m.getByTokenFn(ctx, token)
 }
+
+func TestAuthHandler_createSessionAndRespond_SetsCookiesWithMiddlewareConstants(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(uuid.New(), time.Now()),
+		)
+
+	handler := NewAuthHandler(
+		&config.Config{CSRFSigningKey: "test-signing-key-that-is-long-enough-for-hmac"},
+		nil,
+		nil,
+		db.NewAuthSessionStore(mock),
+		nil,
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	req.TLS = nil
+	w := httptest.NewRecorder()
+
+	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
+	handler.createSessionAndRespond(w, req, user)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var foundSession bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == middleware.SessionCookieName {
+			foundSession = true
+			require.NotEmpty(t, c.Value)
+			require.Equal(t, int(middleware.SessionTTL.Seconds()), c.MaxAge)
+			require.True(t, c.HttpOnly)
+			require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+			require.False(t, c.Secure, "plain HTTP request should not set Secure")
+		}
+	}
+	require.True(t, foundSession, "session cookie should be set")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(uuid.New(), time.Now()),
+		)
+
+	handler := NewAuthHandler(
+		&config.Config{
+			CSRFSigningKey: "test-signing-key-that-is-long-enough-for-hmac",
+			FrontendURL:    "https://app.example.com",
+		},
+		nil,
+		nil,
+		db.NewAuthSessionStore(mock),
+		nil,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+
+	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
+	handler.createSessionAndRedirect(w, req, user)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+
+	var foundSession bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == middleware.SessionCookieName {
+			foundSession = true
+			require.NotEmpty(t, c.Value)
+			require.Equal(t, int(middleware.SessionTTL.Seconds()), c.MaxAge)
+			require.True(t, c.HttpOnly)
+			require.Equal(t, http.SameSiteLaxMode, c.SameSite)
+			require.True(t, c.Secure, "X-Forwarded-Proto=https should set Secure")
+		}
+	}
+	require.True(t, foundSession, "session cookie should be set")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
