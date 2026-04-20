@@ -1,6 +1,15 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+
+/**
+ * Safety-net window after resolution before we force-remove a placeholder.
+ * The sidebar normally GCs resolved rows as soon as the real session appears
+ * in its list, but if the user's current filters exclude the new session (or
+ * no sidebar is mounted), the placeholder would otherwise linger forever.
+ * 10s comfortably exceeds a typical post-invalidation refetch.
+ */
+const RESOLUTION_FALLBACK_MS = 10_000;
 
 /**
  * Minimal shape for a session that hasn't been saved to the backend yet.
@@ -38,6 +47,15 @@ const OptimisticSessionsContext = createContext<OptimisticSessionsContextValue |
 
 export function OptimisticSessionsProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<OptimisticSession[]>([]);
+  const fallbackTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  const clearFallback = useCallback((id: string) => {
+    const handle = fallbackTimers.current.get(id);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      fallbackTimers.current.delete(id);
+    }
+  }, []);
 
   const addOptimisticSession = useCallback((title: string) => {
     const id = `optimistic-${crypto.randomUUID()}`;
@@ -49,11 +67,26 @@ export function OptimisticSessionsProvider({ children }: { children: React.React
   }, []);
 
   const removeOptimisticSession = useCallback((id: string) => {
+    clearFallback(id);
     setSessions((prev) => prev.filter((s) => s.id !== id));
-  }, []);
+  }, [clearFallback]);
 
   const markOptimisticResolved = useCallback((id: string, resolvedId: string) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, resolvedId } : s)));
+    clearFallback(id);
+    const handle = setTimeout(() => {
+      fallbackTimers.current.delete(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    }, RESOLUTION_FALLBACK_MS);
+    fallbackTimers.current.set(id, handle);
+  }, [clearFallback]);
+
+  useEffect(() => {
+    const timers = fallbackTimers.current;
+    return () => {
+      for (const handle of timers.values()) clearTimeout(handle);
+      timers.clear();
+    };
   }, []);
 
   return (

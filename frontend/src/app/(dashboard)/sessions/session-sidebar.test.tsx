@@ -157,6 +157,41 @@ describe('SessionSidebar', () => {
     expect(screen.getByText('Pending')).toBeInTheDocument();
   });
 
+  it('hides a resolved optimistic row once its real session appears in the list', async () => {
+    // Simulate the create flow: the optimistic has already been marked resolved
+    // to real session id "s-real". The real row is served by the API.
+    serveSessions([makeSession({ id: 's-real', result_summary: 'Real session' })]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Optimistic placeholder',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-real',
+    });
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Real session');
+    expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
+  });
+
+  it('keeps a resolved optimistic row visible when the real session is not yet in the list', async () => {
+    serveSessions([]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Still waiting',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-not-yet-fetched',
+    });
+
+    renderWithProviders(<SessionSidebar />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Still waiting')).toBeInTheDocument();
+    });
+  });
+
   // -----------------------------------------------------------------------
   // PR status badge variants
   // -----------------------------------------------------------------------
