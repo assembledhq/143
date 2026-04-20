@@ -1,5 +1,29 @@
 Use docs/design/overall.md as the overall design of the system, think of it as a living doc that should get parts added to it, but only high level details. As more designs are made, put them into folders and subdocs inside of docs/design, and build them out. Please keep track of updates and keep them updated as designs are completed.
 
+## Debugging Production
+
+When investigating bugs or unexpected behavior, three Make targets give read-only access to prod. All require `SSH_KEY` (defaults to `~/.ssh/143-deploy`) and resolve hosts/credentials from `.env.production.enc` via sops.
+
+### Querying the database
+
+- **`make db-query Q='SELECT ...'`** — runs a one-shot SQL query against the prod Postgres as the `readonly` role. SELECT-only, every connection is a read-only txn, bounded by a 30s `statement_timeout`. Use single quotes around `Q` and escape literal `$` as `$$` (Make eats single `$`). For an interactive session, use `make db-psql`.
+
+### Searching logs
+
+Logs are shipped via Vector to a VictoriaLogs instance and visualized in Grafana. Use the CLI for scripted/agent searches and the UI for interactive exploration:
+
+- **`make logs-query Q='<LogsQL>' [LIMIT=100]`** — runs a one-shot LogsQL query against VictoriaLogs and prints NDJSON to stdout. Always include a `_time:` filter — without one VictoriaLogs scans the full 30-day retention. Common fields: `service`, `level`, `org_id`, `agent_run_id`, `request_id`, `trace_id`. Examples:
+
+  ```bash
+  make logs-query Q='service:api AND level:error AND _time:[now-1h,now]'
+  make logs-query Q='agent_run_id:"run-abc123" AND _time:[now-24h,now]' LIMIT=500
+  make logs-query Q='"timeout waiting for sandbox" AND _time:[now-15m,now]' | jq -r '.message'
+  ```
+
+  See `docs/design/47-logging-victorialogs.md` for more examples and the [LogsQL reference](https://docs.victoriametrics.com/victorialogs/logsql/).
+
+- **`make logs`** — opens an SSH tunnel to the prod Grafana instance at <http://localhost:9999> for interactive UI-based exploration. Press Ctrl+C to close the tunnel. Prefer `make logs-query` for anything scriptable.
+
 ## Backend Architecture (Go)
 
 **Key libraries**: `go-chi/chi` (router), `jackc/pgx` (Postgres driver + connection pooling), `rs/zerolog` (structured logging), `go-playground/validator` (request validation), `golang-migrate/migrate` (schema migrations). See `docs/design/02-api-server.md` for full dependency list.
