@@ -74,7 +74,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"users", "where email"},              // pre-auth lookup by email
 		{"users", "where google_id"},          // pre-auth lookup by Google ID
 		{"users", "where id = @id`"},          // GetByIDGlobal: auth middleware loads user identity; org is resolved via memberships
-		{"organization_memberships", "where user_id = @user_id`"}, // CountForUser: user-scoped aggregate across all orgs
+		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
 	}
 
 	// Scan all .go files in the db package (not test files)
