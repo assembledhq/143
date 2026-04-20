@@ -34,12 +34,12 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-		nil, // target_branch
-		nil, // working_branch
-		nil, // repository_id
-		nil, // diff_stats
-		nil, // diff_history
-		nil, // input_manifest
+		nil,      // target_branch
+		nil,      // working_branch
+		nil,      // repository_id
+		nil,      // diff_stats
+		nil,      // diff_history
+		nil,      // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
 		nil, // automation_run_id
 		nil, // deleted_at
@@ -128,6 +128,64 @@ func TestSessionStore_ListByOrg_WithSearch(t *testing.T) {
 	})
 	require.NoError(t, err, "ListByOrg with Search should not return an error")
 	require.Len(t, sessions, 1, "should return one session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_CountsByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+
+	// Args: org_id, cap, active_statuses.
+	mock.ExpectQuery("(?s)SELECT.*all_count.*active_count.*archived_count").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(17, 5, 2),
+		)
+
+	counts, err := store.CountsByOrg(context.Background(), orgID, SessionCountsFilters{})
+	require.NoError(t, err, "CountsByOrg should not return an error")
+	require.Equal(t, 17, counts.All, "all count should pass through")
+	require.Equal(t, 5, counts.Active, "active count should pass through")
+	require.Equal(t, 2, counts.Archived, "archived count should pass through")
+	require.Greater(t, counts.Cap, 0, "cap should be set on the response")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_CountsByOrg_WithScopeFilters(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+
+	// Args: org_id, cap, active_statuses, repository_id, triggered_by_user_id.
+	mock.ExpectQuery("(?s)SELECT.*repository_id.*triggered_by_user_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(3, 1, 0),
+		)
+
+	counts, err := store.CountsByOrg(context.Background(), orgID, SessionCountsFilters{
+		RepositoryID:      repoID,
+		TriggeredByUserID: userID,
+	})
+	require.NoError(t, err, "CountsByOrg with scope filters should not return an error")
+	require.Equal(t, 3, counts.All)
+	require.Equal(t, 1, counts.Active)
+	require.Equal(t, 0, counts.Archived)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -405,7 +463,7 @@ func TestSessionStore_SoftDelete_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func stringPtr(s string) *string { return &s }
+func stringPtr(s string) *string    { return &s }
 func float64Ptr(f float64) *float64 { return &f }
 
 // =============================================================================

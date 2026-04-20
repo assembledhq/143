@@ -468,6 +468,15 @@ export interface SessionsListResponse {
   meta: { next_cursor?: string };
 }
 
+// SessionCounts comes from /api/v1/sessions/counts. Each bucket is capped at
+// `cap` server-side, so values equal to `cap` should be rendered as e.g. "99+".
+export interface SessionCounts {
+  all: number;
+  active: number;
+  archived: number;
+  cap: number;
+}
+
 export interface CodexAuthStatus {
   status: 'pending' | 'completed' | 'expired' | 'error' | 'none';
   account_type?: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   flexRender,
   getCoreRowModel,
@@ -28,16 +28,17 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
-import type { Session, User } from "@/lib/types";
+import type { Session, SessionListItem, User } from "@/lib/types";
 import {
-  activeSet,
   workingSet,
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
+import { getCountForTab, renderCount } from "@/lib/session-counts";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -199,7 +200,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
-  const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
+  const { currentUserFilter, triggeredByUserId, setUserFilter } = useSessionUserFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -221,25 +222,50 @@ export function SessionsPageContent() {
   const showDecisions = currentFilter === "decisions";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Fetch all sessions (for tab badge counts and the "all" view).
-  // We also fetch a filtered query below when a tab is active. The two queries
-  // run in parallel on a 10s interval. The "all" query is cheap (limit 50) and
-  // needed for accurate badge counts; the filtered query ensures the displayed
-  // list reflects the correct server-side results even when total sessions exceed
-  // the limit. If polling cost becomes a concern, consider a dedicated
-  // /sessions/counts endpoint.
-  const { data: allData, isLoading, error } = useQuery({
-    queryKey: ["sessions", repo, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
-    refetchInterval: 10000,
+  // Pagination state. Once the user clicks "Show more" we stop polling entirely
+  // (page 0 included) — refreshing page 0 while extra pages are held locally
+  // would invalidate the cursor that produced them. See automations/[id]/page.tsx.
+  const [extraPages, setExtraPages] = useState<SessionListItem[][]>([]);
+  const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
+  const isPaginated = extraPages.length > 0;
+
+  // Reset pagination when the effective query scope changes. Adjusting state
+  // during render (rather than in an effect) avoids cascading renders.
+  const scopeKey = `${repo ?? ""}|${triggeredByUserId ?? ""}|${currentFilter}`;
+  const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
+  if (prevScopeKey !== scopeKey) {
+    setPrevScopeKey(scopeKey);
+    setExtraPages([]);
+    setLoadMoreCursor(undefined);
+  }
+
+  const listParams = useMemo(
+    () => ({
+      limit: 50,
+      repository_id: repo ?? undefined,
+      triggered_by_user_id: triggeredByUserId,
+      ...(statusParam ? { status: statusParam } : {}),
+    }),
+    [repo, triggeredByUserId, statusParam],
+  );
+
+  const { data: listData, isLoading, error } = useQuery({
+    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId],
+    queryFn: () => api.sessions.list(listParams),
+    refetchInterval: isPaginated || showDecisions ? false : 10000,
+    enabled: !showDecisions,
   });
 
-  // Fetch filtered sessions from the backend when a specific tab is selected.
-  const { data: filteredData } = useQuery({
-    queryKey: ["sessions", repo, statusParam, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
-    refetchInterval: 10000,
-    enabled: !!statusParam,
+  // Tab badge counts.
+  const { data: countsData } = useQuery({
+    queryKey: queryKeys.sessions.counts(repo, triggeredByUserId),
+    queryFn: () =>
+      api.sessions.counts({
+        repository_id: repo ?? undefined,
+        triggered_by_user_id: triggeredByUserId,
+      }),
+    refetchInterval: showDecisions ? false : 10000,
+    enabled: !showDecisions,
   });
 
   const { data: membersData } = useQuery({
@@ -247,20 +273,37 @@ export function SessionsPageContent() {
     queryFn: () => api.team.listMembers(),
   });
 
-  const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
 
-  const activeSessions = allSessions.filter((s) => activeSet.has(s.status));
-  const workingSessions = allSessions.filter((s) => workingSet.has(s.status));
+  const firstPage = useMemo(() => listData?.data ?? [], [listData?.data]);
+  const firstPageCursor = listData?.meta?.next_cursor || undefined;
+  const cursor = isPaginated ? loadMoreCursor : firstPageCursor;
+  const hasMore = !!cursor;
 
-  const filteredSessions = useMemo(
-    () => {
-      if (showDecisions) return [];
-      if (statusParam && filteredData) return filteredData.data;
-      return allSessions;
+  const loadMoreMutation = useMutation({
+    mutationFn: () => api.sessions.list({ ...listParams, cursor }),
+    onSuccess: (res) => {
+      setExtraPages((prev) => [...prev, res.data ?? []]);
+      setLoadMoreCursor(res.meta?.next_cursor || undefined);
     },
-    [allSessions, filteredData, statusParam, showDecisions],
-  );
+  });
+
+  const filteredSessions = useMemo(() => {
+    if (showDecisions) return [];
+    return [firstPage, ...extraPages].flat();
+  }, [firstPage, extraPages, showDecisions]);
+
+  const counts = countsData?.data;
+  const workingCount = counts?.active ?? 0;
+
+  // Total for the currently-visible tab (used for "Showing N of M" footer).
+  // Falls back to loaded length when counts haven't arrived yet or when the cap
+  // is hit (the cap is represented by "M+" via renderCount).
+  const currentTabTotal = useMemo(() => {
+    if (!counts) return undefined;
+    if (currentFilter === "active") return counts.active;
+    return counts.all;
+  }, [counts, currentFilter]);
 
   const columns = useMemo(() => buildColumns(members), [members]);
 
@@ -280,16 +323,20 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={workingSessions.length > 0} />
+      <PMStatusBanner hasActivePlanSession={workingCount > 0} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="relative flex items-center border-b border-border">
         <div ref={tabsRef} className={`flex flex-nowrap items-center overflow-x-auto overflow-y-hidden scrollbar-hide min-w-0 ${tabsOverflow ? "mask-fade-r" : ""}`}>
           {filterTabs.map((tab) => {
             const isSelected = currentFilter === tab.value;
-            const count =
-              tab.value === "active" ? activeSessions.length
-              : 0;
+            const count = getCountForTab(tab.value, counts);
+            const label = renderCount(count, counts);
+            // Active uses the existing attention-grabbing pill; All gets a muted
+            // inline number. Decisions is a client-only view with no count.
+            // Zero buckets render nothing — a "0" badge is noise.
+            const isActivePill = tab.value === "active" && count !== undefined && count > 0;
+            const isMutedNumber = !isActivePill && label !== undefined && count !== undefined && count > 0;
             return (
               <button
                 key={tab.value}
@@ -302,8 +349,11 @@ export function SessionsPageContent() {
               >
                 <span className="flex items-center gap-1.5">
                   {tab.label}
-                  {count > 0 && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal bg-primary">{count}</span>
+                  {isActivePill && (
+                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 font-normal bg-primary">{label}</span>
+                  )}
+                  {isMutedNumber && (
+                    <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
                   )}
                 </span>
                 {isSelected && (
@@ -338,7 +388,7 @@ export function SessionsPageContent() {
         </div>
       )}
 
-      {!showDecisions && !isLoading && !error && allSessions.length === 0 && (
+      {!showDecisions && !isLoading && !error && counts?.all === 0 && (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
@@ -361,53 +411,75 @@ export function SessionsPageContent() {
       )}
 
       {/* ── Data table ─────────────────────────────────────────────── */}
-      {!showDecisions && !isLoading && !error && allSessions.length > 0 && (
+      {!showDecisions && !isLoading && !error && counts?.all !== 0 && (
         <div className="rounded-lg border border-border bg-card overflow-hidden">
-          {/* Count header */}
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50 bg-muted/30">
-            <span className="text-xs font-medium text-muted-foreground/70 tracking-wider">
-              {filteredSessions.length} session{filteredSessions.length !== 1 ? "s" : ""}
-            </span>
-          </div>
-
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground">
               No sessions match this filter.
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                {table.getHeaderGroups().map((headerGroup) => (
-                  <TableRow key={headerGroup.id} className="hover:bg-transparent border-border/50">
-                    {headerGroup.headers.map((header) => (
-                      <TableHead
-                        key={header.id}
-                        style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
-                      >
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(header.column.columnDef.header, header.getContext())}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                ))}
-              </TableHeader>
-              <TableBody>
-                {table.getRowModel().rows.map((row) => (
-                  <TableRow
-                    key={row.id}
-                    className="cursor-pointer"
-                    onClick={() => router.push(`/sessions/${row.original.id}`)}
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <>
+              <Table>
+                <TableHeader>
+                  {table.getHeaderGroups().map((headerGroup) => (
+                    <TableRow key={headerGroup.id} className="hover:bg-transparent border-border/50">
+                      {headerGroup.headers.map((header) => (
+                        <TableHead
+                          key={header.id}
+                          style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
+                        >
+                          {header.isPlaceholder
+                            ? null
+                            : flexRender(header.column.columnDef.header, header.getContext())}
+                        </TableHead>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableHeader>
+                <TableBody>
+                  {table.getRowModel().rows.map((row) => (
+                    <TableRow
+                      key={row.id}
+                      className="cursor-pointer"
+                      onClick={() => router.push(`/sessions/${row.original.id}`)}
+                    >
+                      {row.getVisibleCells().map((cell) => (
+                        <TableCell key={cell.id}>
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+
+              {/* Footer: "Showing N of M · Show more" */}
+              <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-border/50 bg-muted/20">
+                <span className="text-xs text-muted-foreground/70 tabular-nums">
+                  {currentTabTotal !== undefined
+                    ? `Showing ${filteredSessions.length} of ${renderCount(currentTabTotal, counts)}`
+                    : `${filteredSessions.length} session${filteredSessions.length !== 1 ? "s" : ""}`}
+                </span>
+                <div className="flex items-center gap-3">
+                  {loadMoreMutation.isError && (
+                    <span className="text-xs text-destructive/80">
+                      Failed to load more. Try again.
+                    </span>
+                  )}
+                  {hasMore && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => loadMoreMutation.mutate()}
+                      disabled={loadMoreMutation.isPending}
+                    >
+                      {loadMoreMutation.isPending ? "Loading…" : "Show more"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}

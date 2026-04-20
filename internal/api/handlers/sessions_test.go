@@ -396,6 +396,111 @@ func TestSessionHandler_List_InvalidCursor(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_Counts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("(?s)SELECT.*all_count.*active_count.*archived_count").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(42, 7, 3),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200")
+
+	var resp models.SingleResponse[models.SessionCounts]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, 42, resp.Data.All, "all count should pass through")
+	require.Equal(t, 7, resp.Data.Active, "active count should pass through")
+	require.Equal(t, 3, resp.Data.Archived, "archived count should pass through")
+	require.Greater(t, resp.Data.Cap, 0, "cap should be populated so clients can render 99+ correctly")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_Counts_WithScopeFilters(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("(?s)SELECT.*repository_id.*triggered_by_user_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"all_count", "active_count", "archived_count"}).
+				AddRow(5, 2, 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/sessions/counts?repository_id="+repoID.String()+"&triggered_by_user_id="+userID.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return 200 with scope filters")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_Counts_InvalidRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?repository_id=not-a-uuid", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid repository_id")
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestSessionHandler_Counts_InvalidUserID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/counts?triggered_by_user_id=bad", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Counts(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "should reject invalid triggered_by_user_id")
+	require.Contains(t, w.Body.String(), "INVALID_USER_ID")
+}
+
 func TestSessionHandler_Get(t *testing.T) {
 	t.Parallel()
 
