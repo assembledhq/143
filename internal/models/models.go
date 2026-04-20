@@ -139,13 +139,16 @@ type Session struct {
 	TriggeredByUserID   *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
 	AgentSessionID      *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
 	CurrentTurn         int             `db:"current_turn" json:"current_turn"`
-	LastActivityAt      *time.Time      `db:"last_activity_at" json:"last_activity_at,omitempty"`
-	SandboxState        string          `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey         *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
-	TargetBranch        *string         `db:"target_branch" json:"target_branch,omitempty"`
-	WorkingBranch       *string         `db:"working_branch" json:"working_branch,omitempty"`
-	RepositoryID        *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
-	DiffStats           json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
+	// LastActivityAt is the timestamp of the last write to this session — used
+	// as the MRU sort key in ListByOrg. NOT NULL since migration 000076;
+	// previously it could be NULL for first-turn sessions.
+	LastActivityAt time.Time       `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState   string          `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey    *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	TargetBranch   *string         `db:"target_branch" json:"target_branch,omitempty"`
+	WorkingBranch  *string         `db:"working_branch" json:"working_branch,omitempty"`
+	RepositoryID   *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
+	DiffStats      json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
 	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
 	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
 	// field being non-nil unless the session was fetched individually.

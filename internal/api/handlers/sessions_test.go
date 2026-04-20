@@ -84,7 +84,7 @@ func TestSessionHandler_List(t *testing.T) {
 							nil,                      // project_task_id
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
-							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -169,7 +169,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -265,7 +265,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
-				nil, 0, nil, "none", nil,
+				nil, 0, now, "none", nil,
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -345,7 +345,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 	cursorID := uuid.New()
 	cursor := encodeSessionCursor(cursorTime, cursorID)
 
-	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND \\(created_at, id\\) <").
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND \\(last_activity_at, id\\) <").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).AddRow(
@@ -356,7 +356,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil, nil,
-				nil, 0, nil, "none", nil,
+				nil, 0, now, "none", nil,
 				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
 			),
 		)
@@ -531,7 +531,7 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil,                      // project_task_id
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
-							nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+							nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -622,7 +622,7 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 	// Mock job enqueue (6 named args)
 	jobID := uuid.New()
@@ -670,7 +670,7 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 	// Mock job enqueue (6 named args)
 	jobID := uuid.New()
@@ -1311,7 +1311,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1401,7 +1401,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1464,7 +1464,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1491,7 +1491,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1588,7 +1588,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 				// Mock concurrency check
 				mock.ExpectQuery("SELECT count").
@@ -1636,7 +1636,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 				// Mock concurrency check
 				mock.ExpectQuery("SELECT count").
@@ -1787,7 +1787,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
-				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1800,7 +1800,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -1849,7 +1849,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				&userID, // triggered_by_user_id
-				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -1862,7 +1862,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// Expect open_pr job instead of validate.
@@ -2032,7 +2032,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 1, &now, "snapshotted", nil,
+							nil, 1, now, "snapshotted", nil,
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2074,7 +2074,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 0, nil, "none", nil,
+							nil, 0, now, "none", nil,
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2158,7 +2158,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2184,7 +2184,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2227,7 +2227,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 2, &now, "running", nil,
+							nil, 2, now, "running", nil,
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2274,7 +2274,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 0, nil, "none", nil,
+							nil, 0, now, "none", nil,
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2316,7 +2316,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 3, &now, "destroyed", nil,
+							nil, 3, now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
@@ -2346,7 +2346,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 2, &now, "destroyed", nil,
+							nil, 2, now, "destroyed", nil,
 							nil, nil, nil, nil, nil,
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
@@ -2377,7 +2377,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2407,7 +2407,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil,
 							nil, nil,
 							nil, // triggered_by_user_id
-							nil, 1, &now, "snapshotted", stringPtr("snapshots/test"),
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
 							nil,      // target_branch
 							nil,      // working_branch
 							nil,      // repository_id
@@ -2584,7 +2584,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
@@ -2676,7 +2676,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
@@ -2737,7 +2737,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,                      // triggered_by_user_id
-				nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -2805,7 +2805,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, nil, "none", nil,
+				nil, 0, now, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -2859,7 +2859,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, nil, "none", nil,
+				nil, 0, now, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -2956,7 +2956,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, nil, "none", nil,
+				nil, 0, now, "none", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -3026,7 +3026,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
-				nil, 1, &now, "running", nil,
+				nil, 1, now, "running", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -3080,7 +3080,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
-				nil, 1, &now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -3158,7 +3158,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil, // triggered_by_user_id
-				nil, 1, &now, "running", nil,
+				nil, 1, now, "running", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id

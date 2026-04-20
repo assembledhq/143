@@ -33,7 +33,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
-		nil, 0, nil, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+		nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 		nil,      // target_branch
 		nil,      // working_branch
 		nil,      // repository_id
@@ -101,6 +101,65 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	require.NoError(t, err, "ListByOrg without RepositoryID should not return an error")
 	require.Len(t, sessions, 1, "should return one session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestSessionStore_ListByOrg_MRUOrdering verifies the list query orders by
+// last_activity_at (Most-Recently-Updated), not created_at. Regressions here
+// would flip the Sessions page back to creation-time ordering, which is the
+// wrong default for a team product with long-lived async agents.
+func TestSessionStore_ListByOrg_MRUOrdering(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	// Match ORDER BY last_activity_at DESC, id DESC explicitly so a regression
+	// to ORDER BY created_at would fail the expectation.
+	mock.ExpectQuery(`ORDER BY last_activity_at DESC, id DESC`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
+		)
+
+	sessions, err := store.ListByOrg(context.Background(), orgID, SessionFilters{})
+	require.NoError(t, err, "ListByOrg should not return an error")
+	require.Len(t, sessions, 1, "should return one session")
+	require.NoError(t, mock.ExpectationsWereMet(), "ORDER BY last_activity_at must be present in the list query")
+}
+
+// TestSessionStore_ListByOrg_CursorUsesLastActivity verifies the cursor predicate
+// compares (last_activity_at, id) — matching the MRU ordering. If the predicate
+// drifts back to created_at the cursor will skip / repeat rows in pagination.
+func TestSessionStore_ListByOrg_CursorUsesLastActivity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	cursorTime := time.Now().Add(-time.Hour)
+	cursorID := uuid.New()
+
+	mock.ExpectQuery(`\(last_activity_at, id\) < \(@cursor_time, @cursor_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	_, err = store.ListByOrg(context.Background(), orgID, SessionFilters{
+		CursorTime: &cursorTime,
+		CursorID:   &cursorID,
+	})
+	require.NoError(t, err, "ListByOrg with cursor should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "cursor predicate must reference last_activity_at")
 }
 
 func TestSessionStore_ListByOrg_WithSearch(t *testing.T) {

@@ -108,7 +108,7 @@ export interface Session {
   triggered_by_user_id?: string;
   agent_session_id?: string;
   current_turn: number;
-  last_activity_at?: string;
+  last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
   target_branch?: string;
