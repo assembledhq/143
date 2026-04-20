@@ -208,6 +208,17 @@ func main() {
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry)
 		}
+		// Refuse to start an anemic worker. Without agent services (GitHub App,
+		// Docker, sandbox health), run_agent won't register, but the worker will
+		// still dequeue run_agent jobs and dead-letter them as "no handler" —
+		// poisoning session starts on peer nodes that would have served them.
+		// Operators that don't want a worker should set MODE=api.
+		if services == nil {
+			logger.Fatal().
+				Str("mode", cfg.Mode).
+				Msg("worker mode requires agent services (GitHub App + Docker + sandbox health check). " +
+					"Fix the missing dependencies, or set MODE=api to disable the in-process worker.")
+		}
 		retentionCfg := worker.DataRetentionConfig{
 			WebhookDays: cfg.DataRetentionWebhookDays,
 			LogsDays:    cfg.DataRetentionLogsDays,
