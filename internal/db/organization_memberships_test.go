@@ -325,6 +325,137 @@ func TestOrganizationMembershipStore_OldestForUser_NoMemberships(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// Query-error paths return a wrapped error rather than silently succeeding,
+// so the surrounding handler can map the failure to a 500 instead of an empty
+// result set.
+func TestOrganizationMembershipStore_QueryErrors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		run    func(context.Context, *OrganizationMembershipStore) error
+		expect func(mock pgxmock.PgxPoolIface)
+	}{
+		{
+			name: "ListByUser",
+			run: func(ctx context.Context, s *OrganizationMembershipStore) error {
+				_, err := s.ListByUser(ctx, uuid.New())
+				return err
+			},
+			expect: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT m.org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+		},
+		{
+			name: "Get",
+			run: func(ctx context.Context, s *OrganizationMembershipStore) error {
+				_, err := s.Get(ctx, uuid.New(), uuid.New())
+				return err
+			},
+			expect: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+		},
+		{
+			name: "OldestForUser",
+			run: func(ctx context.Context, s *OrganizationMembershipStore) error {
+				_, err := s.OldestForUser(ctx, uuid.New())
+				return err
+			},
+			expect: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ ORDER BY created_at").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+		},
+		{
+			name: "ListUserIDsByOrg",
+			run: func(ctx context.Context, s *OrganizationMembershipStore) error {
+				_, err := s.ListUserIDsByOrg(ctx, uuid.New())
+				return err
+			},
+			expect: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("(?s)SELECT user_id.+FROM organization_memberships").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+			tc.expect(mock)
+			err = tc.run(context.Background(), NewOrganizationMembershipStore(mock))
+			require.Error(t, err)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+// UpdateRole returns pgx.ErrNoRows when the membership row doesn't exist so
+// handlers can surface a 404 rather than silently succeeding.
+func TestOrganizationMembershipStore_UpdateRole_NoRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = NewOrganizationMembershipStore(mock).UpdateRole(context.Background(), uuid.New(), uuid.New(), "member")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, pgx.ErrNoRows))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// UpdateRole and Upsert reject invalid role strings up front so bogus values
+// can't reach the DB with ambiguous error messages.
+func TestOrganizationMembershipStore_RejectInvalidRole(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	s := NewOrganizationMembershipStore(mock)
+
+	err = s.UpdateRole(context.Background(), uuid.New(), uuid.New(), "superadmin")
+	require.Error(t, err)
+
+	err = s.Upsert(context.Background(), uuid.New(), uuid.New(), "guest")
+	require.Error(t, err)
+}
+
+// Remove with pgx.ErrNoRows is surfaced so the handler can return a 404
+// rather than pretending the delete happened.
+func TestOrganizationMembershipStore_Remove_NoRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)WITH cleared_answers.+deleted_membership").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	err = NewOrganizationMembershipStore(mock).Remove(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.True(t, errors.Is(err, pgx.ErrNoRows))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestOrganizationMembershipStore_ListUserIDsByOrg(t *testing.T) {
 	t.Parallel()
 

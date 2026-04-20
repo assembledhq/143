@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -1630,4 +1631,145 @@ func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing
 	}
 	require.True(t, foundSession, "session cookie should be set")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// claimPendingInvitationForExistingUser is a best-effort helper: an empty
+// token short-circuits without touching the DB, a claim failure is logged
+// but does not bubble an error. These tests drive each branch.
+func TestAuthHandler_ClaimPendingInvitationForExistingUser(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty token is a no-op", func(t *testing.T) {
+		t.Parallel()
+		handler := &AuthHandler{}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		// no pool configured — would panic if we tried to begin a tx
+		handler.claimPendingInvitationForExistingUser(req, "", "u@example.com", "", uuid.New())
+	})
+
+	t.Run("successful claim", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		userID := uuid.New()
+		orgID := uuid.New()
+		invID := uuid.New()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+					AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+			)
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectCommit()
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		handler.claimPendingInvitationForExistingUser(req, "valid", "u@example.com", "", userID)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("invitation-error path is logged not returned", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		invID := uuid.New()
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+					AddRow(invID, uuid.New(), strPtr("invitee@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+			)
+		mock.ExpectRollback()
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		handler.claimPendingInvitationForExistingUser(req, "valid", "other@example.com", "", uuid.New())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("hard error is logged not returned", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectBegin().WillReturnError(errors.New("db gone"))
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		handler.claimPendingInvitationForExistingUser(req, "valid", "u@example.com", "", uuid.New())
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// claimInvitationForExistingUser surfaces INVITE_INVALID when the accept
+// step races with another caller that already consumed the invitation.
+func TestAuthHandler_ClaimInvitationForExistingUser_AcceptRace(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	require.NoError(t, err)
+	require.Nil(t, inv)
+	require.NotNil(t, invErr)
+	require.Equal(t, http.StatusGone, invErr.status)
+	require.Equal(t, "INVITE_INVALID", invErr.code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// claimInvitationForExistingUser bubbles begin-transaction failures.
+func TestAuthHandler_ClaimInvitationForExistingUser_BeginFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin().WillReturnError(errors.New("db down"))
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	_, _, err = handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// claimInvitationForExistingUser returns an error when pool is nil.
+func TestAuthHandler_ClaimInvitationForExistingUser_NilPool(t *testing.T) {
+	t.Parallel()
+
+	handler := &AuthHandler{}
+	_, _, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	require.Error(t, err)
 }

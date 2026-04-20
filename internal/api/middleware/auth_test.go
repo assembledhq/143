@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +16,8 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
+
+var errDBDown = errors.New("db down")
 
 // stableUUIDs for readability in tests. The constants give each role in the
 // middleware tests a named, stable identity so assertions read as
@@ -518,6 +521,185 @@ func TestAuth_InvalidSessionClearsCookie(t *testing.T) {
 		}
 	}
 	require.True(t, cleared)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When the header membership lookup fails with a non-ErrNoRows error (DB
+// flake, not a missing row), resolveActiveMembership returns the error
+// unwrapped so handleToken surfaces a 403 rather than falling back to a
+// different org.
+func TestAuth_HeaderMembershipLookupError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set(ActiveOrgHeader, testOrgB.String())
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run on membership lookup failure")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When OldestForUser errors (not ErrNoRows), the middleware surfaces 403
+// rather than pretending the user has no memberships.
+func TestAuth_OldestForUserError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, nil, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ ORDER BY created_at").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run on oldest lookup failure")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When the session's last_org_id hint is for a different org and that lookup
+// fails with a non-ErrNoRows error, the middleware surfaces 403 rather than
+// silently falling back to OldestForUser (which would pick the wrong org).
+func TestAuth_SessionHintLookupError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	// Session points at OrgB as its hint.
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgB, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	// Membership lookup for the hint errors (not ErrNoRows) — we bail out.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run on hint lookup failure")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When GetByIDGlobal reports the user is gone (e.g. account deleted after
+// the session was minted), the middleware rejects the request.
+func TestAuth_UserLookupFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(userCols))
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: "t"})
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run when user lookup fails")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

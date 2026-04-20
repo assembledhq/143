@@ -597,6 +597,179 @@ func TestTeamHandler_RemoveMember_KeepsSessionsWhenOtherMembershipsRemain(t *tes
 	require.False(t, sessionDeleted, "sessions should not be deleted while other memberships remain")
 }
 
+// RemoveMember returns 404 when the user identity lookup fails — it's the
+// same public response as "no such membership" because we don't want to leak
+// whether a user id exists at all.
+func TestTeamHandler_RemoveMember_UserLookupFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, pgx.ErrNoRows
+			},
+		},
+		&mockTeamMembershipStore{},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
+// RemoveMember returns 404 when membership lookup reports ErrNoRows; this is
+// the "user exists but isn't a member of this org" path.
+func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{}, pgx.ErrNoRows
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
+// RemoveMember returns 500 when membership lookup fails with a non-ErrNoRows
+// error (DB down, etc.).
+func TestTeamHandler_RemoveMember_MembershipLookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{}, fmt.Errorf("db down")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// RemoveMember returns 500 when CountAdmins fails during the last-admin check,
+// so admins don't get silently kept/removed based on a count we couldn't read.
+func TestTeamHandler_RemoveMember_CountAdminsFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "admin"}, nil
+			},
+			countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
+				return 0, fmt.Errorf("boom")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "COUNT_FAILED")
+}
+
+// RemoveMember treats a race where Remove returns pgx.ErrNoRows (another
+// admin deleted the membership first) as a 404, not a 500.
+func TestTeamHandler_RemoveMember_RemoveRaceNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{UserID: memberID, OrgID: orgID, Role: "member"}, nil
+			},
+			removeFn: func(_ context.Context, _, _ uuid.UUID) error {
+				return pgx.ErrNoRows
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
 // RemoveMember surfaces an internal error when Remove fails for a reason
 // other than pgx.ErrNoRows.
 func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
