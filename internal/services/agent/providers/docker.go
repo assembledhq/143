@@ -13,6 +13,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/pkg/stdcopy"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -42,10 +43,11 @@ type DockerClient interface {
 // DockerProvider implements SandboxProvider using Docker containers
 // with optional gVisor (runsc) runtime for enhanced isolation.
 type DockerProvider struct {
-	client  DockerClient
-	runtime string // "runsc" (gVisor) or "runc" (standard Docker)
-	network string // pre-created Docker network with egress restrictions
-	logger  zerolog.Logger
+	client     DockerClient
+	runtime    string // "runsc" (gVisor) or "runc" (standard Docker)
+	network    string // pre-created Docker network with egress restrictions
+	resolvConf string // host path bind-mounted at /etc/resolv.conf in sandboxes
+	logger     zerolog.Logger
 }
 
 // DockerProviderOption configures a DockerProvider.
@@ -62,6 +64,19 @@ func WithRuntime(runtime string) DockerProviderOption {
 func WithNetwork(network string) DockerProviderOption {
 	return func(p *DockerProvider) {
 		p.network = network
+	}
+}
+
+// WithResolvConf sets a host path that will be bind-mounted read-only at
+// /etc/resolv.conf inside every sandbox container. Required under runsc on
+// user-defined networks: gVisor's netstack can't reach Docker's embedded DNS
+// at 127.0.0.11, and HostConfig.DNS doesn't replace 127.0.0.11 in resolv.conf
+// on user networks — it only changes the upstream the embedded resolver
+// forwards to. Empty path disables the mount; the container falls back to
+// whatever resolv.conf Docker injects.
+func WithResolvConf(path string) DockerProviderOption {
+	return func(p *DockerProvider) {
+		p.resolvConf = path
 	}
 }
 
@@ -226,18 +241,31 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			Memory:    int64(cfg.MemoryLimitMB) * 1024 * 1024,
 			PidsLimit: &pidsLimit,
 		},
-		NetworkMode: container.NetworkMode(d.network),
-		// Bypass Docker's embedded DNS resolver at 127.0.0.11. gVisor's
-		// netstack can't reliably reach it on user-defined bridge networks,
-		// so DNS lookups from inside the sandbox silently fail under runsc.
-		// Public resolvers work from gVisor's stack directly.
-		DNS:            []string{"1.1.1.1", "8.8.8.8"},
+		NetworkMode:    container.NetworkMode(d.network),
 		CapDrop:        []string{"ALL"},
 		CapAdd:         []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, // minimum caps for sudo
 		ReadonlyRootfs: false,
 		Tmpfs: map[string]string{
 			"/tmp": "rw,noexec,nosuid,size=1073741824",
 		},
+	}
+
+	// On user-defined networks Docker injects 127.0.0.11 into /etc/resolv.conf,
+	// which gVisor's netstack can't reach — so DNS in runsc sandboxes fails
+	// regardless of HostConfig.DNS (that field only changes the upstream the
+	// embedded resolver forwards to, not the resolver itself). Bind-mounting a
+	// host-managed resolv.conf bypasses the embedded resolver entirely and
+	// works for any runtime. The host path is provisioned out-of-band; see
+	// deploy/scripts/provision.sh and the SANDBOX_RESOLV_CONF env var.
+	if d.resolvConf != "" {
+		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   d.resolvConf,
+			Target:   "/etc/resolv.conf",
+			ReadOnly: true,
+		})
+	} else {
+		hostCfg.DNS = []string{"1.1.1.1", "8.8.8.8"}
 	}
 
 	if cfg.DiskLimitGB > 0 {

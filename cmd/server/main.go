@@ -131,7 +131,7 @@ func main() {
 
 		// Build preview provider so the preview subsystem can start/stop
 		// sandbox previews.
-		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger)
+		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
 		pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 		snapshotExec = sandboxExec
 	} else {
@@ -344,7 +344,7 @@ func buildServices(
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
 		return nil
 	}
-	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime))
+	sandboxProvider := providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime(cfg.SandboxRuntime), providers.WithResolvConf(cfg.SandboxResolvConf))
 
 	// Startup health check: verify Docker daemon connectivity and, for gVisor,
 	// that the runsc runtime is functional. Retry a few times because Docker and
@@ -367,7 +367,7 @@ func buildServices(
 		if healthErr != nil {
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
-				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"))
+				sandboxProvider = providers.NewDockerProvider(dockerCli, logger, providers.WithRuntime("runc"), providers.WithResolvConf(cfg.SandboxResolvConf))
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
 				return nil
