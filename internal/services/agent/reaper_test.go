@@ -581,3 +581,43 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-2], "startup catch-up should end at the last completed hour")
 	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "current hour should be rolled as best-effort")
 }
+
+// TestNewSessionReaper_RaisesMaxRunningAgeBelowFloor guards the invariant
+// that the reaper's stuck-running cutoff is always longer than the maximum
+// possible per-org session timeout plus handler buffer. An admin who
+// configures SESSION_MAX_RUNNING_AGE below that would otherwise have
+// legitimate long-running sessions killed by the reaper.
+func TestNewSessionReaper_RaisesMaxRunningAgeBelowFloor(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithMaxRunningAge(10*time.Minute),
+	)
+
+	// The configured 10 min is well below the floor (~2h17m), so the
+	// constructor should raise it.
+	assert.GreaterOrEqual(t, reaper.maxRunningAge, minRunningAgeFloor)
+	// And the floor itself must exceed the max per-org timeout + buffer so
+	// legitimate long runs survive.
+	maxPerOrgTimeout := time.Duration(models.MaxMaxSessionDurationSeconds) * time.Second
+	assert.Greater(t, reaper.maxRunningAge, maxPerOrgTimeout+HandlerCleanupBuffer,
+		"reaper cutoff must exceed max-per-org-timeout + handler buffer")
+}
+
+func TestNewSessionReaper_KeepsMaxRunningAgeAboveFloor(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	configured := 4 * time.Hour // well above the floor
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithMaxRunningAge(configured),
+	)
+
+	assert.Equal(t, configured, reaper.maxRunningAge,
+		"configured value above the floor should be preserved verbatim")
+}

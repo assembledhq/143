@@ -82,10 +82,21 @@ func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 const defaultMaxPendingAge = 10 * time.Minute
 
 // defaultMaxRunningAge is the safety-net cutoff for sessions stuck in
-// "running". It must be longer than the largest sandbox timeout (PM = 30min)
-// plus the handler's cleanup buffer, otherwise legitimate long-running
-// sessions would be failed out from under the orchestrator.
+// "running". It must be longer than the largest per-org session timeout
+// plus the handler cleanup buffer, otherwise legitimate long-running
+// sessions would be failed out from under the orchestrator. The constructor
+// enforces minRunningAgeFloor regardless of how this is configured.
 const defaultMaxRunningAge = 45 * time.Minute
+
+// minRunningAgeFloor is the hard floor for the reaper's running-session
+// cutoff. It's derived from the maximum per-org session timeout
+// (OrgSettings.MaxMaxSessionDurationSeconds) plus HandlerCleanupBuffer plus
+// a 15-minute safety margin for orchestrator bookkeeping. If an operator
+// configures SESSION_MAX_RUNNING_AGE below this, NewSessionReaper logs a
+// warning and raises it — otherwise an admin who legitimately raises their
+// org's timeout above SESSION_MAX_RUNNING_AGE would have sessions killed
+// by the reaper before their own configured timeout fires.
+var minRunningAgeFloor = time.Duration(models.MaxMaxSessionDurationSeconds)*time.Second + HandlerCleanupBuffer + 15*time.Minute
 
 func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.SnapshotStore, maxIdleAge, maxSnapshotAge, interval time.Duration, logger zerolog.Logger, opts ...SessionReaperOption) *SessionReaper {
 	r := &SessionReaper{
@@ -100,6 +111,13 @@ func NewSessionReaper(sessions StaleSessionLister, snapshotStore storage.Snapsho
 	}
 	for _, opt := range opts {
 		opt(r)
+	}
+	if r.maxRunningAge < minRunningAgeFloor {
+		logger.Warn().
+			Dur("configured", r.maxRunningAge).
+			Dur("floor", minRunningAgeFloor).
+			Msg("reaper: max_running_age is below the safe floor; raising to protect long-running sessions from premature reaping")
+		r.maxRunningAge = minRunningAgeFloor
 	}
 	return r
 }

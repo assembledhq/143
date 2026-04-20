@@ -788,11 +788,11 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 
 		// Apply the per-session wall-clock timeout at the handler boundary so
 		// the orchestrator exits cleanly when a container is killed or
-		// ExecStream hangs. The +2m buffer gives the orchestrator slack to
-		// stop the container, snapshot, and persist the failed status after
-		// the session timeout expires.
+		// ExecStream hangs. HandlerCleanupBuffer gives the orchestrator slack
+		// to stop the container, snapshot, and persist the failed status
+		// after the session timeout expires.
 		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
-		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+2*time.Minute)
+		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
 		defer cancel()
 
 		logger.Info().
@@ -862,10 +862,10 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		// Apply the per-session wall-clock timeout (see newRunAgentHandler for
-		// rationale). The +2m buffer lets the orchestrator clean up after the
-		// timeout fires without racing the handler context.
+		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
+		// after the timeout fires without racing the handler context.
 		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
-		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+2*time.Minute)
+		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
 		defer cancel()
 
 		logger.Info().

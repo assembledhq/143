@@ -967,6 +967,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			defer cleanupCancel()
 			errMsg := fmt.Sprintf("Session timed out after %s of execution on turn %d. The maximum duration for this org is configured via org settings.", elapsed, turnNumber)
 			o.failRun(cleanupCtx, session, errMsg)
+			o.enqueueJob(cleanupCtx, session.OrgID, "agent", "analyze_failure", map[string]interface{}{
+				"session_id": session.ID.String(),
+				"org_id":     session.OrgID.String(),
+			})
 			return fmt.Errorf("session timed out: %w", err)
 		}
 		if wasCancelled || ctx.Err() != nil {
@@ -1730,13 +1734,16 @@ func strPtr(s string) *string {
 }
 
 // ResolveSessionTimeout returns the per-session wall-clock timeout for the
-// given org. It reads OrgSettings.MaxSessionDurationSeconds when the org is
-// available and falls back to DefaultSandboxTimeout otherwise. Safe to call
-// with a nil OrgStore.
+// given org, reading OrgSettings.MaxSessionDurationSeconds.
+// ParseOrgSettings always normalises the value (defaulting to
+// DefaultMaxSessionDurationSeconds and clamping into [Min, Max]), so the
+// only path that hits the DefaultSandboxTimeout fallback is the one where
+// we cannot reach the org store at all — nil store, DB outage, or a
+// malformed settings row. Safe to call with a nil OrgStore.
 func (o *Orchestrator) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
 	if o.orgs != nil {
 		if org, err := o.orgs.GetByID(ctx, orgID); err == nil {
-			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && orgSettings.MaxSessionDurationSeconds > 0 {
+			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
 				return time.Duration(orgSettings.MaxSessionDurationSeconds) * time.Second
 			}
 		}

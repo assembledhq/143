@@ -1751,3 +1751,135 @@ func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
 	turnUpdates := d.sessions.getTurnUpdates()
 	require.Empty(t, turnUpdates, "cancelled session without snapshot should not have turn updates")
 }
+
+// --- ResolveSessionTimeout ---
+
+func TestResolveSessionTimeout_UsesOrgOverride(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	// 10 min override — inside [min, max] so ParseOrgSettings leaves it alone.
+	overrideSeconds := 10 * 60
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": overrideSeconds,
+	})
+	require.NoError(t, err)
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, 10*time.Minute, got)
+}
+
+func TestResolveSessionTimeout_ClampsBelowFloor(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	// 30 seconds — below MinMaxSessionDurationSeconds (120s). ParseOrgSettings
+	// should clamp up to 2 minutes.
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": 30,
+	})
+	require.NoError(t, err)
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, 2*time.Minute, got)
+}
+
+func TestResolveSessionTimeout_FallsBackWhenOrgStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             &mockOrgStore{err: errors.New("db down")},
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), orgID)
+	require.Equal(t, agent.DefaultSandboxTimeout, got)
+}
+
+func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
+	t.Parallel()
+
+	d := defaultDeps()
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		// Orgs intentionally nil.
+		Jobs:          d.jobs,
+		GitHub:        d.github,
+		Credentials:   d.creds,
+		Snapshots:     d.snapshots,
+		Logger:        zerolog.Nop(),
+		MaxConcurrent: 3,
+	})
+
+	got := orch.ResolveSessionTimeout(context.Background(), testOrg())
+	require.Equal(t, agent.DefaultSandboxTimeout, got)
+}

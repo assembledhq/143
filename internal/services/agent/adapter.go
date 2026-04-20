@@ -154,6 +154,12 @@ type SandboxProvider interface {
 // OrgSettings.MaxSessionDurationSeconds.
 const DefaultSandboxTimeout = 25 * time.Minute
 
+// HandlerCleanupBuffer is the slack added on top of the resolved session
+// timeout at the worker handler boundary, giving the orchestrator time to
+// destroy the container, persist a terminal status, and enqueue follow-up
+// jobs after a session hits its wall-clock limit.
+const HandlerCleanupBuffer = 2 * time.Minute
+
 // SandboxConfig holds the resource limits and settings for creating a sandbox.
 type SandboxConfig struct {
 	Image         string            // base image with agent CLI tools pre-installed
