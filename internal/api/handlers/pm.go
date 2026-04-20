@@ -106,15 +106,23 @@ func (h *PMHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMPlan]{Data: plan})
 }
 
+// Latest returns the most recent PM plan for the org, or null if none exist.
+// "No plans yet" is a normal empty state, not a missing resource, so we return
+// 200 with a null body rather than 404.
 func (h *PMHandler) Latest(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	plan, err := h.planStore.GetLatestByOrg(r.Context(), orgID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "plan not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusOK, models.SingleResponse[*models.PMPlan]{Data: nil})
+			return
+		}
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("failed to load latest PM plan")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load plan", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMPlan]{Data: plan})
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PMPlan]{Data: &plan})
 }
 
 // Current returns the PM's latest recommendation in a presentation-friendly
