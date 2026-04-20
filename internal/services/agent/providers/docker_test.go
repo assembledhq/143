@@ -413,8 +413,8 @@ func TestDockerProvider_Create(t *testing.T) {
 		// Verify security hardening
 		require.Equal(t, "runsc", capturedHostConfig.Runtime, "container should use gVisor runtime")
 		require.Equal(t, []string(capturedHostConfig.CapDrop), []string{"ALL"}, "container should drop all capabilities")
-		require.Equal(t, []string(capturedHostConfig.CapAdd), []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, "container should add minimum caps for sudo")
-		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options (no-new-privileges blocks sudo)")
+		require.Empty(t, capturedHostConfig.CapAdd, "container should not add back any caps — sudo is gone from the image and bootstrap uses docker exec User=root")
+		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options — no-new-privileges is moot without sudo, keep it unset for parity with the pre-sudo-removal behavior")
 		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/var/tmp", "container should have exec-allowed tmpfs at /var/tmp for scratch binaries")
@@ -669,6 +669,39 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "agent_run", sb.Purpose, "Purpose should be copied from config")
 	})
 
+	t.Run("bootstrap runs as root without sudo", func(t *testing.T) {
+		t.Parallel()
+
+		// The bootstrap mkdir/chown must NOT shell out to `sudo`: under gVisor
+		// (and no-new-privileges / userns-remap / any nosuid mount) the setuid
+		// bit on /usr/bin/sudo is stripped, producing "sudo: effective uid is
+		// not 0 ... nosuid" and failing session startup. Running the exec with
+		// ExecOptions.User="root" goes through Docker's control plane instead,
+		// so it works under every runtime and security profile we support.
+		var execCfgs []container.ExecOptions
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			return container.CreateResponse{ID: "bootstrap-root"}, nil
+		}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			execCfgs = append(execCfgs, config)
+			return container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", len(execCfgs))}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		_, err := p.Create(context.Background(), agent.DefaultSandboxConfig())
+		require.NoError(t, err)
+
+		require.Len(t, execCfgs, 1, "Create should issue exactly one bootstrap exec")
+		boot := execCfgs[0]
+		require.Equal(t, "root", boot.User, "bootstrap exec must run as root via ExecOptions.User (not via sudo)")
+		require.Len(t, boot.Cmd, 3, "bootstrap cmd should be wrapped by sh -c")
+		require.NotContains(t, boot.Cmd[2], "sudo", "bootstrap shell cmd must not invoke sudo — the setuid bit is stripped under gVisor/no-new-privileges")
+		require.Contains(t, boot.Cmd[2], "mkdir -p", "bootstrap must still create the workdir idempotently")
+		require.Contains(t, boot.Cmd[2], "chown sandbox:sandbox", "bootstrap must chown the workdir to the sandbox user")
+	})
+
 	t.Run("cleans up on bootstrap workdir failure", func(t *testing.T) {
 		t.Parallel()
 
@@ -875,11 +908,13 @@ func TestDockerProvider_Exec(t *testing.T) {
 		t.Parallel()
 
 		var capturedCmd []string
+		var capturedUser string
 		var capturedAttachStdout, capturedAttachStderr bool
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
+			capturedUser = config.User
 			capturedAttachStdout = config.AttachStdout
 			capturedAttachStderr = config.AttachStderr
 			return container.ExecCreateResponse{ID: "exec-1"}, nil
@@ -898,6 +933,7 @@ func TestDockerProvider_Exec(t *testing.T) {
 		require.NoError(t, err, "Exec should not return an error")
 		require.Equal(t, 0, code, "exit code should be 0")
 		require.Equal(t, []string{"sh", "-c", "echo hello"}, capturedCmd, "command should be wrapped in sh -c")
+		require.Empty(t, capturedUser, "public Exec must leave User empty so the exec runs as the container's default (sandbox); only bootstrap opts in to root")
 		require.True(t, capturedAttachStdout, "should attach stdout")
 		require.True(t, capturedAttachStderr, "should attach stderr")
 	})
