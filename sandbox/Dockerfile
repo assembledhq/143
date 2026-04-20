@@ -26,12 +26,18 @@ RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 # postgresql-client is needed when a preview's command chain seeds a Postgres
 # infrastructure container via `psql -f`; keeping it in the base image avoids
 # per-preview apt installs.
+#
+# sudo is intentionally omitted: under gVisor (and no-new-privileges /
+# userns-remap / nosuid mounts) the kernel strips setuid bits, so `sudo`
+# fails with "effective uid is not 0 ... nosuid". Any provisioning that
+# needs root runs via docker exec User="root" from the provider instead.
+# Consequence: agents cannot `sudo apt-get install` at runtime — every
+# dependency must be baked into this image up front.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
     jq \
-    sudo \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -64,9 +70,8 @@ RUN --mount=type=cache,target=/root/.npm \
 # Copy 143-tools binary from Go builder.
 COPY --from=go-builder /bin/143-tools /usr/local/bin/143-tools
 
-# Non-root user for sandbox execution with passwordless sudo.
-RUN useradd -m -s /bin/bash sandbox \
-    && echo 'sandbox ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/sandbox \
-    && chmod 0440 /etc/sudoers.d/sandbox
+# Non-root user for sandbox execution. No sudo is provisioned — see the
+# comment on the apt-get block above.
+RUN useradd -m -s /bin/bash sandbox
 USER sandbox
 WORKDIR /workspace
