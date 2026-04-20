@@ -68,6 +68,10 @@ This works for anything measurable: test coverage, bundle size, response times, 
 4. **Ship** — open GitHub PRs with full context and preview environments
 5. **Loop** — for eval-driven tasks, measure results and iterate automatically
 
+## Using 143
+
+User-facing docs live in [`docs/guides/`](docs/guides/). If you're running your own 143 instance instead of using the hosted version, see [`docs/self-hosting/`](docs/self-hosting/).
+
 ## Built for production
 
 Every agent runs in a gVisor-isolated container with a read-only filesystem and network access limited to LLM APIs and package registries. PRs go through security scanning (gitleaks, semgrep), correctness checks, and your CI before a human ever sees them. Your code never leaves infrastructure you control.

@@ -1,0 +1,13 @@
+# User Guides
+
+How-tos for people using 143 to act on their repos. These apply whether you're using the hosted version at [143.dev](https://www.143.dev) or running your own instance.
+
+## Guides
+
+- **[Preview environments](previews.md)** — configure `.143/preview.json` so 143 can serve a live iframed preview of your app from inside a session.
+
+---
+
+Running your own 143 instance? See [`../self-hosting/`](../self-hosting/) instead.
+
+Working on the 143 codebase itself? See [`../local-development.md`](../local-development.md) and [`../contributing/`](../contributing/).
