@@ -107,6 +107,10 @@ fi
 if [ "$ROLE" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply
   # the egress rules (they read the sandbox network's current subnet).
+  # Older workers may have a root-owned copy from cloud-init bootstrap;
+  # chown the scripts dir first so deploy can overwrite via plain scp.
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "sudo chown -R deploy:deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
     deploy@"$HOST":/opt/143/deploy/scripts/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod +x /opt/143/deploy/scripts/sandbox-firewall.sh"
