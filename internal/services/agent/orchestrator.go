@@ -791,12 +791,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
 		}
-		// Defer the user-facing message to the worker's dead-letter path so
-		// intermediate retries stay silent; when the worker gives up (for
-		// any reason — FatalError, retryable timeout, retries exhausted)
-		// the hook fires once and the user sees exactly one message.
-		// Direct callers without a worker registry drop the hook and are
-		// expected to surface the returned error themselves.
 		o.registerSandboxFailureMessage(
 			ctx,
 			session,
@@ -824,11 +818,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
 		}
-		// Same rationale as the workdir-resolution branch above: defer the
-		// user-visible message to the worker's dead-letter hook so a flaky
-		// Docker daemon doesn't produce N identical assistant messages,
-		// and so FatalError / retryable-timeout paths still surface a
-		// message rather than silently dead-lettering.
 		o.registerSandboxFailureMessage(
 			ctx,
 			session,
@@ -1091,18 +1080,11 @@ func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Sess
 	return SlugForRepo(repo.FullName), nil
 }
 
-// registerSandboxFailureMessage queues a user-visible assistant message to
-// be posted if — and only if — the current continue_session job attempt is
-// dead-lettered by the worker. See internal/jobctx: the worker runs
-// registered hooks from every dead-letter path (FatalError, retryable
-// timeout, retries exhausted), so the user gets exactly one message on
-// terminal failure and no message on mid-retry attempts. When there is no
-// worker registry on the context (e.g. a direct test/CLI caller), the
-// hook is dropped and the caller must act on the returned error.
-//
-// stage is a short phrase used only for the warn-level log emitted if the
-// DB insert fails inside the hook (e.g. "workdir resolution",
-// "sandbox creation").
+// registerSandboxFailureMessage queues a user-visible assistant message
+// to post only if the current continue_session job is dead-lettered —
+// posting inline would fire once per retry. Direct callers without a
+// jobctx registry drop the hook and must handle the returned error
+// themselves. stage labels the warn log emitted if the DB insert fails.
 func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, session *models.Session, content, stage string) {
 	if o.sessionMessages == nil {
 		return
@@ -1119,7 +1101,14 @@ func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, sessio
 			Role:       models.MessageRoleAssistant,
 			Content:    content,
 		}
-		if createErr := sessionMessages.Create(hookCtx, errMsg); createErr != nil {
+		// The retryable-timeout dead-letter path fires this hook with a
+		// handler context whose deadline has just expired; detach so the
+		// terminal-message write isn't racing the very timeout that
+		// triggered it, but keep a short bound so we can't hang the poll
+		// goroutine on a wedged DB.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 5*time.Second)
+		defer cancel()
+		if createErr := sessionMessages.Create(writeCtx, errMsg); createErr != nil {
 			o.logger.Error().
 				Err(createErr).
 				Str("session_id", sessionID.String()).

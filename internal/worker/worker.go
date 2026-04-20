@@ -163,11 +163,6 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	handlerCtx := withJobOrgID(ctx, orgID)
-	// Install a fresh per-attempt dead-letter hook registry so handlers can
-	// defer user-visible side effects (error messages, status transitions)
-	// until the worker actually decides to dead-letter the job — covering
-	// FatalError, retryable timeout, and retries-exhausted uniformly
-	// instead of forcing each handler to guess which branch it's on.
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
@@ -176,8 +171,8 @@ func (w *Worker) poll(ctx context.Context) {
 		var fatal *FatalError
 		if errors.As(err, &fatal) {
 			w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed (fatal, skipping retries)")
-			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			w.deadLetterJob(ctx, jobID, err.Error())
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			return
 		}
 		// RetryableError means we should retry without consuming an attempt
@@ -192,8 +187,8 @@ func (w *Worker) poll(ctx context.Context) {
 					Dur("age", time.Since(jobCreatedAt)).
 					Msg("retryable job exceeded max duration, dead-lettering")
 				timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
-				jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
 				w.deadLetterJob(ctx, jobID, timeoutErr.Error())
+				jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
 				return
 			}
 			w.logger.Info().Err(err).Str("job_id", jobID.String()).Msg("job deferred (retryable)")
@@ -202,8 +197,8 @@ func (w *Worker) poll(ctx context.Context) {
 		}
 		w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed")
 		if attempts+1 >= maxAttempts {
-			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			w.deadLetterJob(ctx, jobID, err.Error())
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 		} else {
 			w.retryJob(ctx, jobID, err.Error(), attempts+1)
 		}
