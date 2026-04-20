@@ -23,22 +23,35 @@ FROM ubuntu:24.04
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 # System dependencies for agent CLIs and typical repo operations.
-# postgresql-client is needed when a preview's command chain seeds a Postgres
-# infrastructure container via `psql -f`; keeping it in the base image avoids
-# per-preview apt installs.
 #
 # sudo is intentionally omitted: under gVisor (and no-new-privileges /
 # userns-remap / nosuid mounts) the kernel strips setuid bits, so `sudo`
 # fails with "effective uid is not 0 ... nosuid". Any provisioning that
 # needs root runs via docker exec User="root" from the provider instead.
-# Consequence: agents cannot `sudo apt-get install` at runtime — every
-# dependency must be baked into this image up front.
+# Consequence: agents cannot `apt-get install` at runtime — every
+# dependency must be baked into this image up front, which is why the
+# package set below is on the generous side.
+#
+# Package rationale:
+#   - git/curl/ca-certificates/jq: baseline repo + HTTP + JSON tools.
+#   - postgresql-client: previews seed Postgres via `psql -f`; baked in
+#     here so per-preview startup doesn't apt-install it.
+#   - python3/python3-pip/python3-venv: Python is the #1 missing runtime
+#     when agents work on non-Node repos (scripts, pytest, linters, etc.).
+#   - build-essential: gcc/g++/make/libc-dev — needed whenever a Go/Rust/
+#     Node module has C bindings (ring, openssl-sys, node-gyp native
+#     addons, cgo with C deps). Without it, `go build` / `cargo build` /
+#     `npm install` fails opaquely on compile.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
     jq \
     postgresql-client \
+    python3 \
+    python3-pip \
+    python3-venv \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 LTS via NodeSource.
