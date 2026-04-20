@@ -450,6 +450,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/memories/*", memoryHandler.ListByRepo)
 			r.Get("/api/v1/review-comments", memoryHandler.ListComments)
 			r.Get("/api/v1/sessions", sessionHandler.List)
+			r.Get("/api/v1/sessions/counts", sessionHandler.Counts)
 			r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
 			r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 			r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)

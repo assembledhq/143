@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
@@ -19,7 +19,6 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import type { SessionListItem } from "@/lib/types";
 import {
-  activeSet,
   workingSet,
   filterToStatusParam,
 } from "@/lib/session-status-groups";
@@ -150,9 +149,12 @@ export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { currentUserFilter, triggeredByUserId, user, setUserFilter } = useSessionUserFilter();
+  const { currentUserFilter, triggeredByUserId, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
+  // Deferred keeps keystroke renders snappy while still rebuilding the query key
+  // for the server-side search.
+  const deferredSearch = useDeferredValue(search);
 
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
@@ -163,29 +165,67 @@ export function SessionSidebar() {
   const isArchivedView = currentFilter === "archived";
   const statusParam = filterToStatusParam(currentFilter);
 
-  // Fetch all sessions (for tab badge counts and the "all" view).
-  // Also fetches a filtered query when a tab is active — see sessions-page-content
-  // for the rationale on the double-fetch tradeoff.
-  const { data: allData, isLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId }),
+  // Pagination state. Pages are stored so polling can refresh page 0 without
+  // blowing away any pages the user has loaded via "Load more". Polling pauses
+  // once the user has paginated to avoid cursor invalidation (see the matching
+  // comment in automations/[id]/page.tsx).
+  const [extraPages, setExtraPages] = useState<SessionListItem[][]>([]);
+  const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
+  const isPaginated = extraPages.length > 0;
+
+  const trimmedSearch = deferredSearch.trim();
+
+  // Reset pagination when the effective query scope changes. Adjusting state
+  // during render (rather than in an effect) avoids cascading renders — see
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders.
+  const scopeKey = `${repo ?? ""}|${triggeredByUserId ?? ""}|${currentFilter}|${trimmedSearch}`;
+  const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
+  if (prevScopeKey !== scopeKey) {
+    setPrevScopeKey(scopeKey);
+    setExtraPages([]);
+    setLoadMoreCursor(undefined);
+  }
+  const listParams = useMemo(
+    () => ({
+      limit: 50,
+      repository_id: repo ?? undefined,
+      triggered_by_user_id: triggeredByUserId,
+      search: trimmedSearch || undefined,
+      ...(isArchivedView ? { only_archived: true } : {}),
+      ...(!isArchivedView && statusParam ? { status: statusParam } : {}),
+    }),
+    [repo, triggeredByUserId, trimmedSearch, isArchivedView, statusParam],
+  );
+
+  const { data: listData, isLoading } = useQuery({
+    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId, trimmedSearch],
+    queryFn: () => api.sessions.list(listParams),
+    refetchInterval: isPaginated ? false : 10000,
+  });
+
+  // Tab badge counts. Search-independent so tabs reflect the scope totals, not
+  // the current search result size.
+  const { data: countsData } = useQuery({
+    queryKey: queryKeys.sessions.counts(repo, triggeredByUserId),
+    queryFn: () =>
+      api.sessions.counts({
+        repository_id: repo ?? undefined,
+        triggered_by_user_id: triggeredByUserId,
+      }),
     refetchInterval: 10000,
   });
 
-  // Fetch filtered sessions from the backend when a specific tab is selected.
-  const { data: filteredData } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), statusParam, triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, status: statusParam, triggered_by_user_id: triggeredByUserId }),
-    refetchInterval: 10000,
-    enabled: !!statusParam,
-  });
+  const firstPage = useMemo(() => listData?.data ?? [], [listData?.data]);
+  const firstPageCursor = listData?.meta?.next_cursor || undefined;
+  const cursor = isPaginated ? loadMoreCursor : firstPageCursor;
+  const hasMore = !!cursor;
 
-  // Fetch archived sessions when the archived tab is active.
-  const { data: archivedData, isLoading: isArchivedLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "archived", triggeredByUserId],
-    queryFn: () => api.sessions.list({ limit: 50, repository_id: repo ?? undefined, triggered_by_user_id: triggeredByUserId, only_archived: true }),
-    refetchInterval: 10000,
-    enabled: isArchivedView,
+  const loadMoreMutation = useMutation({
+    mutationFn: () => api.sessions.list({ ...listParams, cursor }),
+    onSuccess: (res) => {
+      setExtraPages((prev) => [...prev, res.data ?? []]);
+      setLoadMoreCursor(res.meta?.next_cursor || undefined);
+    },
   });
 
   const invalidateSessions = () => {
@@ -208,30 +248,24 @@ export function SessionSidebar() {
     },
   });
 
-  const allSessions = useMemo(() => allData?.data ?? [], [allData?.data]);
-
-  const activeSessions = allSessions.filter((s) => activeSet.has(s.status));
-
-  // Archived sessions: backend returns only archived sessions via only_archived filter.
-  const archivedSessions = useMemo(
-    () => archivedData?.data ?? [],
-    [archivedData?.data],
+  const displayedSessions = useMemo(
+    () => [firstPage, ...extraPages].flat(),
+    [firstPage, extraPages],
   );
 
-  const filteredSessions = useMemo(
-    () => {
-      if (isArchivedView) return archivedSessions;
-      if (statusParam && filteredData) return filteredData.data;
-      return allSessions;
-    },
-    [allSessions, filteredData, statusParam, isArchivedView, archivedSessions],
-  );
+  const counts = countsData?.data;
+  const renderCount = (value: number | undefined): string | undefined => {
+    if (value === undefined || !counts) return undefined;
+    return value >= counts.cap ? `${counts.cap - 1}+` : String(value);
+  };
 
-  const displayedSessions = useMemo(() => {
-    if (!search.trim()) return filteredSessions;
-    const q = search.toLowerCase();
-    return filteredSessions.filter((s) => sessionTitle(s).toLowerCase().includes(q));
-  }, [filteredSessions, search]);
+  const getCountForTab = (value: string): number | undefined => {
+    if (!counts) return undefined;
+    if (value === "all") return counts.all;
+    if (value === "active") return counts.active;
+    if (value === "archived") return counts.archived;
+    return undefined;
+  };
 
   const isNewSession = pathname === "/sessions/new";
 
@@ -282,14 +316,20 @@ export function SessionSidebar() {
         >
           <TabsList size="sm" className="overflow-x-auto overflow-y-hidden">
             {filterTabs.map((tab) => {
-              const count =
-                tab.value === "active" ? activeSessions.length
-                : 0;
+              const count = getCountForTab(tab.value);
+              const label = renderCount(count);
+              // Active uses the existing attention-grabbing pill; All/Archived get a
+              // muted inline number so totals are visible without being loud.
+              const isActivePill = tab.value === "active" && count !== undefined && count > 0;
+              const isMutedNumber = !isActivePill && label !== undefined;
               return (
                 <TabsTrigger key={tab.value} value={tab.value}>
                   {tab.label}
-                  {count > 0 && (
-                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{count}</span>
+                  {isActivePill && (
+                    <span className="rounded-full text-white text-xs leading-none px-1.5 py-0.5 bg-primary">{label}</span>
+                  )}
+                  {isMutedNumber && (
+                    <span className="text-xs leading-none text-muted-foreground/60 tabular-nums">{label}</span>
                   )}
                 </TabsTrigger>
               );
@@ -320,15 +360,17 @@ export function SessionSidebar() {
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
 
-        {(isLoading || (isArchivedView && isArchivedLoading)) && (
+        {isLoading && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
-        {!isLoading && !(isArchivedView && isArchivedLoading) && displayedSessions.length === 0 && (
+        {!isLoading && displayedSessions.length === 0 && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-            {allSessions.length === 0 ? "No sessions yet" : "No sessions match this filter."}
+            {counts && counts.all === 0 && !trimmedSearch
+              ? "No sessions yet"
+              : "No sessions match this filter."}
           </div>
         )}
 
@@ -421,6 +463,24 @@ export function SessionSidebar() {
             </div>
           );
         })}
+
+        {loadMoreMutation.isError && (
+          <p className="px-2 py-2 text-center text-xs text-destructive/80">
+            Failed to load more. Try again.
+          </p>
+        )}
+
+        {hasMore && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mx-2 mt-1 mb-2 h-7 w-[calc(100%-1rem)] text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => loadMoreMutation.mutate()}
+            disabled={loadMoreMutation.isPending}
+          >
+            {loadMoreMutation.isPending ? "Loading…" : "Show more"}
+          </Button>
+        )}
       </div>
     </div>
   );

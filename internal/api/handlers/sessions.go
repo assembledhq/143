@@ -236,6 +236,40 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Counts returns capped tab-badge counts for the sessions list. Bucket values
+// that hit the cap indicate "at least cap" and should be rendered as e.g. 99+.
+func (h *SessionHandler) Counts(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	filters := db.SessionCountsFilters{}
+
+	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
+		repoID, err := uuid.Parse(repoIDStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return
+		}
+		filters.RepositoryID = repoID
+	}
+
+	if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
+			return
+		}
+		filters.TriggeredByUserID = userID
+	}
+
+	counts, err := h.runStore.CountsByOrg(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "COUNTS_FAILED", "failed to compute session counts", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionCounts]{Data: counts})
+}
+
 func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
