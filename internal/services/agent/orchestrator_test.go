@@ -1883,3 +1883,105 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
 	got := orch.ResolveSessionTimeout(context.Background(), testOrg())
 	require.Equal(t, agent.DefaultSandboxTimeout, got)
 }
+
+// --- DeadlineExceeded handling in RunAgent / ContinueSession ---
+
+func TestRunAgent_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	startedAt := time.Now().Add(-10 * time.Minute)
+	run.StartedAt = &startedAt
+
+	d := defaultDeps()
+	// Simulate the adapter returning after ctx has already expired — the
+	// orchestrator should detect ctx.Err() == DeadlineExceeded and route
+	// into the timeout branch.
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+
+	orch := buildOrchestrator(d)
+
+	// Pass a context that's already past its deadline.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	err := orch.RunAgent(ctx, run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "session timed out")
+
+	// failRun persists status via UpdateResult, not UpdateStatus.
+	results := d.sessions.getResultUpdates()
+	foundFailed := false
+	for _, r := range results {
+		if r.status == "failed" {
+			foundFailed = true
+			require.NotNil(t, r.result)
+			require.NotNil(t, r.result.Error)
+			require.Contains(t, *r.result.Error, "Session timed out")
+		}
+	}
+	require.True(t, foundFailed, "session should have been marked failed via UpdateResult")
+
+	// analyze_failure should be enqueued with session_id and org_id.
+	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
+	payload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, run.ID.String(), payload["session_id"])
+	require.Equal(t, run.OrgID.String(), payload["org_id"])
+}
+
+func TestContinueSession_DeadlineExceededMarksFailedAndEnqueuesAnalysis(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	startedAt := time.Now().Add(-10 * time.Minute)
+	session.StartedAt = &startedAt
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Keep going.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return nil, context.DeadlineExceeded
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	err := orch.ContinueSession(ctx, session)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "session timed out")
+
+	require.Contains(t, d.jobs.getEnqueued(), "analyze_failure")
+	payload, ok := d.jobs.getPayload("analyze_failure").(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, session.ID.String(), payload["session_id"])
+	require.Equal(t, session.OrgID.String(), payload["org_id"])
+}

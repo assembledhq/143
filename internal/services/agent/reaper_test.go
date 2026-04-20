@@ -177,6 +177,79 @@ func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
 	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[1].category)
 }
 
+func TestReapPhase0_5_ContinuesOnUpdateResultError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+		updateResultErr: errors.New("db error"),
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// UpdateResult attempted for both, but since it errored, UpdateFailure
+	// should have been skipped via the `continue` branch.
+	require.Len(t, mock.updatedResults, 2)
+	assert.Empty(t, mock.updatedFailures, "UpdateFailure should be skipped when UpdateResult errors")
+}
+
+func TestReapPhase0_5_ContinuesOnUpdateFailureError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+		updateFailureErr: errors.New("db error"),
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// UpdateResult should have succeeded for both, UpdateFailure should have
+	// been attempted but logged and continued (not breaking the loop).
+	require.Len(t, mock.updatedResults, 2)
+	require.Len(t, mock.updatedFailures, 2, "UpdateFailure should still be called for all sessions even if it errors")
+}
+
+func TestReapPhase0_5_UsesStartedAtForElapsedLog(t *testing.T) {
+	t.Parallel()
+
+	// Covers the zero-value StartedAt branch in Phase 0.5.
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: nil},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	require.Len(t, mock.updatedResults, 1)
+	require.Len(t, mock.updatedFailures, 1)
+}
+
 func TestReapPhase0_5_ContinuesOnListError(t *testing.T) {
 	t.Parallel()
 
