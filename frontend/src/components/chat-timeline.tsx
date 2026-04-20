@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { ChevronRight, AlertTriangle, Wrench, FileCode2, X, FileText, ClipboardList, Check, PenLine } from "lucide-react";
+import { ChevronRight, AlertTriangle, Wrench, FileCode2, X, FileText, ClipboardList, Check, PenLine, Terminal, FileSearch, Search, FolderSearch, Globe, Bot, ListTodo } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MarkdownContent } from "@/components/markdown";
@@ -9,6 +9,7 @@ import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
+import { deriveToolDisplay, formatToolInput, type ToolIconKind } from "@/lib/tool-label";
 
 function safeDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
@@ -24,9 +25,23 @@ function formatTimestamp(dateStr: string): string {
   });
 }
 
+const TOOL_ICONS: Record<ToolIconKind, React.ComponentType<{ className?: string }>> = {
+  terminal: Terminal,
+  "file-read": FileSearch,
+  "file-edit": PenLine,
+  search: Search,
+  glob: FolderSearch,
+  web: Globe,
+  agent: Bot,
+  plan: ListTodo,
+  wrench: Wrench,
+};
+
 function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
   const [open, setOpen] = useState(false);
-  const toolName = (toolUse.metadata?.tool as string) || "unknown";
+  const { label, icon } = deriveToolDisplay(toolUse);
+  const Icon = TOOL_ICONS[icon];
+  const inputDetail = formatToolInput(toolUse);
 
   return (
     <div className="mx-2">
@@ -35,27 +50,34 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
         className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
-        <Wrench className="h-3 w-3 text-blue-600 dark:text-blue-400 shrink-0" />
-        <Badge
-          variant="secondary"
-          className="bg-blue-500/10 text-blue-700 dark:text-blue-400 text-xs px-1.5 py-0"
-        >
-          {toolName}
-        </Badge>
+        <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        <span className="text-foreground truncate min-w-0">{label}</span>
         <span className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0">
           {formatTimestamp(toolUse.created_at)}
         </span>
       </button>
-      {open && toolResult && (
-        <div className="ml-7 mt-1 mb-2 rounded-md border border-border bg-muted/30 p-2 overflow-x-auto">
-          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground">
-            {toolResult.message}
-          </pre>
-        </div>
-      )}
-      {open && !toolResult && (
-        <div className="ml-7 mt-1 mb-2 text-xs text-muted-foreground italic">
-          No result captured
+      {open && (
+        <div className="ml-7 mt-1 mb-2 space-y-1.5">
+          {inputDetail && (
+            <div className="rounded-md border border-border bg-muted/30 p-2 overflow-x-auto">
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">
+                {inputDetail}
+              </pre>
+            </div>
+          )}
+          {toolResult ? (
+            <div className="rounded-md border border-border bg-muted/30 p-2 overflow-x-auto">
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground">
+                {toolResult.message}
+              </pre>
+            </div>
+          ) : (
+            !inputDetail && (
+              <div className="text-xs text-muted-foreground italic">
+                No result captured
+              </div>
+            )
+          )}
         </div>
       )}
     </div>

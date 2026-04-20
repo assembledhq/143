@@ -156,7 +156,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 				Timestamp: time.Now(),
 				Level:     "tool_use",
 				Message:   fmt.Sprintf("using tool: %s", event.Tool),
-				Metadata:  map[string]interface{}{"tool": event.Tool},
+				Metadata:  claudeToolUseMetadata(event),
 			}
 
 		case "tool_result":
@@ -509,8 +509,25 @@ type claudeStreamEvent struct {
 	Content   string          `json:"content,omitempty"`
 	Message   string          `json:"message,omitempty"`
 	Tool      string          `json:"tool,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
 	Result    json.RawMessage `json:"result,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
+}
+
+// claudeToolUseMetadata builds the metadata map for a tool_use log entry,
+// preserving the tool name and the parsed input arguments so downstream
+// consumers (UI, analytics) can render a descriptive label. Claude's Bash
+// tool includes an `input.description` field that the frontend surfaces as
+// the primary label — dropping Input here would discard that signal.
+func claudeToolUseMetadata(event claudeStreamEvent) map[string]interface{} {
+	metadata := map[string]interface{}{"tool": event.Tool}
+	if len(event.Input) > 0 {
+		var inputMap map[string]interface{}
+		if err := json.Unmarshal(event.Input, &inputMap); err == nil {
+			metadata["input"] = inputMap
+		}
+	}
+	return metadata
 }
 
 // parseStreamOutput processes the streaming JSON output line by line,
@@ -555,7 +572,7 @@ func parseStreamOutput(output []byte, result *agent.AgentResult, logCh chan<- ag
 				Timestamp: time.Now(),
 				Level:     "tool_use",
 				Message:   fmt.Sprintf("using tool: %s", event.Tool),
-				Metadata:  map[string]interface{}{"tool": event.Tool},
+				Metadata:  claudeToolUseMetadata(event),
 			}
 
 		case "tool_result":

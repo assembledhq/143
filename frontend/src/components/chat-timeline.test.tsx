@@ -67,19 +67,24 @@ describe("ChatTimeline", () => {
     const entries: TimelineEntry[] = [
       {
         kind: "tool_group",
-        toolUse: makeLog({ id: 1, level: "tool_use", message: "using tool: Read", metadata: { tool: "Read" } }),
+        toolUse: makeLog({
+          id: 1,
+          level: "tool_use",
+          message: "using tool: Read",
+          metadata: { tool: "Read", input: { file_path: "/repo/app.ts" } },
+        }),
         toolResult: makeLog({ id: 2, level: "output", message: "file contents here", metadata: { type: "tool_result" } }),
       },
     ];
     render(<ChatTimeline entries={entries} isRunning={false} />);
 
-    // Tool name badge visible
-    expect(screen.getByText("Read")).toBeInTheDocument();
+    // Derived label visible on the row.
+    expect(screen.getByText("Read app.ts")).toBeInTheDocument();
     // Result hidden initially
     expect(screen.queryByText("file contents here")).not.toBeInTheDocument();
 
     // Click to expand
-    await userEvent.click(screen.getByText("Read"));
+    await userEvent.click(screen.getByText("Read app.ts"));
     expect(screen.getByText("file contents here")).toBeInTheDocument();
   });
 
