@@ -203,19 +203,27 @@ func TestAuthHandler_Providers(t *testing.T) {
 				GitHubOAuthClientID: "gh-id",
 				GoogleOAuthClientID: "g-id",
 			},
-			expected: map[string]bool{"github": true, "google": true, "email": true},
+			expected: map[string]bool{"github": true, "google": true, "email": true, "demo": false},
 		},
 		{
 			name: "only github configured",
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 			},
-			expected: map[string]bool{"github": true, "google": false, "email": true},
+			expected: map[string]bool{"github": true, "google": false, "email": true, "demo": false},
 		},
 		{
 			name:     "no oauth configured",
 			cfg:      &config.Config{},
-			expected: map[string]bool{"github": false, "google": false, "email": true},
+			expected: map[string]bool{"github": false, "google": false, "email": true, "demo": false},
+		},
+		{
+			name: "demo mode hides github oauth",
+			cfg: &config.Config{
+				GitHubOAuthClientID: "gh-id",
+				DemoMode:            true,
+			},
+			expected: map[string]bool{"github": false, "google": false, "email": true, "demo": true},
 		},
 	}
 

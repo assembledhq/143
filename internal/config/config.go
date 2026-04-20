@@ -24,6 +24,10 @@ type Config struct {
 	FrontendURL        string   `env:"FRONTEND_URL"`
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
 	Mode               string   `env:"MODE"                  envDefault:"all"`
+	// DemoMode tells the server it is running a public demo/dogfood preview
+	// with seeded data and no real GitHub App. Enables a credential banner
+	// on the login page and short-circuits GitHub client construction.
+	DemoMode bool `env:"DEMO_MODE" envDefault:"false"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -297,6 +301,14 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 
 	if c.CSRFSigningKey == "" {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
+	}
+
+	if c.Env == "production" && c.PreviewOriginTemplate == "http://{id}.preview.localhost:9090" {
+		logger.Warn().Msg("PREVIEW_ORIGIN_TEMPLATE is using the localhost default in production — preview URLs in PR comments and the gateway will not resolve. Set PREVIEW_ORIGIN_TEMPLATE to e.g. https://{id}.preview.example.com.")
+	}
+
+	if c.DemoMode {
+		logger.Warn().Msg("DEMO_MODE is enabled — GitHub integrations are stubbed, seeded credentials are public. Do not use this configuration for production data.")
 	}
 }
 

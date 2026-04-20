@@ -57,12 +57,19 @@ func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStor
 }
 
 // Providers returns which auth methods are configured.
+//
+// When DemoMode is on, "github" is forced to false regardless of OAuth
+// configuration so the login page does not offer a button that would 500
+// against the stubbed GitHub client. "demo" tells the frontend to render
+// the seeded-credentials banner.
 func (h *AuthHandler) Providers(w http.ResponseWriter, r *http.Request) {
+	githubEnabled := h.cfg.GitHubOAuthClientID != "" && !h.cfg.DemoMode
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]bool{
-			"github": h.cfg.GitHubOAuthClientID != "",
+		"data": map[string]any{
+			"github": githubEnabled,
 			"google": h.cfg.GoogleOAuthClientID != "",
 			"email":  true,
+			"demo":   h.cfg.DemoMode,
 		},
 	})
 }

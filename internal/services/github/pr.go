@@ -29,6 +29,13 @@ const (
 	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
+// PreviewStopper stops a running preview instance. Implemented by
+// *preview.Manager; extracted as an interface here to avoid importing the
+// preview package (which depends on this package).
+type PreviewStopper interface {
+	StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error
+}
+
 // PRService handles GitHub PR creation and webhook-based tracking.
 type PRService struct {
 	tokenProvider   *Service
@@ -44,6 +51,8 @@ type PRService struct {
 	users           *db.UserStore
 	orgs            *db.OrganizationStore
 	prTemplates     *db.PRTemplateStore
+	previews        *db.PreviewStore
+	previewStopper  PreviewStopper
 	llmClient       llm.Client
 	audit           *db.AuditEmitter
 	logger          zerolog.Logger
@@ -110,6 +119,14 @@ func (s *PRService) SetOrgStore(store *db.OrganizationStore) {
 // SetPRTemplateStore sets the PR template cache store.
 func (s *PRService) SetPRTemplateStore(store *db.PRTemplateStore) {
 	s.prTemplates = store
+}
+
+// SetPreviewTeardown wires the preview store and stopper used to stop any
+// active preview when a PR is closed. Both args may be nil (no-op) in
+// configurations without the preview subsystem.
+func (s *PRService) SetPreviewTeardown(previews *db.PreviewStore, stopper PreviewStopper) {
+	s.previews = previews
+	s.previewStopper = stopper
 }
 
 // tokenResolution holds the resolved token and metadata about how it was resolved.
@@ -472,6 +489,10 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}
 	}
 
+	// Stop any active preview for this PR. Runs in both merged and closed
+	// branches: once a PR is no longer open, the preview is obsolete.
+	s.teardownPRPreview(ctx, pr, event.PR.Merged)
+
 	// Auto-archive the linked session if the org has opted in.
 	if pr.SessionID != nil && s.orgs != nil {
 		if org, err := s.orgs.GetByID(ctx, pr.OrgID); err != nil {
@@ -498,6 +519,45 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	return nil
+}
+
+// teardownPRPreview stops the running preview (if any) for a closed PR and
+// advances its pr_preview_state row to the terminal status. Best-effort: all
+// failures are logged and swallowed so webhook processing continues.
+func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest, merged bool) {
+	if s.previews == nil || s.previewStopper == nil || s.repos == nil {
+		return
+	}
+
+	repo, err := s.repos.GetByFullName(ctx, pr.GitHubRepo)
+	if err != nil {
+		s.logger.Debug().Err(err).Str("repo", pr.GitHubRepo).Msg("no repo row for PR preview teardown")
+		return
+	}
+
+	state, err := s.previews.GetPRPreviewState(ctx, pr.OrgID, repo.ID, pr.GitHubPRNumber)
+	if err != nil || state == nil {
+		return
+	}
+
+	if state.LastPreviewInstanceID != nil {
+		if stopErr := s.previewStopper.StopPreview(ctx, pr.OrgID, *state.LastPreviewInstanceID); stopErr != nil {
+			s.logger.Warn().Err(stopErr).
+				Str("preview_id", state.LastPreviewInstanceID.String()).
+				Str("pr_id", pr.ID.String()).
+				Msg("failed to stop preview on PR close")
+		}
+	}
+
+	nextStatus := models.PRPreviewStatusClosed
+	if merged {
+		nextStatus = models.PRPreviewStatusMerged
+	}
+	if err := s.previews.UpdatePRPreviewStatus(ctx, pr.OrgID, state.ID, nextStatus); err != nil {
+		s.logger.Warn().Err(err).
+			Str("pr_preview_state_id", state.ID.String()).
+			Msg("failed to update pr_preview_state status")
+	}
 }
 
 // PullRequestReviewEvent represents a GitHub pull_request_review webhook event.

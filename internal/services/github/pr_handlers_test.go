@@ -1861,3 +1861,110 @@ func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {
 	require.NoError(t, err, "should skip unknown PRs without error")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+// recordingPreviewStopper captures StopPreview calls for assertions.
+type recordingPreviewStopper struct {
+	calls   int
+	orgID   uuid.UUID
+	prevID  uuid.UUID
+	nextErr error
+}
+
+func (r *recordingPreviewStopper) StopPreview(_ context.Context, orgID, previewID uuid.UUID) error {
+	r.calls++
+	r.orgID = orgID
+	r.prevID = previewID
+	return r.nextErr
+}
+
+func TestHandlePullRequestEvent_ClosedStopsPreview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	prPreviewStateID := uuid.New()
+	previewInstanceID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+
+	stopper := &recordingPreviewStopper{}
+
+	svc := &PRService{
+		pullRequests:   db.NewPullRequestStore(prMock),
+		repos:          db.NewRepositoryStore(repoMock),
+		previews:       db.NewPreviewStore(previewMock),
+		previewStopper: stopper,
+		logger:         zerolog.Nop(),
+	}
+
+	// 1. GetByRepoAndNumber returns the PR.
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, &sessionID, orgID, 42,
+					"https://github.com/testorg/testrepo/pull/42", "testorg/testrepo",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "",
+					(*time.Time)(nil), now, now),
+		)
+
+	// 2. UpdateStatus to closed.
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// 3. Repo lookup by full name.
+	handlerRepoColumns := []string{
+		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+		"private", "language", "description", "clone_url", "installation_id", "status",
+		"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+	repoMock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerRepoColumns).
+				AddRow(repoID, orgID, integrationID, int64(12345),
+					"testorg/testrepo", "main", false, nil, nil,
+					"https://github.com/testorg/testrepo.git", int64(99),
+					"active", nil, nil, json.RawMessage(`{}`), now, now),
+		)
+
+	// 4. GetPRPreviewState returns a state with a live instance.
+	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
+				"last_preview_instance_id", "last_screenshot_blob_path",
+				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"created_at", "updated_at",
+			}).AddRow(
+				prPreviewStateID, orgID, repoID, 42, nil,
+				&previewInstanceID, "", "", "", "running", now, now,
+			),
+		)
+
+	// 5. UpdatePRPreviewStatus to closed.
+	previewMock.ExpectExec("UPDATE pr_preview_state SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = false
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err)
+	require.Equal(t, 1, stopper.calls, "StopPreview should be called exactly once")
+	require.Equal(t, previewInstanceID, stopper.prevID, "StopPreview should receive the preview instance id from pr_preview_state")
+	require.Equal(t, orgID, stopper.orgID, "StopPreview should receive the PR's org id")
+	require.NoError(t, prMock.ExpectationsWereMet())
+	require.NoError(t, repoMock.ExpectationsWereMet())
+	require.NoError(t, previewMock.ExpectationsWereMet())
+}

@@ -89,8 +89,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
 
 	// Create PRService if GitHub App credentials are configured.
+	// DemoMode short-circuits all GitHub App construction so the dogfood preview
+	// can run with placeholder credentials without 500-ing on integration calls.
 	var prService *ghservice.PRService
-	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+	if !cfg.DemoMode && cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
@@ -118,7 +120,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	// If the GitHub App service is available, let the integration handler
 	// fetch repos directly from the API during the install redirect.
-	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+	if !cfg.DemoMode && cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
@@ -190,7 +192,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
-	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+	if !cfg.DemoMode && cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
@@ -318,6 +320,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		Logger:  logger,
 	})
 	recycleWorker.Start()
+
+	// Wire preview teardown into the PR service so closing a PR stops any
+	// active preview for it. No-op when PRService is nil (no GitHub App).
+	if prService != nil {
+		prService.SetPreviewTeardown(previewStore, previewManager)
+	}
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.

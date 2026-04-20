@@ -89,6 +89,26 @@ describe('LoginPage', () => {
     expect(screen.queryByRole('button', { name: 'Continue with Google' })).not.toBeInTheDocument();
   });
 
+  it('shows demo banner with seeded credentials when demo mode is on', () => {
+    useAuthProvidersMock.mockReturnValue({
+      providers: { github: false, google: false, email: true, demo: true },
+      isLoading: false,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    const banner = screen.getByTestId('demo-banner');
+    expect(banner).toHaveTextContent('Demo environment');
+    expect(banner).toHaveTextContent('dogfood@143.dev');
+    expect(banner).toHaveTextContent('preview-dogfood');
+  });
+
+  it('hides demo banner when demo mode is off', () => {
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
+  });
+
   it('calls login on GitHub button click', async () => {
     const user = userEvent.setup();
     renderWithProviders(<LoginPage />);

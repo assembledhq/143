@@ -4,6 +4,33 @@ A preview is a live, iframed view of your app running inside a 143 session. When
 
 This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/44-sandbox-preview-server.md`](design/44-sandbox-preview-server.md).
 
+## Dogfood preview
+
+143 ships its own `.143/preview.json` + `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
+
+**How to launch it locally:**
+
+1. Boot the local stack (`docker compose up` or the repo-specific make target).
+2. Open a session against the 143 repo (or anything on `main`).
+3. Click **Start Preview**.
+
+**Demo credentials** (shown on the login page when `DEMO_MODE=true`):
+
+- Email: `dogfood@143.dev`
+- Password: `preview-dogfood`
+
+**What you can and cannot do in the dogfood:**
+
+| Works | Does not work |
+|---|---|
+| Browse seeded sessions / PR previews / activity | Start a new agent session (no Docker socket inside the sandbox) |
+| Sign in as the seeded admin | Spin up a nested preview from inside the dogfood |
+| Open the session detail / messages | Any flow that calls the GitHub API (stubbed — no real GitHub App) |
+
+The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
+
+Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
+
 ## Quickstart
 
 Add `.143/preview.json` at the root of your repo:

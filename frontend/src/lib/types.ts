@@ -23,6 +23,7 @@ export interface AuthProviders {
   github: boolean;
   google: boolean;
   email: boolean;
+  demo?: boolean;
 }
 
 export interface Repository {
