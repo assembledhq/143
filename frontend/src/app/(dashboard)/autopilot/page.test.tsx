@@ -74,17 +74,10 @@ function mockStatus(data: PMStatus) {
   );
 }
 
-function mockLatestPlan(plan: PMPlan | null, status = 200) {
+function mockLatestPlan(plan: PMPlan | null) {
   server.use(
-    http.get("/api/v1/pm/plans/latest", () => {
-      if (!plan) {
-        return HttpResponse.json(
-          { error: { code: "NOT_FOUND", message: "No PM plan found" } },
-          { status }
-        );
-      }
-      return HttpResponse.json({ data: plan } satisfies SingleResponse<PMPlan>);
-    })
+    http.get("/api/v1/pm/plans/latest", () =>
+      HttpResponse.json({ data: plan } satisfies SingleResponse<PMPlan | null>))
   );
 }
 
@@ -143,7 +136,7 @@ describe("AutopilotPage", () => {
       success_count: 0,
       total_delegated: 0,
     });
-    mockLatestPlan(null, 404);
+    mockLatestPlan(null);
     mockDocuments([]);
     mockIntegrations([]);
     mockRepositories([]);
@@ -174,7 +167,7 @@ describe("AutopilotPage", () => {
       success_count: 0,
       total_delegated: 0,
     });
-    mockLatestPlan(null, 404);
+    mockLatestPlan(null);
     mockDocuments([]);
     mockIntegrations([
       {

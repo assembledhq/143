@@ -107,12 +107,25 @@ fi
 if [ "$ROLE" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply
   # the egress rules (they read the sandbox network's current subnet).
-  # Older workers may have a root-owned copy from cloud-init bootstrap;
-  # chown the scripts dir first so deploy can overwrite via plain scp.
+  # Older workers may have a root-owned copy from cloud-init bootstrap.
+  # Try to normalize ownership non-interactively; tolerate failure so the
+  # scp below still runs on hosts where files are already deploy-owned.
+  # If sudo has no NOPASSWD entry, `sudo -n` exits immediately instead of
+  # hanging waiting for a password that CI can't provide.
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo chown -R deploy:deploy /opt/143/deploy/scripts"
-  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
-    deploy@"$HOST":/opt/143/deploy/scripts/
+    "sudo -n chown -R deploy:deploy /opt/143/deploy/scripts 2>/dev/null || true"
+  if ! scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-firewall.sh" \
+      deploy@"$HOST":/opt/143/deploy/scripts/; then
+    echo "ERROR: scp of sandbox-firewall.sh failed."
+    echo "  Hint: the worker likely has root-owned files under /opt/143/deploy/scripts AND"
+    echo "  the 'deploy' user lacks NOPASSWD sudo. One-time fix on the worker host:"
+    echo "    1) Log in as root (provider console) and run:"
+    echo "       echo 'deploy ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/99-deploy"
+    echo "       chmod 440 /etc/sudoers.d/99-deploy"
+    echo "       chown -R deploy:deploy /opt/143/deploy"
+    echo "    2) Re-run the deploy."
+    exit 1
+  fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod +x /opt/143/deploy/scripts/sandbox-firewall.sh"
 fi
 

@@ -28,13 +28,6 @@ const DEFAULT_PM_STATUS: PMStatus = {
   total_delegated: 0,
 };
 
-function isNotFoundError(error: unknown): boolean {
-  return typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "NOT_FOUND";
-}
-
 export function useAutopilotPageData() {
   const { isLoading: setupLoading, isSetupComplete } = useSetupStatus();
 
@@ -50,17 +43,7 @@ export function useAutopilotPageData() {
 
   const { data: latestPlan, isLoading: latestPlanLoading } = useQuery<PMPlan | null>({
     queryKey: queryKeys.pm.latest,
-    queryFn: async () => {
-      try {
-        const response = await api.pm.latest();
-        return response.data;
-      } catch (error) {
-        if (isNotFoundError(error)) {
-          return null;
-        }
-        throw error;
-      }
-    },
+    queryFn: async () => (await api.pm.latest()).data,
   });
 
   const { data: documentsResponse, isLoading: documentsLoading } = useQuery<ListResponse<PMDocument>>({
