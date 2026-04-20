@@ -33,6 +33,16 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 	)
 }
 
+// bulkUpdateEnabledColumns mirrors the narrow RETURNING used by
+// BulkUpdateEnabled — only the fields ComputeNextRunAt needs for cron fixup.
+func bulkUpdateEnabledColumns() []string {
+	return []string{"id", "schedule_type", "cron_expression", "timezone"}
+}
+
+func addBulkUpdateEnabledRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
+	return rows.AddRow(a.ID, a.ScheduleType, a.CronExpression, a.Timezone)
+}
+
 func TestAutomationStore_Create(t *testing.T) {
 	t.Parallel()
 
@@ -245,9 +255,10 @@ func TestAutomationStore_BulkUpdateEnabled_EmptyIDsNoop(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationStore(mock)
-	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), nil, false, nil)
 	require.NoError(t, err)
 	require.Empty(t, affected)
+	require.Empty(t, fixupFailures)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -260,15 +271,22 @@ func TestAutomationStore_BulkUpdateEnabled_Pause(t *testing.T) {
 
 	store := NewAutomationStore(mock)
 	userID := uuid.New()
+	orgID := uuid.New()
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 
+	a1 := models.Automation{ID: ids[0], OrgID: orgID, Name: "a1", ScheduleType: "interval", Timezone: "UTC"}
+	a2 := models.Automation{ID: ids[1], OrgID: orgID, Name: "a2", ScheduleType: "interval", Timezone: "UTC"}
+
+	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]).AddRow(ids[1]))
+		WillReturnRows(addBulkUpdateEnabledRow(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1), a2))
+	mock.ExpectCommit()
 
-	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, false, &userID)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, false, &userID)
 	require.NoError(t, err)
 	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "pause path never fixes up cron rows")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -280,18 +298,111 @@ func TestAutomationStore_BulkUpdateEnabled_Resume(t *testing.T) {
 	defer mock.Close()
 
 	store := NewAutomationStore(mock)
+	orgID := uuid.New()
 	ids := []uuid.UUID{uuid.New()}
 
+	iv := 1
+	iu := "hours"
+	a1 := models.Automation{
+		ID: ids[0], OrgID: orgID, Name: "a1",
+		ScheduleType: "interval", IntervalValue: &iv, IntervalUnit: &iu, Timezone: "UTC",
+	}
+
+	mock.ExpectBegin()
 	// Assert the resume path emits the CASE expression that recomputes
 	// next_run_at from interval_value/interval_unit — without this regex
 	// a silent regression to `NULL` would pass the looser UPDATE check.
 	mock.ExpectQuery(`interval_value::text \|\| ' ' \|\| interval_unit\)::interval`).
 		WithArgs(anyArgs(5)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(ids[0]))
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
+	// No cron fixup expected for interval-only rows.
+	mock.ExpectCommit()
 
-	affected, err := store.BulkUpdateEnabled(context.Background(), uuid.New(), ids, true, nil)
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "interval-only resume produces no cron fixups")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	// Cron rows come back from the bulk UPDATE with next_run_at=NULL because
+	// Postgres can't evaluate cron expressions. The Go-side fixup then issues
+	// a per-row UPDATE with the computed next_run_at.
+	expr := "0 9 * * *"
+	a1 := models.Automation{
+		ID: ids[0], OrgID: orgID, Name: "cron-a1",
+		ScheduleType:   "cron",
+		CronExpression: &expr,
+		Timezone:       "UTC",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
+	mock.ExpectExec("UPDATE automations SET next_run_at").
+		WithArgs(anyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, ids, affected)
+	require.Empty(t, fixupFailures, "valid cron expression should fix up cleanly")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure verifies that
+// a malformed cron expression on a resumed row does not abort the bulk and
+// produces a CronFixupFailure entry the caller can surface to the operator.
+// Without this signal the row would be enabled=true with next_run_at=NULL
+// and silently never fire — the worst kind of "automation bug".
+func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	// Cron expression that ValidateCronExpression / ComputeNextRunAt rejects.
+	// We rely on the model's parser to fail rather than constructing an error
+	// path manually — keeps this test honest about which inputs trip it.
+	expr := "this is definitely not a cron expression"
+	a1 := models.Automation{
+		ID: ids[0], OrgID: orgID, Name: "broken-cron",
+		ScheduleType:   "cron",
+		CronExpression: &expr,
+		Timezone:       "UTC",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(addBulkUpdateEnabledRow(pgxmock.NewRows(bulkUpdateEnabledColumns()), a1))
+	// No follow-up UPDATE expected — the per-row fixup is skipped on parse error.
+	mock.ExpectCommit()
+
+	affected, fixupFailures, err := store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	require.NoError(t, err, "a single malformed cron must not abort the bulk")
+	require.ElementsMatch(t, ids, affected, "row was still resumed in the SQL UPDATE")
+	require.Len(t, fixupFailures, 1, "operator must be told the cron next_run_at couldn't be computed")
+	require.Equal(t, ids[0], fixupFailures[0].AutomationID)
+	require.NotEmpty(t, fixupFailures[0].Reason)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -613,42 +724,6 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAutomationRunStore_CompletePendingNoopIfAutomationActive(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		rowsAffected int64
-		expected     bool
-	}{
-		{name: "updates pending run for active automation", rowsAffected: 1, expected: true},
-		{name: "leaves skipped or deleted automation run unchanged", rowsAffected: 0, expected: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
-			defer mock.Close()
-
-			store := NewAutomationRunStore(mock)
-			now := time.Now()
-			summary := "noop"
-
-			mock.ExpectExec(`UPDATE automation_runs AS r\s+SET status = @status.*FROM automations AS a.*r.status = 'pending'.*a.deleted_at IS NULL`).
-				WithArgs(anyArgs(6)...).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
-
-			updated, err := store.CompletePendingNoopIfAutomationActive(context.Background(), uuid.New(), uuid.New(), uuid.New(), &now, &summary)
-			require.NoError(t, err)
-			require.Equal(t, tt.expected, updated)
-			require.NoError(t, mock.ExpectationsWereMet())
-		})
-	}
-}
-
 func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	t.Parallel()
 
@@ -709,5 +784,85 @@ func TestAutomationRunStore_ListOrgsWithStuckRuns(t *testing.T) {
 	orgs, err := store.ListOrgsWithStuckRuns(context.Background(), time.Hour)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []uuid.UUID{orgA, orgB}, orgs)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_GetStats(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+	orgID := uuid.New()
+	automationID := uuid.New()
+
+	day1 := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 4, 11, 0, 0, 0, 0, time.UTC)
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+
+	cols := []string{
+		"bucket", "total", "completed", "completed_noop", "failed",
+		"skipped", "running", "pending", "avg_duration_seconds",
+	}
+	rows := pgxmock.NewRows(cols).
+		AddRow(day1, 5, 3, 1, 1, 0, 0, 0, 120.0).
+		AddRow(day2, 2, 2, 0, 0, 0, 0, 0, 60.0)
+
+	mock.ExpectQuery(`FROM automation_runs\s+WHERE org_id = @org_id\s+AND automation_id = @automation_id\s+AND triggered_at >= @since\s+AND triggered_at < @until\s+GROUP BY bucket\s+ORDER BY bucket ASC`).
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(rows)
+
+	stats, err := store.GetStats(context.Background(), orgID, automationID, since, until)
+	require.NoError(t, err)
+	require.Len(t, stats.Buckets, 2)
+	require.Equal(t, 5, stats.Buckets[0].Total)
+	require.Equal(t, 3, stats.Buckets[0].Completed)
+	require.Equal(t, 1, stats.Buckets[0].Failed)
+	require.InDelta(t, 120.0, stats.Buckets[0].AvgDurationSeconds, 0.001)
+
+	// Window totals roll up across buckets.
+	require.Equal(t, 7, stats.Totals.Total)
+	require.Equal(t, 5, stats.Totals.Completed)
+	require.Equal(t, 1, stats.Totals.CompletedNoop)
+	require.Equal(t, 1, stats.Totals.Failed)
+
+	// Success rate: (completed + completed_noop) / (completed + completed_noop + failed)
+	//             = (5 + 1) / (5 + 1 + 1) = 6/7
+	require.InDelta(t, 6.0/7.0, stats.Totals.SuccessRate, 0.001)
+
+	// Weighted duration: (5*120 + 2*60) / (5 + 2) = 720/7 ≈ 102.857
+	require.InDelta(t, 720.0/7.0, stats.Totals.AvgDurationSeconds, 0.001)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_GetStats_EmptyWindow(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+
+	cols := []string{
+		"bucket", "total", "completed", "completed_noop", "failed",
+		"skipped", "running", "pending", "avg_duration_seconds",
+	}
+	mock.ExpectQuery(`FROM automation_runs`).
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(cols))
+
+	since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	stats, err := store.GetStats(context.Background(), uuid.New(), uuid.New(), since, until)
+	require.NoError(t, err)
+	require.Empty(t, stats.Buckets)
+	// No terminal runs → success_rate stays 0 rather than NaN.
+	require.Equal(t, 0.0, stats.Totals.SuccessRate)
+	require.Equal(t, 0.0, stats.Totals.AvgDurationSeconds)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

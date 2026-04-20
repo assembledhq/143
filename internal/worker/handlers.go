@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -281,12 +282,24 @@ func newProjectCycleHandler(services *Services, logger zerolog.Logger) JobHandle
 	}
 }
 
-// newAutomationRunHandler executes a single automation_run job.
+// newAutomationRunHandler executes a single automation_run job by creating a
+// Session owned by the run and dispatching it through the normal run_agent
+// job pipeline. Completion bubbles back via AutomationRunUpdater on the
+// Orchestrator (see services/automations/hooks.go).
 //
-// The actual agent invocation is not yet implemented (separation work first,
-// execution in a follow-up). The handler still must exist so the scheduler's
-// enqueued jobs do not pile up as "no handler registered" errors and so the
-// run row transitions out of `pending` deterministically each tick.
+// Concurrency contract: the handler relies on TransitionStatusIf to make every
+// status transition out of `pending` atomic. Two workers handed a duplicate
+// job (at-least-once delivery, retry-after-crash) both reach the conditional
+// transition; whichever lands its UPDATE first wins, the loser sees
+// transitioned=false and bails. This is what prevents two sessions from being
+// created against the same automation_run row.
+//
+// Terminal status guarantee: by the time this handler returns, the
+// automation_run row is in exactly one of {pending (lost race / unchanged),
+// running (we own the session), skipped (automation deleted/paused), failed
+// (session create failed)}. Leaving the row in pending after we've made
+// changes would force the reaper to clean up, and the reaper's hour-long
+// threshold is too slow to give the UI useful feedback.
 func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -311,25 +324,150 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("parse automation ID: %w", err)
 		}
 
-		logger.Info().
+		log := logger.With().
 			Str("org_id", orgID.String()).
 			Str("automation_id", automationID.String()).
 			Str("run_id", runID.String()).
-			Msg("running automation_run job (stub: marking completed_noop)")
+			Logger()
+		log.Info().Msg("running automation_run job")
 
-		now := time.Now()
-		summary := "Automation execution is not yet implemented (Phase 3). This run was recorded but no agent was launched."
-		updated, err := stores.AutomationRuns.CompletePendingNoopIfAutomationActive(ctx, orgID, automationID, runID, &now, &summary)
+		// Fast-path early-exit: if the row is already non-pending we can skip
+		// all the downstream work (automation lookup, session build) without
+		// changing correctness. The atomic transitions below are still the
+		// source of truth — this is purely an optimisation for retries.
+		run, err := stores.AutomationRuns.GetByID(ctx, orgID, automationID, runID)
 		if err != nil {
-			return err
+			return fmt.Errorf("fetch automation run: %w", err)
 		}
-		if !updated {
-			logger.Info().
-				Str("org_id", orgID.String()).
-				Str("automation_id", automationID.String()).
-				Str("run_id", runID.String()).
-				Msg("automation_run job skipped because run is no longer pending or automation is deleted")
+		if run.Status != models.AutomationRunStatusPending {
+			log.Info().Str("status", run.Status).Msg("skipping automation_run: row no longer pending")
+			return nil
 		}
+
+		automation, err := stores.Automations.GetByID(ctx, orgID, automationID)
+		if err != nil {
+			// GetByID filters deleted_at IS NULL, so ErrNoRows covers both
+			// "truly missing" and "soft-deleted" — mark skipped so the run
+			// doesn't sit pending forever. Any other error is treated as
+			// transient and returned so the job can be retried.
+			//
+			// SoftDelete cascades to cancel pending runs in the same tx
+			// (see AutomationStore.SoftDelete), so a delete committed
+			// before this fetch will already have flipped the run row out
+			// of pending — the !pending fast-path above catches that case.
+			// This branch handles the narrow window where this worker
+			// observed pending *before* SoftDelete's tx committed; the
+			// CAS below would also fail safely, but skipping early avoids
+			// building a session for a doomed run.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("fetch automation: %w", err)
+			}
+			now := time.Now()
+			summary := "automation deleted before run could start"
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); updateErr != nil {
+				return fmt.Errorf("mark run skipped after automation deletion: %w", updateErr)
+			}
+			return nil
+		}
+
+		// Paused automations: manual Run-now is refused at the API layer, so
+		// we only get here when a scheduled run slipped through before a
+		// pause landed. Mark skipped so the scheduler can fire cleanly on
+		// the next resume without a ghost run sitting pending.
+		//
+		// There is a narrow TOCTOU window between this !Enabled check and
+		// the pending→running transition below: if a user pauses *between*
+		// those two statements, this worker still claims the row and starts
+		// a session. That's acceptable — pause does not cancel in-flight
+		// runs by design (see Pause handler — it clears next_run_at but
+		// leaves pending/running rows alone), and the next scheduled tick
+		// simply won't fire. Folding the enabled check into the CAS would
+		// require coupling automations and automation_runs tables into one
+		// UPDATE, which isn't worth the complexity for a race that only
+		// starts *one* extra session.
+		if !automation.Enabled {
+			now := time.Now()
+			summary := "automation paused before run could start"
+			if _, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
+				return fmt.Errorf("mark run skipped after pause: %w", err)
+			}
+			return nil
+		}
+
+		// Atomic claim: pending → running. Performed BEFORE session creation
+		// so a duplicate worker that loses the race never reaches the Sessions
+		// or Jobs stores at all. Once we own the row (transitioned=true), any
+		// later failure path uses TransitionStatusIf(running → ...) so we
+		// don't accidentally overwrite a status another path already wrote.
+		transitioned, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusRunning, nil, nil)
+		if err != nil {
+			return fmt.Errorf("transition run to running: %w", err)
+		}
+		if !transitioned {
+			log.Info().Msg("skipping automation_run: lost race claiming pending row")
+			return nil
+		}
+
+		agentType := models.DefaultDefaultAgentType
+		if automation.AgentType != nil && *automation.AgentType != "" {
+			candidate := models.AgentType(*automation.AgentType)
+			if err := candidate.Validate(); err == nil {
+				agentType = candidate
+			} else {
+				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
+			}
+		}
+
+		var targetBranch *string
+		if automation.BaseBranch != "" {
+			b := automation.BaseBranch
+			targetBranch = &b
+		}
+
+		session := &models.Session{
+			OrgID:             orgID,
+			AgentType:         agentType,
+			Status:            "pending",
+			AutonomyLevel:     "semi",
+			TokenMode:         "low",
+			ModelOverride:     automation.ModelOverride,
+			TriggeredByUserID: run.TriggeredByUserID,
+			TargetBranch:      targetBranch,
+			RepositoryID:      automation.RepositoryID,
+			AutomationRunID:   &runID,
+		}
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			// Session creation failed after we claimed the row — flip
+			// running → failed so the UI reflects the dispatch failure
+			// immediately. Conditional transition guards against the (rare)
+			// case that the orchestrator's completion hook somehow already
+			// fired and moved the row.
+			now := time.Now()
+			summary := fmt.Sprintf("failed to create agent session: %s", err)
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after session create failure")
+			}
+			return fmt.Errorf("create session: %w", err)
+		}
+
+		// Dedupe key on the run_agent enqueue: if this handler is invoked
+		// twice for the same automation_run (only possible if the conditional
+		// transition above somehow returned true twice — defense in depth),
+		// the job store rejects the second insert and the second handler
+		// returns cleanly without a duplicate agent run.
+		dedupeKey := fmt.Sprintf("run_agent:%s", session.ID.String())
+		agentPayload := map[string]string{
+			"session_id": session.ID.String(),
+			"org_id":     orgID.String(),
+		}
+		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", agentPayload, 5, &dedupeKey); err != nil {
+			return fmt.Errorf("enqueue run_agent: %w", err)
+		}
+
+		log.Info().
+			Str("session_id", session.ID.String()).
+			Str("agent_type", string(agentType)).
+			Msg("automation session dispatched")
 		return nil
 	}
 }

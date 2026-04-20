@@ -300,22 +300,42 @@ func (s *AutomationStore) CountInFlightRuns(ctx context.Context, tx pgx.Tx, orgI
 	return count, err
 }
 
+// CronFixupFailure describes a cron-scheduled automation whose next_run_at
+// could not be recomputed during a bulk resume. The row is still flipped to
+// enabled=true by the bulk UPDATE and that change is committed alongside the
+// rest of the transaction, but its next_run_at stays NULL so the scheduler
+// will not fire it. Callers should surface these so the user knows why a
+// "resumed" automation isn't running.
+type CronFixupFailure struct {
+	AutomationID uuid.UUID
+	Reason       string
+}
+
 // BulkUpdateEnabled sets enabled state for multiple automations. When pausing,
-// next_run_at is cleared so the scheduler skips paused rows. When resuming, an
-// interval automation's next_run_at is recomputed from now() so it doesn't sit
-// dead with a NULL next_run_at (which the scheduler's idx_automations_due
-// excludes).
+// next_run_at is cleared so the scheduler skips paused rows. When resuming,
+// next_run_at is recomputed so the row doesn't sit dead with a NULL next_run_at
+// (which the scheduler's idx_automations_due excludes).
 //
-// Returns the IDs actually affected (scoped to org_id and not-yet-deleted) so
-// callers can emit audit events only for rows that really changed — IDs from
-// another tenant or stale/deleted rows are silently filtered by the WHERE
-// clause and must not leak into the audit log.
+// Interval schedules are advanced in-DB via Postgres' interval arithmetic.
+// Cron schedules can't be evaluated in SQL, so the resume path falls through to
+// a Go-side pass inside the same transaction: we scan the returning rows, pick
+// the cron ones, and update each with a locally-computed next_run_at. Keeping
+// both branches in a single tx avoids a half-resumed state visible to the
+// scheduler between statements.
+//
+// Returns:
+//   - affectedIDs: rows actually mutated (scoped to org_id and not-yet-deleted)
+//     so callers can emit audit events only for rows that really changed.
+//   - cronFixupFailures: cron rows whose next_run_at could not be computed.
+//     The row is still resumed but its next_run_at is NULL, so the scheduler
+//     will skip it. Callers should log/surface these — silently dropping them
+//     would leave a "resumed" automation that never fires.
 //
 // Fails closed on empty automationIDs so a caller who forgot to populate the
 // list can't silently pause or resume every automation in the org.
-func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) ([]uuid.UUID, error) {
+func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID, automationIDs []uuid.UUID, enabled bool, userID *uuid.UUID) (affectedIDs []uuid.UUID, cronFixupFailures []CronFixupFailure, err error) {
 	if len(automationIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var pausedBy *uuid.UUID
@@ -326,20 +346,36 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		pausedAt = &now
 	}
 
-	// On resume, compute next_run_at = now() + interval. Postgres' interval
-	// arithmetic handles 'hours'/'days'/'weeks' literals natively. On pause,
-	// clear next_run_at so the scheduler doesn't fire a paused automation.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("begin bulk-update-enabled tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Interval: compute next_run_at = now() + interval directly in SQL.
+	// Cron: leave next_run_at NULL here and fix up below in Go.
+	// Pause: clear next_run_at so the scheduler skips the row.
+	//
+	// NOTE: the ELSE NULL branch is load-bearing for cron — the Go-side
+	// loop below fixes those up before the tx commits. Any *new* schedule
+	// kind added to AutomationScheduleType must either extend this CASE or
+	// add its own post-update pass, otherwise resuming it here will silently
+	// leave next_run_at NULL and the scheduler will skip it forever.
 	var nextRunAtExpr string
 	if enabled {
 		nextRunAtExpr = `CASE
 			WHEN schedule_type = 'interval' AND interval_value IS NOT NULL AND interval_unit IS NOT NULL
 			THEN now() + (interval_value::text || ' ' || interval_unit)::interval
-			ELSE next_run_at
+			ELSE NULL
 		END`
 	} else {
 		nextRunAtExpr = `NULL`
 	}
 
+	// RETURNING only the fields the Go-side cron fixup pass needs
+	// (ComputeNextRunAt reads schedule_type, cron_expression, timezone). Scanning
+	// the full row here would pull 20+ columns back over the wire on every bulk
+	// pause/resume for no reason.
 	query := fmt.Sprintf(`UPDATE automations SET
 			enabled = @enabled,
 			paused_by = @paused_by,
@@ -347,9 +383,9 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			next_run_at = %s,
 			updated_at = now()
 		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
-		RETURNING id`, nextRunAtExpr)
+		RETURNING id, schedule_type, cron_expression, timezone`, nextRunAtExpr)
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
 		"enabled":   enabled,
 		"paused_by": pausedBy,
@@ -357,10 +393,69 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		"ids":       automationIDs,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer rows.Close()
-	return collectIDs(rows)
+	type affectedRow struct {
+		id             uuid.UUID
+		scheduleType   string
+		cronExpression *string
+		timezone       string
+	}
+	var affected []affectedRow
+	for rows.Next() {
+		var r affectedRow
+		if err := rows.Scan(&r.id, &r.scheduleType, &r.cronExpression, &r.timezone); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		affected = append(affected, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	affectedIDs = make([]uuid.UUID, 0, len(affected))
+	now := time.Now()
+	for _, r := range affected {
+		affectedIDs = append(affectedIDs, r.id)
+
+		// Resume-side fixup for cron rows. On pause we leave next_run_at NULL.
+		if !enabled || r.scheduleType != models.AutomationScheduleCron {
+			continue
+		}
+		// ComputeNextRunAt only reads the schedule fields we populated above,
+		// so a partial Automation is safe here.
+		partial := &models.Automation{
+			ID:             r.id,
+			ScheduleType:   r.scheduleType,
+			CronExpression: r.cronExpression,
+			Timezone:       r.timezone,
+		}
+		next, computeErr := partial.ComputeNextRunAt(now)
+		if computeErr != nil {
+			// Record the failure so the caller can surface it. Don't abort
+			// the bulk: a single malformed cron shouldn't block resuming
+			// every other automation in the request.
+			cronFixupFailures = append(cronFixupFailures, CronFixupFailure{
+				AutomationID: r.id,
+				Reason:       computeErr.Error(),
+			})
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE automations SET next_run_at = @next_run_at, updated_at = now()
+				WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+			pgx.NamedArgs{"id": r.id, "org_id": orgID, "next_run_at": next},
+		); err != nil {
+			return nil, nil, fmt.Errorf("update cron next_run_at: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return affectedIDs, cronFixupFailures, nil
 }
 
 // BulkSoftDelete soft-deletes multiple automations and cancels their pending
@@ -587,28 +682,29 @@ func (s *AutomationRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid
 	return err
 }
 
-// CompletePendingNoopIfAutomationActive moves a pending run to completed_noop
-// only if its parent automation still exists. This protects runs cancelled by
-// SoftDelete/BulkSoftDelete from being rewritten by a queued worker job.
-func (s *AutomationRunStore) CompletePendingNoopIfAutomationActive(ctx context.Context, orgID, automationID, runID uuid.UUID, completedAt *time.Time, resultSummary *string) (bool, error) {
-	query := `UPDATE automation_runs AS r
-		SET status = @status,
-		    completed_at = @completed_at,
-		    result_summary = @result_summary,
-		    updated_at = now()
-		FROM automations AS a
-		WHERE r.id = @id
-		  AND r.org_id = @org_id
-		  AND r.automation_id = @automation_id
-		  AND r.status = 'pending'
-		  AND a.id = r.automation_id
-		  AND a.org_id = r.org_id
-		  AND a.deleted_at IS NULL`
+// TransitionStatusIf updates the run's status only if its current status equals
+// fromStatus. Returns true when the row was actually updated. Use this to make
+// the worker handler's pending → running transition safe under at-least-once
+// job delivery: two workers each holding a duplicate job will both pass the
+// "is pending?" check, so the transition itself must be the source of truth.
+//
+// completedAt and resultSummary are preserved via COALESCE when the caller
+// passes nil: intermediate transitions (e.g. pending → running) can pass nil
+// for both without risk, and a later terminal transition that accidentally
+// drops one of them still won't clobber a value written by an earlier writer.
+// Pass non-nil values for terminal transitions.
+func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus string, completedAt *time.Time, resultSummary *string) (bool, error) {
+	query := `UPDATE automation_runs
+		SET status = @to_status,
+			completed_at = COALESCE(@completed_at, completed_at),
+			result_summary = COALESCE(@result_summary, result_summary),
+			updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = @from_status`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":             runID,
 		"org_id":         orgID,
-		"automation_id":  automationID,
-		"status":         models.AutomationRunStatusCompletedNoop,
+		"from_status":    fromStatus,
+		"to_status":      toStatus,
 		"completed_at":   completedAt,
 		"result_summary": resultSummary,
 	})
@@ -636,6 +732,120 @@ func (s *AutomationRunStore) ListOrgsWithStuckRuns(ctx context.Context, threshol
 	}
 	defer rows.Close()
 	return collectIDs(rows)
+}
+
+// GetStats returns per-day aggregates and window totals for an automation's
+// runs. The bucketing uses date_trunc('day', triggered_at) in UTC so every
+// client sees the same bucket boundaries regardless of their locale. Days
+// with zero runs are omitted from the result set — the UI fills gaps with
+// zeros so it stays O(days returned) instead of O(window size).
+//
+// since/until form a half-open interval [since, until); until=now() if zero.
+// Both bounds are required to be UTC times.
+func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID uuid.UUID, since, until time.Time) (models.AutomationRunStats, error) {
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+	if since.IsZero() {
+		since = until.Add(-30 * 24 * time.Hour)
+	}
+	stats := models.AutomationRunStats{Since: since, Until: until}
+
+	// FILTER clauses keep the pivot readable. avg_duration_seconds filters
+	// on the same status set the Go-side weighted re-aggregation uses
+	// (completed/completed_noop/failed) — skipped rows also get completed_at
+	// set by the worker handler, so "WHERE completed_at IS NOT NULL" would
+	// pull them into the bucket mean while the Go weight excludes them, and
+	// the window-wide avg would drift whenever an automation accumulates
+	// skipped runs.
+	const bucketQuery = `
+		SELECT
+			date_trunc('day', triggered_at AT TIME ZONE 'UTC') AS bucket,
+			count(*) AS total,
+			count(*) FILTER (WHERE status = 'completed') AS completed,
+			count(*) FILTER (WHERE status = 'completed_noop') AS completed_noop,
+			count(*) FILTER (WHERE status = 'failed') AS failed,
+			count(*) FILTER (WHERE status = 'skipped') AS skipped,
+			count(*) FILTER (WHERE status = 'running') AS running,
+			count(*) FILTER (WHERE status = 'pending') AS pending,
+			coalesce(
+				avg(GREATEST(EXTRACT(EPOCH FROM (completed_at - triggered_at)), 0))
+					FILTER (WHERE status IN ('completed', 'completed_noop', 'failed')
+						AND completed_at IS NOT NULL),
+				0
+			) AS avg_duration_seconds
+		FROM automation_runs
+		WHERE org_id = @org_id
+		  AND automation_id = @automation_id
+		  AND triggered_at >= @since
+		  AND triggered_at < @until
+		GROUP BY bucket
+		ORDER BY bucket ASC`
+
+	rows, err := s.db.Query(ctx, bucketQuery, pgx.NamedArgs{
+		"org_id":        orgID,
+		"automation_id": automationID,
+		"since":         since,
+		"until":         until,
+	})
+	if err != nil {
+		return stats, fmt.Errorf("query automation run stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var b models.AutomationRunStatsBucket
+		if err := rows.Scan(
+			&b.Bucket,
+			&b.Total,
+			&b.Completed,
+			&b.CompletedNoop,
+			&b.Failed,
+			&b.Skipped,
+			&b.Running,
+			&b.Pending,
+			&b.AvgDurationSeconds,
+		); err != nil {
+			return stats, fmt.Errorf("scan automation run stats: %w", err)
+		}
+		stats.Buckets = append(stats.Buckets, b)
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+
+	// Totals: summing the buckets is cheaper than a second query and keeps
+	// bucketed and window-wide numbers consistent by construction.
+	t := &stats.Totals
+	var durWeightedSum float64
+	var durCompletedCount int
+	for _, b := range stats.Buckets {
+		t.Total += b.Total
+		t.Completed += b.Completed
+		t.CompletedNoop += b.CompletedNoop
+		t.Failed += b.Failed
+		t.Skipped += b.Skipped
+		t.Running += b.Running
+		t.Pending += b.Pending
+		// Re-aggregate duration as a weighted mean over completed counts.
+		// avg_duration_seconds is over rows with completed_at set, which is
+		// (completed + completed_noop + failed) for that bucket. Using
+		// completed+noop+failed as the weight matches what the bucket mean
+		// was computed over.
+		completedLike := b.Completed + b.CompletedNoop + b.Failed
+		if completedLike > 0 {
+			durWeightedSum += b.AvgDurationSeconds * float64(completedLike)
+			durCompletedCount += completedLike
+		}
+	}
+	if denom := t.Completed + t.CompletedNoop + t.Failed; denom > 0 {
+		t.SuccessRate = float64(t.Completed+t.CompletedNoop) / float64(denom)
+	}
+	if durCompletedCount > 0 {
+		t.AvgDurationSeconds = durWeightedSum / float64(durCompletedCount)
+	}
+
+	return stats, nil
 }
 
 // ReapStuckRuns marks pending/running runs older than threshold as failed for

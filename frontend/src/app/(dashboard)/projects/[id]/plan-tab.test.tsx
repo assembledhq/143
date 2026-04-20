@@ -67,9 +67,6 @@ const mockProject: Project = {
   failed_tasks: 0,
   proposed_by_pm: false,
   source_issue_ids: [],
-  schedule_enabled: false,
-  schedule_interval: 1,
-  schedule_unit: "days",
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };
