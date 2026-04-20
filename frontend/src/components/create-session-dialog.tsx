@@ -52,6 +52,9 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  // Synchronous guard: React Query's isPending flips on the next render, so
+  // rapid Enter presses can all pass the isPending check in the same tick.
+  const submittingRef = useRef(false);
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -136,6 +139,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       setUserSelectedRepoId(null);
       setBranchByRepoId({});
       setCreationError(null);
+      submittingRef.current = false;
     }
   }, [open]);
 
@@ -179,8 +183,16 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       setCreationError(
         error instanceof Error ? error.message : "Could not start session. Please try again.",
       );
+      submittingRef.current = false;
     },
   });
+
+  function submitCreateSession() {
+    if (submittingRef.current) return;
+    if (message.trim().length === 0) return;
+    submittingRef.current = true;
+    createMutation.mutate();
+  }
 
   function resizeMessageInput() {
     const element = messageInputRef.current;
@@ -250,9 +262,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (message.trim().length > 0 && !createMutation.isPending) {
-                  createMutation.mutate();
-                }
+                submitCreateSession();
               }
             }}
             placeholder="Tell the agent what to do..."
@@ -417,7 +427,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
             <Button
               type="button"
               size="sm"
-              onClick={() => createMutation.mutate()}
+              onClick={submitCreateSession}
               disabled={message.trim().length === 0 || createMutation.isPending}
               className="h-7 px-3 text-xs rounded-md"
             >
