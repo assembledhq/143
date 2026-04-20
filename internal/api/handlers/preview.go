@@ -90,32 +90,36 @@ func (h *PreviewHandler) requireManager(w http.ResponseWriter, r *http.Request) 
 const workspacePreviewConfigPath = ".143/preview.json"
 
 // readWorkspacePreviewConfig attempts to read and parse .143/preview.json from
-// the session's sandbox workspace. Returns the parsed config and true when a
-// valid config is found; returns false in every other case (no fileReader
-// wired, file absent, read error, or invalid contents) so the caller can fall
-// back to built-in defaults without surfacing an error to the user.
-func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, bool) {
+// the session's sandbox workspace. Returns:
+//   - (cfg, nil)   when a valid committed config is found and parsed.
+//   - (nil, nil)   for "no config to use" cases where the caller should fall
+//     back to built-in defaults: no fileReader wired, the file is absent, or
+//     its contents fail to parse (a malformed committed config is a user
+//     authoring problem, not an infrastructure failure; surfacing it as a 500
+//     would make the preview worse, not better, than the default).
+//   - (nil, err)   for genuine infrastructure failures (docker exec failed,
+//     context cancelled, sandbox gone) — the caller should surface these
+//     instead of silently swapping in Node.js defaults for what may well be
+//     a Go/Python/etc. project.
+func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *agent.Sandbox, sessionID uuid.UUID) (*models.PreviewConfig, error) {
 	if h.fileReader == nil {
-		return nil, false
+		return nil, nil
 	}
 	content, _, err := h.fileReader.ReadFile(ctx, sb.ID, sb.WorkDir, workspacePreviewConfigPath)
 	if err != nil {
-		// Missing file is the expected "no committed config" case (debug);
-		// anything else (docker exec failure, context cancellation, sandbox
-		// gone) is warned so unexpected failures don't fall through silently.
 		if errors.Is(err, sandbox.ErrFileNotFound) {
 			h.logger.Debug().
 				Str("session_id", sessionID.String()).
 				Str("path", workspacePreviewConfigPath).
 				Msg("no committed preview config in workspace")
-		} else {
-			h.logger.Warn().
-				Err(err).
-				Str("session_id", sessionID.String()).
-				Str("path", workspacePreviewConfigPath).
-				Msg("failed to read committed preview config; falling back to defaults")
+			return nil, nil
 		}
-		return nil, false
+		h.logger.Warn().
+			Err(err).
+			Str("session_id", sessionID.String()).
+			Str("path", workspacePreviewConfigPath).
+			Msg("failed to read committed preview config")
+		return nil, fmt.Errorf("read %s: %w", workspacePreviewConfigPath, err)
 	}
 	cfg, err := preview.ParseConfig([]byte(content))
 	if err != nil {
@@ -124,13 +128,13 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 			Str("session_id", sessionID.String()).
 			Str("path", workspacePreviewConfigPath).
 			Msg("committed preview config failed to parse; falling back to defaults")
-		return nil, false
+		return nil, nil
 	}
 	h.logger.Info().
 		Str("session_id", sessionID.String()).
 		Str("path", workspacePreviewConfigPath).
 		Msg("using preview config from workspace")
-	return cfg, true
+	return cfg, nil
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.
@@ -216,7 +220,15 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		// Auto-detect: first try to read .143/preview.json from the session's
 		// workspace so repos with a committed config just work. Fall back to a
 		// Node.js default (npm start, port 3000) only if no config is present.
-		if cfg, ok := h.readWorkspacePreviewConfig(r.Context(), sb, sessionID); ok {
+		cfg, err := h.readWorkspacePreviewConfig(r.Context(), sb, sessionID)
+		if err != nil {
+			// Infrastructure failure (docker exec, sandbox gone, etc.) — do
+			// not silently swap in Node.js defaults, which would start the
+			// wrong preview for a non-Node project and time out after minutes.
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
+			return
+		}
+		if cfg != nil {
 			body.Config = cfg
 		} else {
 			h.logger.Info().

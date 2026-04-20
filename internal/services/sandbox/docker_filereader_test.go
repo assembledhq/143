@@ -25,9 +25,14 @@ type mockDockerClient struct {
 
 	inspectResp container.ExecInspect
 	inspectErr  error
+
+	// lastExecOptions captures the last ExecOptions passed to
+	// ContainerExecCreate so tests can assert on Env, Cmd, etc.
+	lastExecOptions container.ExecOptions
 }
 
-func (m *mockDockerClient) ContainerExecCreate(_ context.Context, _ string, _ container.ExecOptions) (container.ExecCreateResponse, error) {
+func (m *mockDockerClient) ContainerExecCreate(_ context.Context, _ string, cfg container.ExecOptions) (container.ExecCreateResponse, error) {
+	m.lastExecOptions = cfg
 	return m.createResp, m.createErr
 }
 
@@ -271,6 +276,20 @@ func TestDockerFileReader_ReadFile_NonNotFoundNotSentinel(t *testing.T) {
 	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "locked")
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrFileNotFound, "non-ENOENT errors must not be classified as file-not-found")
+}
+
+// TestDockerFileReader_ForcesCLocale guards isNotFoundStderr: if the exec
+// environment ever stops pinning LC_ALL=C, a non-English container locale
+// would emit a translated ENOENT that our matcher would miss.
+func TestDockerFileReader_ForcesCLocale(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClient("ok\n", 0)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "f")
+	require.NoError(t, err)
+	require.Contains(t, client.lastExecOptions.Env, "LC_ALL=C", "exec must pin LC_ALL=C so ENOENT stderr stays in English")
+	require.Contains(t, client.lastExecOptions.Env, "LANG=C", "exec must pin LANG=C as a belt-and-braces fallback")
 }
 
 func TestDockerFileReader_ReadFileContext(t *testing.T) {

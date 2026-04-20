@@ -50,6 +50,10 @@ func (d *DockerFileReader) execCmd(ctx context.Context, containerID, workDir str
 		AttachStdout: true,
 		AttachStderr: true,
 		WorkingDir:   workDir,
+		// Force the C locale so utilities (head, sed, ls) emit stderr in a
+		// known dialect — isNotFoundStderr relies on the English "No such
+		// file or directory" phrase to distinguish ENOENT from other errors.
+		Env: []string{"LC_ALL=C", "LANG=C"},
 	}
 
 	execResp, err := d.client.ContainerExecCreate(ctx, containerID, execCfg)

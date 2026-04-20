@@ -462,9 +462,9 @@ func TestReadWorkspacePreviewConfig_NilReader(t *testing.T) {
 	t.Parallel()
 
 	h := &PreviewHandler{logger: zerolog.Nop()}
-	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{}, uuid.New())
-	require.False(t, ok, "nil fileReader must fall through so caller uses defaults")
-	require.Nil(t, cfg)
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{}, uuid.New())
+	require.NoError(t, err, "nil fileReader is the no-op case, not an infrastructure failure")
+	require.Nil(t, cfg, "nil fileReader must fall through so caller uses defaults")
 }
 
 func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
@@ -477,36 +477,43 @@ func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 		fileReader: fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
 		logger:     zerolog.Nop(),
 	}
-	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.False(t, ok)
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err, "ENOENT is expected absence, not an error to surface")
 	require.Nil(t, cfg)
 }
 
 func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
 	t.Parallel()
 
-	// A non-"not found" read error (docker exec failure, context cancel, sandbox
-	// gone) must still fall through to defaults so a broken sandbox doesn't
-	// block StartPreview entirely. The handler logs it at Warn, but callers
-	// still see (nil, false).
+	// A non-ENOENT read error (docker exec failure, context cancel, sandbox
+	// gone) means we cannot tell whether a committed config exists. Returning
+	// (nil, err) makes StartPreview surface a 500 instead of silently swapping
+	// in Node.js defaults — which would start the wrong preview for non-Node
+	// projects and time out after minutes.
+	wantErr := errors.New("docker exec failed: container not running")
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{err: errors.New("docker exec failed: container not running")},
+		fileReader: fakeFileReader{err: wantErr},
 		logger:     zerolog.Nop(),
 	}
-	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.False(t, ok)
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.Error(t, err, "non-ENOENT read errors must surface so the caller returns 500")
+	require.ErrorIs(t, err, wantErr, "underlying read error must be wrapped, not discarded")
 	require.Nil(t, cfg)
 }
 
 func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	t.Parallel()
 
+	// Parse errors are a user authoring problem, not infrastructure. We still
+	// fall back to defaults (returning the 500 would make the preview strictly
+	// worse than just running the default), but log at Warn so the user sees
+	// why their committed config didn't take effect.
 	h := &PreviewHandler{
 		fileReader: fakeFileReader{content: "{not valid json"},
 		logger:     zerolog.Nop(),
 	}
-	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.False(t, ok, "invalid JSON must fall through to defaults, not surface as an error")
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err, "invalid JSON must fall through to defaults, not surface as a 500")
 	require.Nil(t, cfg)
 }
 
@@ -531,8 +538,8 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 		fileReader: fakeFileReader{content: raw},
 		logger:     zerolog.Nop(),
 	}
-	cfg, ok := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.True(t, ok)
+	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
+	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	require.Equal(t, "web", cfg.Primary)
 	require.Contains(t, cfg.Services, "web")
