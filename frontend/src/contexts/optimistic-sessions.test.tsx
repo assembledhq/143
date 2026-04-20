@@ -78,6 +78,37 @@ describe("OptimisticSessionsProvider", () => {
     expect(result.current.optimisticSessions).toHaveLength(1);
   });
 
+  it("markOptimisticResolved stamps the real session id onto a placeholder", () => {
+    const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+    let id: string;
+    act(() => {
+      id = result.current.addOptimisticSession("Pending");
+    });
+
+    act(() => {
+      result.current.markOptimisticResolved(id!, "real-123");
+    });
+
+    expect(result.current.optimisticSessions).toHaveLength(1);
+    expect(result.current.optimisticSessions[0].resolvedId).toBe("real-123");
+  });
+
+  it("markOptimisticResolved is a no-op for unknown ids", () => {
+    const { result } = renderHook(() => useOptimisticSessions(), { wrapper });
+
+    act(() => {
+      result.current.addOptimisticSession("Only one");
+    });
+
+    act(() => {
+      result.current.markOptimisticResolved("does-not-exist", "real-xyz");
+    });
+
+    expect(result.current.optimisticSessions).toHaveLength(1);
+    expect(result.current.optimisticSessions[0].resolvedId).toBeUndefined();
+  });
+
   it("throws when used outside the provider", () => {
     expect(() => {
       renderHook(() => useOptimisticSessions());

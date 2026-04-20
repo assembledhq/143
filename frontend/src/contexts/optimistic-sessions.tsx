@@ -16,14 +16,22 @@ export interface OptimisticSession {
   title: string;
   status: "pending";
   created_at: string;
+  /**
+   * Set once the create mutation returns with a real session id. The sidebar
+   * hides optimistic rows whose resolvedId matches a session already in the
+   * server-returned list, then removes them — avoiding a double-render flash.
+   */
+  resolvedId?: string;
 }
 
 interface OptimisticSessionsContextValue {
   optimisticSessions: OptimisticSession[];
   /** Add a placeholder session. Returns the temporary id. */
   addOptimisticSession: (title: string) => string;
-  /** Remove a placeholder (on success or error). */
+  /** Remove a placeholder (on error, or after the real session is visible). */
   removeOptimisticSession: (id: string) => void;
+  /** Link an optimistic placeholder to the real session id returned by the server. */
+  markOptimisticResolved: (id: string, resolvedId: string) => void;
 }
 
 const OptimisticSessionsContext = createContext<OptimisticSessionsContextValue | null>(null);
@@ -44,8 +52,12 @@ export function OptimisticSessionsProvider({ children }: { children: React.React
     setSessions((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
+  const markOptimisticResolved = useCallback((id: string, resolvedId: string) => {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, resolvedId } : s)));
+  }, []);
+
   return (
-    <OptimisticSessionsContext.Provider value={{ optimisticSessions: sessions, addOptimisticSession, removeOptimisticSession }}>
+    <OptimisticSessionsContext.Provider value={{ optimisticSessions: sessions, addOptimisticSession, removeOptimisticSession, markOptimisticResolved }}>
       {children}
     </OptimisticSessionsContext.Provider>
   );
@@ -62,10 +74,12 @@ export function useOptimisticSessions() {
 const EMPTY_SESSIONS: OptimisticSession[] = [];
 const noopAdd = () => `optimistic-${Date.now()}`;
 const noopRemove = () => {};
+const noopResolve = () => {};
 const FALLBACK: OptimisticSessionsContextValue = {
   optimisticSessions: EMPTY_SESSIONS,
   addOptimisticSession: noopAdd,
   removeOptimisticSession: noopRemove,
+  markOptimisticResolved: noopResolve,
 };
 
 /** Same as useOptimisticSessions but returns no-op stubs when outside a provider. */

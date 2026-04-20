@@ -27,13 +27,14 @@ vi.mock('@/hooks/use-auth', () => ({
   useAuth: () => ({ isAuthenticated: true, user: { id: 'user-1' }, isLoading: false, logout: vi.fn() }),
 }));
 
-const mockOptimisticSessions: { id: string; title: string; status: 'pending'; created_at: string }[] = [];
+const mockOptimisticSessions: { id: string; title: string; status: 'pending'; created_at: string; resolvedId?: string }[] = [];
 
 vi.mock('@/contexts/optimistic-sessions', () => ({
   useOptimisticSessions: () => ({
     optimisticSessions: mockOptimisticSessions,
     addOptimisticSession: vi.fn(),
     removeOptimisticSession: vi.fn(),
+    markOptimisticResolved: vi.fn(),
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
