@@ -2248,3 +2248,161 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 	// No analyze_failure job should have been enqueued.
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
 }
+
+// --- Amp/Pi agent env resolution ---
+
+// TestRunAgent_AmpAgentConfigOverrides asserts that Amp sessions receive the
+// AMP_API_KEY from agent_config.amp.* (the only channel since there is no
+// ProviderAmp credential store).
+func TestRunAgent_AmpAgentConfigOverrides(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypeAmp
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "amp-sb", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	settings := models.OrgSettings{
+		AgentConfig: models.AgentEnvConfig{
+			"amp": {"AMP_API_KEY": "amp_live_key", "AMP_MODE": models.AmpModeDeep},
+		},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	require.NoError(t, err)
+	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             orgs,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+	require.Equal(t, "amp_live_key", capturedCfg.Env["AMP_API_KEY"],
+		"AMP_API_KEY must flow from agent_config.amp into the sandbox env")
+	require.Equal(t, models.AmpModeDeep, capturedCfg.Env["AMP_MODE"],
+		"AMP_MODE from agent_config.amp should reach the sandbox")
+}
+
+// TestRunAgent_PiInheritsProviderKeys asserts Pi sessions inherit the
+// Anthropic/OpenAI/Gemini keys already configured for other agents and still
+// layer agent_config.pi.* overrides on top.
+func TestRunAgent_PiInheritsProviderKeys(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypePi
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypePi
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "pi-sb", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant-pi"}},
+			models.ProviderOpenAI:    {Provider: models.ProviderOpenAI, Config: models.OpenAIConfig{APIKey: "sk-openai-pi"}},
+			models.ProviderGemini:    {Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gem-pi"}},
+		},
+	}
+
+	settings := models.OrgSettings{
+		AgentConfig: models.AgentEnvConfig{
+			"pi": {"PI_MODEL": models.PiModelGPT54, "PI_MODEL_CUSTOM": "moonshot/kimi-k2"},
+		},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	require.NoError(t, err)
+	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             orgs,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, "sk-ant-pi", capturedCfg.Env["ANTHROPIC_API_KEY"], "Pi should inherit Anthropic key")
+	require.Equal(t, "sk-openai-pi", capturedCfg.Env["OPENAI_API_KEY"], "Pi should inherit OpenAI key")
+	require.Equal(t, "gem-pi", capturedCfg.Env["GEMINI_API_KEY"], "Pi should inherit Gemini key")
+	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "PI_MODEL should flow from agent_config.pi")
+	require.Equal(t, "moonshot/kimi-k2", capturedCfg.Env["PI_MODEL_CUSTOM"], "PI_MODEL_CUSTOM should flow from agent_config.pi")
+}
+
+// TestRunAgent_AmpNoOrgsStore ensures resolveAgentEnv handles a nil orgs
+// dependency gracefully — the Amp session still runs, just without
+// agent_config overrides.
+func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypeAmp
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "amp-no-orgs", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		// Orgs intentionally omitted.
+		Jobs:          d.jobs,
+		GitHub:        d.github,
+		Credentials:   d.creds,
+		Logger:        zerolog.Nop(),
+		MaxConcurrent: 3,
+	})
+
+	require.NoError(t, orch.RunAgent(context.Background(), run),
+		"Amp run should succeed even when the orgs store is not wired")
+	require.NotContains(t, capturedCfg.Env, "AMP_API_KEY",
+		"without an orgs store there is nowhere to source AMP_API_KEY from")
+}

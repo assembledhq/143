@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -186,4 +187,178 @@ func TestParsePiStreamLine_NonJSON(t *testing.T) {
 	logs := drain(logCh)
 	require.Len(t, logs, 1)
 	require.Equal(t, "output", logs[0].Level)
+}
+
+func TestParsePiStreamLine_EventTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		line          string
+		wantLevel     string
+		wantContains  string
+		wantMetaField string
+		wantMetaValue interface{}
+		wantAssistant string
+		wantTokens    *agent.TokenUsage
+	}{
+		{
+			name:          "message event uses content",
+			line:          `{"type":"message","content":"pi speaks"}`,
+			wantLevel:     "output",
+			wantContains:  "pi speaks",
+			wantAssistant: "pi speaks",
+		},
+		{
+			name:          "assistant falls back to message field",
+			line:          `{"type":"assistant","message":"pi fallback"}`,
+			wantLevel:     "output",
+			wantContains:  "pi fallback",
+			wantAssistant: "pi fallback",
+		},
+		{
+			name:          "tool_use name fallback with model metadata",
+			line:          `{"type":"tool_use","name":"edit","model":"anthropic/claude-sonnet-4-6","input":{"path":"a.go"}}`,
+			wantLevel:     "tool_use",
+			wantContains:  "edit",
+			wantMetaField: "model",
+			wantMetaValue: "anthropic/claude-sonnet-4-6",
+		},
+		{
+			name:          "tool_result falls back to Name and Result",
+			line:          `{"type":"tool_result","name":"edit","result":{"status":"ok"}}`,
+			wantLevel:     "output",
+			wantContains:  "status",
+			wantMetaField: "tool",
+			wantMetaValue: "edit",
+		},
+		{
+			name:          "thinking goes to debug",
+			line:          `{"type":"thinking","content":"pondering"}`,
+			wantLevel:     "debug",
+			wantContains:  "pondering",
+			wantMetaField: "type",
+			wantMetaValue: "thinking",
+		},
+		{
+			name:         "error uses error field",
+			line:         `{"type":"error","error":"upstream 500"}`,
+			wantLevel:    "error",
+			wantContains: "upstream 500",
+		},
+		{
+			name:         "error falls back to message",
+			line:         `{"type":"error","message":"msg body"}`,
+			wantLevel:    "error",
+			wantContains: "msg body",
+		},
+		{
+			name:         "error falls back to content",
+			line:         `{"type":"error","content":"content body"}`,
+			wantLevel:    "error",
+			wantContains: "content body",
+		},
+		{
+			name:         "done event with embedded token usage",
+			line:         `{"type":"done","content":"","result":{"input_tokens":42,"output_tokens":7}}`,
+			wantLevel:    "info",
+			wantContains: "",
+			wantTokens:   &agent.TokenUsage{InputTokens: 42, OutputTokens: 7},
+		},
+		{
+			name:         "unknown event type goes to debug",
+			line:         `{"type":"mystery_event","content":"x"}`,
+			wantLevel:    "debug",
+			wantContains: "mystery_event",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			logCh := make(chan agent.LogEntry, 10)
+			result := &agent.AgentResult{}
+			var summary []string
+			var last string
+
+			parsePiStreamLine([]byte(tc.line), result, logCh, &summary, &last)
+			close(logCh)
+
+			logs := drain(logCh)
+			require.Len(t, logs, 1)
+			require.Equal(t, tc.wantLevel, logs[0].Level)
+			if tc.wantContains != "" {
+				require.Contains(t, logs[0].Message, tc.wantContains)
+			}
+			if tc.wantMetaField != "" {
+				require.Equal(t, tc.wantMetaValue, logs[0].Metadata[tc.wantMetaField])
+			}
+			if tc.wantAssistant != "" {
+				require.Equal(t, tc.wantAssistant, last)
+			}
+			if tc.wantTokens != nil {
+				require.Equal(t, tc.wantTokens.InputTokens, result.TokenUsage.InputTokens)
+				require.Equal(t, tc.wantTokens.OutputTokens, result.TokenUsage.OutputTokens)
+			}
+		})
+	}
+}
+
+func TestPiAdapter_Execute_WriteFileError(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.WriteFileFn = func(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error {
+		return fmt.Errorf("no space left on device")
+	}
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
+	}, logCh)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "write prompt file")
+}
+
+func TestPiAdapter_Execute_ExecStreamError(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		return 0, fmt.Errorf("pi sandbox exec blew up")
+	}
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
+	}, logCh)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exec pi CLI")
+}
+
+func TestPiAdapter_Execute_SummaryFromAssistantFallback(t *testing.T) {
+	t.Parallel()
+
+	provider := newMockProvider()
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		onLine([]byte(`{"type":"assistant","content":"final message, no result event"}`))
+		return 0, nil
+	}
+
+	adapter := NewPiAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
+	}, logCh)
+	require.NoError(t, err)
+	require.Equal(t, "final message, no result event", result.Summary)
 }

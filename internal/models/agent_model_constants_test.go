@@ -117,9 +117,14 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet},
 		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini31ProPreview},
+		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
+		{name: "valid pi model", agentType: AgentTypePi, model: PiModelClaudeSonnet46},
+		{name: "pi accepts non-curated model", agentType: AgentTypePi, model: "moonshot/kimi-k2"},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
 		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
+		{name: "invalid amp mode", agentType: AgentTypeAmp, model: "turbo", wantErr: true},
+		{name: "empty pi model rejected", agentType: AgentTypePi, model: "", wantErr: true},
 		{name: "unknown agent type", agentType: "unknown", model: "any", wantErr: true},
 	}
 
@@ -142,7 +147,29 @@ func TestModelEnvVarForAgentType(t *testing.T) {
 	require.Equal(t, "OPENAI_MODEL", ModelEnvVarForAgentType(AgentTypeCodex))
 	require.Equal(t, "ANTHROPIC_MODEL", ModelEnvVarForAgentType(AgentTypeClaudeCode))
 	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType(AgentTypeGeminiCLI))
+	require.Equal(t, "AMP_MODE", ModelEnvVarForAgentType(AgentTypeAmp))
+	require.Equal(t, "PI_MODEL", ModelEnvVarForAgentType(AgentTypePi))
 	require.Equal(t, "", ModelEnvVarForAgentType("unknown"))
+}
+
+func TestIsSupportedAmpMode(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range AvailableAmpModes {
+		require.True(t, IsSupportedAmpMode(mode), "expected %q to be a valid amp mode", mode)
+	}
+	require.False(t, IsSupportedAmpMode("turbo"), "unknown amp mode should be rejected")
+	require.False(t, IsSupportedAmpMode(""), "empty amp mode should be rejected")
+}
+
+func TestIsSupportedPiModel(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range AvailablePiModels {
+		require.True(t, IsSupportedPiModel(model), "expected %q to be a curated Pi model", model)
+	}
+	require.False(t, IsSupportedPiModel("moonshot/kimi-k2"), "non-curated Pi model should not be in the curated set")
+	require.False(t, IsSupportedPiModel(""), "empty Pi model should be rejected")
 }
 
 func TestValidateSettingsModels(t *testing.T) {
@@ -249,6 +276,59 @@ func TestValidateSettingsModels(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "accepts valid amp mode",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"amp": {"AMP_MODE": AmpModeDeep, "AMP_API_KEY": "amp_x"},
+				},
+			},
+		},
+		{
+			name: "rejects invalid amp mode",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"amp": {"AMP_MODE": "turbo"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "accepts empty amp mode",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"amp": {"AMP_API_KEY": "amp_x"},
+				},
+			},
+		},
+		{
+			name: "accepts valid pi model",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"pi": {"PI_MODEL": PiModelClaudeSonnet46},
+				},
+			},
+		},
+		{
+			name: "rejects invalid pi model without override",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"pi": {"PI_MODEL": "moonshot/kimi-k2"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "pi_model_custom bypasses enum check",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"pi": {
+						"PI_MODEL":        "not-in-the-curated-list",
+						"PI_MODEL_CUSTOM": "moonshot/kimi-k2",
+					},
+				},
+			},
 		},
 	}
 
