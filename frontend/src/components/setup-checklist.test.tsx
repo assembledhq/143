@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
       },
     },
   }),
-  agentDefaultsMock: vi.fn().mockResolvedValue({ data: {} }),
   codexAuthMock: vi.fn().mockResolvedValue({ data: { status: "pending" } }),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
   repositoriesListMock: vi.fn().mockResolvedValue({ data: [] }),
@@ -22,7 +21,6 @@ vi.mock("@/lib/api", () => ({
   api: {
     settings: {
       get: mocks.settingsGetMock,
-      getAgentDefaults: mocks.agentDefaultsMock,
       update: vi.fn().mockResolvedValue({}),
     },
     codexAuth: {

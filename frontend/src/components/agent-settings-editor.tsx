@@ -100,11 +100,6 @@ export function AgentSettingsEditor({
     queryFn: () => api.settings.get(),
   });
 
-  const { data: agentDefaultsResponse } = useQuery({
-    queryKey: ["agent-defaults"],
-    queryFn: () => api.settings.getAgentDefaults(),
-  });
-
   const { data: codexAuthStatusResp } = useQuery({
     queryKey: ["codex-auth-status"],
     queryFn: () => api.codexAuth.status(),
@@ -117,10 +112,9 @@ export function AgentSettingsEditor({
   const agentConfig = agentConfigOverride ?? settings?.agent_config ?? {};
 
   const hasCodexAPIKey = useMemo(() => {
-    const codexServerDefaults = (agentDefaultsResponse?.data ?? {}).codex ?? {};
     const codexOrgConfig = agentConfig.codex ?? {};
-    return Boolean(codexOrgConfig.OPENAI_API_KEY || codexServerDefaults.OPENAI_API_KEY);
-  }, [agentConfig.codex, agentDefaultsResponse?.data]);
+    return Boolean(codexOrgConfig.OPENAI_API_KEY);
+  }, [agentConfig.codex]);
 
   const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
     hasCodexAPIKey && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
@@ -156,14 +150,12 @@ export function AgentSettingsEditor({
   );
 
   function handleSave() {
-    const serverAgentDefaults = agentDefaultsResponse?.data ?? {};
     const cleanedAgentConfig: Record<string, Record<string, string>> = {};
 
     for (const [agentKey, vars] of Object.entries(agentConfig)) {
       const filtered: Record<string, string> = {};
-      const serverVars = serverAgentDefaults[agentKey] ?? {};
       for (const [key, value] of Object.entries(vars)) {
-        if (value && value !== serverVars[key]) {
+        if (value) {
           filtered[key] = value;
         }
       }
@@ -316,7 +308,6 @@ export function AgentSettingsEditor({
               ? []
               : selectedAgent.envVars.filter((envVar) => !(setupMode && envVar.hideInSetup));
           const hasAdvancedSettings = !setupMode && envVarsToRender.some((envVar) => envVar.advanced);
-          const serverVars = (agentDefaultsResponse?.data ?? {})[selectedAgent.key] ?? {};
           const visibleEnvVars = envVarsToRender.filter((envVar) => !envVar.advanced || showAdvancedSettings);
           return (
             <>
@@ -331,10 +322,7 @@ export function AgentSettingsEditor({
                 </Button>
               )}
               {visibleEnvVars.map((envVar) => {
-            const serverDefault = serverVars[envVar.name] ?? "";
-            const orgOverride = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
-            const displayValue = orgOverride || serverDefault;
-            const isServerDefault = !orgOverride && !!serverDefault;
+            const displayValue = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
 
             return (
               <div key={envVar.name} className="space-y-1">
@@ -342,9 +330,6 @@ export function AgentSettingsEditor({
                   <Label htmlFor={`${selectedAgent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
                     {envVar.label}
                   </Label>
-                  {isServerDefault && (
-                    <span className="text-xs text-muted-foreground">server default</span>
-                  )}
                 </div>
                 {envVar.options ? (
                   <Select
@@ -362,7 +347,6 @@ export function AgentSettingsEditor({
                     <SelectTrigger
                       id={`${selectedAgent.key}-${envVar.name}`}
                       aria-label={envVar.label}
-                      className={isServerDefault ? "text-muted-foreground" : ""}
                     >
                       <SelectValue placeholder="Select a model" />
                     </SelectTrigger>
@@ -380,7 +364,6 @@ export function AgentSettingsEditor({
                     type={envVar.sensitive ? "password" : "text"}
                     placeholder={envVar.placeholder ?? "Not set"}
                     value={displayValue}
-                    className={isServerDefault ? "text-muted-foreground" : ""}
                     onChange={(e) => {
                       setAgentConfigOverride({
                         ...(agentConfigOverride ?? agentConfig),

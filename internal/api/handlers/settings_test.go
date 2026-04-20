@@ -65,7 +65,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil, nil, "gpt-5-nano")
+			handler := NewSettingsHandler(store, nil, "gpt-5-nano")
 
 			tt.setupMock(mock, orgID)
 
@@ -82,29 +82,13 @@ func TestSettingsHandler_Get(t *testing.T) {
 	}
 }
 
-func TestSettingsHandler_GetAgentDefaults(t *testing.T) {
-	t.Parallel()
-
-	defaults := map[string]map[string]string{
-		"claude_code": {"ANTHROPIC_API_KEY": "sk-a••••test"},
-	}
-	handler := NewSettingsHandler(nil, defaults, nil, "gpt-5-nano")
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/agent-defaults", nil)
-	w := httptest.NewRecorder()
-
-	handler.GetAgentDefaults(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK")
-	require.Contains(t, w.Body.String(), "claude_code", "response should contain agent type")
-}
-
 func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 	t.Parallel()
 
 	defaults := map[string]string{
 		"anthropic": "sk-a••••test",
 	}
-	handler := NewSettingsHandler(nil, nil, defaults, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, defaults, "gpt-5-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -120,7 +104,7 @@ func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, nil, map[string]string{}, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, map[string]string{}, "gpt-5-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -139,7 +123,7 @@ func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 func TestSettingsHandler_GetLLMModels(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, nil, nil, "gpt-5-nano")
+	handler := NewSettingsHandler(nil, nil, "gpt-5-nano")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-models", nil)
 	w := httptest.NewRecorder()
@@ -296,7 +280,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil, nil, "gpt-5-nano")
+			handler := NewSettingsHandler(store, nil, "gpt-5-nano")
 
 			tt.setupMock(mock, orgID)
 

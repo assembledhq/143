@@ -195,7 +195,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
           onClose={() => {
             setShowSettingsModal(false);
             queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-            queryClient.invalidateQueries({ queryKey: queryKeys.settings.agentDefaults });
           }}
         />
       )}

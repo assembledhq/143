@@ -64,20 +64,14 @@ type Config struct {
 	LLMReasoningEffort string `env:"LLM_REASONING_EFFORT"`
 	PlatformLLMModel   string `env:"PLATFORM_LLM_MODEL"    envDefault:"gpt-5-nano"`
 	AnthropicAPIKey    string `env:"ANTHROPIC_API_KEY"`
-	AnthropicBaseURL  string `env:"ANTHROPIC_BASE_URL"`
-	AnthropicModel    string `env:"ANTHROPIC_MODEL"`
-	OpenAIAPIKey      string `env:"OPENAI_API_KEY"`
-	OpenAIBaseURL     string `env:"OPENAI_BASE_URL"`
-	OpenAIAPIType     string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
-	OpenAIModel       string `env:"OPENAI_MODEL"`
-	OpenRouterAPIKey  string `env:"OPENROUTER_API_KEY"`
-	OpenRouterBaseURL string `env:"OPENROUTER_BASE_URL"`
-	OpenRouterAppName string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
-	OpenRouterSiteURL string `env:"OPENROUTER_SITE_URL"`
-
-	// Gemini CLI
-	GeminiAPIKey string `env:"GEMINI_API_KEY"`
-	GeminiModel  string `env:"GEMINI_MODEL"`
+	AnthropicBaseURL   string `env:"ANTHROPIC_BASE_URL"`
+	OpenAIAPIKey       string `env:"OPENAI_API_KEY"`
+	OpenAIBaseURL      string `env:"OPENAI_BASE_URL"`
+	OpenAIAPIType      string `env:"OPENAI_API_TYPE"       envDefault:"chat"`
+	OpenRouterAPIKey   string `env:"OPENROUTER_API_KEY"`
+	OpenRouterBaseURL  string `env:"OPENROUTER_BASE_URL"`
+	OpenRouterAppName  string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
+	OpenRouterSiteURL  string `env:"OPENROUTER_SITE_URL"`
 
 	// SMTP (optional — invitation emails are logged to console when not configured)
 	SMTPHost     string `env:"SMTP_HOST"`
@@ -87,7 +81,7 @@ type Config struct {
 	SMTPFrom     string `env:"SMTP_FROM"`
 
 	// Sandbox
-	SandboxRuntime     string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
+	SandboxRuntime       string `env:"SANDBOX_RUNTIME" envDefault:"runc"`
 	SandboxRequireGVisor bool   `env:"SANDBOX_REQUIRE_GVISOR" envDefault:"false"`
 	// Data retention
 	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
@@ -95,12 +89,12 @@ type Config struct {
 	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
 
 	// Upload storage (images/files attached to session messages)
-	UploadStorageDir      string `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
-	UploadS3Bucket        string `env:"UPLOAD_S3_BUCKET"`
-	UploadS3Prefix        string `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
-	UploadS3Endpoint      string `env:"UPLOAD_S3_ENDPOINT"`      // e.g. https://mybucket.s3.amazonaws.com
-	UploadS3Region        string `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
-	UploadMaxAge          time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
+	UploadStorageDir string        `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
+	UploadS3Bucket   string        `env:"UPLOAD_S3_BUCKET"`
+	UploadS3Prefix   string        `env:"UPLOAD_S3_PREFIX"        envDefault:"uploads"`
+	UploadS3Endpoint string        `env:"UPLOAD_S3_ENDPOINT"` // e.g. https://mybucket.s3.amazonaws.com
+	UploadS3Region   string        `env:"UPLOAD_S3_REGION"        envDefault:"us-east-1"`
+	UploadMaxAge     time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
 
 	// Interactive session snapshots
 	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
@@ -109,11 +103,11 @@ type Config struct {
 	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 
 	// Preview system
-	ChromeWSURL            string `env:"CHROME_WS_URL"`                                                        // e.g. "ws://chrome:9222"
-	PreviewOriginTemplate  string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
-	PreviewGatewayPort     int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
 	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
-	PreviewHMRBlobDir      string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
 
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
@@ -196,82 +190,6 @@ func (c *Config) PlatformLLMConfig() llm.Config {
 		OpenRouterAppName: c.OpenRouterAppName,
 		OpenRouterSiteURL: c.OpenRouterSiteURL,
 	}
-}
-
-// AgentEnv returns a map from agent type to the environment variables that
-// should be injected into sandbox containers for that agent. Only includes
-// entries for agents whose required credentials are configured.
-func (c *Config) AgentEnv() map[string]map[string]string {
-	result := make(map[string]map[string]string)
-
-	// Claude Code needs ANTHROPIC_API_KEY.
-	// ANTHROPIC_MODEL selects the model (e.g. "opus", "sonnet", "claude-opus-4-6", "claude-sonnet-4-5").
-	if c.AnthropicAPIKey != "" {
-		env := map[string]string{"ANTHROPIC_API_KEY": c.AnthropicAPIKey}
-		if c.AnthropicBaseURL != "" {
-			env["ANTHROPIC_BASE_URL"] = c.AnthropicBaseURL
-		}
-		if c.AnthropicModel != "" {
-			env["ANTHROPIC_MODEL"] = c.AnthropicModel
-		}
-		result["claude_code"] = env
-	}
-
-	// Codex needs OPENAI_API_KEY.
-	// OPENAI_MODEL is not natively supported by Codex CLI (it uses config.toml),
-	// but we pass it so the adapter can use it in the --model flag
-	// (e.g. "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5-codex").
-	if c.OpenAIAPIKey != "" {
-		env := map[string]string{"OPENAI_API_KEY": c.OpenAIAPIKey}
-		if c.OpenAIBaseURL != "" {
-			env["OPENAI_BASE_URL"] = c.OpenAIBaseURL
-		}
-		if c.OpenAIModel != "" {
-			env["OPENAI_MODEL"] = c.OpenAIModel
-		}
-		result["codex"] = env
-	}
-
-	// Gemini CLI needs GEMINI_API_KEY.
-	// GEMINI_MODEL selects the model (e.g. "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro").
-	if c.GeminiAPIKey != "" {
-		env := map[string]string{"GEMINI_API_KEY": c.GeminiAPIKey}
-		if c.GeminiModel != "" {
-			env["GEMINI_MODEL"] = c.GeminiModel
-		}
-		result["gemini_cli"] = env
-	}
-
-	return result
-}
-
-// SafeAgentEnv returns the same structure as AgentEnv but with API key values
-// masked (e.g. "sk-ant-...prod"). Suitable for exposing to the frontend so
-// operators can see what server defaults are configured without leaking secrets.
-func (c *Config) SafeAgentEnv() map[string]map[string]string {
-	raw := c.AgentEnv()
-	safe := make(map[string]map[string]string, len(raw))
-	for agent, vars := range raw {
-		safeVars := make(map[string]string, len(vars))
-		for k, v := range vars {
-			if isSecretKey(k) {
-				safeVars[k] = maskSecret(v)
-			} else {
-				safeVars[k] = v
-			}
-		}
-		safe[agent] = safeVars
-	}
-	return safe
-}
-
-// isSecretKey returns true for env var names that contain secrets.
-func isSecretKey(key string) bool {
-	switch key {
-	case "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY":
-		return true
-	}
-	return false
 }
 
 // maskSecret masks a secret string, showing the first 4 and last 4 characters.

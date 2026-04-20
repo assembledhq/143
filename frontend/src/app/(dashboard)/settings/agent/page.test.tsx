@@ -64,9 +64,6 @@ function setupHandlers({
     http.get('/api/v1/settings', () => {
       return HttpResponse.json(mockOrgSettings);
     }),
-    http.get('/api/v1/settings/agent-defaults', () => {
-      return HttpResponse.json({ data: {} });
-    }),
     http.get('/api/v1/settings/codex-auth/status', () => {
       return HttpResponse.json({ data: { status: 'none' } });
     }),
@@ -410,21 +407,6 @@ describe('AgentPage', () => {
     renderWithProviders(<AgentPage />);
 
     expect(await screen.findByText('Gemini CLI settings')).toBeInTheDocument();
-  });
-
-  it('shows server default indicator for env vars with server defaults', async () => {
-    setupHandlers({ team: [], resolved: [] });
-    server.use(
-      http.get('/api/v1/settings/agent-defaults', () => {
-        return HttpResponse.json({
-          data: { claude_code: { ANTHROPIC_API_KEY: 'sk-server-default' } },
-        });
-      }),
-    );
-
-    renderWithProviders(<AgentPage />);
-
-    expect(await screen.findByText('server default')).toBeInTheDocument();
   });
 
   it('does not show Advanced settings toggle for agents without advanced env vars', async () => {
