@@ -250,7 +250,7 @@ func TestBuildServiceEnvs(t *testing.T) {
 		},
 	}
 
-	envs := d.buildServiceEnvs(cfg, infraCreds)
+	envs := d.buildServiceEnvs(cfg, infraCreds, nil)
 
 	// web should have NODE_ENV + DATABASE_URL
 	require.Equal(t, "development", envs["web"]["NODE_ENV"])
@@ -259,6 +259,28 @@ func TestBuildServiceEnvs(t *testing.T) {
 	// worker should have WORKER_THREADS + DATABASE_URL
 	require.Equal(t, "2", envs["worker"]["WORKER_THREADS"])
 	require.Equal(t, "postgres://preview_db:secret@preview-db-abc:5432/preview_db", envs["worker"]["DATABASE_URL"])
+}
+
+// TestBuildServiceEnvs_ExtraEnvOverrides verifies that platform-level extras
+// (e.g. PREVIEW_ORIGIN) are applied to every service and win over both user
+// env and infra-injected env.
+func TestBuildServiceEnvs_ExtraEnvOverrides(t *testing.T) {
+	t.Parallel()
+	d := &DockerPreviewProvider{}
+
+	cfg := &models.PreviewConfig{
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web":    {Port: 3000, Env: map[string]string{"PREVIEW_ORIGIN": "user-wins"}},
+			"worker": {Port: 9000},
+		},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+	}
+
+	envs := d.buildServiceEnvs(cfg, nil, map[string]string{"PREVIEW_ORIGIN": "http://abc.preview.localhost:9090"})
+
+	require.Equal(t, "http://abc.preview.localhost:9090", envs["web"]["PREVIEW_ORIGIN"], "extraEnv must override user-declared value")
+	require.Equal(t, "http://abc.preview.localhost:9090", envs["worker"]["PREVIEW_ORIGIN"], "extraEnv must reach services with no user env")
 }
 
 func TestBuildServiceEnvs_NoInfra(t *testing.T) {
@@ -276,7 +298,7 @@ func TestBuildServiceEnvs_NoInfra(t *testing.T) {
 		Infrastructure: map[string]models.InfrastructureConfig{},
 	}
 
-	envs := d.buildServiceEnvs(cfg, nil)
+	envs := d.buildServiceEnvs(cfg, nil, nil)
 	require.Equal(t, "3000", envs["web"]["PORT"])
 	require.Len(t, envs["web"], 1)
 }

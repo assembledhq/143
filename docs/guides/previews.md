@@ -192,6 +192,7 @@ Every service receives:
 | Var | Value |
 |-----|-------|
 | `HOST` | `0.0.0.0` — most frameworks honor this for bind address. Override in your service `env` if your app reads `HOST` for something else. |
+| `PREVIEW_ORIGIN` | The public URL the gateway serves this preview on, e.g. `http://<id>.preview.localhost:9090`. Set this as your app's external base URL (e.g. `BASE_URL`, `FRONTEND_URL`) so redirects and absolute links point at the preview instead of `localhost`. Overrides any user-declared value. |
 
 ## Trust Split
 

@@ -2,6 +2,8 @@ package preview
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -163,8 +165,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "valid single service",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "start"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 0,
@@ -184,7 +186,7 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "missing primary",
 			cfg: models.PreviewConfig{
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -192,8 +194,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "primary references missing service",
 			cfg: models.PreviewConfig{
-				Primary:  "missing",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "missing",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -201,8 +203,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "no services",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 2, // no services + primary references missing
@@ -225,8 +227,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "port out of range",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 80, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 80, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -246,8 +248,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "missing command",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -255,8 +257,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "missing ready path",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -264,8 +266,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "shell injection in ready path",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/; rm -rf /"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/; rm -rf /"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -273,8 +275,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "cwd escapes repo root",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "../../etc", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "../../etc", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -282,8 +284,8 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "cwd is absolute path",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "/etc/passwd", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Cwd: "/etc/passwd", Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantErr: 1,
@@ -326,10 +328,10 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name: "credential inject_into unknown service",
 			cfg: models.PreviewConfig{
-				Primary:     "app",
-				Services:    map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Credentials: models.CredentialConfig{Mode: "managed_env", InjectInto: []string{"unknown"}},
+				Credentials:    models.CredentialConfig{Mode: "managed_env", InjectInto: []string{"unknown"}},
 			},
 			wantErr: 1,
 		},
@@ -552,45 +554,45 @@ func TestDetectReadiness(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		cfg      models.PreviewConfig
+		name      string
+		cfg       models.PreviewConfig
 		wantReady models.PreviewReadiness
 	}{
 		{
 			name: "ready - simple config",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Credentials: models.CredentialConfig{Mode: "none"},
+				Credentials:    models.CredentialConfig{Mode: "none"},
 			},
 			wantReady: models.PreviewReadinessReady,
 		},
 		{
 			name: "admin setup - has credentials",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Credentials: models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}},
+				Credentials:    models.CredentialConfig{Mode: "managed_env", CredentialSet: "staging", Env: []string{"DB_URL"}},
 			},
 			wantReady: models.PreviewReadinessAdminSetupRequired,
 		},
 		{
 			name: "admin setup - has destinations",
 			cfg: models.PreviewConfig{
-				Primary:  "app",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "app",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
-				Network: models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
+				Network:        models.NetworkConfig{Mode: "managed", Destinations: []string{"staging_db"}},
 			},
 			wantReady: models.PreviewReadinessAdminSetupRequired,
 		},
 		{
 			name: "not supported - invalid config",
 			cfg: models.PreviewConfig{
-				Primary:  "missing",
-				Services: map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+				Primary:        "missing",
+				Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
 				Infrastructure: map[string]models.InfrastructureConfig{},
 			},
 			wantReady: models.PreviewReadinessNotSupported,
@@ -690,5 +692,37 @@ func TestParseConfig_RoundTrip(t *testing.T) {
 	}
 	if len(cfg1.Services) != len(cfg2.Services) {
 		t.Errorf("Services count mismatch: %d vs %d", len(cfg1.Services), len(cfg2.Services))
+	}
+}
+
+// TestParseConfig_CommittedDogfoodConfig guards against silent regressions
+// in the committed `.143/preview.json` at the repo root. The dogfood config
+// is the configuration used when a 143 session on this very repo clicks
+// "Start Preview", so a broken file manifests as a broken developer loop.
+func TestParseConfig_CommittedDogfoodConfig(t *testing.T) {
+	t.Parallel()
+
+	// Walk up from the package dir to the repo root (where `.143/` lives).
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		candidate := filepath.Join(dir, ".143", "preview.json")
+		if _, err := os.Stat(candidate); err == nil {
+			raw, err := os.ReadFile(candidate)
+			if err != nil {
+				t.Fatalf("read %s: %v", candidate, err)
+			}
+			if _, err := ParseConfig(raw); err != nil {
+				t.Fatalf("committed .143/preview.json failed to parse: %v", err)
+			}
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Skip("repo root .143/preview.json not found from test working directory")
+		}
+		dir = parent
 	}
 }

@@ -1,10 +1,32 @@
 package sandbox
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestNoOpFileReader_ReturnsErrFileNotFound pins the contract documented on
+// NoOpFileReader and relied on by PreviewHandler.readWorkspacePreviewConfig:
+// every method must wrap ErrFileNotFound so callers using errors.Is can treat
+// the no-Docker case as "no file" and fall through to defaults instead of
+// surfacing a 500.
+func TestNoOpFileReader_ReturnsErrFileNotFound(t *testing.T) {
+	t.Parallel()
+
+	r := NoOpFileReader{}
+	ctx := context.Background()
+
+	_, listErr := r.ListDir(ctx, "c", "/w", ".")
+	require.ErrorIs(t, listErr, ErrFileNotFound, "ListDir must wrap ErrFileNotFound")
+
+	_, _, readErr := r.ReadFile(ctx, "c", "/w", "f")
+	require.ErrorIs(t, readErr, ErrFileNotFound, "ReadFile must wrap ErrFileNotFound")
+
+	_, ctxErr := r.ReadFileContext(ctx, "c", "/w", "f", 1, 0, 0)
+	require.ErrorIs(t, ctxErr, ErrFileNotFound, "ReadFileContext must wrap ErrFileNotFound")
+}
 
 func TestResolvePathInWorkDir(t *testing.T) {
 	t.Parallel()

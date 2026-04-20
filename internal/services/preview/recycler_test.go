@@ -27,9 +27,9 @@ func (p *countingProvider) StopPreview(ctx context.Context, handle string) error
 	return p.mockProvider.StopPreview(ctx, handle)
 }
 
-func (p *countingProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig) (*PreviewHandle, error) {
+func (p *countingProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*PreviewHandle, error) {
 	p.startCount++
-	return p.mockProvider.StartPreview(ctx, sb, cfg)
+	return p.mockProvider.StartPreview(ctx, sb, cfg, extraEnv)
 }
 
 // newPreviewInstanceRowWithRecycleSchedule is like newPreviewInstanceRow but

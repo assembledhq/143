@@ -25,9 +25,14 @@ type mockDockerClient struct {
 
 	inspectResp container.ExecInspect
 	inspectErr  error
+
+	// lastExecOptions captures the last ExecOptions passed to
+	// ContainerExecCreate so tests can assert on Env, Cmd, etc.
+	lastExecOptions container.ExecOptions
 }
 
-func (m *mockDockerClient) ContainerExecCreate(_ context.Context, _ string, _ container.ExecOptions) (container.ExecCreateResponse, error) {
+func (m *mockDockerClient) ContainerExecCreate(_ context.Context, _ string, cfg container.ExecOptions) (container.ExecCreateResponse, error) {
+	m.lastExecOptions = cfg
 	return m.createResp, m.createErr
 }
 
@@ -246,6 +251,58 @@ func TestDockerFileReader_ReadFile(t *testing.T) {
 			require.Equal(t, tt.expectTruncated, truncated, "ReadFile truncation flag should match")
 		})
 	}
+}
+
+// TestDockerFileReader_ReadFile_NotFoundSentinel verifies that ENOENT stderr
+// surfaces as ErrFileNotFound so callers can errors.Is against it instead of
+// pattern-matching stderr text themselves.
+func TestDockerFileReader_ReadFile_NotFoundSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("head: cannot open '/workspace/missing' for reading: No such file or directory", 1)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "missing")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from head must be surfaced as ErrFileNotFound")
+}
+
+// TestDockerFileReader_ReadFile_NonNotFoundNotSentinel ensures unrelated exec
+// failures (non-ENOENT stderr) do NOT get miscategorized as ErrFileNotFound.
+func TestDockerFileReader_ReadFile_NonNotFoundNotSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("head: permission denied", 1)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "locked")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrFileNotFound, "non-ENOENT errors must not be classified as file-not-found")
+}
+
+// TestDockerFileReader_ReadFileContext_NotFoundSentinel verifies that ENOENT
+// stderr from `sed` (used by ReadFileContext) surfaces as ErrFileNotFound,
+// matching ReadFile's behavior so callers can use a single sentinel.
+func TestDockerFileReader_ReadFileContext_NotFoundSentinel(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClientWithStderr("sed: can't read /workspace/missing: No such file or directory", 1)
+	reader := NewDockerFileReader(client)
+	_, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", "missing", 5, 2, 2)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from sed must be surfaced as ErrFileNotFound")
+}
+
+// TestDockerFileReader_ForcesCLocale guards isNotFoundStderr: if the exec
+// environment ever stops pinning LC_ALL=C, a non-English container locale
+// would emit a translated ENOENT that our matcher would miss.
+func TestDockerFileReader_ForcesCLocale(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClient("ok\n", 0)
+	reader := NewDockerFileReader(client)
+	_, _, err := reader.ReadFile(context.Background(), "container-1", "/workspace", "f")
+	require.NoError(t, err)
+	require.Contains(t, client.lastExecOptions.Env, "LC_ALL=C", "exec must pin LC_ALL=C so ENOENT stderr stays in English")
+	require.Contains(t, client.lastExecOptions.Env, "LANG=C", "exec must pin LANG=C as a belt-and-braces fallback")
 }
 
 func TestDockerFileReader_ReadFileContext(t *testing.T) {

@@ -22,8 +22,13 @@ type PreviewCapableProvider interface {
 	//   4. Start application services in dependency order
 	//   5. Wait for all readiness probes to pass
 	//
+	// extraEnv is merged into every service's environment after the user's
+	// declared env and any infrastructure-injected credentials, so it can
+	// carry platform-level values (e.g. PREVIEW_ORIGIN) that must always be
+	// available and should win over user overrides.
+	//
 	// The returned PreviewHandle contains connection details for DialPreview.
-	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig) (*PreviewHandle, error)
+	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string) (*PreviewHandle, error)
 
 	// StopPreview gracefully stops all preview processes and tears down
 	// infrastructure containers. Safe to call multiple times.
