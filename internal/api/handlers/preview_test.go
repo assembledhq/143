@@ -572,7 +572,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
-		0, nil,
+		0, time.Now(),
 		"none", nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil, time.Now(),

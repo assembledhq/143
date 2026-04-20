@@ -28,16 +28,23 @@ func NewSessionStore(db DBTX) *SessionStore {
 }
 
 type SessionFilters struct {
-	Statuses          []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
-	Limit             int
-	CursorTime        *time.Time // Cursor-based pagination: created_at of the last item.
-	CursorID          *uuid.UUID // Cursor-based pagination: id of the last item.
-	AdHocOnly         bool       // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
-	RepositoryID      uuid.UUID  // When non-zero, filter sessions by repository via issues table.
-	TriggeredByUserID uuid.UUID  // When non-zero, filter sessions to those triggered by this user.
-	Search            string     // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
-	IncludeArchived   bool       // When true, include archived sessions in the results.
-	OnlyArchived      bool       // When true, return only archived sessions.
+	Statuses []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
+	Limit    int
+	// Cursor-based pagination on (last_activity_at, id). Because last_activity_at
+	// mutates as sessions get bumped, callers should expect the standard MRU
+	// pagination drift: the primary failure mode is that a row bumped after
+	// page N was fetched will be *skipped on a later page* (it moved ahead of
+	// the cursor). The inverse — a duplicate reappearing on an earlier page —
+	// only happens if the same page is re-fetched. The frontend dedupes by id,
+	// so this manifests as occasional reordering, not data loss.
+	CursorTime        *time.Time
+	CursorID          *uuid.UUID
+	AdHocOnly         bool      // When true, only return runs where pm_plan_id IS NULL (not linked to a PM plan).
+	RepositoryID      uuid.UUID // When non-zero, filter sessions by repository via issues table.
+	TriggeredByUserID uuid.UUID // When non-zero, filter sessions to those triggered by this user.
+	Search            string    // When non-empty, filter sessions by title (case-insensitive prefix/substring match).
+	IncludeArchived   bool      // When true, include archived sessions in the results.
+	OnlyArchived      bool      // When true, return only archived sessions.
 }
 
 // SessionCountsFilters scopes CountsByOrg to a subset of sessions.
@@ -167,14 +174,15 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		query += ` AND pm_plan_id IS NULL`
 	}
 	if filters.CursorTime != nil && filters.CursorID != nil {
-		query += ` AND (created_at, id) < (@cursor_time, @cursor_id)`
+		query += ` AND (last_activity_at, id) < (@cursor_time, @cursor_id)`
 		args["cursor_time"] = *filters.CursorTime
 		args["cursor_id"] = *filters.CursorID
 	}
 
-	// Uses partial index idx_sessions_deleted (org_id, created_at DESC, id DESC)
-	// WHERE deleted_at IS NULL for efficient filtering and sort.
-	query += ` ORDER BY created_at DESC, id DESC`
+	// Uses partial index idx_sessions_last_activity
+	// (org_id, last_activity_at DESC, id DESC) WHERE deleted_at IS NULL for
+	// efficient filtering and MRU sort.
+	query += ` ORDER BY last_activity_at DESC, id DESC`
 
 	limit := filters.Limit
 	if limit <= 0 || limit > 100 {
@@ -271,7 +279,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
 			@model_override, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id
 		)
-		RETURNING id, created_at`
+		RETURNING id, created_at, last_activity_at`
 
 	var issueID interface{} = run.IssueID
 	if run.IssueID == uuid.Nil {
@@ -301,18 +309,18 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&run.ID, &run.CreatedAt)
+	return row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt)
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
-	query := `UPDATE sessions SET status = @status WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	query := `UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == "running" {
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
-		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
-		query = `UPDATE sessions SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     runID,
@@ -322,8 +330,14 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return err
 }
 
+// UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
+// method is self-contained — callers do not have to remember to pair it with
+// a separate activity bump. Today's sole caller already calls UpdateResult
+// microseconds earlier, so this is a redundant write on the hot path, but the
+// cost (one UPDATE per plan creation) is negligible versus the coupling risk
+// of a future caller silently skipping the MRU bump.
 func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
-	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":         runID,
 		"org_id":     orgID,
@@ -332,12 +346,18 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 	return err
 }
 
+// UpdateResult persists a turn result and status transition. Always bumps
+// last_activity_at because every call represents user-driven activity (the
+// agent finished processing a user turn). Do NOT call this from reaper /
+// sweeper code paths — use a status-only update instead, otherwise dormant
+// sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
 
 	query := `
 		UPDATE sessions
 		SET status = @status,
+		    last_activity_at = now(),
 		    completed_at = CASE
 		        WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped')
 		            THEN now()
@@ -373,7 +393,7 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', started_at = now(), completed_at = NULL
+		SET status = 'running', started_at = now(), completed_at = NULL, last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -395,7 +415,7 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
-		SET status = 'running', completed_at = NULL
+		SET status = 'running', completed_at = NULL, last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled')
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
@@ -416,7 +436,8 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		SET failure_explanation = @failure_explanation,
 		    failure_category = @failure_category,
 		    failure_next_steps = @failure_next_steps,
-		    failure_retry_advised = @failure_retry_advised
+		    failure_retry_advised = @failure_retry_advised,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -473,7 +494,8 @@ func (s *SessionStore) ResetForRetry(ctx context.Context, orgID, sessionID uuid.
 		    risk_factors = NULL,
 		    token_usage = NULL,
 		    diff = NULL,
-		    diff_stats = NULL
+		    diff_stats = NULL,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -491,7 +513,8 @@ func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID u
 		    completed_at = now(),
 		    failure_explanation = @failure_explanation,
 		    failure_category = @failure_category,
-		    failure_retry_advised = true
+		    failure_retry_advised = true,
+		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -504,7 +527,7 @@ func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID u
 }
 
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
-	query := `UPDATE sessions SET title = @title WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET title = @title, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -617,11 +640,15 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 // UpdateSnapshotInfo persists snapshot metadata without changing the session status.
 // Used after the first run to store snapshot data while letting the normal
 // completion flow control the status.
+//
+// Deliberately does NOT touch last_activity_at: the orchestrator calls
+// UpdateResult (which bumps last_activity_at) immediately before this, so an
+// additional bump here is redundant and would double-write the column on
+// every snapshot.
 func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
 	query := `
 		UPDATE sessions
-		SET last_activity_at = now(),
-		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
+		SET agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted'
 		WHERE id = @id AND org_id = @org_id`
 
@@ -634,6 +661,12 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 	return err
 }
 
+// UpdateSandboxState changes only the sandbox lifecycle column. It deliberately
+// does NOT touch last_activity_at because the reaper calls this to mark
+// long-completed sessions as 'destroyed' during snapshot cleanup — bumping the
+// MRU timestamp there would resurface dormant sessions at the top of the list.
+// Caller-driven activity (turn results, status transitions) bumps last_activity_at
+// through its own update path.
 func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error {
 	query := `UPDATE sessions SET sandbox_state = @sandbox_state WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -646,7 +679,7 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 
 // UpdateWorkingBranch sets the working branch name for a session.
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
-	query := `UPDATE sessions SET working_branch = @working_branch WHERE id = @id AND org_id = @org_id`
+	query := `UPDATE sessions SET working_branch = @working_branch, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":             sessionID,
 		"org_id":         orgID,
@@ -754,8 +787,10 @@ func (s *SessionStore) ArchiveSystem(ctx context.Context, orgID, sessionID uuid.
 }
 
 // Unarchive removes the archived flag from a session, restoring it to default views.
+// Bumps last_activity_at so the restored session surfaces at the top of the
+// MRU-ordered list rather than reappearing pages deep at its old position.
 func (s *SessionStore) Unarchive(ctx context.Context, orgID, sessionID uuid.UUID) error {
-	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
+	query := `UPDATE sessions SET archived_at = NULL, archived_by_user_id = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NOT NULL`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,

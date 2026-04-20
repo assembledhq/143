@@ -703,7 +703,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(sessionID, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
 
 	// 5. Enqueue run_agent (with dedupe key on the session ID).
 	mock.ExpectQuery(`INSERT INTO jobs`).

@@ -36,23 +36,23 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, // project_task_id
-		nil, // model_override
-		nil, // triggered_by_user_id
-		nil, // agent_session_id
-		0,   // current_turn
-		nil, // last_activity_at
-		"none", // sandbox_state
-		nil,    // snapshot_key
-		nil,    // target_branch
-		nil,    // working_branch
-		nil,    // repository_id
-		nil,    // diff_stats
-		nil,    // diff_history
-		nil,    // input_manifest
+		nil,      // project_task_id
+		nil,      // model_override
+		nil,      // triggered_by_user_id
+		nil,      // agent_session_id
+		0,        // current_turn
+		now,      // last_activity_at
+		"none",   // sandbox_state
+		nil,      // snapshot_key
+		nil,      // target_branch
+		nil,      // working_branch
+		nil,      // repository_id
+		nil,      // diff_stats
+		nil,      // diff_history
+		nil,      // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
-		nil,    // automation_run_id
-		nil,    // deleted_at
+		nil, // automation_run_id
+		nil, // deleted_at
 		now,
 	}
 }
@@ -264,14 +264,15 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at"}).
-				AddRow(generatedID, now),
+			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
+				AddRow(generatedID, now, now),
 		)
 
 	err = store.Create(context.Background(), run)
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
+	require.Equal(t, now, run.LastActivityAt, "should set the last_activity_at timestamp on the agent run")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -302,8 +303,8 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at"}).
-				AddRow(generatedID, now),
+			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
+				AddRow(generatedID, now, now),
 		)
 
 	err = store.Create(context.Background(), run)

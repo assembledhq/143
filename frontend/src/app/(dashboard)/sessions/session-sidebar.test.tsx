@@ -53,6 +53,7 @@ function makeSession(overrides: Partial<SessionListItem> = {}): SessionListItem 
     created_at: '2026-02-17T07:00:00Z',
     started_at: '2026-02-17T07:00:00Z',
     completed_at: '2026-02-17T07:05:00Z',
+    last_activity_at: '2026-02-17T07:05:00Z',
     result_summary: 'Test session',
     ...overrides,
   };

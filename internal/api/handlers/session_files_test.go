@@ -22,9 +22,9 @@ import (
 
 // mockFileReader is a test implementation of sandbox.FileReader.
 type mockFileReader struct {
-	listDirFn      func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error)
-	readFileFn     func(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
-	readContextFn  func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error)
+	listDirFn     func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error)
+	readFileFn    func(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
+	readContextFn func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error)
 }
 
 func (m *mockFileReader) ListDir(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
@@ -89,20 +89,20 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumnsForFiles).AddRow(
 				sessionID, issueID, orgID, "claude_code", "running", "supervised", "standard",
-				nil, nil, nil, nil,                // complexity_tier through risk_factors
-				containerID, &now, nil, nil,        // container_id, started_at, completed_at, token_usage
-				nil, nil, nil, false,              // failure fields
-				nil, nil, nil, nil, nil,            // parent_session_id through diff
-				nil, nil, nil, nil,                // pm_plan_id through pm_reasoning
-				nil, nil, nil,                      // project_task_id, model_override, triggered_by_user_id
-				nil, 0, nil, "running", nil,        // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, nil, nil,                      // target_branch, working_branch, repository_id
-				nil, nil,                           // diff_stats, diff_history
-				nil,                                // input_manifest
-				nil, nil,                           // archived_at, archived_by_user_id
-				nil,                                // automation_run_id
-				nil,                                // deleted_at
-				now,                                // created_at
+				nil, nil, nil, nil, // complexity_tier through risk_factors
+				containerID, &now, nil, nil, // container_id, started_at, completed_at, token_usage
+				nil, nil, nil, false, // failure fields
+				nil, nil, nil, nil, nil, // parent_session_id through diff
+				nil, nil, nil, nil, // pm_plan_id through pm_reasoning
+				nil, nil, nil, // project_task_id, model_override, triggered_by_user_id
+				nil, 0, now, "running", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil, nil, nil, // target_branch, working_branch, repository_id
+				nil, nil, // diff_stats, diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil, // automation_run_id
+				nil, // deleted_at
+				now, // created_at
 			),
 		)
 }
@@ -263,8 +263,8 @@ func TestSessionFileHandler_GetFileContent(t *testing.T) {
 			},
 		},
 		{
-			name:         "requires path parameter",
-			path:         "",
+			name: "requires path parameter",
+			path: "",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
