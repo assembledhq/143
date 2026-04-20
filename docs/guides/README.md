@@ -1,11 +1,13 @@
 # User Guides
 
-Documentation for people **using** 143 — whether you're configuring a repo for 143 to act on, setting up a 143 deployment for your org, or operating a self-hosted instance.
-
-For documentation aimed at contributors working on 143 itself, see [`../contributing/`](../contributing/) and [`../local-development.md`](../local-development.md). For architecture and design, see [`../design/`](../design/).
+How-tos for people using 143 to act on their repos. These apply whether you're using the hosted version at [143.dev](https://www.143.dev) or running your own instance.
 
 ## Guides
 
 - **[Preview environments](previews.md)** — configure `.143/preview.json` so 143 can serve a live iframed preview of your app from inside a session.
-- **[GitHub App setup](github-app-setup.md)** — for self-hosted deployments: create your own GitHub OAuth App + GitHub App and wire them up.
-- **[Production deployment checklist](production-deployment-checklist.md)** — minimum steps to deploy the 143 backend + frontend in production.
+
+---
+
+Running your own 143 instance? See [`../self-hosting/`](../self-hosting/) instead.
+
+Working on the 143 codebase itself? See [`../local-development.md`](../local-development.md) and [`../contributing/`](../contributing/).

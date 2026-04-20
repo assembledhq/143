@@ -70,7 +70,9 @@ This works for anything measurable: test coverage, bundle size, response times, 
 
 ## Using 143
 
-If you want to run 143 against your own repos or deploy your own instance, the [user guides in `docs/guides/`](docs/guides/) cover configuring preview environments, setting up a GitHub App, and deploying the backend + frontend in production.
+If you're using 143 against your repos — on the hosted version or not — the [user guides in `docs/guides/`](docs/guides/) cover per-repo configuration (currently: preview environments).
+
+If you're running your own 143 instance, see [`docs/self-hosting/`](docs/self-hosting/) for GitHub App setup and the production deployment checklist.
 
 ## Built for production
 

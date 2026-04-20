@@ -1,0 +1,12 @@
+# Self-Hosting 143
+
+Most people don't need this — the hosted version at [143.dev](https://www.143.dev) is already running and pre-configured. These guides are for teams running their own instance of 143 (on their own infrastructure, with their own GitHub App, behind their own domain).
+
+For general usage docs that apply regardless of who's hosting, see [`../guides/`](../guides/).
+
+## Guides
+
+- **[GitHub App setup](github-app-setup.md)** — create your own GitHub OAuth App + GitHub App and wire them into your deployment.
+- **[Production deployment checklist](production-deployment-checklist.md)** — minimum steps to deploy the 143 backend + frontend in production.
+
+For local development (running 143 on your laptop while working on the codebase), see [`../local-development.md`](../local-development.md) instead.
