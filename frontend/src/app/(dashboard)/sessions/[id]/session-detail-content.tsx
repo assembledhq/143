@@ -433,11 +433,7 @@ const prStatusColor: Record<string, string> = {
 function PRCard({ sessionId }: { sessionId: string }) {
   const { data: prData, isLoading: prLoading } = useQuery({
     queryKey: ["session", sessionId, "pr"],
-    queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
-      // 404 means no PR exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
+    queryFn: () => api.sessions.getPR(sessionId),
   });
 
   const pr = prData?.data;
@@ -962,11 +958,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
   const { data: prData } = useQuery({
     queryKey: ["session", sessionId, "pr"],
-    queryFn: () => api.sessions.getPR(sessionId).catch((err) => {
-      // 404 means no PR exists yet — treat as empty data, not an error.
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
+    queryFn: () => api.sessions.getPR(sessionId),
   });
   const hasPR = !!prData?.data;
   const hasDiff = !!session.diff_stats;
@@ -1358,10 +1350,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // PR state for the detail-panel header button
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
-    queryFn: () => api.sessions.getPR(id).catch((err) => {
-      if (err?.code === "NOT_FOUND") return { data: null };
-      throw err;
-    }),
+    queryFn: () => api.sessions.getPR(id),
   });
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {

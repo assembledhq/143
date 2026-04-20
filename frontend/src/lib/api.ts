@@ -181,7 +181,7 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').PMPlan>>(`/api/v1/pm/plans${qs ? `?${qs}` : ''}`);
     },
-    latest: () => get<import('./types').SingleResponse<import('./types').PMPlan>>('/api/v1/pm/plans/latest'),
+    latest: () => get<import('./types').SingleResponse<import('./types').PMPlan | null>>('/api/v1/pm/plans/latest'),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').PMPlan>>(`/api/v1/pm/plans/${id}`),
     decisions: (params?: { cursor?: string; limit?: number; decision_type?: string; outcome?: string }) => {
       const searchParams = new URLSearchParams();
@@ -223,7 +223,7 @@ export const api = {
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
-    getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest>>(`/api/v1/sessions/${sessionId}/pr`),
+    getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
     createPR: (sessionId: string, options?: { draft?: boolean }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),

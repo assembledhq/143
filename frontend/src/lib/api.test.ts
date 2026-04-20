@@ -635,7 +635,7 @@ describe('api client', () => {
       );
 
       const result = await api.pm.latest();
-      expect(result.data.id).toBe('plan-latest');
+      expect(result.data?.id).toBe('plan-latest');
     });
 
     it('fetches single plan', async () => {
