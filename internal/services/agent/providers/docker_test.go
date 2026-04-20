@@ -413,8 +413,8 @@ func TestDockerProvider_Create(t *testing.T) {
 		// Verify security hardening
 		require.Equal(t, "runsc", capturedHostConfig.Runtime, "container should use gVisor runtime")
 		require.Equal(t, []string(capturedHostConfig.CapDrop), []string{"ALL"}, "container should drop all capabilities")
-		require.Equal(t, []string(capturedHostConfig.CapAdd), []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, "container should add minimum caps for sudo")
-		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options (no-new-privileges blocks sudo)")
+		require.Empty(t, capturedHostConfig.CapAdd, "container should not add back any caps — sudo is gone from the image and bootstrap uses docker exec User=root")
+		require.Empty(t, capturedHostConfig.SecurityOpt, "container should not set security options — no-new-privileges is moot without sudo, keep it unset for parity with the pre-sudo-removal behavior")
 		require.False(t, capturedHostConfig.ReadonlyRootfs, "container should have writable rootfs for package installation")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/tmp", "container should have tmpfs at /tmp")
 		require.Contains(t, capturedHostConfig.Tmpfs, "/var/tmp", "container should have exec-allowed tmpfs at /var/tmp for scratch binaries")
@@ -908,11 +908,13 @@ func TestDockerProvider_Exec(t *testing.T) {
 		t.Parallel()
 
 		var capturedCmd []string
+		var capturedUser string
 		var capturedAttachStdout, capturedAttachStderr bool
 
 		mock := &mockDockerClient{}
 		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
 			capturedCmd = config.Cmd
+			capturedUser = config.User
 			capturedAttachStdout = config.AttachStdout
 			capturedAttachStderr = config.AttachStderr
 			return container.ExecCreateResponse{ID: "exec-1"}, nil
@@ -931,6 +933,7 @@ func TestDockerProvider_Exec(t *testing.T) {
 		require.NoError(t, err, "Exec should not return an error")
 		require.Equal(t, 0, code, "exit code should be 0")
 		require.Equal(t, []string{"sh", "-c", "echo hello"}, capturedCmd, "command should be wrapped in sh -c")
+		require.Empty(t, capturedUser, "public Exec must leave User empty so the exec runs as the container's default (sandbox); only bootstrap opts in to root")
 		require.True(t, capturedAttachStdout, "should attach stdout")
 		require.True(t, capturedAttachStderr, "should attach stderr")
 	})

@@ -250,7 +250,10 @@ func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
 
 // Create spins up a new Docker container with the given resource limits and
 // security hardening (dropped capabilities, gVisor runtime, non-root user).
-// The rootfs is writable so agents can install packages via sudo apt-get.
+// The rootfs is writable so the orchestrator can seed per-session state via
+// docker exec User="root" (see bootstrap below). Runtime apt-get is not
+// supported — every dependency is baked into the sandbox image — because
+// sudo's setuid bit is stripped under gVisor / nosuid mounts.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 	log := d.configLogger(cfg)
 	log.Info().
@@ -295,9 +298,13 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			Memory:    int64(cfg.MemoryLimitMB) * 1024 * 1024,
 			PidsLimit: &pidsLimit,
 		},
-		NetworkMode:    container.NetworkMode(d.network),
-		CapDrop:        []string{"ALL"},
-		CapAdd:         []string{"SETUID", "SETGID", "DAC_OVERRIDE"}, // minimum caps for sudo
+		NetworkMode: container.NetworkMode(d.network),
+		CapDrop:     []string{"ALL"},
+		// No CapAdd: sudo was removed from the sandbox image (setuid bits
+		// are stripped under gVisor / nosuid), and bootstrap provisioning
+		// runs via docker exec User="root", which doesn't need container
+		// capabilities. Keeping the cap set empty shrinks the attack
+		// surface for any agent code that escapes into the sandbox.
 		ReadonlyRootfs: false,
 		Tmpfs: map[string]string{
 			// /tmp is hardened (noexec,nosuid) so exploits can't drop a binary
