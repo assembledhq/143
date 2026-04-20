@@ -131,16 +131,16 @@ function LoginPageContent() {
             </div>
           )}
 
-          {providers?.demo && (
+          {providers?.demo && providers.demo_email && providers.demo_password && (
             <div
               className="rounded-md border border-amber-300/50 bg-amber-50/50 px-3 py-2 text-sm text-muted-foreground dark:border-amber-500/30 dark:bg-amber-950/30"
               data-testid="demo-banner"
             >
               <div className="font-medium text-foreground">Demo environment</div>
               <div className="mt-1">
-                Sign in with <code className="font-mono">dogfood@143.dev</code>
+                Sign in with <code className="font-mono">{providers.demo_email}</code>
                 {" / "}
-                <code className="font-mono">preview-dogfood</code>.
+                <code className="font-mono">{providers.demo_password}</code>.
               </div>
               <div className="mt-1 text-xs">
                 Data resets when the preview recycles. GitHub actions are stubbed.

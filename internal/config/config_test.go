@@ -384,6 +384,26 @@ func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
 			wantWarn: false,
 		},
 		{
+			name: "production + host containing 'localhost' as substring does not warn",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "https://{id}.preview.localhost.example.com",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "production + loopback IP warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://127.0.0.1:9090/{id}",
+			},
+			wantWarn: true,
+		},
+		{
 			name: "development + localhost does not warn",
 			cfg: Config{
 				Env:                   "development",

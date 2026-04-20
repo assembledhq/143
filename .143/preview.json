@@ -16,11 +16,7 @@
       }
     },
     "server": {
-      "command": [
-        "sh",
-        "-c",
-        "set -e && echo '[143-preview] building binaries...' && go build -o /tmp/143-migrate ./cmd/migrate && go build -o /tmp/143-server ./cmd/server && echo '[143-preview] running migrations...' && /tmp/143-migrate up && echo '[143-preview] seeding database...' && psql \"$DATABASE_URL\" -f .143/seed.sql && mkdir -p /tmp/143-preview && chmod 700 /tmp/143-preview && if [ ! -s /tmp/143-preview/session_secret ]; then head -c 32 /dev/urandom | base64 > /tmp/143-preview/session_secret && chmod 600 /tmp/143-preview/session_secret; fi && export SESSION_SECRET=\"$(cat /tmp/143-preview/session_secret)\" && echo '[143-preview] starting server...' && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" /tmp/143-server"
-      ],
+      "command": ["sh", ".143/preview-start.sh"],
       "port": 8080,
       "env": {
         "MODE": "api",

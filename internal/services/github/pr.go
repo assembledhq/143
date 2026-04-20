@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -536,7 +538,19 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 	}
 
 	state, err := s.previews.GetPRPreviewState(ctx, pr.OrgID, repo.ID, pr.GitHubPRNumber)
-	if err != nil || state == nil {
+	if err != nil {
+		// No pr_preview_state row is the common case (PR never had a
+		// preview) and not worth a warning. Anything else is an actual
+		// database error — log it so we don't silently mask ops issues.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).
+				Str("repo", pr.GitHubRepo).
+				Int("pr_number", pr.GitHubPRNumber).
+				Msg("failed to load pr_preview_state for PR preview teardown")
+		}
+		return
+	}
+	if state == nil {
 		return
 	}
 

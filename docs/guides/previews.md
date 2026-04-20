@@ -6,7 +6,7 @@ This guide covers how to add preview support to a repo. For the underlying archi
 
 ## Dogfood preview
 
-143 ships its own `.143/preview.json` + `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
+143 ships its own `.143/preview.json`, `.143/preview-start.sh`, and `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
 
 **How to launch it locally:**
 
@@ -18,6 +18,8 @@ This guide covers how to add preview support to a repo. For the underlying archi
 
 - Email: `dogfood@143.dev`
 - Password: `preview-dogfood`
+
+The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
 
 **What you can and cannot do in the dogfood:**
 

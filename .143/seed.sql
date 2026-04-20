@@ -4,6 +4,12 @@
 -- placeholder integration and a couple of repositories/projects so the
 -- logged-in UI shows populated screens instead of empty states.
 --
+-- IMPORTANT: the seeded admin email + password below must match the
+-- DEMO_EMAIL / DEMO_PASSWORD defaults in internal/config/config.go, since
+-- the login-page banner renders those values and a reviewer copy-pastes
+-- them into the sign-in form. If you change either side, regenerate the
+-- bcrypt hash below (cost 10) and update the config defaults in lockstep.
+--
 -- Password: "preview-dogfood" (bcrypt hash below).
 --
 -- All rows use fixed UUIDs + ON CONFLICT DO NOTHING so the seed is

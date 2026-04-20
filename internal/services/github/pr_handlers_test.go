@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -2163,8 +2164,10 @@ func TestTeardownPRPreview_RepoLookupError(t *testing.T) {
 	require.NoError(t, previewMock.ExpectationsWereMet(), "preview store must not be queried when repo lookup fails")
 }
 
-// TestTeardownPRPreview_NoPreviewState covers the path where the PR has
-// never had a preview created — GetPRPreviewState returns nil, no error.
+// TestTeardownPRPreview_NoPreviewState covers the common path where the PR
+// has never had a preview created — GetPRPreviewState returns pgx.ErrNoRows.
+// This must be silent (no warning log) since it's the default state for
+// every freshly-opened PR.
 func TestTeardownPRPreview_NoPreviewState(t *testing.T) {
 	t.Parallel()
 
@@ -2177,11 +2180,77 @@ func TestTeardownPRPreview_NoPreviewState(t *testing.T) {
 	previewMock := newMockPool(t)
 	stopper := &recordingPreviewStopper{}
 
+	var logBuf bytes.Buffer
 	svc := &PRService{
 		repos:          db.NewRepositoryStore(repoMock),
 		previews:       db.NewPreviewStore(previewMock),
 		previewStopper: stopper,
-		logger:         zerolog.Nop(),
+		logger:         zerolog.New(&logBuf),
+	}
+
+	handlerRepoColumns := []string{
+		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+		"private", "language", "description", "clone_url", "installation_id", "status",
+		"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+	repoMock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerRepoColumns).
+				AddRow(repoID, orgID, integrationID, int64(12345),
+					"testorg/testrepo", "main", false, nil, nil,
+					"https://github.com/testorg/testrepo.git", int64(99),
+					"active", nil, nil, json.RawMessage(`{}`), now, now),
+		)
+
+	// Empty result set — CollectOneRow inside GetPRPreviewState surfaces
+	// pgx.ErrNoRows, which teardownPRPreview must treat as the benign
+	// "no preview ever created" case.
+	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "pr_number", "github_comment_id",
+			"last_preview_instance_id", "last_screenshot_blob_path",
+			"last_visual_diff_blob_path", "base_snapshot_key", "status",
+			"created_at", "updated_at",
+		}))
+
+	pr := models.PullRequest{
+		OrgID:          orgID,
+		GitHubRepo:     "testorg/testrepo",
+		GitHubPRNumber: 42,
+	}
+	svc.teardownPRPreview(context.Background(), pr, false)
+
+	require.Equal(t, 0, stopper.calls, "StopPreview must not be called when no pr_preview_state exists")
+	require.NotContains(t, logBuf.String(), "failed to load pr_preview_state",
+		"no-rows must be silent — no warning log for the common case")
+	require.NoError(t, repoMock.ExpectationsWereMet())
+	require.NoError(t, previewMock.ExpectationsWereMet())
+}
+
+// TestTeardownPRPreview_PreviewStateLookupError covers the path where the
+// pr_preview_state lookup fails with a real DB error (not no-rows). The
+// function must log a warning and return without calling the stopper, so
+// ops has a breadcrumb instead of a silent swallow.
+func TestTeardownPRPreview_PreviewStateLookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	stopper := &recordingPreviewStopper{}
+
+	var logBuf bytes.Buffer
+	svc := &PRService{
+		repos:          db.NewRepositoryStore(repoMock),
+		previews:       db.NewPreviewStore(previewMock),
+		previewStopper: stopper,
+		logger:         zerolog.New(&logBuf),
 	}
 
 	handlerRepoColumns := []string{
@@ -2201,7 +2270,7 @@ func TestTeardownPRPreview_NoPreviewState(t *testing.T) {
 
 	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(fmt.Errorf("no rows"))
+		WillReturnError(fmt.Errorf("connection refused"))
 
 	pr := models.PullRequest{
 		OrgID:          orgID,
@@ -2210,7 +2279,9 @@ func TestTeardownPRPreview_NoPreviewState(t *testing.T) {
 	}
 	svc.teardownPRPreview(context.Background(), pr, false)
 
-	require.Equal(t, 0, stopper.calls, "StopPreview must not be called when no pr_preview_state exists")
+	require.Equal(t, 0, stopper.calls, "StopPreview must not be called when preview state lookup errors")
+	require.Contains(t, logBuf.String(), "failed to load pr_preview_state",
+		"a real DB error must be logged, not silently swallowed")
 	require.NoError(t, repoMock.ExpectationsWereMet())
 	require.NoError(t, previewMock.ExpectationsWereMet())
 }

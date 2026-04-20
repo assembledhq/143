@@ -61,17 +61,22 @@ func NewAuthHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStor
 // When DemoMode is on, "github" is forced to false regardless of OAuth
 // configuration so the login page does not offer a button that would 500
 // against the stubbed GitHub client. "demo" tells the frontend to render
-// the seeded-credentials banner.
+// the seeded-credentials banner, and "demo_email" / "demo_password" carry
+// the banner text so a reviewer sees whatever the server was actually
+// seeded with (server is the single source of truth, not the TSX).
 func (h *AuthHandler) Providers(w http.ResponseWriter, r *http.Request) {
 	githubEnabled := h.cfg.GitHubOAuthClientID != "" && !h.cfg.DemoMode
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": map[string]any{
-			"github": githubEnabled,
-			"google": h.cfg.GoogleOAuthClientID != "",
-			"email":  true,
-			"demo":   h.cfg.DemoMode,
-		},
-	})
+	data := map[string]any{
+		"github": githubEnabled,
+		"google": h.cfg.GoogleOAuthClientID != "",
+		"email":  true,
+		"demo":   h.cfg.DemoMode,
+	}
+	if h.cfg.DemoMode {
+		data["demo_email"] = h.cfg.DemoEmail
+		data["demo_password"] = h.cfg.DemoPassword
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
 }
 
 // Me returns the currently authenticated user.
