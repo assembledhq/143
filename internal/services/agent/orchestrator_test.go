@@ -1005,7 +1005,7 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	d.creds = &mockCredentialProvider{
@@ -1055,7 +1055,7 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	// No credential configured for "claude_code".
@@ -1083,8 +1083,8 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	// when integration skills are available (independent of agent type).
 	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
 		"sandbox config should not have agent-specific env for unconfigured agent type")
-	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
-		"HOME should always be set")
+	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
+		"HOME should always be set to the sandbox user's home dir")
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
@@ -1108,7 +1108,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: "/workspace"}, nil
+		return &agent.Sandbox{ID: "codex-oauth", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	orch := buildOrchestrator(d)
@@ -1120,7 +1120,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	require.Empty(t, capturedCfg.Env["CODEX_API_KEY"], "CODEX_API_KEY should not be set as env var")
 
 	// Instead, the token should be injected via auth.json.
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
 	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
@@ -1181,12 +1181,12 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	require.Contains(
 		t,
 		d.provider.ExecCalls,
-		"mkdir -p /workspace/.codex",
-		"codex auth setup should create the auth directory inside the writable sandbox workdir",
+		"mkdir -p /home/sandbox/.codex",
+		"codex auth setup should create the auth directory under the sandbox user's home",
 	)
 
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
-	require.True(t, ok, "codex auth injection should write auth.json under /workspace/.codex")
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
+	require.True(t, ok, "codex auth injection should write auth.json under /home/sandbox/.codex")
 
 	var authJSON map[string]interface{}
 	unmarshalErr := json.Unmarshal(authData, &authJSON)
@@ -1246,14 +1246,14 @@ func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		capturedCfg = cfg
-		return &agent.Sandbox{ID: "test-sandbox", WorkDir: cfg.WorkDir}, nil
+		return &agent.Sandbox{ID: "test-sandbox", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
 	orch := buildOrchestrator(d)
 	_ = orch.RunAgent(context.Background(), run)
 
-	require.Equal(t, "/workspace", capturedCfg.Env["HOME"],
-		"sandbox env should set HOME to the workdir so Codex CLI finds ~/.codex/auth.json")
+	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
+		"sandbox env should set HOME to the sandbox user's home so Codex CLI finds ~/.codex/auth.json")
 }
 
 func TestRunAgent_IssueWithoutRepository(t *testing.T) {
@@ -1391,6 +1391,136 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }
 
+// errForcedCreateFailure is used by tests that short-circuit provider.Create so
+// the test can inspect the SandboxConfig without running the full sandbox
+// lifecycle. Named so grep picks it up and future refactors don't silently
+// change behavior if Create's call site moves.
+var errForcedCreateFailure = errors.New("forced create failure to short-circuit test")
+
+// TestContinueSession_SessionRepoSlug exercises every branch of
+// sessionRepoSlug through ContinueSession.
+//   - The two "happy" branches (session.RepositoryID set; issue.RepositoryID
+//     set) must produce the slug-derived WorkDir and then fail at provider.Create.
+//   - The "no repo at all" branch (issue.RepositoryID == nil) must fall back to
+//     the default WorkDir and fail at Create.
+//   - Both lookup-failure branches must hard-fail (resolve workdir error) WITHOUT
+//     ever calling Create — otherwise we'd risk running the agent in /workspace
+//     while the snapshot tar restored files under /home/sandbox/<slug>.
+func TestContinueSession_SessionRepoSlug(t *testing.T) {
+	t.Parallel()
+
+	const defaultWorkDir = "/workspace"
+	const slugWorkDir = "/home/sandbox/backend"
+
+	type tc struct {
+		name         string
+		prepSession  func(s *models.Session)
+		prepDeps     func(d testDeps)
+		wantWorkDir  string // "" means Create must not be invoked
+		wantErrMatch string
+	}
+
+	cases := []tc{
+		{
+			name:         "session with repo uses slug-derived workdir",
+			prepSession:  func(s *models.Session) {},
+			prepDeps:     func(d testDeps) {},
+			wantWorkDir:  slugWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name: "session without repo falls back to issue's repo",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps:     func(d testDeps) {},
+			wantWorkDir:  slugWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name: "session and issue both without repo use default workdir",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps: func(d testDeps) {
+				issue := d.issues.issue
+				issue.RepositoryID = nil
+				d.issues.issue = issue
+			},
+			wantWorkDir:  defaultWorkDir,
+			wantErrMatch: "create sandbox",
+		},
+		{
+			name: "issue fetch failure hard-fails resume",
+			prepSession: func(s *models.Session) {
+				s.RepositoryID = nil
+			},
+			prepDeps: func(d testDeps) {
+				d.issues.err = errors.New("db flaky")
+			},
+			wantWorkDir:  "",
+			wantErrMatch: "resolve workdir",
+		},
+		{
+			name:        "repo fetch failure hard-fails resume",
+			prepSession: func(s *models.Session) {},
+			prepDeps: func(d testDeps) {
+				d.repos.err = errors.New("db flaky")
+			},
+			wantWorkDir:  "",
+			wantErrMatch: "resolve workdir",
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			session := testRun(orgID, issue.ID)
+			session.Status = string(models.SessionStatusIdle)
+			session.CurrentTurn = 1
+			c.prepSession(session)
+
+			d := defaultDeps()
+			// mockIssueStore / mockRepositoryStore are value-holders; update in place.
+			d.issues.issue = issue
+			c.prepDeps(d)
+
+			// Pre-populate a user message so ContinueSession reaches the Create call.
+			d.messages.messages = []models.SessionMessage{{
+				ID:         1,
+				SessionID:  session.ID,
+				OrgID:      orgID,
+				TurnNumber: 2,
+				Role:       models.MessageRoleUser,
+				Content:    "continue please",
+			}}
+
+			var gotWorkDir string
+			var createCalls int
+			d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+				createCalls++
+				gotWorkDir = cfg.WorkDir
+				return nil, errForcedCreateFailure
+			}
+
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(context.Background(), session)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), c.wantErrMatch)
+			if c.wantWorkDir == "" {
+				require.Zero(t, createCalls, "resume must not create a sandbox when repo lookup fails")
+				return
+			}
+			require.Equal(t, 1, createCalls, "Create should be called exactly once when workdir resolution succeeds")
+			require.Equal(t, c.wantWorkDir, gotWorkDir, "sessionRepoSlug should drive WorkDir selection")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WithSandboxProvider / SandboxProviderFromContext
 // ---------------------------------------------------------------------------
@@ -1506,7 +1636,7 @@ func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err)
 
-	authData, ok := d.provider.Files["/workspace/.codex/auth.json"]
+	authData, ok := d.provider.Files["/home/sandbox/.codex/auth.json"]
 	require.True(t, ok, "auth.json should be written to sandbox")
 	var authJSON map[string]interface{}
 	require.NoError(t, json.Unmarshal(authData, &authJSON))
@@ -1621,4 +1751,3 @@ func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
 	turnUpdates := d.sessions.getTurnUpdates()
 	require.Empty(t, turnUpdates, "cancelled session without snapshot should not have turn updates")
 }
-

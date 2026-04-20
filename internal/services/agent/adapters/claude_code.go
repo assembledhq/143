@@ -97,9 +97,10 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			msg,
 		)
 	} else {
-		// First turn: write prompt file and run fresh.
+		// First turn: write prompt file and run fresh. Put it under $HOME
+		// (not WorkDir) so it doesn't pollute the cloned repo's git status.
 		promptContent := fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
-		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+		promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 		if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
