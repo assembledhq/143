@@ -1531,32 +1531,61 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 }
 
 // TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt locks in the
-// behavior that when sandbox creation fails, ContinueSession posts the
-// user-visible "Failed to start..." assistant message only on the final
-// retry attempt. Intermediate attempts must stay silent so the worker's
-// automatic retry loop doesn't flood the session with duplicates.
+// behavior that when sandbox preparation fails, ContinueSession posts the
+// user-visible assistant message only on the final retry attempt.
+// Intermediate attempts must stay silent so the worker's automatic retry
+// loop doesn't flood the session with duplicates. Exercised for both the
+// sandbox-creation branch and the sibling workdir-resolution branch.
 func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
 	t.Parallel()
 
+	type failureMode int
+	const (
+		sandboxCreateFailure failureMode = iota
+		workdirResolveFailure
+	)
+
 	cases := []struct {
 		name            string
+		failure         failureMode
 		ctx             func() context.Context
 		wantErrorPosted bool
+		wantErrMatch    string
 	}{
 		{
-			name:            "no attempt metadata does not post",
+			name:            "sandbox-create: no attempt metadata does not post",
+			failure:         sandboxCreateFailure,
 			ctx:             context.Background,
 			wantErrorPosted: false,
+			wantErrMatch:    "create sandbox",
 		},
 		{
-			name:            "mid-retry attempt does not post",
+			name:            "sandbox-create: mid-retry attempt does not post",
+			failure:         sandboxCreateFailure,
 			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 1, 3) },
 			wantErrorPosted: false,
+			wantErrMatch:    "create sandbox",
 		},
 		{
-			name:            "final attempt posts",
+			name:            "sandbox-create: final attempt posts",
+			failure:         sandboxCreateFailure,
 			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 3, 3) },
 			wantErrorPosted: true,
+			wantErrMatch:    "create sandbox",
+		},
+		{
+			name:            "workdir-resolve: mid-retry attempt does not post",
+			failure:         workdirResolveFailure,
+			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 1, 3) },
+			wantErrorPosted: false,
+			wantErrMatch:    "resolve workdir",
+		},
+		{
+			name:            "workdir-resolve: final attempt posts",
+			failure:         workdirResolveFailure,
+			ctx:             func() context.Context { return jobctx.WithAttempt(context.Background(), 3, 3) },
+			wantErrorPosted: true,
+			wantErrMatch:    "resolve workdir",
 		},
 	}
 
@@ -1575,7 +1604,7 @@ func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
 			d.issues.issue = issue
 
 			// Pre-populate a user message so ContinueSession reaches the
-			// provider.Create call that we'll force to fail.
+			// failure point we're exercising.
 			d.messages.messages = []models.SessionMessage{{
 				ID:         1,
 				SessionID:  session.ID,
@@ -1585,14 +1614,22 @@ func TestContinueSession_ErrorMessagePostedOnlyOnFinalAttempt(t *testing.T) {
 				Content:    "continue please",
 			}}
 
-			d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-				return nil, errForcedCreateFailure
+			switch c.failure {
+			case sandboxCreateFailure:
+				d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+					return nil, errForcedCreateFailure
+				}
+			case workdirResolveFailure:
+				// Force sessionRepoSlug to fail: drop the session's repo and
+				// make the fallback issue-repo lookup error out.
+				session.RepositoryID = nil
+				d.issues.err = errors.New("db flaky")
 			}
 
 			orch := buildOrchestrator(d)
 			err := orch.ContinueSession(c.ctx(), session)
 			require.Error(t, err)
-			require.Contains(t, err.Error(), "create sandbox")
+			require.Contains(t, err.Error(), c.wantErrMatch)
 
 			var errorMessages int
 			for _, m := range d.messages.getMessages() {
