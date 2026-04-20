@@ -68,9 +68,9 @@ This works for anything measurable: test coverage, bundle size, response times, 
 4. **Ship** — open GitHub PRs with full context and preview environments
 5. **Loop** — for eval-driven tasks, measure results and iterate automatically
 
-## Preview environments
+## Using 143
 
-For repos that run through 143, drop a `.143/preview.json` into the root and the session page will show a live, iframed view of your app running with the agent's changes applied — no branch-pulling required. Supports single- or multi-service configs with ephemeral platform-provided Postgres / Redis / MySQL sidecars. See [docs/previews.md](docs/previews.md) for the config reference, examples, and trust split.
+If you want to run 143 against your own repos or deploy your own instance, the [user guides in `docs/guides/`](docs/guides/) cover configuring preview environments, setting up a GitHub App, and deploying the backend + frontend in production.
 
 ## Built for production
 
