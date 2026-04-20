@@ -380,10 +380,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
-	// Ensure HOME points to the sandbox workdir so CLI tools (e.g. Codex
-	// resolving ~/.codex/auth.json) find files written to the workdir.
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
+	}
+	// Route the sandbox workdir into a repo-named subdir of HomeDir so the
+	// agent's cwd reads like `/home/sandbox/<repo>` — matching what a human
+	// would see after `git clone && cd <repo>`. Falls back to the default
+	// (/workspace) when no repo is attached.
+	if slug := SlugForRepo(repoFullName); slug != "" {
+		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
 	// Inject GitHub token and repo info for 143-tools CLI only when the agent
 	// has integration skills (i.e. the prompt references CLI tools). This avoids
@@ -405,7 +410,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
-		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
@@ -727,8 +732,40 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
 	}
+	// Look up the session's repo to derive the same WorkDir used on the
+	// initial run (see RunAgent). This must match the original: the container
+	// WorkingDir and HOME are driven off WorkDir, and the snapshot tar restores
+	// files at the original absolute paths, so drifting here leaves the agent
+	// running in an empty /workspace while the checkout sits elsewhere.
+	// Treat a lookup failure as fatal — revert to idle so the user can retry.
+	slug, slugErr := o.sessionRepoSlug(ctx, session)
+	if slugErr != nil {
+		log.Error().Err(slugErr).Msg("sandbox workdir resolution failed during continue_session")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after workdir resolution failure")
+		}
+		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
+		}
+		if o.sessionMessages != nil {
+			errMsg := &models.SessionMessage{
+				SessionID:  session.ID,
+				OrgID:      session.OrgID,
+				TurnNumber: session.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
+			}
+			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+				log.Error().Err(createErr).Msg("failed to create error message for workdir resolution failure")
+			}
+		}
+		return fmt.Errorf("resolve workdir: %w", slugErr)
+	}
+	if slug != "" {
+		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
-		sandboxCfg.Env["HOME"] = sandboxCfg.WorkDir
+		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
@@ -976,6 +1013,32 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, nil
+}
+
+// sessionRepoSlug returns the repo-name slug for the session's repository. The
+// returned slug drives WorkDir selection on resume and MUST match what RunAgent
+// chose originally, or the container's WorkingDir/HOME diverge from where the
+// snapshot tar restored the repo checkout. An empty slug with nil error means
+// "no repo is attached" (legitimate, falls back to default WorkDir). Any lookup
+// failure is returned as an error so the caller can surface it rather than
+// silently diverging.
+func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) (string, error) {
+	repoID := session.RepositoryID
+	if repoID == nil {
+		issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
+		if err != nil {
+			return "", fmt.Errorf("fetch issue for session repo lookup: %w", err)
+		}
+		if issue.RepositoryID == nil {
+			return "", nil
+		}
+		repoID = issue.RepositoryID
+	}
+	repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
+	if err != nil {
+		return "", fmt.Errorf("fetch repo for session workdir: %w", err)
+	}
+	return SlugForRepo(repo.FullName), nil
 }
 
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff
@@ -1419,10 +1482,10 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		return false, fmt.Errorf("marshal auth.json: %w", err)
 	}
 
-	// Write auth.json under the sandbox workdir/.codex. The sandbox env
-	// sets HOME to the workdir (see RunAgent step 7) so the Codex CLI
+	// Write auth.json under $HOME/.codex. The sandbox env sets HOME to the
+	// sandbox user's home dir (see RunAgent step 7) so the Codex CLI
 	// resolves ~/.codex/auth.json to this path.
-	authDir := path.Join(sandbox.WorkDir, ".codex")
+	authDir := path.Join(sandbox.HomeDir, ".codex")
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
 
 	var mkdirOut, mkdirErr bytes.Buffer

@@ -215,7 +215,7 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			}
 
 			adapter := NewClaudeCodeAdapter(zerolog.Nop())
-			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace"}
+			sandbox := &agent.Sandbox{ID: "test-sandbox", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 			prompt := &agent.AgentPrompt{
 				SystemPrompt: "Fix the bug.",
 				UserPrompt:   "Null pointer error.",
@@ -242,7 +242,7 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			tt.checkResult(t, result, logs)
 
 			// Verify prompt file was written.
-			promptData, exists := provider.Files["/workspace/.143-prompt.md"]
+			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
 		})
@@ -261,7 +261,7 @@ func TestClaudeCodeAdapter_Execute_ExecError(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -281,7 +281,7 @@ func TestClaudeCodeAdapter_Execute_WriteFileError(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
@@ -296,7 +296,7 @@ func TestClaudeCodeAdapter_Execute_MissingSandboxProvider(t *testing.T) {
 	t.Parallel()
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{SystemPrompt: "test", UserPrompt: "test", MaxTokens: 50_000}
 	logCh := make(chan agent.LogEntry, 10)
 
@@ -327,7 +327,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	}
 
 	adapter := NewClaudeCodeAdapter(zerolog.Nop())
-	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 	prompt := &agent.AgentPrompt{
 		UserMessage:  "Please tighten the guard clause.",
 		MaxTokens:    50_000,
@@ -340,7 +340,7 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	require.NoError(t, err, "continuation should succeed")
 	require.NotNil(t, result, "continuation should return a result")
 	require.Contains(t, provider.ExecCalls[0], "--continue", "continuation should use Claude's continue mode")
-	_, exists := provider.Files["/workspace/.143-prompt.md"]
+	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
@@ -1129,7 +1129,7 @@ func TestCollectDiff(t *testing.T) {
 				return 0, nil
 			}
 
-			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
+			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
 			diff, err := collectDiff(context.Background(), provider, sandbox)
 			if tt.wantErr {
 				require.Error(t, err)
