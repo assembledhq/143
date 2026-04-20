@@ -65,7 +65,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		SELECT
 			e.id,
 			e.session_id,
-			s.created_by AS user_id,
+			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
 			e.cpu_limit,
 			e.memory_limit_mb,
 			e.started_at,
@@ -165,7 +165,7 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	// complete after that hour has already been rolled up.
 	tokenRows, err := s.db.Query(ctx, `
 		SELECT
-			s.created_by AS user_id,
+			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
 			COALESCE((s.token_usage->>'input_tokens')::bigint, 0) AS input_tokens,
 			COALESCE((s.token_usage->>'output_tokens')::bigint, 0) AS output_tokens,
 			COALESCE((s.token_usage->>'total_cost_usd')::double precision, 0) AS cost_usd
@@ -227,6 +227,12 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	// at the per-user level (Level 2) since session token_usage isn't broken
 	// down by capacity tier.
 	for key, agg := range aggregates {
+		// Skip sessions with no attributed user (e.g. automation-triggered).
+		// They still contribute to per-tier and org totals below; we just can't
+		// emit a per-user row because user_id has a FK to users(id).
+		if key.userID == uuid.Nil {
+			continue
+		}
 		uid := key.userID
 		tier := key.capacityTier
 		peak := computePeakConcurrent(agg.intervals)
@@ -263,6 +269,9 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		ua.intervals = append(ua.intervals, agg.intervals...)
 	}
 	for uid, agg := range userAgg {
+		if uid == uuid.Nil {
+			continue
+		}
 		peak := computePeakConcurrent(agg.intervals)
 		avgDur, p95Dur := computeDurationStats(agg.durations)
 		ta := tokensByUser[uid]
@@ -291,6 +300,9 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 	// events in this hour. Without this, token spend is visible at the org
 	// level but cannot be attributed to these users in per-user views.
 	for uid, ta := range tokensByUser {
+		if uid == uuid.Nil {
+			continue
+		}
 		if _, hasContainer := userAgg[uid]; hasContainer {
 			continue // already handled above
 		}
@@ -692,14 +704,15 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 		query = fmt.Sprintf(`
 			WITH session_counts AS (
 				SELECT
-					s.created_by AS user_id,
+					s.triggered_by_user_id AS user_id,
 					COUNT(DISTINCT e.session_id) AS distinct_sessions
 				FROM container_usage_events e
 				JOIN sessions s ON s.id = e.session_id
 				WHERE e.org_id = @org_id
 				  AND e.started_at < @end
 				  AND COALESCE(e.stopped_at, @now) > @start
-				GROUP BY s.created_by
+				  AND s.triggered_by_user_id IS NOT NULL
+				GROUP BY s.triggered_by_user_id
 			)
 			SELECT
 				uh.user_id::text AS key,
@@ -840,7 +853,7 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 			  ON s.id = e.session_id
 			 AND s.org_id = e.org_id
 			LEFT JOIN users u
-			  ON u.id = s.created_by
+			  ON u.id = s.triggered_by_user_id
 			 AND u.org_id = s.org_id
 			GROUP BY days.local_day, COALESCE(u.email, '')
 			ORDER BY days.local_day, user_email`
