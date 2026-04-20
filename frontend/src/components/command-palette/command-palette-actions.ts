@@ -2,6 +2,7 @@ import {
   Zap,
   Play,
   FolderKanban,
+  RefreshCw,
   Settings,
   CircleUser,
   Users,
@@ -32,9 +33,10 @@ export interface PaletteAction {
 
 export const staticActions: PaletteAction[] = [
   // Navigation
-  { id: "nav-autopilot", label: "Autopilot", icon: Zap, href: "/autopilot", group: "navigation" },
   { id: "nav-sessions", label: "Sessions", icon: Play, href: "/sessions", preserveRepo: true, group: "navigation" },
+  { id: "nav-automations", label: "Automations", icon: RefreshCw, href: "/automations", group: "navigation" },
   { id: "nav-projects", label: "Projects", icon: FolderKanban, href: "/projects", preserveRepo: true, group: "navigation" },
+  { id: "nav-autopilot", label: "Autopilot", icon: Zap, href: "/autopilot", group: "navigation" },
 
   // Settings & admin
   { id: "settings-account", label: "Account", icon: CircleUser, href: "/settings/account", group: "settings" },
