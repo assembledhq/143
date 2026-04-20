@@ -255,10 +255,12 @@ export function SessionSidebar() {
     },
   });
 
-  const displayedSessions = useMemo(
-    () => [firstPage, ...extraPages].flat(),
-    [firstPage, extraPages],
-  );
+  const displayedSessions = useMemo(() => {
+    const merged = [firstPage, ...extraPages].flat();
+    const q = search.trim().toLowerCase();
+    if (!q) return merged;
+    return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
+  }, [firstPage, extraPages, search]);
 
   const counts = countsData?.data;
 
@@ -364,7 +366,7 @@ export function SessionSidebar() {
 
         {!isLoading && displayedSessions.length === 0 && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-            {counts && counts.all === 0 && !trimmedSearch
+            {currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0)
               ? "No sessions yet"
               : "No sessions match this filter."}
           </div>
