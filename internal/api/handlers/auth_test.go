@@ -2094,3 +2094,133 @@ func TestAuthHandler_ClaimInvitationForExistingUser_NilPool(t *testing.T) {
 	_, _, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 	require.Error(t, err)
 }
+
+// With MultiOrgMembershipsEnabled disabled, claiming an invitation for a user
+// who already belongs to a different org returns ALREADY_IN_ORG instead of
+// granting a second membership. The invitation is preserved for audit.
+func TestAuthHandler_ClaimInvitationForExistingUser_LegacySingleOrg_AlreadyInOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectQuery("(?s)SELECT user_id.+FROM organization_memberships.+WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}))
+	mock.ExpectQuery("SELECT COUNT.+FROM organization_memberships WHERE user_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", userID)
+	require.NoError(t, err)
+	require.NotNil(t, inv)
+	require.Equal(t, invID, inv.ID)
+	require.NotNil(t, invErr)
+	require.Equal(t, http.StatusConflict, invErr.status)
+	require.Equal(t, "ALREADY_IN_ORG", invErr.code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// With MultiOrgMembershipsEnabled disabled and CountForUser returning an
+// error after Get returned NoRows, the count failure bubbles up so callers
+// don't silently grant a second-org membership.
+func TestAuthHandler_ClaimInvitationForExistingUser_LegacySingleOrg_CountError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectQuery("(?s)SELECT user_id.+FROM organization_memberships.+WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}))
+	mock.ExpectQuery("SELECT COUNT.+FROM organization_memberships WHERE user_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	_, _, err = handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// With MultiOrgMembershipsEnabled disabled and Get returning a non-NoRows
+// error, the membership lookup failure bubbles up as a wrapped error.
+func TestAuthHandler_ClaimInvitationForExistingUser_LegacySingleOrg_GetError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	invID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}).
+				AddRow(invID, orgID, strPtr("u@example.com"), nil, "member", uuid.New(), "valid", "pending", time.Now().Add(time.Hour), time.Now(), nil),
+		)
+	mock.ExpectQuery("(?s)SELECT user_id.+FROM organization_memberships.+WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	_, _, err = handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// When validateInvitationWithStore fails to load the invitation row at all
+// (e.g. token not found), claimInvitationForExistingUser returns a nil
+// invitation pointer via invitationOrNil so the caller does not emit a
+// dangling audit event for a non-existent invite.
+func TestAuthHandler_ClaimInvitationForExistingUser_TokenNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE token").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}))
+	mock.ExpectRollback()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "missing", "u@example.com", "", uuid.New())
+	require.NoError(t, err)
+	require.Nil(t, inv, "invitation pointer is nil when the row was never loaded")
+	require.NotNil(t, invErr)
+	require.Equal(t, "INVITE_NOT_FOUND", invErr.code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
