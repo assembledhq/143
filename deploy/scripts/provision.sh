@@ -232,6 +232,20 @@ PULL_APP
       if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
         /opt/143/deploy/scripts/sandbox-firewall.sh 143-sandbox
       fi
+      # Provision /etc/143/sandbox-resolv.conf for sandboxes to bind-mount at
+      # /etc/resolv.conf. Required because user-defined Docker networks inject
+      # 127.0.0.11 (Docker's embedded DNS) into resolv.conf, and gVisor's
+      # netstack can't reach it. HostConfig.DNS doesn't help — it only changes
+      # the upstream the embedded resolver forwards to. Bind-mounting our own
+      # resolv.conf bypasses 127.0.0.11 entirely. Future: point this at a
+      # host-local DNS forwarder (dnsmasq on 172.19.0.1) for filtering/logging.
+      mkdir -p /etc/143
+      cat > /etc/143/sandbox-resolv.conf <<RESOLV
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options edns0 trust-ad ndots:0
+RESOLV
+      chmod 644 /etc/143/sandbox-resolv.conf
 PULL_WORKER
     ;;
   db|logging)
