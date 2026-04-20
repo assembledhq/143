@@ -711,6 +711,33 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }
 
+// ListStaleRunningSessions returns running sessions whose started_at is
+// older than the given cutoff. These sessions exceeded their wall-clock
+// budget without the orchestrator persisting a terminal status — typically
+// because the worker crashed mid-execution or a DB write failed during
+// failure handling. The reaper fails them so the UI stops showing them as
+// active and concurrency slots are freed.
+// lint:allow-no-orgid reason="cross-org reaper scan for stuck running sessions"
+func (s *SessionStore) ListStaleRunningSessions(ctx context.Context, startedBefore time.Time) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionListColumns + `
+		FROM sessions s
+		WHERE s.status = 'running'
+		  AND s.deleted_at IS NULL
+		  AND s.started_at IS NOT NULL
+		  AND s.started_at < @started_before
+		ORDER BY s.started_at ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"started_before": startedBefore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query stale running sessions: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+}
+
 // ListStaleIdleSessions returns idle sessions that have been inactive longer
 // than the idle timeout. These sessions should be transitioned to completed
 // but their snapshots are preserved for later resumption.

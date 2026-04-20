@@ -46,12 +46,16 @@ import type {
 
 const DEFAULT_EXECUTION_SETTINGS: Pick<
   Required<OrgSettings>,
-  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs"
+  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "max_session_duration_seconds"
 > = {
   autonomy_level: "auto_simple",
   execution_aggressiveness: 2,
   max_concurrent_runs: 5,
+  max_session_duration_seconds: 25 * 60,
 };
+
+const MIN_SESSION_DURATION_MINUTES = 2;
+const MAX_SESSION_DURATION_MINUTES = 120;
 
 /* ------------------------------------------------------------------ */
 /*  Page                                                              */
@@ -130,12 +134,15 @@ export default function AgentPage() {
   const [autonomyLevelOverride, setAutonomyLevelOverride] = useState<string | null>(null);
   const [aggressivenessOverride, setAggressivenessOverride] = useState<string | null>(null);
   const [maxConcurrentOverride, setMaxConcurrentOverride] = useState<string | null>(null);
+  const [maxSessionMinutesOverride, setMaxSessionMinutesOverride] = useState<string | null>(null);
 
   const defaultAgentType = defaultAgentTypeOverride ?? orgSettings?.default_agent_type ?? "codex";
   const agentConfig = agentConfigOverride ?? orgSettings?.agent_config ?? {};
   const autonomyLevel = autonomyLevelOverride ?? orgSettings?.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
   const aggressiveness = aggressivenessOverride ?? String(orgSettings?.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness);
   const maxConcurrent = maxConcurrentOverride ?? String(orgSettings?.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs);
+  const serverSessionSeconds = orgSettings?.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
+  const maxSessionMinutes = maxSessionMinutesOverride ?? String(Math.round(serverSessionSeconds / 60));
 
   const hasCodexAPIKey = useMemo(() => {
     const codexOrgConfig = agentConfig.codex ?? {};
@@ -188,6 +195,11 @@ export default function AgentPage() {
       }
     }
 
+    const parsedSessionMinutes = parseInt(maxSessionMinutes, 10);
+    const clampedSessionMinutes = Number.isFinite(parsedSessionMinutes)
+      ? Math.min(MAX_SESSION_DURATION_MINUTES, Math.max(MIN_SESSION_DURATION_MINUTES, parsedSessionMinutes))
+      : DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds / 60;
+
     orgMutation.mutate({
       settings: {
         default_agent_type: defaultAgentType,
@@ -195,6 +207,7 @@ export default function AgentPage() {
         autonomy_level: autonomyLevel,
         execution_aggressiveness: parseInt(aggressiveness, 10),
         max_concurrent_runs: parseInt(maxConcurrent, 10),
+        max_session_duration_seconds: clampedSessionMinutes * 60,
       },
     });
   }
@@ -571,6 +584,21 @@ export default function AgentPage() {
                       value={maxConcurrent}
                       onChange={(e) => setMaxConcurrentOverride(e.target.value)}
                     />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="max-session-minutes">Max session duration (minutes)</Label>
+                    <Input
+                      id="max-session-minutes"
+                      type="number"
+                      min={MIN_SESSION_DURATION_MINUTES}
+                      max={MAX_SESSION_DURATION_MINUTES}
+                      value={maxSessionMinutes}
+                      onChange={(e) => setMaxSessionMinutesOverride(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Sessions that exceed this wall-clock limit are cancelled and marked failed. Defaults to 25 minutes; allowed range {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes.
+                    </p>
                   </div>
                 </div>
               </CardContent>

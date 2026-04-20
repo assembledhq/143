@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -507,8 +508,34 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(run.ID)
 
 	if err != nil {
-		// If the session was cancelled by the user (context force-cancelled
-		// after SIGINT timeout), snapshot what we have and go to idle.
+		// Distinguish three cases:
+		//   1. context.DeadlineExceeded — session hit its wall-clock limit.
+		//      Mark as failed with a clear timeout message so failure.go
+		//      classifies it correctly and the user sees actionable guidance.
+		//   2. User cancellation (wasCancelled or ctx.Err()==Canceled) —
+		//      snapshot and return to idle so the session can be continued.
+		//   3. Any other error — fail with the underlying message.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			elapsed := time.Duration(0)
+			if run.StartedAt != nil {
+				elapsed = time.Since(*run.StartedAt).Round(time.Second)
+			}
+			log.Error().
+				Err(err).
+				Dur("elapsed", elapsed).
+				Msg("session exceeded maximum execution time")
+			// ctx is already expired — use a fresh context for bookkeeping so
+			// the failed status actually persists.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			errMsg := fmt.Sprintf("Session timed out after %s of execution. The maximum duration for this org is configured via org settings.", elapsed)
+			o.failRun(cleanupCtx, run, errMsg)
+			o.enqueueJob(cleanupCtx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+				"session_id": run.ID.String(),
+				"org_id":     run.OrgID.String(),
+			})
+			return fmt.Errorf("session timed out: %w", err)
+		}
 		if wasCancelled || ctx.Err() != nil {
 			log.Info().Msg("session cancelled by user")
 			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
@@ -926,6 +953,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(session.ID)
 
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			elapsed := time.Duration(0)
+			if session.StartedAt != nil {
+				elapsed = time.Since(*session.StartedAt).Round(time.Second)
+			}
+			log.Error().
+				Err(err).
+				Dur("elapsed", elapsed).
+				Int("turn", turnNumber).
+				Msg("continue_session exceeded maximum execution time")
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			errMsg := fmt.Sprintf("Session timed out after %s of execution on turn %d. The maximum duration for this org is configured via org settings.", elapsed, turnNumber)
+			o.failRun(cleanupCtx, session, errMsg)
+			return fmt.Errorf("session timed out: %w", err)
+		}
 		if wasCancelled || ctx.Err() != nil {
 			log.Info().Msg("session cancelled by user during continue")
 			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
@@ -1684,6 +1727,21 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// ResolveSessionTimeout returns the per-session wall-clock timeout for the
+// given org. It reads OrgSettings.MaxSessionDurationSeconds when the org is
+// available and falls back to DefaultSandboxTimeout otherwise. Safe to call
+// with a nil OrgStore.
+func (o *Orchestrator) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if o.orgs != nil {
+		if org, err := o.orgs.GetByID(ctx, orgID); err == nil {
+			if orgSettings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && orgSettings.MaxSessionDurationSeconds > 0 {
+				return time.Duration(orgSettings.MaxSessionDurationSeconds) * time.Second
+			}
+		}
+	}
+	return DefaultSandboxTimeout
 }
 
 const maxBranchSlugLen = 60

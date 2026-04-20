@@ -20,9 +20,11 @@ import (
 type reaperMockSessionLister struct {
 	staleIdleSessions    []models.Session
 	stalePendingSessions []models.Session
+	staleRunningSessions []models.Session
 	expiredSnapshots     []models.Session
 	listIdleErr          error
 	listPendingErr       error
+	listRunningErr       error
 	listExpiredErr       error
 	updateStatusErr      error
 	updateResultErr      error
@@ -68,6 +70,10 @@ func (m *reaperMockSessionLister) ListStaleIdleSessions(_ context.Context, _ tim
 
 func (m *reaperMockSessionLister) ListStalePendingSessions(_ context.Context, _ time.Time) ([]models.Session, error) {
 	return m.stalePendingSessions, m.listPendingErr
+}
+
+func (m *reaperMockSessionLister) ListStaleRunningSessions(_ context.Context, _ time.Time) ([]models.Session, error) {
+	return m.staleRunningSessions, m.listRunningErr
 }
 
 func (m *reaperMockSessionLister) ListExpiredSnapshots(_ context.Context, _ time.Time) ([]models.Session, error) {
@@ -137,6 +143,60 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 	require.Len(t, mock.updatedFailures, 2)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[0].category)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[1].category)
+}
+
+func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// Phase 0.5 should fail both running sessions via UpdateResult.
+	require.Len(t, mock.updatedResults, 2)
+	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[0].status)
+	assert.Equal(t, sessionID1, mock.updatedResults[0].sessionID)
+	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[1].status)
+	assert.Equal(t, sessionID2, mock.updatedResults[1].sessionID)
+
+	// Phase 0.5 should also set failure details with the stuck_running category.
+	require.Len(t, mock.updatedFailures, 2)
+	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[0].category)
+	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[1].category)
+}
+
+func TestReapPhase0_5_ContinuesOnListError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock := &reaperMockSessionLister{
+		listRunningErr: errors.New("db error"),
+		staleIdleSessions: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// Phase 0.5 list failed, but Phase 1 should still run.
+	require.Len(t, mock.updatedStatuses, 1)
+	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
 }
 
 func TestReapPhase0Error_StillRunsPhase1(t *testing.T) {
