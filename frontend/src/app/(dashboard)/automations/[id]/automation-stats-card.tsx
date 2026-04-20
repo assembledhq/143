@@ -197,7 +197,7 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
             )}
           </div>
           <span
-            className="text-[10px] uppercase tracking-wide text-muted-foreground"
+            className="text-xs uppercase tracking-wide text-muted-foreground"
             title="Day buckets use UTC boundaries so aggregates match the backend."
           >
             UTC
