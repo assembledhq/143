@@ -109,6 +109,12 @@ type Config struct {
 	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
 	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
 	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
+	// SessionMaxRunningAge is the safety-net cutoff after which the reaper
+	// fails sessions stuck in "running". Must be at or above
+	// reaper.minRunningAgeFloor (max per-org timeout + handler cleanup
+	// buffer + orchestrator bookkeeping margin); the reaper raises any
+	// lower value and logs a warning.
+	SessionMaxRunningAge time.Duration `env:"SESSION_MAX_RUNNING_AGE" envDefault:"150m"`
 
 	// Preview system
 	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"

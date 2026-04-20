@@ -786,12 +786,22 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
+		// Apply the per-session wall-clock timeout at the handler boundary so
+		// the orchestrator exits cleanly when a container is killed or
+		// ExecStream hangs. HandlerCleanupBuffer gives the orchestrator slack
+		// to stop the container, snapshot, and persist the failed status
+		// after the session timeout expires.
+		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
+		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
+		defer cancel()
+
 		logger.Info().
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
+			Dur("session_timeout", sessionTimeout).
 			Msg("starting run_agent job")
 
-		if err := services.Orchestrator.RunAgent(ctx, &run); err != nil {
+		if err := services.Orchestrator.RunAgent(jobCtx, &run); err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) {
 				// If the session has been pending for too long, fail it
 				// instead of retrying indefinitely.
@@ -851,13 +861,21 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			return fmt.Errorf("fetch session: %w", err)
 		}
 
+		// Apply the per-session wall-clock timeout (see newRunAgentHandler for
+		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
+		// after the timeout fires without racing the handler context.
+		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
+		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
+		defer cancel()
+
 		logger.Info().
 			Str("session_id", sessionID.String()).
 			Str("org_id", orgID.String()).
 			Int("current_turn", session.CurrentTurn).
+			Dur("session_timeout", sessionTimeout).
 			Msg("starting continue_session job")
 
-		if err := services.Orchestrator.ContinueSession(ctx, &session); err != nil {
+		if err := services.Orchestrator.ContinueSession(jobCtx, &session); err != nil {
 			return err
 		}
 

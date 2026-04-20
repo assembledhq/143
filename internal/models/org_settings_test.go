@@ -397,3 +397,43 @@ func TestPRAuthorship_Validate(t *testing.T) {
 	require.NoError(t, PRAuthorship("").Validate(), "empty should be valid")
 	require.Error(t, PRAuthorship("invalid").Validate(), "unknown value should be invalid")
 }
+
+func TestParseOrgSettings_MaxSessionDuration_Default(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(nil)
+	require.NoError(t, err)
+	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "unset should default")
+}
+
+func TestParseOrgSettings_MaxSessionDuration_Zero(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":0}`))
+	require.NoError(t, err)
+	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "zero should default")
+}
+
+func TestParseOrgSettings_MaxSessionDuration_ClampsBelowMin(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":30}`))
+	require.NoError(t, err)
+	require.Equal(t, MinMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "below min should clamp up")
+}
+
+func TestParseOrgSettings_MaxSessionDuration_ClampsAboveMax(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":99999}`))
+	require.NoError(t, err)
+	require.Equal(t, MaxMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "above max should clamp down")
+}
+
+func TestParseOrgSettings_MaxSessionDuration_InRange(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":600}`))
+	require.NoError(t, err)
+	require.Equal(t, 600, s.MaxSessionDurationSeconds, "in-range value should pass through")
+}

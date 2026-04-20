@@ -20,9 +20,11 @@ import (
 type reaperMockSessionLister struct {
 	staleIdleSessions    []models.Session
 	stalePendingSessions []models.Session
+	staleRunningSessions []models.Session
 	expiredSnapshots     []models.Session
 	listIdleErr          error
 	listPendingErr       error
+	listRunningErr       error
 	listExpiredErr       error
 	updateStatusErr      error
 	updateResultErr      error
@@ -68,6 +70,10 @@ func (m *reaperMockSessionLister) ListStaleIdleSessions(_ context.Context, _ tim
 
 func (m *reaperMockSessionLister) ListStalePendingSessions(_ context.Context, _ time.Time) ([]models.Session, error) {
 	return m.stalePendingSessions, m.listPendingErr
+}
+
+func (m *reaperMockSessionLister) ListStaleRunningSessions(_ context.Context, _ time.Time) ([]models.Session, error) {
+	return m.staleRunningSessions, m.listRunningErr
 }
 
 func (m *reaperMockSessionLister) ListExpiredSnapshots(_ context.Context, _ time.Time) ([]models.Session, error) {
@@ -137,6 +143,133 @@ func TestReapPhase0_FailsStalePendingSessions(t *testing.T) {
 	require.Len(t, mock.updatedFailures, 2)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[0].category)
 	assert.Equal(t, FailureCategoryStuckPending, mock.updatedFailures[1].category)
+}
+
+func TestReapPhase0_5_FailsStaleRunningSessions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// Phase 0.5 should fail both running sessions via UpdateResult.
+	require.Len(t, mock.updatedResults, 2)
+	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[0].status)
+	assert.Equal(t, sessionID1, mock.updatedResults[0].sessionID)
+	assert.Equal(t, string(models.SessionStatusFailed), mock.updatedResults[1].status)
+	assert.Equal(t, sessionID2, mock.updatedResults[1].sessionID)
+
+	// Phase 0.5 should also set failure details with the stuck_running category.
+	require.Len(t, mock.updatedFailures, 2)
+	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[0].category)
+	assert.Equal(t, FailureCategoryStuckRunning, mock.updatedFailures[1].category)
+}
+
+func TestReapPhase0_5_ContinuesOnUpdateResultError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+		updateResultErr: errors.New("db error"),
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// UpdateResult attempted for both, but since it errored, UpdateFailure
+	// should have been skipped via the `continue` branch.
+	require.Len(t, mock.updatedResults, 2)
+	assert.Empty(t, mock.updatedFailures, "UpdateFailure should be skipped when UpdateResult errors")
+}
+
+func TestReapPhase0_5_ContinuesOnUpdateFailureError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID1 := uuid.New()
+	sessionID2 := uuid.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID1, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+			{ID: sessionID2, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: &startedAt},
+		},
+		updateFailureErr: errors.New("db error"),
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// UpdateResult should have succeeded for both, UpdateFailure should have
+	// been attempted but logged and continued (not breaking the loop).
+	require.Len(t, mock.updatedResults, 2)
+	require.Len(t, mock.updatedFailures, 2, "UpdateFailure should still be called for all sessions even if it errors")
+}
+
+func TestReapPhase0_5_UsesStartedAtForElapsedLog(t *testing.T) {
+	t.Parallel()
+
+	// Covers the zero-value StartedAt branch in Phase 0.5.
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock := &reaperMockSessionLister{
+		staleRunningSessions: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusRunning), StartedAt: nil},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	require.Len(t, mock.updatedResults, 1)
+	require.Len(t, mock.updatedFailures, 1)
+}
+
+func TestReapPhase0_5_ContinuesOnListError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock := &reaperMockSessionLister{
+		listRunningErr: errors.New("db error"),
+		staleIdleSessions: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusIdle)},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop())
+	reaper.reap(context.Background())
+
+	// Phase 0.5 list failed, but Phase 1 should still run.
+	require.Len(t, mock.updatedStatuses, 1)
+	assert.Equal(t, string(models.SessionStatusCompleted), mock.updatedStatuses[0].status)
 }
 
 func TestReapPhase0Error_StillRunsPhase1(t *testing.T) {
@@ -520,4 +653,44 @@ func TestReapPhase4_BackfillsStartupWindowWhenWatermarkMissing(t *testing.T) {
 	require.Equal(t, time.Date(2026, 4, 9, 9, 0, 0, 0, time.UTC), sorted[0], "startup catch-up should begin 24 hours before the last completed hour")
 	require.Equal(t, time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC), sorted[len(sorted)-2], "startup catch-up should end at the last completed hour")
 	require.Equal(t, time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC), sorted[len(sorted)-1], "current hour should be rolled as best-effort")
+}
+
+// TestNewSessionReaper_RaisesMaxRunningAgeBelowFloor guards the invariant
+// that the reaper's stuck-running cutoff is always longer than the maximum
+// possible per-org session timeout plus handler buffer. An admin who
+// configures SESSION_MAX_RUNNING_AGE below that would otherwise have
+// legitimate long-running sessions killed by the reaper.
+func TestNewSessionReaper_RaisesMaxRunningAgeBelowFloor(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithMaxRunningAge(10*time.Minute),
+	)
+
+	// The configured 10 min is well below the floor (~2h17m), so the
+	// constructor should raise it.
+	assert.GreaterOrEqual(t, reaper.maxRunningAge, minRunningAgeFloor)
+	// And the floor itself must exceed the max per-org timeout + buffer so
+	// legitimate long runs survive.
+	maxPerOrgTimeout := time.Duration(models.MaxMaxSessionDurationSeconds) * time.Second
+	assert.Greater(t, reaper.maxRunningAge, maxPerOrgTimeout+HandlerCleanupBuffer,
+		"reaper cutoff must exceed max-per-org-timeout + handler buffer")
+}
+
+func TestNewSessionReaper_KeepsMaxRunningAgeAboveFloor(t *testing.T) {
+	t.Parallel()
+
+	mock := &reaperMockSessionLister{}
+	snapStore := &reaperMockSnapshotStore{}
+
+	configured := 4 * time.Hour // well above the floor
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithMaxRunningAge(configured),
+	)
+
+	assert.Equal(t, configured, reaper.maxRunningAge,
+		"configured value above the floor should be preserved verbatim")
 }
