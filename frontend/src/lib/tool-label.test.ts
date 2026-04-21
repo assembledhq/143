@@ -23,7 +23,6 @@ describe("deriveToolDisplay", () => {
       });
       expect(deriveToolDisplay(log)).toEqual({
         label: "Ran Check git status",
-        icon: "terminal",
         canonical: "bash",
       });
     });
@@ -61,7 +60,6 @@ describe("deriveToolDisplay", () => {
       });
       expect(deriveToolDisplay(log)).toMatchObject({
         label: "Ran `go test ./...`",
-        icon: "terminal",
         canonical: "bash",
       });
     });
@@ -75,7 +73,6 @@ describe("deriveToolDisplay", () => {
       });
       expect(deriveToolDisplay(log)).toMatchObject({
         label: "Ran `ls`",
-        icon: "terminal",
         canonical: "bash",
       });
     });
@@ -91,7 +88,6 @@ describe("deriveToolDisplay", () => {
       const log = makeLog({ tool: "read_file", input: { path: "/app/config.yaml" } });
       expect(deriveToolDisplay(log)).toMatchObject({
         label: "Read config.yaml",
-        icon: "file-read",
       });
     });
   });
@@ -106,7 +102,6 @@ describe("deriveToolDisplay", () => {
       const log = makeLog({ tool: "write_file", input: { path: "/tmp/out.txt" } });
       expect(deriveToolDisplay(log)).toMatchObject({
         label: "Edited out.txt",
-        icon: "file-edit",
       });
     });
   });
@@ -153,7 +148,6 @@ describe("deriveToolDisplay", () => {
       const log = makeLog({ tool: "frobnicate" });
       expect(deriveToolDisplay(log)).toEqual({
         label: "Ran frobnicate",
-        icon: "wrench",
         canonical: "frobnicate",
       });
     });
