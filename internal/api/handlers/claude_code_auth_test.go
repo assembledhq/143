@@ -89,6 +89,9 @@ func (s *claudeStoreStub) DisableLabeled(context.Context, uuid.UUID, models.Prov
 	s.disabled = true
 	return nil
 }
+func (s *claudeStoreStub) HasActiveLabeled(context.Context, uuid.UUID, models.ProviderName) (bool, error) {
+	return false, nil
+}
 
 func TestClaudeCodeAuthHandler_Initiate_RequiresLabel(t *testing.T) {
 	t.Parallel()
@@ -152,7 +155,6 @@ func TestClaudeCodeAuthHandler_Initiate_ReturnsAuthorizeURL(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.NotEmpty(t, resp.Data.AuthorizeURL)
 	require.NotEmpty(t, resp.Data.State)
-	require.Equal(t, "team-a", resp.Data.Label)
 	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge=")
 	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge_method=S256")
 }

@@ -1315,10 +1315,20 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	case models.AgentTypeClaudeCode:
-		// Subscription is preferred; fall through silently when only an API
-		// key is configured (the env var was already set by resolveAgentEnv).
-		if _, err := o.injectClaudeCodeAuth(ctx, session.OrgID, sandbox); err != nil {
+		injected, err := o.injectClaudeCodeAuth(ctx, session.OrgID, sandbox)
+		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
+		}
+		if !injected {
+			// No subscription — the API-key env var was already baked into
+			// sandboxCfg.Env by resolveAgentEnv. Fail fast when neither path
+			// is configured so the session doesn't launch credential-less;
+			// matches the Codex branch above.
+			cfg := o.resolveProviderConfig(ctx, session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
+			ac, ok := cfg.(models.AnthropicConfig)
+			if !ok || ac.APIKey == "" {
+				return models.Issue{}, "", fmt.Errorf("no credentials for claude code agent")
+			}
 		}
 	}
 

@@ -453,6 +453,28 @@ func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provi
 	return err
 }
 
+// HasActiveLabeled reports whether (org, provider) has at least one active
+// credential with a non-empty label. Used by callers (e.g. the Claude Code
+// subscription path) that need a cheap existence check without claiming a
+// round-robin slot — claiming would bump last_used_at and distort rotation.
+// Runs as a LIMIT 1 EXISTS-style probe so it stays O(1) even when an org
+// has many labeled credentials.
+func (s *OrgCredentialStore) HasActiveLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (bool, error) {
+	var exists bool
+	row := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM org_credentials
+			WHERE org_id = @org_id AND provider = @provider AND label != '' AND status = 'active'
+		)`, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(provider),
+	})
+	if err := row.Scan(&exists); err != nil {
+		return false, fmt.Errorf("check active labeled %s credential: %w", provider, err)
+	}
+	return exists, nil
+}
+
 // DisableLabeled soft-deletes only the labeled rows for (org, provider),
 // leaving the singleton label=” row untouched. Used when a provider mixes
 // an API-key row (label=”) with subscription rows (label!=”) and the

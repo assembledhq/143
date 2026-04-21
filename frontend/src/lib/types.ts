@@ -527,7 +527,6 @@ export interface CodexSubscription {
 export interface ClaudeCodeInitiateResponse {
   authorize_url: string;
   state: string;
-  label: string;
 }
 
 export interface ClaudeCodeCompleteResponse {

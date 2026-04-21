@@ -178,6 +178,15 @@ func (m *mockCredentialStore) DisableLabeled(_ context.Context, orgID uuid.UUID,
 	return nil
 }
 
+func (m *mockCredentialStore) HasActiveLabeled(_ context.Context, orgID uuid.UUID, provider models.ProviderName) (bool, error) {
+	for _, cred := range m.creds {
+		if cred.OrgID == orgID && cred.Provider == provider && cred.Label != "" && cred.Status == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 	t.Parallel()
 
@@ -191,9 +200,6 @@ func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 	}
 	if resp.State == "" {
 		t.Error("want non-empty state")
-	}
-	if resp.Label != "team-a" {
-		t.Errorf("want label team-a, got %q", resp.Label)
 	}
 	if !strings.Contains(resp.AuthorizeURL, "code_challenge=") {
 		t.Errorf("authorize URL missing code_challenge: %s", resp.AuthorizeURL)
@@ -220,7 +226,7 @@ func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 		t.Error("want non-empty code_verifier stored on pending row")
 	}
 	if cred.Label != "team-a" {
-		t.Errorf("want label team-a, got %q", cred.Label)
+		t.Errorf("want persisted row label team-a, got %q", cred.Label)
 	}
 	if cred.Status != "pending_auth" {
 		t.Errorf("want status pending_auth, got %q", cred.Status)

@@ -129,6 +129,10 @@ type CredentialStore interface {
 	UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status string) error
 	UpsertByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, cfg models.ProviderConfig) error
 	ExistsForProviderByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, provider models.ProviderName) (bool, error)
+	// HasActiveLabeled reports whether at least one active labeled credential
+	// exists for (org, provider). Backs HasActiveSubscription with a cheap
+	// EXISTS probe instead of listing every row.
+	HasActiveLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (bool, error)
 	// DisableLabeled disables all subscription rows (label != '') for an org's
 	// Anthropic credentials while leaving the API-key row (label='') intact.
 	// Used by DisconnectAll so the user doesn't lose their Anthropic API key
@@ -154,11 +158,12 @@ var ErrInvalidPaste = fmt.Errorf("pasted code is invalid or expired")
 
 // InitiateResponse is returned by the /initiate endpoint. The caller hands
 // AuthorizeURL to the user's browser; State is echoed back to the UI so the
-// modal can verify the eventual paste matches this session.
+// modal can verify the eventual paste matches this session. Label is not
+// echoed back — the caller already owns that value and adding it here would
+// be a no-op round trip.
 type InitiateResponse struct {
 	AuthorizeURL string `json:"authorize_url"`
 	State        string `json:"state"`
-	Label        string `json:"label"`
 }
 
 // CompleteResponse is returned by the /complete endpoint once the auth code
@@ -322,7 +327,6 @@ func (s *Service) InitiateOAuth(ctx context.Context, orgID uuid.UUID, createdBy 
 	return &InitiateResponse{
 		AuthorizeURL: authURL,
 		State:        state,
-		Label:        label,
 	}, nil
 }
 
@@ -719,6 +723,14 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		}
 
 		if _, seen := tried[cred.ID]; seen {
+			// Rotation wrapped back to an already-tried credential before we
+			// found a usable one. Surface this so operators can tell the
+			// "no usable subscription" failure from a genuine empty set
+			// versus a set where every row got rejected this cycle.
+			s.logger.Debug().
+				Str("org_id", orgID.String()).
+				Int("tried", len(tried)).
+				Msg("claude subscription rotation exhausted before finding usable credential")
 			break
 		}
 		tried[cred.ID] = struct{}{}
@@ -774,24 +786,17 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 // Claude Code subscription row. Cheap existence check used by the
 // orchestrator to decide whether to suppress the Anthropic API-key env var
 // without claiming a round-robin slot (which would bump last_used_at and
-// distort rotation).
+// distort rotation). Delegates to the store's EXISTS probe so it's O(1)
+// regardless of how many subscriptions the org holds.
 func (s *Service) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error) {
 	if s.credentials == nil {
 		return false, nil
 	}
-	creds, err := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+	exists, err := s.credentials.HasActiveLabeled(ctx, orgID, models.ProviderAnthropic)
 	if err != nil {
-		return false, fmt.Errorf("list anthropic credentials: %w", err)
+		return false, fmt.Errorf("check anthropic subscription: %w", err)
 	}
-	for _, cred := range creds {
-		if cred.Label == "" || cred.Status != "active" {
-			continue
-		}
-		if cfg, ok := cred.Config.(models.AnthropicConfig); ok && cfg.Subscription != nil && cfg.Subscription.AccessToken != "" {
-			return true, nil
-		}
-	}
-	return false, nil
+	return exists, nil
 }
 
 // Disconnect removes a specific Claude subscription by ID for an org.

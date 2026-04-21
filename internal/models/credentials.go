@@ -353,10 +353,11 @@ func (c AnthropicConfig) MaskedSummary() CredentialSummary {
 		Configured: true,
 	}
 	if c.Subscription != nil {
-		// Do not mask the access token — it's a JWT whose high-entropy suffix
-		// is exactly what we want to keep secret. AccountType + the presence of
-		// a label (shown by the subscription list endpoint) is enough context
-		// for the UI to distinguish subscriptions in the generic summary view.
+		// Skip the masked-key field entirely for subscriptions: MaskKey keeps
+		// the last four characters, which on a JWT is part of the HMAC
+		// signature — the exact high-entropy tail we must not leak. The UI
+		// distinguishes subscriptions via AccountType and the separate
+		// subscription list endpoint, so no masked fingerprint is needed.
 		summary.AccountType = c.Subscription.AccountType
 	} else {
 		summary.MaskedKey = MaskKey(c.APIKey)

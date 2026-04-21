@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -16,6 +17,12 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 )
+
+// claudeCodeSubscriptionLabelMax bounds the handler-side length check for
+// subscription labels. The org_credentials.label column is unbounded text,
+// so this cap is purely to keep UI and log lines compact. Matches the
+// equivalent limit in codex_auth.go.
+const claudeCodeSubscriptionLabelMax = 100
 
 // ClaudeCodeAuthHandler serves the /api/v1/settings/claude-code-auth endpoints.
 // Mirrors CodexAuthHandler in spirit, but the Claude Code CLI uses an
@@ -60,8 +67,8 @@ func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label is required for Claude subscriptions", nil)
 		return
 	}
-	if len(body.Label) > 100 {
-		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label must be 100 characters or fewer", nil)
+	if len(body.Label) > claudeCodeSubscriptionLabelMax {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", fmt.Sprintf("label must be %d characters or fewer", claudeCodeSubscriptionLabelMax), nil)
 		return
 	}
 
@@ -106,8 +113,8 @@ func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label is required", nil)
 		return
 	}
-	if len(body.Label) > 100 {
-		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label must be 100 characters or fewer", nil)
+	if len(body.Label) > claudeCodeSubscriptionLabelMax {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", fmt.Sprintf("label must be %d characters or fewer", claudeCodeSubscriptionLabelMax), nil)
 		return
 	}
 	if body.Code == "" {
