@@ -1998,7 +1998,12 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd := fmt.Sprintf("claude --print %q 2>&1", bootstrapPrompt)
+	// Wrap the prompt in single quotes so the shell does not interpret
+	// backticks, $, or backslashes that appear in the template (e.g. the
+	// triple-backtick JSON fence). Any literal single quote is closed,
+	// escaped, and reopened.
+	escapedPrompt := strings.ReplaceAll(bootstrapPrompt, "'", `'\''`)
+	cmd := fmt.Sprintf("claude --print '%s' 2>&1", escapedPrompt)
 	exitCode, execErr := services.SandboxProvider.ExecStream(ctx, sb, cmd, func(line []byte) {
 		trimmed := strings.TrimSpace(string(line))
 		if trimmed == "" {
