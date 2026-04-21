@@ -391,3 +391,175 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 		})
 	}
 }
+
+func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns labeled active credential",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				configData := crypto.DevEncrypt([]byte(`{"subscription":{"access_token":"a","refresh_token":"r","expires_at":"2030-01-01T00:00:00Z"}}`))
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns).
+						AddRow(uuid.New(), uuid.New(), "anthropic", "team-a", configData, "active", nil, nil, nil, time.Now(), time.Now()))
+			},
+		},
+		{
+			name: "no labeled active credentials",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns))
+			},
+			expectErr: true,
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			cred, err := store.ClaimNextLabeledRoundRobin(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "ClaimNextLabeledRoundRobin should return an error")
+				return
+			}
+			require.NoError(t, err, "ClaimNextLabeledRoundRobin should not return an error")
+			require.NotNil(t, cred, "ClaimNextLabeledRoundRobin should return a credential")
+			require.NotEmpty(t, cred.Label, "claimed credential should have a non-empty label")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestOrgCredentialStore_HasActiveLabeled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		setupMock  func(mock pgxmock.PgxPoolIface)
+		wantExists bool
+		expectErr  bool
+	}{
+		{
+			name: "returns true when labeled row exists",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+			},
+			wantExists: true,
+		},
+		{
+			name: "returns false when no labeled row exists",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+			},
+			wantExists: false,
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			exists, err := store.HasActiveLabeled(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "HasActiveLabeled should return an error")
+				return
+			}
+			require.NoError(t, err, "HasActiveLabeled should not return an error")
+			require.Equal(t, tt.wantExists, exists, "HasActiveLabeled should return expected existence")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestOrgCredentialStore_DisableLabeled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "disables labeled rows",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label != ''`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+			},
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label != ''`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			err = store.DisableLabeled(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "DisableLabeled should return an error")
+				return
+			}
+			require.NoError(t, err, "DisableLabeled should not return an error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}

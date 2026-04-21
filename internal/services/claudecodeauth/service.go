@@ -55,7 +55,7 @@ const (
 
 	// defaultTokenURL is the Anthropic PKCE token endpoint used for both the
 	// initial authorization_code exchange and subsequent refresh_token calls.
-	defaultTokenURL = "https://platform.claude.com/v1/oauth/token"
+	defaultTokenURL = "https://platform.claude.com/v1/oauth/token" // #nosec G101 -- public OAuth endpoint URL, not a credential
 
 	// defaultRedirectURI is the Anthropic-hosted callback the CLI uses; the
 	// browser lands here after login and Anthropic renders `<code>#<state>`
