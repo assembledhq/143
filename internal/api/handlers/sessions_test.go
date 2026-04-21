@@ -1605,6 +1605,89 @@ func TestSessionHandler_StreamLogs_InvalidID(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_ID")
 }
 
+// TestSessionHandler_StreamLogs_ShutdownSignal verifies that the SSE loop
+// returns promptly when shutdownCh is closed, instead of blocking
+// Server.Shutdown until its deadline expires.
+func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	issueID := uuid.New()
+
+	handler := newSessionHandler(t, mock)
+	shutdownCh := make(chan struct{})
+	handler.SetShutdownSignal(shutdownCh)
+
+	// Non-terminal ("running") status triggers the SSE streaming path.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                      // triggered_by_user_id
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil, // automation_run_id
+				nil, // deleted_at
+				now,
+			),
+		)
+
+	// Empty logs list so the initial write loop is a no-op.
+	mock.ExpectQuery("SELECT .+ FROM session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.StreamLogs(w, req)
+	}()
+
+	// Close the shutdown channel; whether the handler has reached its select
+	// yet or not, the for-select will pick the shutdownCh case on its first
+	// iteration and return.
+	close(shutdownCh)
+
+	select {
+	case <-done:
+		// Expected: handler exited within deadline.
+	case <-time.After(2 * time.Second):
+		t.Fatal("StreamLogs did not return within 2s of shutdownCh close")
+	}
+
+	// A heartbeat is written on the shutdown path so the browser sees a
+	// flush before EOF; check for its SSE comment marker.
+	require.Contains(t, w.Body.String(), ": ping", "expected heartbeat on shutdown")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestSessionHandler_CreateManual(t *testing.T) {
 	t.Parallel()
 
