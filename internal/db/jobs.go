@@ -78,6 +78,12 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, queue, jobTyp
 		"priority":   priority,
 		"dedupe_key": dedupeKey,
 	}).Scan(&id)
+	// ON CONFLICT DO NOTHING returns no row when a pending/running job with the
+	// same (queue, dedupe_key) already exists. Treat that as a successful no-op:
+	// the existing job will satisfy the caller's intent.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, nil
+	}
 	return id, err
 }
 
