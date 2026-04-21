@@ -67,6 +67,8 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"PMHandler.Bootstrap":               "delegates to enqueueAndRespond which uses OrgIDFromContext",
 		"PMHandler.Refresh":                 "delegates to enqueueAndRespond which uses OrgIDFromContext",
 		"ProjectHandler.Start":              "delegates to transitionStatus which uses OrgIDFromContext",
+		"RepositoryHandler.Disconnect":      "delegates to setRepoStatus which uses OrgIDFromContext",
+		"RepositoryHandler.Reconnect":       "delegates to setRepoStatus which uses OrgIDFromContext",
 		"SessionFileHandler.ListFiles":      "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",

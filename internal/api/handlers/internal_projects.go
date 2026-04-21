@@ -30,12 +30,12 @@ const maxOpenProposalsPerRepo = 3
 // InternalProjectHandler handles project proposal creation from sandbox agents
 // via internal API tokens.
 type InternalProjectHandler struct {
-	txStarter         db.TxStarter
-	projectStore      *db.ProjectStore
-	projectTaskStore  *db.ProjectTaskStore
-	repoStore         *db.RepositoryStore
-	signingSecret     string
-	logger            zerolog.Logger
+	txStarter        db.TxStarter
+	projectStore     *db.ProjectStore
+	projectTaskStore *db.ProjectTaskStore
+	repoStore        *db.RepositoryStore
+	signingSecret    string
+	logger           zerolog.Logger
 
 	// perTokenRepoCount tracks how many proposals each token has created per repo.
 	// Keyed by hash(token):repoID. This is intentionally in-memory: counters
@@ -156,6 +156,10 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 	repo, err := h.repoStore.GetByID(r.Context(), claims.OrgID, repoID)
 	if err != nil || repo.OrgID != claims.OrgID {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY", "repository not found in this organization")
+		return
+	}
+	if !repo.IsActive() {
+		writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to propose projects")
 		return
 	}
 

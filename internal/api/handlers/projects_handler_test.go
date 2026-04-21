@@ -388,11 +388,22 @@ func TestProjectHandler_Create(t *testing.T) {
 	defer mock.Close()
 
 	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
 	orgID := uuid.New()
 	userID := uuid.New()
 	repoID := uuid.New()
+	integrationID := uuid.New()
 	now := time.Now()
 
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),

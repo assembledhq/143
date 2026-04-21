@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type RepositoryHandler struct {
@@ -28,7 +30,13 @@ func (h *RepositoryHandler) SetPRService(svc *ghservice.PRService) {
 
 func (h *RepositoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	repos, err := h.repoStore.ListByOrg(r.Context(), orgID)
+	// Pickers (session/project/automation creation) are the dominant caller and
+	// always want active repos only; the integrations settings page opts in with
+	// ?include_disconnected=true so the user can still see and reconnect them.
+	filters := db.RepositoryFilters{
+		IncludeDisconnected: r.URL.Query().Get("include_disconnected") == "true",
+	}
+	repos, err := h.repoStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list repositories", err)
 		return
@@ -124,6 +132,41 @@ func (h *RepositoryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
 }
 
+// Disconnect marks a single repository as disconnected without tearing down the
+// parent GitHub integration. Existing sessions/runs/projects referencing the
+// repo remain readable; new work is blocked by the guards in session/automation
+// /project creation paths. The op is idempotent — calling it twice is a no-op.
+func (h *RepositoryHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
+	h.setRepoStatus(w, r, models.RepositoryStatusDisconnected)
+}
+
+// Reconnect flips a user-disconnected repo back to active. Requires an explicit
+// user action — an integration Sync does NOT silently revive disconnected repos
+// (UpsertFromGitHub deliberately omits status from the ON CONFLICT SET clause).
+func (h *RepositoryHandler) Reconnect(w http.ResponseWriter, r *http.Request) {
+	h.setRepoStatus(w, r, models.RepositoryStatusActive)
+}
+
+func (h *RepositoryHandler) setRepoStatus(w http.ResponseWriter, r *http.Request, status string) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid repository ID")
+		return
+	}
+
+	repo, err := h.repoStore.SetStatus(r.Context(), orgID, repoID, status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update repository status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Repository]{Data: repo})
+}
+
 func (h *RepositoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -160,6 +203,10 @@ func (h *RepositoryHandler) ListBranches(w http.ResponseWriter, r *http.Request)
 	repo, err := h.repoStore.GetByID(r.Context(), orgID, repoID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "repository not found")
+		return
+	}
+	if !repo.IsActive() {
+		writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to fetch branches")
 		return
 	}
 

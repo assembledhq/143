@@ -73,9 +73,14 @@ func validateTimezone(tz string) error {
 	return nil
 }
 
+// errRepoDisconnected is returned by resolveRepositoryID when the repo exists
+// but is user-disconnected. Callers should surface this as REPO_DISCONNECTED so
+// the UI can show a reconnect affordance instead of a generic validation error.
+var errRepoDisconnected = fmt.Errorf("repository is disconnected")
+
 // resolveRepositoryID parses a repository_id from a request and verifies it
-// belongs to orgID. Returns nil + nil for empty input. The error is one a
-// handler can return directly (already user-safe).
+// belongs to orgID and is still active. Returns nil + nil for empty input.
+// Errors are user-safe and can be returned directly from handlers.
 //
 // Fails closed when no repo store is configured: the router always calls
 // SetRepositoryStore so a missing store means a wiring bug, not a
@@ -91,8 +96,12 @@ func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.
 	if h.repoStore == nil {
 		return nil, fmt.Errorf("repository lookup not configured")
 	}
-	if _, err := h.repoStore.GetByID(ctx, orgID, parsed); err != nil {
+	repo, err := h.repoStore.GetByID(ctx, orgID, parsed)
+	if err != nil {
 		return nil, fmt.Errorf("repository not found in this org")
+	}
+	if !repo.IsActive() {
+		return nil, errRepoDisconnected
 	}
 	return &parsed, nil
 }

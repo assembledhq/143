@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +50,7 @@ func TestRepositoryStore_ListByOrg(t *testing.T) {
 				AddRow(newRepoRow(repoID2, orgID, integrationID, now)...),
 		)
 
-	repos, err := store.ListByOrg(context.Background(), orgID)
+	repos, err := store.ListByOrg(context.Background(), orgID, RepositoryFilters{IncludeDisconnected: true})
 	require.NoError(t, err, "ListByOrg should not return an error")
 	require.Len(t, repos, 2, "should return both repositories for the org")
 	require.Equal(t, repoID1, repos[0].ID, "should return the first repository ID")
@@ -113,6 +115,58 @@ func TestRepositoryStore_GetByID(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestRepositoryStore_SetStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	row := newRepoRow(repoID, orgID, integrationID, now)
+	// Override the status column (index 11) to reflect the new value.
+	row[11] = "disconnected"
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoColumns).AddRow(row...))
+
+	repo, err := store.SetStatus(context.Background(), orgID, repoID, models.RepositoryStatusDisconnected)
+	require.NoError(t, err, "SetStatus should not error on happy path")
+	require.Equal(t, "disconnected", repo.Status, "should return the refreshed row with new status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_UpsertFromGitHub_OmitsStatusFromSetClause(t *testing.T) {
+	// Regression guard: a GitHub sync must never silently re-activate a
+	// user-disconnected repo. UpsertFromGitHub deliberately omits `status`
+	// from the ON CONFLICT ... DO UPDATE SET clause; if it ever gets added,
+	// this test catches it at the source level.
+	t.Parallel()
+
+	src, err := os.ReadFile("repositories.go")
+	require.NoError(t, err, "reading repositories.go source should succeed")
+
+	i := strings.Index(string(src), "UpsertFromGitHub")
+	require.NotEqual(t, -1, i, "UpsertFromGitHub must exist in repositories.go")
+
+	// Scan the SET clause only — an INSERT line referencing `status` is fine.
+	tail := string(src)[i:]
+	setStart := strings.Index(tail, "DO UPDATE")
+	returnEnd := strings.Index(tail, "RETURNING")
+	require.NotEqual(t, -1, setStart, "expected DO UPDATE clause in UpsertFromGitHub")
+	require.NotEqual(t, -1, returnEnd, "expected RETURNING clause in UpsertFromGitHub")
+	setClause := tail[setStart:returnEnd]
+
+	require.NotContains(t, setClause, "status",
+		"UpsertFromGitHub's DO UPDATE SET clause must not touch status — would silently revive user-disconnected repos on sync")
 }
 
 func TestRepositoryStore_GetByFullName(t *testing.T) {

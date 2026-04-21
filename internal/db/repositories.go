@@ -44,12 +44,23 @@ func (s *RepositoryStore) Create(ctx context.Context, repo *models.Repository) e
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 }
 
-func (s *RepositoryStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+// RepositoryFilters controls optional predicates on ListByOrg. Default behavior
+// (zero value) returns only active repos, which is what every picker UI wants;
+// set IncludeDisconnected to surface user-disconnected repos for the settings
+// page's "Reconnect" affordance.
+type RepositoryFilters struct {
+	IncludeDisconnected bool
+}
+
+func (s *RepositoryStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters RepositoryFilters) ([]models.Repository, error) {
 	query := `
 		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
 		FROM repositories
-		WHERE org_id = @org_id
-		ORDER BY full_name ASC`
+		WHERE org_id = @org_id`
+	if !filters.IncludeDisconnected {
+		query += ` AND status = 'active'`
+	}
+	query += ` ORDER BY full_name ASC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
@@ -90,6 +101,28 @@ func (s *RepositoryStore) Update(ctx context.Context, repo *models.Repository) e
 
 	row := s.db.QueryRow(ctx, query, args)
 	return row.Scan(&repo.UpdatedAt)
+}
+
+// SetStatus flips a repo's status within an org. Returns the refreshed row so
+// callers can echo it back to the client without an extra round-trip. The
+// caller is responsible for validating that status is one of the known values
+// via models.RepositoryStatus* constants.
+func (s *RepositoryStore) SetStatus(ctx context.Context, orgID, repoID uuid.UUID, status string) (models.Repository, error) {
+	query := `
+		UPDATE repositories
+		SET status = @status, updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		RETURNING id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     repoID,
+		"org_id": orgID,
+		"status": status,
+	})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("update repository status: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
 func (s *RepositoryStore) Delete(ctx context.Context, orgID, repoID uuid.UUID) error {

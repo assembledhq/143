@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -177,6 +178,10 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	repoID, err := h.resolveRepositoryID(r.Context(), orgID, req.RepositoryID)
 	if err != nil {
+		if errors.Is(err, errRepoDisconnected) {
+			writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to create automations")
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", err.Error())
 		return
 	}
@@ -406,6 +411,10 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.RepositoryID != nil {
 		repoID, err := h.resolveRepositoryID(r.Context(), orgID, *req.RepositoryID)
 		if err != nil {
+			if errors.Is(err, errRepoDisconnected) {
+				writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to assign automations")
+				return
+			}
 			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", err.Error())
 			return
 		}

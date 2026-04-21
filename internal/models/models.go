@@ -74,6 +74,18 @@ type Repository struct {
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 }
 
+const (
+	RepositoryStatusActive       = "active"
+	RepositoryStatusDisconnected = "disconnected"
+)
+
+// IsActive reports whether the repo is currently usable for new work. Disconnected
+// repos remain readable (existing sessions still load) but must be rejected from
+// any code path that creates new sessions, runs, projects, or automations.
+func (r Repository) IsActive() bool {
+	return r.Status == RepositoryStatusActive
+}
+
 // RepoSummary is the API model for repository summary data in the context switcher.
 type RepoSummary struct {
 	RepositoryID        uuid.UUID `json:"repository_id"`
