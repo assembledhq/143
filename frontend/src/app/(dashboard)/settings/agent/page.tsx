@@ -37,7 +37,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
-import { ClaudeCodeDeviceCodeModal } from "@/components/claude-code-device-code-modal";
+import { ClaudeSubscriptionManager } from "@/components/claude-subscription-manager";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { queryKeys } from "@/lib/query-keys";
@@ -374,56 +374,22 @@ export default function AgentPage() {
   /** Shared Claude subscription auth status — list + add/remove. */
   function renderClaudeSubscriptionAuthStatus(): ReactNode {
     return (
-      <div className="space-y-3">
-        {activeClaudeSubscriptions.length > 0 && (
-          <div className="space-y-2">
-            <Label className="text-xs text-muted-foreground">
-              Connected subscriptions ({activeClaudeSubscriptions.length}) &mdash; usage is distributed via round-robin
-            </Label>
-            {activeClaudeSubscriptions.map((sub) => (
-              <div key={sub.id} className="flex items-center justify-between rounded-md border px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="border-green-600 text-green-600">
-                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                    Active
-                  </Badge>
-                  <span className="text-sm font-medium">{sub.label}</span>
-                  {sub.account_type && (
-                    <span className="text-xs text-muted-foreground">({sub.account_type})</span>
-                  )}
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-xs text-muted-foreground hover:text-destructive"
-                  onClick={() => setRemovingClaudeSubscriptionId(sub.id)}
-                  aria-label={`Remove Claude subscription ${sub.label}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="flex items-center gap-2">
-          <Input
-            placeholder="Subscription label (e.g. Team A)"
-            value={newClaudeSubscriptionLabel}
-            onChange={(e) => setNewClaudeSubscriptionLabel(e.target.value.slice(0, 100))}
-            maxLength={100}
-            className="max-w-xs text-sm"
-          />
-          <Button
-            size="sm"
-            onClick={() => setShowClaudeDeviceCodeModal(true)}
-            disabled={showClaudeDeviceCodeModal || newClaudeSubscriptionLabel.trim() === ""}
-          >
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            Add subscription
-          </Button>
-        </div>
-      </div>
+      <ClaudeSubscriptionManager
+        subscriptions={claudeCodeSubscriptions}
+        label={newClaudeSubscriptionLabel}
+        onLabelChange={setNewClaudeSubscriptionLabel}
+        showModal={showClaudeDeviceCodeModal}
+        onOpenModal={() => setShowClaudeDeviceCodeModal(true)}
+        onCloseModal={() => {
+          setShowClaudeDeviceCodeModal(false);
+          setNewClaudeSubscriptionLabel("");
+        }}
+        onRemove={(sub) => setRemovingClaudeSubscriptionId(sub.id)}
+        connectedLabelText={(count) =>
+          `Connected subscriptions (${count}) — usage is distributed via round-robin`
+        }
+        addButtonVariant="plus"
+      />
     );
   }
 
@@ -892,18 +858,6 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Claude Code Device Code Modal */}
-      {showClaudeDeviceCodeModal && newClaudeSubscriptionLabel.trim() !== "" && (
-        <ClaudeCodeDeviceCodeModal
-          label={newClaudeSubscriptionLabel.trim()}
-          onClose={() => { setShowClaudeDeviceCodeModal(false); setNewClaudeSubscriptionLabel(""); }}
-          onConnected={() => {
-            queryClient.invalidateQueries({ queryKey: ["claude-code-subscriptions"] });
-            setShowClaudeDeviceCodeModal(false);
-            setNewClaudeSubscriptionLabel("");
-          }}
-        />
-      )}
     </PageContainer>
   );
 }

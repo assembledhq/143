@@ -91,11 +91,20 @@ type AnthropicConfig struct {
 // subscription rows and API-key rows share the same provider
 // (ProviderAnthropic); the presence of a non-nil Subscription is what marks
 // a row as a subscription credential.
+//
+// Field provenance:
+//   - AccessToken/RefreshToken/ExpiresAt come from the /v1/oauth/token endpoint.
+//   - Scopes comes from that endpoint's space-separated `scope` response field.
+//   - AccountType / RateLimitTier come from a best-effort follow-up fetch of
+//     /api/oauth/profile and may be empty if the profile call failed. They are
+//     display-only — Claude Code CLI inside the sandbox rebuilds them itself.
 type AnthropicSubscription struct {
-	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
-	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
-	ExpiresAt    time.Time `json:"expires_at"`
-	AccountType  string    `json:"account_type,omitempty"` // "pro" | "max" | "team" | "enterprise"
+	AccessToken   string    `json:"access_token"`  // #nosec G117 -- JSON config field
+	RefreshToken  string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	ExpiresAt     time.Time `json:"expires_at"`
+	AccountType   string    `json:"account_type,omitempty"`    // e.g. "claude_max", "claude_pro"
+	RateLimitTier string    `json:"rate_limit_tier,omitempty"` // e.g. "default_claude_max_20x"
+	Scopes        []string  `json:"scopes,omitempty"`
 
 	// Pending PKCE-auth fields — only populated between InitiateOAuth and
 	// CompleteOAuth. Persisted so the flow survives server restarts.

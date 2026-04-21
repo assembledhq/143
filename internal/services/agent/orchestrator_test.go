@@ -100,6 +100,26 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
+// mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
+type mockClaudeCodeAuthProvider struct {
+	sub       *models.AnthropicSubscription
+	credID    *uuid.UUID
+	hasSub    bool
+	hasSubErr error
+	tokenErr  error
+}
+
+func (m *mockClaudeCodeAuthProvider) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error) {
+	return m.hasSub, m.hasSubErr
+}
+
+func (m *mockClaudeCodeAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error) {
+	if m.tokenErr != nil {
+		return nil, nil, m.tokenErr
+	}
+	return m.sub, m.credID, nil
+}
+
 type mockCredentialProvider struct {
 	byProvider map[models.ProviderName]*models.DecryptedCredential
 	err        error
@@ -561,22 +581,23 @@ func strPtr(s string) *string {
 }
 
 type testDeps struct {
-	provider  *testutil.MockSandboxProvider
-	adapter   *mockAgentAdapter
-	sessions  *mockSessionStore
-	projects  *mockProjectTaskUpdater
-	issues    *mockIssueStore
-	repos     *mockRepositoryStore
-	logs      *mockSessionLogStore
-	questions *mockSessionQuestionStore
-	messages  *mockSessionMessageStore
-	decisions *mockDecisionLogStore
-	jobs      *mockJobStore
-	github    *mockGitHubTokenProvider
-	codexAuth agent.CodexAuthProvider
-	creds     *mockCredentialProvider
-	snapshots *mockSnapshotStore
-	cancels   *agent.CancelRegistry
+	provider       *testutil.MockSandboxProvider
+	adapter        *mockAgentAdapter
+	sessions       *mockSessionStore
+	projects       *mockProjectTaskUpdater
+	issues         *mockIssueStore
+	repos          *mockRepositoryStore
+	logs           *mockSessionLogStore
+	questions      *mockSessionQuestionStore
+	messages       *mockSessionMessageStore
+	decisions      *mockDecisionLogStore
+	jobs           *mockJobStore
+	github         *mockGitHubTokenProvider
+	codexAuth      agent.CodexAuthProvider
+	claudeCodeAuth agent.ClaudeCodeAuthProvider
+	creds          *mockCredentialProvider
+	snapshots      *mockSnapshotStore
+	cancels        *agent.CancelRegistry
 }
 
 func defaultDeps() testDeps {
@@ -626,6 +647,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Jobs:             d.jobs,
 		GitHub:           d.github,
 		CodexAuth:        d.codexAuth,
+		ClaudeCodeAuth:   d.claudeCodeAuth,
 		Credentials:      d.creds,
 		Snapshots:        d.snapshots,
 		Cancels:          d.cancels,
@@ -1294,6 +1316,72 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	// Verify the sandbox was created with the credential-derived env vars.
 	require.NotNil(t, capturedCfg.Env, "sandbox config should have env vars")
 	require.Equal(t, "sk-ant-test-key", capturedCfg.Env["ANTHROPIC_API_KEY"])
+}
+
+func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	credID := uuid.New()
+	expiresAt := time.Now().Add(45 * time.Minute)
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub: true,
+		credID: &credID,
+		sub: &models.AnthropicSubscription{
+			AccessToken:   "sub-access-1",
+			RefreshToken:  "sub-refresh-1",
+			ExpiresAt:     expiresAt,
+			AccountType:   "claude_max",
+			RateLimitTier: "default_claude_max_20x",
+			Scopes:        []string{"user:profile", "user:inference", "user:sessions:claude_code"},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "sub-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed with a Claude subscription")
+
+	// Subscription wins over ANTHROPIC_API_KEY — the env var must be absent
+	// so the Claude Code CLI falls through to the credentials file we wrote.
+	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
+		"ANTHROPIC_API_KEY must not be set when a subscription is present")
+
+	// Credentials file was written to the expected path with the CLI's schema.
+	credsPath := "/home/sandbox/.claude/.credentials.json"
+	credsData, ok := d.provider.Files[credsPath]
+	require.True(t, ok, ".credentials.json should be written under ~/.claude")
+
+	var credsJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(credsData, &credsJSON))
+	oauth, ok := credsJSON["claudeAiOauth"].(map[string]interface{})
+	require.True(t, ok, "credentials file should have claudeAiOauth object")
+	require.Equal(t, "sub-access-1", oauth["accessToken"])
+	require.Equal(t, "sub-refresh-1", oauth["refreshToken"])
+	require.Equal(t, "claude_max", oauth["subscriptionType"])
+	require.Equal(t, "default_claude_max_20x", oauth["rateLimitTier"])
+	require.EqualValues(t, expiresAt.UnixMilli(), oauth["expiresAt"], "expiresAt should be millis-since-epoch")
+	scopes, ok := oauth["scopes"].([]interface{})
+	require.True(t, ok, "scopes should be an array")
+	require.Len(t, scopes, 3)
+
+	// Permissions must be locked down to 0600 — the CLI refuses a
+	// world-readable token file. Verified via the executed chmod command.
+	require.Contains(t, d.provider.ExecCalls,
+		"mkdir -p '/home/sandbox/.claude'",
+		"should create ~/.claude with mkdir -p")
+	require.Contains(t, d.provider.ExecCalls,
+		"chmod 600 '/home/sandbox/.claude/.credentials.json'",
+		"should chmod the credentials file to 0600")
 }
 
 func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {

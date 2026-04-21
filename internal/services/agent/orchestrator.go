@@ -1742,7 +1742,18 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		// injected by injectClaudeCodeAuth isn't overridden at runtime.
 		hasSubscription := false
 		if o.claudeCodeAuth != nil {
-			if has, err := o.claudeCodeAuth.HasActiveSubscription(ctx, orgID); err == nil {
+			has, err := o.claudeCodeAuth.HasActiveSubscription(ctx, orgID)
+			if err != nil {
+				// Don't swallow: a transient DB error here would fall through
+				// to the API-key branch and could overwrite a real subscription
+				// with ANTHROPIC_API_KEY. Log so operators see the outage; the
+				// sandbox will still get an API-key fallback if one exists,
+				// which is the safest degradation when we can't tell.
+				o.logger.Warn().
+					Err(err).
+					Str("org_id", orgID.String()).
+					Msg("claude subscription lookup failed; falling back to API-key env")
+			} else {
 				hasSubscription = has
 			}
 		}
@@ -2176,11 +2187,12 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 // fallback should be used, or (false, err) on failure.
 //
 // Credentials file schema: the shape (claudeAiOauth.{accessToken,
-// refreshToken, expiresAt, subscriptionType}) is what the Claude Code CLI
-// writes itself when a user runs `claude login` — we're reproducing its
-// output format verbatim so the CLI picks the file up without modification.
-// If Anthropic ever changes this format, update this marshal block and the
-// AnthropicSubscription struct together.
+// refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier}) mirrors
+// what the Claude Code CLI writes itself when a user runs `claude login`.
+// expiresAt is milliseconds-since-epoch. Scopes is the array form the CLI
+// uses; we translate from the space-separated `scope` response string when
+// the tokens are issued. If Anthropic ever changes this format, update this
+// marshal block and the AnthropicSubscription struct together.
 func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if o.claudeCodeAuth == nil {
 		return false, nil
@@ -2194,14 +2206,21 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 		return false, nil
 	}
 
-	credsJSON, err := json.Marshal(map[string]interface{}{
-		"claudeAiOauth": map[string]interface{}{
-			"accessToken":      sub.AccessToken,
-			"refreshToken":     sub.RefreshToken,
-			"expiresAt":        sub.ExpiresAt.UnixMilli(),
-			"subscriptionType": sub.AccountType,
-		},
-	})
+	oauthPayload := map[string]interface{}{
+		"accessToken":  sub.AccessToken,
+		"refreshToken": sub.RefreshToken,
+		"expiresAt":    sub.ExpiresAt.UnixMilli(),
+	}
+	if len(sub.Scopes) > 0 {
+		oauthPayload["scopes"] = sub.Scopes
+	}
+	if sub.AccountType != "" {
+		oauthPayload["subscriptionType"] = sub.AccountType
+	}
+	if sub.RateLimitTier != "" {
+		oauthPayload["rateLimitTier"] = sub.RateLimitTier
+	}
+	credsJSON, err := json.Marshal(map[string]interface{}{"claudeAiOauth": oauthPayload})
 	if err != nil {
 		return false, fmt.Errorf("marshal claude credentials: %w", err)
 	}
@@ -2224,6 +2243,19 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	credsPath := authDir + "/.credentials.json"
 	if err := o.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
 		return false, fmt.Errorf("write claude credentials: %w", err)
+	}
+
+	// Lock down permissions on the credentials file; the CLI expects 0600
+	// and refuses to use a world-readable token file. Single-quote the path
+	// against future HomeDir refactors for the same reason mkdir does.
+	chmodCmd := fmt.Sprintf("chmod 600 '%s'", shellEscapeSingleQuote(credsPath))
+	var chmodOut, chmodErr bytes.Buffer
+	exitCode, err = o.provider.Exec(ctx, sandbox, chmodCmd, &chmodOut, &chmodErr)
+	if err != nil {
+		return false, fmt.Errorf("chmod claude credentials: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("chmod claude credentials: exited with code %d: %s", exitCode, chmodErr.String())
 	}
 
 	o.logger.Debug().

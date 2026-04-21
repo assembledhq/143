@@ -8,15 +8,14 @@ import { Input } from "@/components/ui/input";
 import { ExternalLink } from "lucide-react";
 import type { ClaudeCodeInitiateResponse } from "@/lib/types";
 
-// ClaudeCodeDeviceCodeModal drives the Claude Code subscription PKCE flow.
-// The name is kept for import stability; the UX underneath is the
-// authorization-code + PKCE flow:
+// ClaudeCodeAuthModal drives the Claude Code subscription OAuth flow using
+// authorization-code + PKCE:
 //   1. POST /initiate — server generates a PKCE verifier + state and returns
 //      an authorize URL.
 //   2. User opens the URL, logs in, and Anthropic shows them `<code>#<state>`.
 //   3. User pastes that string back into the input; POST /complete exchanges
 //      it for tokens.
-export function ClaudeCodeDeviceCodeModal({
+export function ClaudeCodeAuthModal({
   onClose,
   onConnected,
   label,

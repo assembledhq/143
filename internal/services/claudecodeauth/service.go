@@ -65,6 +65,11 @@ const (
 	// defaultClientID is the Claude Code CLI's public OAuth client_id.
 	defaultClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+	// defaultProfileURL is the Anthropic profile endpoint we query after a
+	// token exchange to learn the subscription tier (account_type) and rate
+	// limit tier. Best-effort: a failure here never fails the auth flow.
+	defaultProfileURL = "https://api.anthropic.com/api/oauth/profile"
+
 	// refreshGrantType is the OAuth 2.0 grant type for token refresh.
 	refreshGrantType = "refresh_token"
 
@@ -166,6 +171,7 @@ type Service struct {
 	logger       zerolog.Logger
 	authorizeURL string
 	tokenURL     string
+	profileURL   string
 	redirectURI  string
 	clientID     string
 	scopes       []string
@@ -183,6 +189,7 @@ func NewService(credentials CredentialStore, logger zerolog.Logger) *Service {
 		logger:       logger,
 		authorizeURL: defaultAuthorizeURL,
 		tokenURL:     defaultTokenURL,
+		profileURL:   defaultProfileURL,
 		redirectURI:  defaultRedirectURI,
 		clientID:     defaultClientID,
 		scopes:       scopes,
@@ -197,6 +204,9 @@ func (s *Service) SetAuthorizeURL(u string) { s.authorizeURL = u }
 
 // SetTokenURL overrides the token endpoint (useful for testing).
 func (s *Service) SetTokenURL(u string) { s.tokenURL = u }
+
+// SetProfileURL overrides the profile endpoint (useful for testing).
+func (s *Service) SetProfileURL(u string) { s.profileURL = u }
 
 // pendingKey returns the sync.Map key for init-side mutexes scoped to org+label.
 func pendingKey(orgID uuid.UUID, label string) string {
@@ -339,10 +349,20 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	sub := &models.AnthropicSubscription{
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
-		AccountType:  tokens.AccountType,
+		Scopes:       parseScopes(tokens.Scope),
 	}
 	if tokens.ExpiresIn > 0 {
 		sub.ExpiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
+	}
+
+	// Best-effort profile fetch to enrich the subscription with a
+	// human-readable tier (AccountType) and the backend's rate_limit_tier.
+	// These fields are display-only; a failure here must not block auth.
+	if profile, perr := s.fetchProfile(ctx, sub.AccessToken); perr != nil {
+		s.logger.Warn().Err(perr).Str("org_id", orgID.String()).Str("label", label).Msg("claude profile fetch failed; continuing without tier info")
+	} else if profile != nil {
+		sub.AccountType = profile.Organization.OrganizationType
+		sub.RateLimitTier = profile.Organization.RateLimitTier
 	}
 
 	if err := s.credentials.UpsertByID(ctx, orgID, cred.ID, models.AnthropicConfig{Subscription: sub}); err != nil {
@@ -357,6 +377,16 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 		Msg("Claude Code OAuth completed")
 
 	return &CompleteResponse{AccountType: sub.AccountType}, nil
+}
+
+// parseScopes splits a space-separated OAuth scope string into a slice.
+// Empty or whitespace-only inputs return nil so we never store a []string{""}.
+func parseScopes(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Fields(trimmed)
 }
 
 // splitCodeAndState parses the "<code>#<state>" string Anthropic shows to the
@@ -377,11 +407,60 @@ func splitCodeAndState(raw string) (string, string, error) {
 
 // tokenExchangeResponse holds the parsed tokens returned by the Anthropic
 // token endpoint for both authorization_code and refresh_token grants.
+// Anthropic's /v1/oauth/token response does not carry the subscription tier
+// (we fetch that separately from the profile endpoint); Scope is a
+// space-separated list of granted scopes.
 type tokenExchangeResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
-	AccountType  string `json:"account_type"`
+	Scope        string `json:"scope"`
 	ExpiresIn    int    `json:"expires_in"`
+}
+
+// profileResponse is the subset of Anthropic's /api/oauth/profile response
+// we use to learn the subscription tier and rate-limit tier.
+type profileResponse struct {
+	Organization struct {
+		OrganizationType string `json:"organization_type"`
+		RateLimitTier    string `json:"rate_limit_tier"`
+	} `json:"organization"`
+}
+
+// fetchProfile calls Anthropic's /api/oauth/profile with the issued access
+// token to learn the subscription tier + rate limit tier. Returns (nil, nil)
+// if profileURL isn't configured. Failures are non-fatal and surface as
+// errors for the caller to log.
+func (s *Service) fetchProfile(ctx context.Context, accessToken string) (*profileResponse, error) {
+	if s.profileURL == "" || accessToken == "" {
+		return nil, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.profileURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create profile request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("profile request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read profile response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("profile fetch failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var profile profileResponse
+	if err := json.Unmarshal(body, &profile); err != nil {
+		return nil, fmt.Errorf("parse profile response: %w", err)
+	}
+	return &profile, nil
 }
 
 // exchangeAuthCode POSTs to the token endpoint with the auth code and PKCE
@@ -517,15 +596,17 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 	}
 
 	newSub := &models.AnthropicSubscription{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-		AccountType:  sub.AccountType,
+		AccessToken:   tokenResp.AccessToken,
+		RefreshToken:  tokenResp.RefreshToken,
+		ExpiresAt:     time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		AccountType:   sub.AccountType,
+		RateLimitTier: sub.RateLimitTier,
+		Scopes:        sub.Scopes,
 	}
-	// Some OAuth servers return the account_type on refresh; prefer the fresh
-	// value when present so tier upgrades are reflected.
-	if tokenResp.AccountType != "" {
-		newSub.AccountType = tokenResp.AccountType
+	// If the refresh response carries a fresh scope string, prefer it so
+	// scope changes (e.g. an added scope) are reflected.
+	if refreshed := parseScopes(tokenResp.Scope); len(refreshed) > 0 {
+		newSub.Scopes = refreshed
 	}
 	// Anthropic's refresh sometimes returns an empty refresh_token string,
 	// meaning "keep the old one". Avoid clobbering the stored value in that
