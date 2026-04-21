@@ -418,6 +418,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			sandboxCfg.Env[envVar] = *run.ModelOverride
 		}
 	}
+	// For Pi, drop any inherited provider keys that don't match the effective
+	// model so the sandbox only sees the single credential Pi will actually
+	// use. Runs after ModelOverride so a per-run switch shapes the env too.
+	if run.AgentType == models.AgentTypePi {
+		narrowPiProviderKeys(sandboxCfg.Env)
+	}
 	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -788,6 +794,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
+	}
+	if session.AgentType == models.AgentTypePi {
+		narrowPiProviderKeys(sandboxCfg.Env)
 	}
 	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
@@ -1644,14 +1653,7 @@ func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string
 // env var is required, so we fall back to the weaker "at least one inherited
 // key" guarantee.
 func checkPiProviderKey(env map[string]string) error {
-	model := env["PI_MODEL_CUSTOM"]
-	if model == "" {
-		model = env["PI_MODEL"]
-	}
-	if model == "" {
-		// Matches the hardcoded fallback in piStreamingConfig.BuildCmd.
-		model = models.PiModelClaudeOpus47
-	}
+	model := piResolvedModel(env)
 	prefix, _, _ := strings.Cut(model, "/")
 	switch strings.ToLower(prefix) {
 	case "anthropic":
@@ -1674,6 +1676,50 @@ func checkPiProviderKey(env map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// piResolvedModel returns the Pi model string the CLI will run against, using
+// the same precedence as piStreamingConfig.BuildCmd: PI_MODEL_CUSTOM > PI_MODEL
+// > hardcoded default.
+func piResolvedModel(env map[string]string) string {
+	if m := env["PI_MODEL_CUSTOM"]; m != "" {
+		return m
+	}
+	if m := env["PI_MODEL"]; m != "" {
+		return m
+	}
+	return models.PiModelClaudeOpus47
+}
+
+// narrowPiProviderKeys strips inherited provider keys that don't match Pi's
+// resolved model. Called after ModelOverride is applied, so the env reflects
+// the *effective* model — a per-run override that flips Pi from Anthropic to
+// OpenAI removes the Anthropic key from the sandbox env, even if the
+// agent_config default pointed at Anthropic.
+//
+// Only narrows for known provider prefixes (anthropic/openai/google/gemini):
+// for unknown prefixes (moonshot via PI_MODEL_CUSTOM, etc.) we can't tell
+// which key Pi will use upstream, so the weaker "keep all inherited keys"
+// posture is intentional.
+func narrowPiProviderKeys(env map[string]string) {
+	model := piResolvedModel(env)
+	prefix, _, _ := strings.Cut(model, "/")
+	const (
+		ak = "ANTHROPIC_API_KEY"
+		ok = "OPENAI_API_KEY"
+		gk = "GEMINI_API_KEY"
+	)
+	switch strings.ToLower(prefix) {
+	case "anthropic":
+		delete(env, ok)
+		delete(env, gk)
+	case "openai":
+		delete(env, ak)
+		delete(env, gk)
+	case "google", "gemini":
+		delete(env, ak)
+		delete(env, ok)
+	}
 }
 
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org

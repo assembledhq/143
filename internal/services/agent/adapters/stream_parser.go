@@ -268,6 +268,16 @@ func runStreamingAgent(
 		parseAgentStreamLine(line, cfg.ParseConfig, result, logCh, &summaryParts, &lastAssistantContent)
 	}, &stderr)
 	if err != nil {
+		// Surface any buffered stderr alongside the wrap error — otherwise the
+		// caller sees only "exec amp CLI: <exec-level error>" and loses the
+		// CLI's own diagnostics, which are often the actionable part.
+		if stderr.Len() > 0 {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   stderr.String(),
+			}
+		}
 		return nil, fmt.Errorf("exec %s CLI: %w", cfg.CLIName, err)
 	}
 

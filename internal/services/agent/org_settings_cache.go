@@ -91,3 +91,14 @@ func (c *OrgSettingsCache) Len() int {
 	defer c.mu.RUnlock()
 	return len(c.entries)
 }
+
+// SetClockForTest replaces the cache's time source. Only intended for tests —
+// production code should never call this.
+func (c *OrgSettingsCache) SetClockForTest(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now == nil {
+		now = time.Now
+	}
+	c.now = now
+}

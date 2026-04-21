@@ -2676,6 +2676,95 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 		"after InvalidateOrg the orchestrator must re-read agent_config from the org store")
 }
 
+// TestRunAgent_AmpAgentConfigCacheTTLExpires asserts that a naturally expired
+// cache entry (no explicit Invalidate) is treated as a miss by the
+// orchestrator, and that the orchestrator falls back to the org store.
+//
+// This complements TestRunAgent_AmpAgentConfigCached (which covers the
+// explicit InvalidateOrg path) — without this case, a bug that made the
+// orchestrator keep using stale cached entries past the TTL would slip
+// through, since the invalidate path is a separate code branch (delete) from
+// the time-based expiry path (Get returns miss).
+func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+
+	orgStoreSettings := models.OrgSettings{
+		AgentConfig: models.AgentEnvConfig{
+			"amp": {"AMP_API_KEY": "from-org-store"},
+		},
+	}
+	settingsJSON, err := json.Marshal(orgStoreSettings)
+	require.NoError(t, err)
+	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
+
+	cache := agent.NewOrgSettingsCache(time.Minute)
+	base := time.Unix(1_700_000_000, 0)
+	clock := base
+	cache.SetClockForTest(func() time.Time { return clock })
+
+	// Prime the cache with a value distinct from the org store so a cache hit
+	// is observable in the captured sandbox env. The Set timestamp uses the
+	// current (base) clock, so the entry expires at base + 1 minute.
+	cache.Set(orgID, models.AgentEnvConfig{
+		"amp": {"AMP_API_KEY": "from-cache"},
+	})
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+
+	var captured []map[string]string
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		envCopy := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			envCopy[k] = v
+		}
+		captured = append(captured, envCopy)
+		return &agent.Sandbox{ID: "amp-sb", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             orgs,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		OrgSettingsCache: cache,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	// First run: clock is at base, cache is still fresh — must serve the
+	// cached value.
+	run1 := testRun(orgID, issue.ID)
+	run1.AgentType = models.AgentTypeAmp
+	require.NoError(t, orch.RunAgent(context.Background(), run1))
+	require.Len(t, captured, 1)
+	require.Equal(t, "from-cache", captured[0]["AMP_API_KEY"],
+		"pre-expiry run must hit the cache")
+
+	// Advance past the TTL without calling InvalidateOrg. The next read
+	// must be a miss and the orchestrator must re-populate from the org
+	// store (whose value is distinct so we can distinguish the sources).
+	clock = base.Add(time.Minute + time.Second)
+
+	run2 := testRun(orgID, issue.ID)
+	run2.AgentType = models.AgentTypeAmp
+	require.NoError(t, orch.RunAgent(context.Background(), run2))
+	require.Len(t, captured, 2)
+	require.Equal(t, "from-org-store", captured[1]["AMP_API_KEY"],
+		"post-TTL run must miss the cache and re-read from the org store")
+}
+
 // TestContinueSession_AmpMissingAPIKeyFailsFast asserts the ContinueSession
 // auth pre-flight: when Amp is missing AMP_API_KEY the function must revert
 // the session status back to idle, post an assistant message so the user
