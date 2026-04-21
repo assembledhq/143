@@ -253,7 +253,11 @@ export default function LLMPage() {
             ownerConfigured={ownerConfigured}
             onChange={(model) => autosave.save({ settings: { llm_model: model } })}
             onReasoningChange={(effort) =>
-              autosave.save({ settings: { llm_reasoning_effort: effort } })
+              autosave.save({
+                settings: {
+                  llm_reasoning_effort: effort as "" | "low" | "medium" | "high",
+                },
+              })
             }
           />
         </section>
