@@ -124,13 +124,17 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   const autosave = useAutosave<RepoPatch>({
     queryKey: ["repository", repository.id],
     mutationFn: async (payload) => {
-      const result = await api.repositories.update(repository.id, payload);
       // useAutosave invalidates its own queryKey on settle. The repositories
       // list query (rendered by the sidebar, repo picker, etc.) caches the
       // same data under a different key, so invalidate it here too; otherwise
-      // list views show stale PM settings until the next navigation.
-      void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
-      return result;
+      // list views show stale PM settings until the next navigation. Run the
+      // invalidation in `finally` so an error path — where the optimistic
+      // cache was rolled back — also reconciles the list.
+      try {
+        return await api.repositories.update(repository.id, payload);
+      } finally {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+      }
     },
     applyOptimistic: (prev, patch) => {
       const previous = prev as SingleResponse<Repository> | undefined;

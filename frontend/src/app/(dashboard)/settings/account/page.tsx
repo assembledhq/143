@@ -182,6 +182,11 @@ export default function AccountPage() {
       api.userCredentials.setTeamDefault(provider, userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+      setSettingTeamDefaultProvider(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-key-set-team-default" });
+      setSettingTeamDefaultProvider(null);
     },
   });
 
@@ -506,13 +511,13 @@ export default function AccountPage() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               disabled={!user || setTeamDefaultMutation.isPending}
-              onClick={() => {
+              onClick={(event) => {
+                event.preventDefault();
                 if (settingTeamDefaultProvider && user) {
                   setTeamDefaultMutation.mutate({
                     provider: settingTeamDefaultProvider,
                     userId: user.id,
                   });
-                  setSettingTeamDefaultProvider(null);
                 }
               }}
             >

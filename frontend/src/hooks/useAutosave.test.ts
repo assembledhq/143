@@ -170,6 +170,59 @@ describe("useAutosave", () => {
     expect(mutationFn).toHaveBeenNthCalledWith(2, { settings: { b: 2, c: 3 } });
   });
 
+  it("collapses N rapid saves into at most two mutations (rapid toggle)", async () => {
+    // Rapid-toggle scenario: a user mashes a switch (or types very fast). The
+    // shared queue should collapse everything into one in-flight + one
+    // coalesced follow-up regardless of burst size. Matches the testing
+    // checklist in settings/AGENTS.md.
+    let resolveFirst: (() => void) | undefined;
+    const mutationFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: Record<string, unknown> }>({
+          queryKey: ["settings", "test-rapid-toggle"],
+          mutationFn,
+          applyOptimistic,
+          coalesce,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.save({ settings: { toggle: true } });
+    });
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      for (let i = 0; i < 10; i += 1) {
+        result.current.save({ settings: { toggle: i % 2 === 0, n: i } });
+      }
+    });
+
+    // Everything after the in-flight save collapses into one pending payload.
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(2));
+    // Last writer wins for overlapping keys; the tail of the burst set n to 9
+    // and toggle to false.
+    expect(mutationFn).toHaveBeenNthCalledWith(2, { settings: { toggle: false, n: 9 } });
+  });
+
   it("rolls back optimistic update and shows toast on error", async () => {
     const mutationFn = vi.fn().mockRejectedValue(new Error("500 boom"));
     const queryKey = ["settings", "test-rollback"];

@@ -168,6 +168,13 @@ async function run(
  * Callers MUST pass `applyOptimistic` because the cache shape varies per
  * resource (e.g. `settings.data.settings.<field>` vs `repositories.data`).
  *
+ * `coalesce` MUST be referentially stable across all callers of a given
+ * `queryKey` — use a module-level export or `useCallback`, never an inline
+ * arrow. Two callers that share a `queryKey` and pass different `coalesce`
+ * identities will throw in dev. See
+ * `frontend/src/app/(dashboard)/settings/AGENTS.md` (“Optimistic update
+ * helpers”) for the full rule and the preferred helpers.
+ *
  * @example
  *   const { save, flush, status } = useAutosave<{ settings: { foo: string } }>({
  *     queryKey: queryKeys.settings.all,

@@ -210,7 +210,7 @@ When adding or changing an autosaved field, verify:
   requests for N > 2 rapid clicks).
 - Killing the backend and editing the field shows the optimistic value, then
   rolls back, and a Sonner error toast appears.
-- The indicator shows `Saving…`, then `Saved ✓`, then clears after ~1.5s.
+- The indicator shows `Saving…`, then `Saved`, then clears after ~1.5s.
   On error, it shows `Couldn't save` and clears after ~3s.
 - Navigating away from the page mid-save does not throw and does not leave a
   dangling optimistic update on return.
