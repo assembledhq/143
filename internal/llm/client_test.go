@@ -131,6 +131,19 @@ func TestFallbackClient_AllProvidersFail(t *testing.T) {
 	require.Equal(t, 1, p2.callCount)
 }
 
+func TestBuildChain_QwenIsServableByOpenRouterAlone(t *testing.T) {
+	t.Parallel()
+
+	// Regression guard: a user with only OpenRouter configured should still get
+	// a chain for the OpenRouter-exclusive Qwen models.
+	openrouter := &mockProvider{name: "openrouter"}
+	chain, err := buildChain("qwen3-235b-a22b", map[string]Provider{"openrouter": openrouter})
+	require.NoError(t, err, "qwen3-235b-a22b should route through OpenRouter")
+	require.GreaterOrEqual(t, len(chain), 1)
+	require.Equal(t, "openrouter", chain[0].provider.Name(), "OpenRouter should be the primary for Qwen")
+	require.Equal(t, "qwen/qwen3-235b-a22b", chain[0].modelID)
+}
+
 func TestBuildChain_FiltersUnavailableProviders(t *testing.T) {
 	t.Parallel()
 
@@ -259,15 +272,50 @@ func TestNewClient_WithAllProviders(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:            "claude-sonnet-4-6",
+		Model:            "gemini-2.5-pro",
 		AnthropicAPIKey:  "sk-ant-test",
 		AnthropicBaseURL: "https://custom.anthropic.com",
 		OpenAIAPIKey:     "sk-openai-test",
 		OpenAIBaseURL:    "https://custom.openai.com",
 		OpenRouterAPIKey: "sk-or-test",
+		GeminiAPIKey:     "AIza-test",
 	}, zerolog.Nop())
 	require.NoError(t, err, "should create client with all providers")
 	require.NotNil(t, client, "client should not be nil")
+
+	// When every provider has credentials, a gemini model must route to the
+	// gemini provider first. This guards against a regression where NewClient
+	// silently drops GeminiAPIKey and falls back to a cross-provider model.
+	fc, ok := client.(*FallbackClient)
+	require.True(t, ok, "NewClient should return a *FallbackClient")
+	require.NotEmpty(t, fc.chain, "chain should not be empty")
+	require.Equal(t, "gemini", fc.chain[0].provider.Name(), "gemini model must prefer the gemini provider when its key is configured")
+}
+
+func TestNewClient_WithGeminiKey(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(Config{
+		Model:         "gemini-2.5-pro",
+		GeminiAPIKey:  "AIza-test",
+		GeminiBaseURL: "https://custom.googleapis.com",
+	}, zerolog.Nop())
+	require.NoError(t, err, "should create client with gemini key")
+	require.NotNil(t, client, "client should not be nil")
+}
+
+func TestNewClient_GeminiModelRequiresGeminiKey(t *testing.T) {
+	t.Parallel()
+
+	// Gemini model requested but only Anthropic configured — chain should still
+	// build if any entry in the Gemini fallback chain is configured (e.g.,
+	// anthropic fallback or openrouter).
+	client, err := NewClient(Config{
+		Model:           "gemini-2.5-pro",
+		AnthropicAPIKey: "sk-ant-test",
+	}, zerolog.Nop())
+	require.NoError(t, err, "should build client if any fallback provider for a gemini model is configured")
+	require.NotNil(t, client)
 }
 
 func TestNewClient_UnknownModel(t *testing.T) {

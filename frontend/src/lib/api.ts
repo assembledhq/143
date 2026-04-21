@@ -319,7 +319,7 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
-    getLLMDefaults: () => get<{ data: Record<string, string>; platform_model?: string }>('/api/v1/settings/llm-defaults'),
+    getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
   },
   credentials: {
