@@ -117,13 +117,19 @@ func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provi
 
 // mockSessionStore implements agent.SessionStore.
 type mockSessionStore struct {
-	mu              sync.Mutex
-	countRunning    int
-	statusUpdates   []string
-	resultUpdates   []resultUpdate
-	turnUpdates     []turnUpdate
-	failureUpdates  []failureUpdate
-	countRunningErr error
+	mu               sync.Mutex
+	countRunning     int
+	statusUpdates    []string
+	resultUpdates    []resultUpdate
+	turnUpdates      []turnUpdate
+	failureUpdates   []failureUpdate
+	countRunningErr  error
+	acquireHoldErr   error
+	releaseHoldFn    func() (bool, string, error)
+	clearContainerFn func() error
+	acquireHoldCalls int
+	releaseHoldCalls int
+	clearContCalls   int
 }
 
 type failureUpdate struct {
@@ -210,17 +216,33 @@ func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UU
 }
 
 func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
-	return nil
+	m.mu.Lock()
+	m.acquireHoldCalls++
+	err := m.acquireHoldErr
+	m.mu.Unlock()
+	return err
 }
 
 func (m *mockSessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (bool, string, error) {
-	// Default mock behavior: the turn held it alone, so the caller should
-	// destroy and clear. Tests that need the preview-holds-on branch can
-	// shadow this by adding a dedicated mock.
+	m.mu.Lock()
+	m.releaseHoldCalls++
+	fn := m.releaseHoldFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	// Default: turn held it alone, destroy and clear.
 	return true, "", nil
 }
 
 func (m *mockSessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	m.mu.Lock()
+	m.clearContCalls++
+	fn := m.clearContainerFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
 	return nil
 }
 
@@ -640,6 +662,127 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+// TestRunAgent_PreviewHoldsContainerSkipsDestroy covers the branch where
+// ReleaseTurnHold reports destroyNow=false (a preview is holding the
+// sandbox) so the deferred cleanup leaves the container alive
+// (orchestrator.go:483-485).
+func TestRunAgent_PreviewHoldsContainerSkipsDestroy(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.releaseHoldFn = func() (bool, string, error) {
+		// Preview still holds — do NOT destroy.
+		return false, "c-1", nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "ok",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, 1, d.sessions.acquireHoldCalls)
+	require.Equal(t, 1, d.sessions.releaseHoldCalls)
+	require.Equal(t, 0, d.sessions.clearContCalls, "ClearContainerID must not run while preview holds")
+	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must be left alive while preview holds")
+}
+
+// TestRunAgent_ReleaseHoldErrorFallsBackToDestroy covers the branch where
+// ReleaseTurnHold errors and the orchestrator falls back to destroying to
+// avoid a container leak (orchestrator.go:477-482).
+func TestRunAgent_ReleaseHoldErrorFallsBackToDestroy(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.releaseHoldFn = func() (bool, string, error) {
+		return false, "", errors.New("db down")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "ok",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	// Even with a DB error on release, we still destroy to avoid a leak.
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+// TestRunAgent_AcquireHoldErrorDoesNotFailRun covers the log-and-continue
+// branch when AcquireTurnHold errors (orchestrator.go:462-464).
+func TestRunAgent_AcquireHoldErrorDoesNotFailRun(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.acquireHoldErr = errors.New("write failed")
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "ok",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, 1, d.sessions.acquireHoldCalls)
+	// Sandbox still destroys on turn end.
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+// TestRunAgent_ClearContainerIDErrorLogsAndContinues covers the log-and-continue
+// branch when ClearContainerID errors (orchestrator.go:490-492).
+func TestRunAgent_ClearContainerIDErrorLogsAndContinues(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.clearContainerFn = func() error {
+		return errors.New("db write failed")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "ok",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
+	require.Equal(t, 1, d.sessions.clearContCalls)
 }
 
 func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
@@ -1420,6 +1563,72 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 // lifecycle. Named so grep picks it up and future refactors don't silently
 // change behavior if Create's call site moves.
 var errForcedCreateFailure = errors.New("forced create failure to short-circuit test")
+
+// TestContinueSession_ReusesExistingContainer covers the branch where
+// session.ContainerID is populated (a preview hydrated the sandbox) so
+// continueSessionTurn skips Create/Restore and attaches to it by ID
+// (orchestrator.go:849-859). It also exercises the preview-holds-on
+// release branch so the container is left alive (orchestrator.go:924-927).
+func TestContinueSession_ReusesExistingContainer(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-abc"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+	// No SnapshotKey: proves the reuse branch takes precedence over hydrate.
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	// Fail the test if Create runs — reuse must skip it.
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called on the reuse path")
+		return nil, nil
+	}
+	d.provider.RestoreFn = func(context.Context, *agent.Sandbox, io.Reader) error {
+		t.Fatalf("provider.Restore must not be called on the reuse path")
+		return nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, existing, sandbox.ID, "adapter must run against the reused container")
+		return &agent.AgentResult{
+			Summary:             "done",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+	// Preview still holds the container after this turn ends.
+	d.sessions.releaseHoldFn = func() (bool, string, error) {
+		return false, existing, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.ContinueSession(context.Background(), session))
+
+	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
+	require.Equal(t, 0, d.sessions.clearContCalls, "container_id must not be cleared while preview holds")
+	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
+	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
+}
 
 // TestContinueSession_SessionRepoSlug exercises every branch of
 // sessionRepoSlug through ContinueSession.
