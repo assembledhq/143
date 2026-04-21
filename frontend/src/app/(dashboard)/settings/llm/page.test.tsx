@@ -405,4 +405,45 @@ describe("LLMPage", () => {
     await Promise.resolve();
     expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
   });
+
+  it("surfaces the server error message when saving a key fails", async () => {
+    credentialsUpdateMock.mockRejectedValueOnce(new Error("Invalid API key"));
+
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Invalid API key")).toBeInTheDocument();
+    });
+  });
+
+  it("surfaces an error dialog and re-enables the row when delete fails", async () => {
+    credentialsListMock.mockResolvedValueOnce({
+      data: [{ provider: "anthropic", configured: true, masked_key: "sk-ant-••••" }],
+    });
+    credentialsDeleteMock.mockRejectedValueOnce(new Error("Something broke"));
+
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    // Click the "Remove" ghost button inside the edit dialog.
+    const editDialog = await screen.findByRole("dialog");
+    await user.click(within(editDialog).getByRole("button", { name: "Remove" }));
+
+    // Confirm in the AlertDialog that opens (scope by the dialog title).
+    const confirmDialog = await screen.findByRole("alertdialog");
+    await user.click(within(confirmDialog).getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn.?t remove API key/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("Something broke")).toBeInTheDocument();
+  });
 });

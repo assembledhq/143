@@ -39,6 +39,11 @@ import { ProviderKeyRow } from "./_components/ProviderKeyRow";
 
 const LLM_PROVIDERS = Object.keys(LLM_PROVIDER_INFO) as (keyof typeof LLM_PROVIDER_INFO)[];
 
+const EMPTY_PROVIDER_STATUS = {
+  orgConfigured: false,
+  platformAvailable: false,
+} as const;
+
 export default function LLMPage() {
   const queryClient = useQueryClient();
 
@@ -86,7 +91,9 @@ export default function LLMPage() {
   const [reasoningEffort, setReasoningEffort] = useState<string>("");
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, SaveStatus>>({});
+  const [keySaveError, setKeySaveError] = useState<Record<string, string>>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
 
   const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
@@ -149,6 +156,11 @@ export default function LLMPage() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "success" }));
+      setKeySaveError((prev) => {
+        const next = { ...prev };
+        delete next[variables.provider];
+        return next;
+      });
       setTimeout(() => {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
       }, 2000);
@@ -156,6 +168,10 @@ export default function LLMPage() {
     onError: (err, variables) => {
       captureError(err, { feature: "llm-key-save" });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "error" }));
+      setKeySaveError((prev) => ({
+        ...prev,
+        [variables.provider]: err instanceof Error ? err.message : String(err),
+      }));
       setTimeout(() => {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
       }, 3000);
@@ -167,10 +183,13 @@ export default function LLMPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setRemovingProvider(null);
+      setRemoveError(null);
       setEditingProvider(null);
     },
     onError: (error) => {
       captureError(error, { feature: "llm-key-delete" });
+      setRemoveError(error instanceof Error ? error.message : String(error));
+      setRemovingProvider(null);
     },
   });
 
@@ -203,6 +222,7 @@ export default function LLMPage() {
   const editingInfo = editingProvider ? LLM_PROVIDER_INFO[editingProvider] : null;
   const editingStatus = editingProvider ? providerStatus[editingProvider] : undefined;
   const editingSaveStatus = editingProvider ? keySaveStatus[editingProvider] ?? "idle" : "idle";
+  const editingSaveError = editingProvider ? keySaveError[editingProvider] : undefined;
 
   return (
     <PageContainer size="default">
@@ -264,7 +284,7 @@ export default function LLMPage() {
                 key={provider}
                 provider={provider}
                 info={LLM_PROVIDER_INFO[provider]}
-                status={providerStatus[provider] ?? { orgConfigured: false, platformAvailable: false }}
+                status={providerStatus[provider] ?? EMPTY_PROVIDER_STATUS}
                 isDefaultOwner={provider === ownerProvider}
                 onEdit={() => openEditor(provider)}
               />
@@ -283,11 +303,26 @@ export default function LLMPage() {
           info={editingInfo}
           existingMaskedKey={editingStatus?.maskedKey}
           saveStatus={editingSaveStatus}
+          errorMessage={editingSaveError}
           onSave={(key) => handleSaveKey(editingProvider, key)}
           onRemove={
             editingStatus?.orgConfigured ? () => setRemovingProvider(editingProvider) : undefined
           }
         />
+      )}
+
+      {removeError && (
+        <AlertDialog open onOpenChange={(open) => !open && setRemoveError(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Couldn&apos;t remove API key</AlertDialogTitle>
+              <AlertDialogDescription>{removeError}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction onClick={() => setRemoveError(null)}>Dismiss</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       )}
 
       <AlertDialog open={!!removingProvider} onOpenChange={(open) => !open && setRemovingProvider(null)}>

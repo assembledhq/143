@@ -272,7 +272,7 @@ func TestNewClient_WithAllProviders(t *testing.T) {
 	t.Parallel()
 
 	client, err := NewClient(Config{
-		Model:            "claude-sonnet-4-6",
+		Model:            "gemini-2.5-pro",
 		AnthropicAPIKey:  "sk-ant-test",
 		AnthropicBaseURL: "https://custom.anthropic.com",
 		OpenAIAPIKey:     "sk-openai-test",
@@ -282,6 +282,14 @@ func TestNewClient_WithAllProviders(t *testing.T) {
 	}, zerolog.Nop())
 	require.NoError(t, err, "should create client with all providers")
 	require.NotNil(t, client, "client should not be nil")
+
+	// When every provider has credentials, a gemini model must route to the
+	// gemini provider first. This guards against a regression where NewClient
+	// silently drops GeminiAPIKey and falls back to a cross-provider model.
+	fc, ok := client.(*FallbackClient)
+	require.True(t, ok, "NewClient should return a *FallbackClient")
+	require.NotEmpty(t, fc.chain, "chain should not be empty")
+	require.Equal(t, "gemini", fc.chain[0].provider.Name(), "gemini model must prefer the gemini provider when its key is configured")
 }
 
 func TestNewClient_WithGeminiKey(t *testing.T) {

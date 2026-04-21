@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -98,8 +99,10 @@ func (p *GeminiProvider) Complete(ctx context.Context, model, systemPrompt, user
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := p.baseURL + "/v1beta/models/" + model + ":generateContent"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	// PathEscape defends against a stray colon/slash in the model name resolving
+	// to a different Google endpoint (e.g. ":streamGenerateContent").
+	endpoint := p.baseURL + "/v1beta/models/" + url.PathEscape(model) + ":generateContent"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
