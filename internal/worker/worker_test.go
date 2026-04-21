@@ -13,6 +13,8 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/jobctx"
 )
 
 func newTestWorker(t *testing.T) (*Worker, pgxmock.PgxPoolIface) {
@@ -131,10 +133,10 @@ func TestWorker_LifecycleMethodsLogWarningOnExecFailure(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		expectSQL     string
-		invoke        func(w *Worker, ctx context.Context, jobID uuid.UUID)
-		expectedArg1  string
+		name         string
+		expectSQL    string
+		invoke       func(w *Worker, ctx context.Context, jobID uuid.UUID)
+		expectedArg1 string
 	}{
 		{
 			name:      "succeedJob logs warning when update fails",
@@ -525,6 +527,136 @@ func TestWorker_Poll(t *testing.T) {
 			}, "poll should not panic")
 
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// TestWorker_Poll_RunsDeadLetterHooksOnAllTerminalPaths verifies that
+// handlers can rely on jobctx.RegisterDeadLetterHook to fire exactly once
+// on every dead-letter branch (FatalError, retryable timeout, retries
+// exhausted) and to stay silent when the worker retries without
+// dead-lettering. This is the invariant that lets downstream services
+// (e.g. the agent orchestrator) defer user-visible side effects until the
+// worker actually gives up.
+func TestWorker_Poll_RunsDeadLetterHooksOnAllTerminalPaths(t *testing.T) {
+	t.Parallel()
+
+	type branch int
+	const (
+		branchDeadLetter branch = iota // deadLetterJob: WithArgs(errMsg, jobID)
+		branchRetry                    // retryJob:      WithArgs(errMsg, interval, jobID)
+	)
+
+	tests := []struct {
+		name        string
+		handlerErr  func() error
+		attempts    int
+		maxAttempts int
+		createdAt   time.Time
+		branch      branch
+		finalSQL    string
+		expectFires int
+	}{
+		{
+			name:        "fatal error fires hook before dead-letter",
+			handlerErr:  func() error { return &FatalError{Err: errors.New("docker daemon unreachable")} },
+			attempts:    0,
+			maxAttempts: 3,
+			createdAt:   time.Now(),
+			branch:      branchDeadLetter,
+			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
+			expectFires: 1,
+		},
+		{
+			name:        "retryable timeout fires hook before dead-letter",
+			handlerErr:  func() error { return &RetryableError{Err: errors.New("concurrency limit")} },
+			attempts:    0,
+			maxAttempts: 3,
+			createdAt:   time.Now().Add(-10 * time.Minute),
+			branch:      branchDeadLetter,
+			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
+			expectFires: 1,
+		},
+		{
+			name:        "retries exhausted fires hook before dead-letter",
+			handlerErr:  func() error { return errors.New("permanent failure") },
+			attempts:    2,
+			maxAttempts: 3,
+			createdAt:   time.Now(),
+			branch:      branchDeadLetter,
+			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
+			expectFires: 1,
+		},
+		{
+			name:        "plain error under the retry cap does not fire hook",
+			handlerErr:  func() error { return errors.New("transient failure") },
+			attempts:    0,
+			maxAttempts: 3,
+			createdAt:   time.Now(),
+			branch:      branchRetry,
+			finalSQL:    "UPDATE jobs SET status = 'pending'",
+			expectFires: 0,
+		},
+		{
+			name:        "retryable error within time budget does not fire hook",
+			handlerErr:  func() error { return &RetryableError{Err: errors.New("concurrency limit")} },
+			attempts:    0,
+			maxAttempts: 3,
+			createdAt:   time.Now(),
+			branch:      branchRetry,
+			finalSQL:    "UPDATE jobs SET status = 'pending'",
+			expectFires: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mock := newTestWorker(t)
+			defer mock.Close()
+
+			jobID := uuid.New()
+			orgID := uuid.New()
+			payload := json.RawMessage(`{}`)
+
+			var fires int
+			var gotErr error
+			handlerErr := tt.handlerErr()
+			w.Register("hook_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
+				jobctx.RegisterDeadLetterHook(ctx, func(_ context.Context, err error) {
+					fires++
+					gotErr = err
+				})
+				return handlerErr
+			})
+
+			mock.ExpectBegin()
+			rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
+				AddRow(jobID, orgID, "hook_job", payload, tt.attempts, tt.maxAttempts, tt.createdAt)
+			mock.ExpectQuery("SELECT .+ FROM jobs").WillReturnRows(rows)
+			mock.ExpectExec("UPDATE jobs SET status = 'running'").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			mock.ExpectCommit()
+			switch tt.branch {
+			case branchDeadLetter:
+				mock.ExpectExec(tt.finalSQL).
+					WithArgs(pgxmock.AnyArg(), jobID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			case branchRetry:
+				mock.ExpectExec(tt.finalSQL).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), jobID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			w.poll(context.Background())
+
+			require.NoError(t, mock.ExpectationsWereMet())
+			require.Equal(t, tt.expectFires, fires, "hook fire count mismatch for %s", tt.name)
+			if tt.expectFires > 0 {
+				require.Error(t, gotErr, "hook must receive the error being recorded on the job")
+			}
 		})
 	}
 }

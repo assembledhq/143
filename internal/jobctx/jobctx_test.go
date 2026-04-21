@@ -1,0 +1,117 @@
+package jobctx_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/jobctx"
+)
+
+func TestRegisterDeadLetterHook_NoRegistryIsNoop(t *testing.T) {
+	t.Parallel()
+
+	// Registering on a bare context should silently drop the hook; running
+	// hooks on a bare context is also a no-op. Direct callers own their
+	// own error handling.
+	called := false
+	jobctx.RegisterDeadLetterHook(context.Background(), func(context.Context, error) {
+		called = true
+	})
+	jobctx.RunDeadLetterHooks(context.Background(), errors.New("boom"))
+	require.False(t, called, "hook must not fire when there is no registry")
+}
+
+func TestRegisterDeadLetterHook_NilHookIsSkipped(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	require.NotPanics(t, func() {
+		jobctx.RegisterDeadLetterHook(ctx, nil)
+		jobctx.RunDeadLetterHooks(ctx, errors.New("boom"))
+	})
+}
+
+func TestRunDeadLetterHooks_InvokesInOrderWithError(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	var order []string
+	var gotErr error
+	jobctx.RegisterDeadLetterHook(ctx, func(_ context.Context, err error) {
+		order = append(order, "first")
+		gotErr = err
+	})
+	jobctx.RegisterDeadLetterHook(ctx, func(context.Context, error) {
+		order = append(order, "second")
+	})
+
+	want := errors.New("dead letter")
+	jobctx.RunDeadLetterHooks(ctx, want)
+
+	require.Equal(t, []string{"first", "second"}, order)
+	require.ErrorIs(t, gotErr, want)
+}
+
+func TestRunDeadLetterHooks_FiresAtMostOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	var calls int
+	jobctx.RegisterDeadLetterHook(ctx, func(context.Context, error) {
+		calls++
+	})
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("first"))
+	jobctx.RunDeadLetterHooks(ctx, errors.New("second"))
+
+	require.Equal(t, 1, calls, "repeated RunDeadLetterHooks calls on the same registry must be idempotent")
+}
+
+func TestWithDeadLetterHooks_ProducesFreshRegistryPerCall(t *testing.T) {
+	t.Parallel()
+
+	parent := jobctx.WithDeadLetterHooks(context.Background())
+	child := jobctx.WithDeadLetterHooks(parent)
+
+	var parentCalls, childCalls int
+	jobctx.RegisterDeadLetterHook(parent, func(context.Context, error) { parentCalls++ })
+	jobctx.RegisterDeadLetterHook(child, func(context.Context, error) { childCalls++ })
+
+	jobctx.RunDeadLetterHooks(child, nil)
+	require.Equal(t, 0, parentCalls, "child registry must not leak hooks to parent")
+	require.Equal(t, 1, childCalls)
+
+	jobctx.RunDeadLetterHooks(parent, nil)
+	require.Equal(t, 1, parentCalls)
+}
+
+func TestRegisterDeadLetterHook_ConcurrentRegistrationIsSafe(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	calls := 0
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			jobctx.RegisterDeadLetterHook(ctx, func(context.Context, error) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+			})
+		}()
+	}
+	wg.Wait()
+
+	jobctx.RunDeadLetterHooks(ctx, nil)
+	require.Equal(t, 32, calls)
+}
