@@ -535,6 +535,70 @@ func TestAuth(t *testing.T) {
 			checkContext:  nil,
 			checkResponse: nil,
 		},
+		{
+			name: "returns 503 without clearing cookie when session lookup hits a transient DB error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection reset by peer"))
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "valid-token"})
+				return req
+			},
+			expectedCode: http.StatusServiceUnavailable,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName {
+						t.Fatalf("transient DB error must not clear session cookie, got %+v", c)
+					}
+				}
+				require.Contains(t, w.Body.String(), "SERVICE_UNAVAILABLE",
+					"transient failures should return SERVICE_UNAVAILABLE so useAuth retries")
+			},
+		},
+		{
+			name: "returns 503 without clearing cookie when user lookup hits a transient DB error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				sessionRows := pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
+					AddRow(
+						uuid.MustParse("99999999-0000-0000-0000-000000000001"),
+						uuid.MustParse("99999999-0000-0000-0000-000000000002"),
+						uuid.MustParse("99999999-0000-0000-0000-000000000003"),
+						"valid-token",
+						now.Add(29*24*time.Hour),
+						now,
+					)
+				mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(sessionRows)
+
+				mock.ExpectQuery("SELECT .+ FROM users").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection reset by peer"))
+			},
+			setupRequest: func(req *http.Request) *http.Request {
+				req.AddCookie(&http.Cookie{Name: "session_token", Value: "valid-token"})
+				return req
+			},
+			expectedCode: http.StatusServiceUnavailable,
+			checkContext: nil,
+			checkResponse: func(t *testing.T, w *httptest.ResponseRecorder) {
+				t.Helper()
+				resp := w.Result()
+				defer resp.Body.Close()
+				for _, c := range resp.Cookies() {
+					if c.Name == SessionCookieName {
+						t.Fatalf("transient DB error must not clear session cookie, got %+v", c)
+					}
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
