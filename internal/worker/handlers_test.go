@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -3055,4 +3056,111 @@ func TestBootstrapLogWriter_WritesLog(t *testing.T) {
 		// The nil-store and nil-sessionID tests above cover the guard paths.
 		t.Skipf("pgxmock did not match QueryRow with named args (known limitation): %v", err)
 	}
+}
+
+func TestShellSingleQuote(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "hello", `'hello'`},
+		{"backticks", "a `cmd` b", "'a `cmd` b'"},
+		{"dollar", "$VAR", `'$VAR'`},
+		{"backslash_n", "line1\\nline2", `'line1\nline2'`},
+		{"embedded_quote", "it's", `'it'\''s'`},
+		{"triple_backtick_json", "```\n{\n  \"x\": 1\n}\n```", "'```\n{\n  \"x\": 1\n}\n```'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shellSingleQuote(tc.in)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestBootstrapAgentCommand(t *testing.T) {
+	t.Parallel()
+	// The prompt deliberately contains the characters that broke the
+	// previous %q-based implementation: triple-backtick fences, embedded
+	// $VAR, and a literal single quote.
+	prompt := "scan ```\n{\n  \"x\": $VAR\n}\n``` for it's candidates"
+	cmd := bootstrapAgentCommand(prompt)
+
+	require.Equal(
+		t,
+		"claude --print 'scan ```\n{\n  \"x\": $VAR\n}\n``` for it'\\''s candidates' 2>&1",
+		cmd,
+	)
+}
+
+// stubGitHubTokenProvider implements agent.GitHubTokenProvider.
+type stubGitHubTokenProvider struct{ token string }
+
+func (s *stubGitHubTokenProvider) GetInstallationToken(_ context.Context, _ int64) (string, error) {
+	return s.token, nil
+}
+
+// captureExecSandbox records the cmd passed to ExecStream so tests can
+// assert how the bootstrap command is assembled. The sandbox returns
+// exit code 0 with empty stdout, which causes executeBootstrapScan to
+// fail at JSON parsing — that's fine for our purposes because line 2001
+// (the cmd assignment) has already run.
+type captureExecSandbox struct {
+	stubSandboxProvider
+	lastCmd string
+}
+
+func (c *captureExecSandbox) ExecStream(_ context.Context, _ *agent.Sandbox, cmd string, _ func(line []byte), _ io.Writer) (int, error) {
+	c.lastCmd = cmd
+	return 0, nil
+}
+
+func TestExecuteBootstrapScan_ShellEscapesPrompt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	repoMock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer repoMock.Close()
+
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+				"private", "language", "description", "clone_url", "installation_id", "status",
+				"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+			}).AddRow(
+				repoID, orgID, integrationID, int64(12345), "assembledhq/143", "main",
+				false, nil, nil, "https://github.com/assembledhq/143.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	stores := &Stores{Repositories: db.NewRepositoryStore(repoMock)}
+	capSB := &captureExecSandbox{}
+	services := &Services{
+		SandboxProvider: capSB,
+		GitHub:          &stubGitHubTokenProvider{token: "ghp_test"},
+	}
+	logWriter := &bootstrapLogWriter{}
+
+	// The scan will ultimately fail on JSON parsing (stdout is empty), but
+	// it must reach line 2001 first — that's the line diff-cover was
+	// flagging.
+	_, scanErr := executeBootstrapScan(context.Background(), stores, services, orgID, repoID, logWriter, zerolog.Nop())
+	require.Error(t, scanErr)
+
+	require.True(t, strings.HasPrefix(capSB.lastCmd, "claude --print '"), "cmd should single-quote the prompt, got: %s", capSB.lastCmd)
+	require.Contains(t, capSB.lastCmd, "assembledhq/143", "prompt should include repo full name")
+	// The template contains triple-backtick fences; they must survive
+	// intact inside single quotes rather than being escaped or stripped.
+	require.Contains(t, capSB.lastCmd, "```", "triple-backtick JSON fences should remain in cmd")
 }
