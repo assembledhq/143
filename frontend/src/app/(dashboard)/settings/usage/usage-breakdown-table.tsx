@@ -98,7 +98,7 @@ export function UsageBreakdownTable({
                   <TableHead className="pl-4 text-xs">
                     {dimension === "user" ? "User" : "Capacity Tier"}
                   </TableHead>
-                  <TableHead className="text-xs text-right">Minutes</TableHead>
+                  <TableHead className="text-xs text-right">Hours</TableHead>
                   <TableHead className="text-xs text-right">Sessions</TableHead>
                   {dimension === "user" && (
                     <>

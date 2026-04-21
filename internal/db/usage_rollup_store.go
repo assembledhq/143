@@ -669,19 +669,21 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 	// container_usage_events) and then joined, instead of per-row LATERAL
 	// subqueries which would re-scan the events table for every group.
 	// NOTE: '%%' in format() calls below is Go's fmt.Sprintf escaping — Postgres
-	// receives single '%' and interprets '%0.0f'/'%s' as format verbs.
+	// receives single '%'. Postgres format() only accepts %s/%I/%L, so the
+	// cpu_limit is rounded+cast to int before formatting with %s to match the
+	// Go-side rollup's "Ncpu_Mmb" string.
 	switch dimension {
 	case "capacity":
 		query = fmt.Sprintf(`
 			WITH session_counts AS (
 				SELECT
-					format('%%0.0fcpu_%%smb', e.cpu_limit, e.memory_limit_mb) AS capacity_tier,
+					format('%%scpu_%%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS capacity_tier,
 					COUNT(DISTINCT e.session_id) AS distinct_sessions
 				FROM container_usage_events e
 				WHERE e.org_id = @org_id
 				  AND e.started_at < @end
 				  AND COALESCE(e.stopped_at, @now) > @start
-				GROUP BY format('%%0.0fcpu_%%smb', e.cpu_limit, e.memory_limit_mb)
+				GROUP BY format('%%scpu_%%smb', round(e.cpu_limit)::int, e.memory_limit_mb)
 			)
 			SELECT
 				uh.capacity_tier AS key,
@@ -865,7 +867,7 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 			SELECT
 				to_char(days.local_day::date, 'YYYY-MM-DD') AS local_date,
 				'' AS user_email,
-				format('%0.0fcpu_%smb', e.cpu_limit, e.memory_limit_mb) AS capacity_tier,
+				format('%scpu_%smb', round(e.cpu_limit)::int, e.memory_limit_mb) AS capacity_tier,
 				COUNT(DISTINCT e.session_id) AS sessions
 			FROM days
 			JOIN container_usage_events e
