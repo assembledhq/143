@@ -58,6 +58,29 @@ func TestRepositoryStore_ListByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRepositoryStore_ListByOrg_DefaultFiltersDisconnected(t *testing.T) {
+	// Default filter path: the SQL picked up by pgxmock must restrict to
+	// status = 'active'. Regression guard against a refactor that drops the
+	// WHERE clause and silently surfaces disconnected repos in pickers.
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectQuery(`status = 'active'`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoColumns))
+
+	repos, err := store.ListByOrg(context.Background(), orgID, RepositoryFilters{})
+	require.NoError(t, err, "ListByOrg should not return an error with default filters")
+	require.Empty(t, repos, "no repos expected")
+	require.NoError(t, mock.ExpectationsWereMet(), "default filter must emit the status = 'active' predicate")
+}
+
 func TestRepositoryStore_GetByID(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +164,25 @@ func TestRepositoryStore_SetStatus(t *testing.T) {
 	repo, err := store.SetStatus(context.Background(), orgID, repoID, models.RepositoryStatusDisconnected)
 	require.NoError(t, err, "SetStatus should not error on happy path")
 	require.Equal(t, "disconnected", repo.Status, "should return the refreshed row with new status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_SetStatus_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	_, err = store.SetStatus(context.Background(), uuid.New(), uuid.New(), models.RepositoryStatusActive)
+	require.Error(t, err, "SetStatus should propagate query errors")
+	require.Contains(t, err.Error(), "update repository status", "error should be wrapped with context")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
