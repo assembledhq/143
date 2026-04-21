@@ -157,7 +157,10 @@ export default function EvalsSettingsPage() {
   return (
     <PageContainer size="default">
       <div className="space-y-6">
-        <PageHeader title="Evals" description="Create, manage, and run eval tasks to measure agent quality." />
+        <PageHeader
+          title="Coding agent evals"
+          description="Benchmark coding agents on real tasks from your repo. Each eval pins a base commit and task setup to measure end-to-end coding ability."
+        />
       {/* Actions */}
       <div className="flex items-center gap-3">
         <Button size="sm" asChild>
@@ -263,8 +266,8 @@ export default function EvalsSettingsPage() {
       ) : tasks.length === 0 ? (
         <EmptyState
           icon={FlaskConical}
-          title="No eval tasks yet"
-          description="Create eval tasks manually or bootstrap them from your PR history to start measuring agent quality."
+          title="No coding agent evals yet"
+          description="Create eval tasks manually or bootstrap from your PR history. Each pins a base commit and setup to benchmark different coding agents."
           action={{ label: "Create eval task", href: "/settings/evals/new" }}
         />
       ) : (
