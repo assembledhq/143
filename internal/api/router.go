@@ -463,7 +463,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		// OrgContext would 403 them before they could. Rate-limited 5/hour
 		// per user and per IP to cap spam: a human creates maybe one org per
 		// onboarding, so a bucket any larger is just room for scripted abuse.
-		r.With(middleware.CreateOrgRateLimit(5)).Post("/api/v1/organizations", organizationsHandler.Create)
+		// The prune goroutine inside the limiter runs for the life of the
+		// process; context.Background() is the right lifetime here.
+		r.With(middleware.CreateOrgRateLimit(context.Background(), 5)).Post("/api/v1/organizations", organizationsHandler.Create)
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {

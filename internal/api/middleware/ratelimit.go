@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -218,16 +219,14 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 			ip := remoteAddrIP(r)
 			if !getBucket(ipBuckets, ip).allow() {
 				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("invitation claim rate limit exceeded (IP)")
-				w.Header().Set("Retry-After", "60")
-				http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+				writeRateLimited(w, "CLAIM_RATE_LIMITED", "too many invitation claim attempts; try again in a minute", "60")
 				return
 			}
 
 			if user := UserFromContext(r.Context()); user != nil {
 				if !getBucket(userBuckets, user.ID.String()).allow() {
 					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("invitation claim rate limit exceeded (user)")
-					w.Header().Set("Retry-After", "60")
-					http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+					writeRateLimited(w, "CLAIM_RATE_LIMITED", "too many invitation claim attempts; try again in a minute", "60")
 					return
 				}
 			}
@@ -252,8 +251,11 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 // Bucket maps are pruned in the background to prevent unbounded memory growth
 // over process lifetime — entries idle for more than 2h (twice the refill
 // window) are discarded because a bucket that's been untouched that long is
-// indistinguishable from a fresh one anyway.
-func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
+// indistinguishable from a fresh one anyway. The prune goroutine exits when
+// ctx is cancelled; in production this is the server lifetime, in tests it
+// should be t.Context() so each test does not leak a goroutine for the life
+// of the test binary.
+func CreateOrgRateLimit(ctx context.Context, perHour int) func(http.Handler) http.Handler {
 	ipBuckets := &sync.Map{}
 	userBuckets := &sync.Map{}
 	refillPerSecond := float64(perHour) / 3600.0
@@ -272,7 +274,7 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 		return actual.(*tokenBucket)
 	}
 
-	startPruneLoop(ipBuckets, userBuckets, 10*time.Minute, 2*time.Hour)
+	startPruneLoop(ctx, ipBuckets, userBuckets, 10*time.Minute, 2*time.Hour)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,16 +289,14 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 			ip := remoteAddrIP(r)
 			if !getBucket(ipBuckets, ip).allow() {
 				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("create-org rate limit exceeded (IP)")
-				w.Header().Set("Retry-After", "3600")
-				http.Error(w, `{"error":{"code":"CREATE_ORG_RATE_LIMITED","message":"too many organization-creation attempts; try again later"}}`, http.StatusTooManyRequests)
+				writeRateLimited(w, "CREATE_ORG_RATE_LIMITED", "too many organization-creation attempts; try again later", "3600")
 				return
 			}
 
 			if user := UserFromContext(r.Context()); user != nil {
 				if !getBucket(userBuckets, user.ID.String()).allow() {
 					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("create-org rate limit exceeded (user)")
-					w.Header().Set("Retry-After", "3600")
-					http.Error(w, `{"error":{"code":"CREATE_ORG_RATE_LIMITED","message":"too many organization-creation attempts; try again later"}}`, http.StatusTooManyRequests)
+					writeRateLimited(w, "CREATE_ORG_RATE_LIMITED", "too many organization-creation attempts; try again later", "3600")
 					return
 				}
 			}
@@ -307,17 +307,33 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 }
 
 // startPruneLoop runs a background goroutine that evicts bucket-map entries
-// whose lastRefill is older than staleAfter. Exported as an internal helper
-// so tests can drive pruning synchronously via pruneStaleBuckets.
-func startPruneLoop(ipBuckets, userBuckets *sync.Map, interval, staleAfter time.Duration) {
+// whose lastRefill is older than staleAfter. Exits when ctx is cancelled.
+// Exported as an internal helper so tests can drive pruning synchronously
+// via pruneStaleBuckets.
+func startPruneLoop(ctx context.Context, ipBuckets, userBuckets *sync.Map, interval, staleAfter time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			pruneStaleBuckets(ipBuckets, staleAfter)
-			pruneStaleBuckets(userBuckets, staleAfter)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pruneStaleBuckets(ipBuckets, staleAfter)
+				pruneStaleBuckets(userBuckets, staleAfter)
+			}
 		}
 	}()
+}
+
+// writeRateLimited writes a 429 response with a JSON error body and a
+// Retry-After header. Use instead of http.Error for rate-limit rejections so
+// the Content-Type is application/json (http.Error would set text/plain and
+// append a trailing newline, leaving a body that looks like JSON but is
+// served as text).
+func writeRateLimited(w http.ResponseWriter, code, message, retryAfterSeconds string) {
+	w.Header().Set("Retry-After", retryAfterSeconds)
+	writeError(w, http.StatusTooManyRequests, code, message)
 }
 
 // pruneStaleBuckets removes entries whose bucket has not refilled within the

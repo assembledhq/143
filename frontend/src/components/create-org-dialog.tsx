@@ -22,10 +22,8 @@ import { setActiveOrgId } from "@/lib/active-org";
 
 const MAX_NAME_LEN = 120;
 
-// Duck-typed ApiError.code lookup — see hooks/use-auth.ts for rationale. The
-// codes below mirror writeError calls in internal/api/handlers/organizations.go
-// and the rate-limit middleware, so the user sees human copy instead of raw
-// SCREAMING_SNAKE error codes.
+// Codes must stay in sync with writeError calls in
+// internal/api/handlers/organizations.go and CreateOrgRateLimit.
 function messageForError(err: unknown): string {
   const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
   switch (code) {
@@ -67,13 +65,14 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
 
   const mutation = useMutation({
     mutationFn: (trimmed: string) => api.organizations.create(trimmed),
-    onSuccess: async (response) => {
+    onSuccess: (response) => {
       const created = response.data;
       setActiveOrgId(created.id);
-      // Everything (including memberships) is scoped to the previous org; nuke
-      // the whole cache so the next render fetches fresh data for the new
-      // workspace. The unqualified invalidate subsumes the memberships key.
-      await queryClient.invalidateQueries();
+      // clear() over invalidateQueries(): invalidating would fire refetches
+      // against the current page right before navigation unmounts it.
+      // Clearing drops cached data so the next page's queries fetch fresh
+      // under the new active-org header.
+      queryClient.clear();
       toast.success(`Created ${created.name}`);
       handleOpenChange(false);
       router.push("/sessions");

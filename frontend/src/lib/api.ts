@@ -31,6 +31,19 @@ function getCSRFToken(): string {
   return match ? decodeURIComponent(match.substring('csrf_token='.length)) : '';
 }
 
+// N parallel requests after a membership revocation all see the header, and
+// without a guard each one would fire a fresh event → fresh toast. Collapse
+// bursts into a single dispatch per short window; listeners still get woken
+// up for any later revocation that lands after the window closes.
+let lastRevokedDispatchAt = 0;
+const REVOKED_DISPATCH_MIN_INTERVAL_MS = 1000;
+function maybeDispatchRevoked(): void {
+  const now = Date.now();
+  if (now - lastRevokedDispatchAt < REVOKED_DISPATCH_MIN_INTERVAL_MS) return;
+  lastRevokedDispatchAt = now;
+  window.dispatchEvent(new CustomEvent(ORG_MEMBERSHIP_REVOKED_EVENT));
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -47,9 +60,16 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   // (login, register, logout, me, memberships) are user-scoped — they operate
   // on session/user state regardless of the selected workspace, so sending a
   // stale org id here would only give the server a way to misattribute the
-  // request or echo back an irrelevant header.
+  // request or echo back an irrelevant header. Creating a new org (POST
+  // /api/v1/organizations) is also user-scoped: the handler runs outside
+  // OrgContext, and forwarding a just-revoked active-org id would trip the
+  // upstream auth middleware into emitting X-Org-Membership-Revoked *during*
+  // the create flow, firing a confusing "your access changed" toast.
   const activeOrgId = getActiveOrgId();
-  if (activeOrgId && !path.startsWith('/api/v1/auth/')) {
+  const isUserScopedRoute =
+    path.startsWith('/api/v1/auth/') ||
+    (method === 'POST' && path === '/api/v1/organizations');
+  if (activeOrgId && !isUserScopedRoute) {
     headers['X-Active-Org-ID'] = activeOrgId;
   }
 
@@ -60,7 +80,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (typeof window !== 'undefined' && res.headers.get('X-Org-Membership-Revoked') === '1') {
-    window.dispatchEvent(new CustomEvent(ORG_MEMBERSHIP_REVOKED_EVENT));
+    maybeDispatchRevoked();
   }
 
   if (!res.ok) {

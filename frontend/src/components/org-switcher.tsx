@@ -86,13 +86,17 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
       // Drop the stale tab selection so the next request doesn't resend the
       // revoked org id and trip the same response header in a loop. Falling
       // back to null lets effectiveActiveOrgId pick up whatever org the
-      // server resolves for this user on the refetch below.
+      // server resolves for this user on the next fetch.
       setActiveOrgId(null);
-      void queryClient.invalidateQueries();
+      // clear() drops cached data without kicking off refetches against the
+      // current page. Mounted queries will fetch fresh data with the new
+      // active-org resolution; unmounted queries won't waste a request.
+      queryClient.clear();
       toast.info(
         previousLabel
           ? `Your access to ${previousLabel} changed. Switched to your next available workspace.`
           : "Your access to an organization changed. Switched to your next available workspace.",
+        { id: "org-membership-revoked" },
       );
     };
     window.addEventListener(ORG_MEMBERSHIP_REVOKED_EVENT, handler);
@@ -109,7 +113,11 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   const handleSwitch = (membership: MembershipSummary) => {
     if (membership.org_id === effectiveActiveOrgId) return;
     setActiveOrgId(membership.org_id);
-    void queryClient.invalidateQueries();
+    // clear() over invalidateQueries(): invalidating here would refetch every
+    // cached query against the *current* page right before it unmounts on
+    // navigation — doubling request volume. Clearing drops the cache so the
+    // destination page fetches fresh under the new active-org header.
+    queryClient.clear();
     router.push("/sessions");
   };
 

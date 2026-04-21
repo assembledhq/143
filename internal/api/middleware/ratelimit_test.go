@@ -312,7 +312,7 @@ func TestCreateOrgRateLimit(t *testing.T) {
 		t.Parallel()
 
 		const perHour = 3
-		handler := CreateOrgRateLimit(perHour)(okHandler)
+		handler := CreateOrgRateLimit(t.Context(), perHour)(okHandler)
 		user := &models.User{ID: uuid.New()}
 
 		for i := 0; i < perHour; i++ {
@@ -339,7 +339,7 @@ func TestCreateOrgRateLimit(t *testing.T) {
 		t.Parallel()
 
 		const perHour = 2
-		handler := CreateOrgRateLimit(perHour)(okHandler)
+		handler := CreateOrgRateLimit(t.Context(), perHour)(okHandler)
 		user := &models.User{ID: uuid.New()}
 
 		// Exhaust the user bucket by cycling IP addresses, so the IP bucket
