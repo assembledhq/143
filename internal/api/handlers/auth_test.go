@@ -195,7 +195,7 @@ func TestAuthHandler_Providers(t *testing.T) {
 	tests := []struct {
 		name     string
 		cfg      *config.Config
-		expected map[string]bool
+		expected map[string]any
 	}{
 		{
 			name: "all providers configured",
@@ -203,19 +203,36 @@ func TestAuthHandler_Providers(t *testing.T) {
 				GitHubOAuthClientID: "gh-id",
 				GoogleOAuthClientID: "g-id",
 			},
-			expected: map[string]bool{"github": true, "google": true, "email": true},
+			expected: map[string]any{"github": true, "google": true, "email": true, "demo": false},
 		},
 		{
 			name: "only github configured",
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 			},
-			expected: map[string]bool{"github": true, "google": false, "email": true},
+			expected: map[string]any{"github": true, "google": false, "email": true, "demo": false},
 		},
 		{
 			name:     "no oauth configured",
 			cfg:      &config.Config{},
-			expected: map[string]bool{"github": false, "google": false, "email": true},
+			expected: map[string]any{"github": false, "google": false, "email": true, "demo": false},
+		},
+		{
+			name: "demo mode hides github oauth and exposes banner credentials",
+			cfg: &config.Config{
+				GitHubOAuthClientID: "gh-id",
+				DemoMode:            true,
+				DemoEmail:           "dogfood@143.dev",
+				DemoPassword:        "preview-dogfood",
+			},
+			expected: map[string]any{
+				"github":        false,
+				"google":        false,
+				"email":         true,
+				"demo":          true,
+				"demo_email":    "dogfood@143.dev",
+				"demo_password": "preview-dogfood",
+			},
 		},
 	}
 
@@ -231,12 +248,38 @@ func TestAuthHandler_Providers(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code)
 
 			var resp struct {
-				Data map[string]bool `json:"data"`
+				Data map[string]any `json:"data"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 			require.Equal(t, tt.expected, resp.Data)
 		})
 	}
+}
+
+// TestAuthHandler_Providers_OmitsDemoCredentialsWhenOff confirms that the
+// demo_email / demo_password fields do NOT leak into the response when
+// DemoMode is off, even if the config happens to have defaults populated.
+func TestAuthHandler_Providers_OmitsDemoCredentialsWhenOff(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		DemoMode:     false,
+		DemoEmail:    "dogfood@143.dev",
+		DemoPassword: "preview-dogfood",
+	}
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
+	w := httptest.NewRecorder()
+
+	handler.Providers(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotContains(t, resp.Data, "demo_email", "must not expose demo_email when DemoMode is off")
+	require.NotContains(t, resp.Data, "demo_password", "must not expose demo_password when DemoMode is off")
 }
 
 func TestAuthHandler_Me(t *testing.T) {

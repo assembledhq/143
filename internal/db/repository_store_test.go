@@ -115,6 +115,76 @@ func TestRepositoryStore_GetByID(t *testing.T) {
 	}
 }
 
+func TestRepositoryStore_GetByFullName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns repository when found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns).
+							AddRow(newRepoRow(repoID, orgID, integrationID, now)...),
+					)
+			},
+		},
+		{
+			name: "returns error when repository not found",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(repoColumns))
+			},
+			expectErr: true,
+		},
+		{
+			name: "returns error when query fails",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, repoID, integrationID uuid.UUID, now time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(context.DeadlineExceeded)
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewRepositoryStore(mock)
+			orgID := uuid.New()
+			repoID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, orgID, repoID, integrationID, now)
+
+			repo, err := store.GetByFullName(context.Background(), orgID, "org/repo")
+			if tt.expectErr {
+				require.Error(t, err, "GetByFullName should return an error")
+				return
+			}
+			require.NoError(t, err, "GetByFullName should not return an error")
+			require.Equal(t, repoID, repo.ID, "should return the correct repository ID")
+			require.Equal(t, orgID, repo.OrgID, "should return the correct org ID")
+			require.Equal(t, "org/repo", repo.FullName, "should return the correct repository full name")
+			require.Equal(t, "active", repo.Status, "should return the correct repository status")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestRepositoryStore_Create(t *testing.T) {
 	t.Parallel()
 

@@ -8,7 +8,7 @@
       "port": 3000,
       "env": {
         "API_PROXY_TARGET": "http://localhost:8080",
-        "NODE_OPTIONS": "--max-old-space-size=768"
+        "NODE_OPTIONS": "--max-old-space-size=1280"
       },
       "ready": {
         "http_path": "/",
@@ -16,15 +16,12 @@
       }
     },
     "server": {
-      "command": [
-        "sh",
-        "-c",
-        "export SESSION_SECRET=\"$(head -c 32 /dev/urandom | base64)\" && echo '[143-preview] running migrations...' && go run ./cmd/migrate up && echo '[143-preview] seeding database...' && psql \"$DATABASE_URL\" -f .143/seed.sql && echo '[143-preview] starting server...' && BASE_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" FRONTEND_URL=\"${PREVIEW_ORIGIN:-http://localhost:8080}\" go run ./cmd/server"
-      ],
+      "command": ["sh", ".143/preview-start.sh"],
       "port": 8080,
       "env": {
-        "MODE": "all",
-        "LOG_LEVEL": "info"
+        "MODE": "api",
+        "LOG_LEVEL": "info",
+        "DEMO_MODE": "true"
       },
       "ready": {
         "http_path": "/api/v1/health",

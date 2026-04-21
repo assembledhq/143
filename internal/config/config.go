@@ -3,12 +3,26 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/caarlos0/env/v11"
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
+)
+
+// Default demo credentials. Must stay in sync with the envDefault tags on
+// Config.DemoEmail / Config.DemoPassword and with the seeded admin row in
+// .143/seed.sql (where the password is stored as a bcrypt hash). Overriding
+// DemoPassword via env without regenerating the seed hash results in a
+// login-page banner that advertises credentials that won't actually sign in
+// — LogStatus warns about this at boot.
+const (
+	defaultDemoEmail    = "dogfood@143.dev"
+	defaultDemoPassword = "preview-dogfood"
 )
 
 type Config struct {
@@ -24,6 +38,16 @@ type Config struct {
 	FrontendURL        string   `env:"FRONTEND_URL"`
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
 	Mode               string   `env:"MODE"                  envDefault:"all"`
+	// DemoMode tells the server it is running a public demo/dogfood preview
+	// with seeded data and no real GitHub App. Enables a credential banner
+	// on the login page and short-circuits GitHub client construction.
+	DemoMode bool `env:"DEMO_MODE" envDefault:"false"`
+	// DemoEmail / DemoPassword are the public credentials rendered in the
+	// login-page banner when DemoMode is on. Defaults must match the seeded
+	// admin in .143/seed.sql and the constants below — override via env
+	// only if you also regenerate the bcrypt hash in the seed.
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"dogfood@143.dev"`
+	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview-dogfood"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -169,6 +193,40 @@ func Load() *Config {
 	return cfg
 }
 
+// GitHubAppEnabled reports whether the GitHub App integration should be
+// wired up. Requires both app credentials and a non-demo environment: in
+// DemoMode we skip GitHub App construction so the dogfood preview can boot
+// with placeholder credentials without 500-ing on integration calls.
+func (c *Config) GitHubAppEnabled() bool {
+	return !c.DemoMode && c.GitHubAppID != 0 && c.GitHubAppPrivateKey != ""
+}
+
+// previewOriginHostIsLocal reports whether the template's host resolves to
+// a loopback address in the way a browser would — i.e. the literal
+// "localhost", any "*.localhost" subdomain (RFC 6761), or a loopback IP.
+// Used by LogStatus to warn when PREVIEW_ORIGIN_TEMPLATE is still
+// unconfigured in production. A simple substring search would false-
+// positive on legitimate hostnames like "localhost.example.com".
+func previewOriginHostIsLocal(template string) bool {
+	// Replace the placeholder with something parseable. We only care about
+	// the host, so the value of the replacement doesn't matter as long as
+	// it's a valid DNS label.
+	candidate := strings.ReplaceAll(template, "{id}", "x")
+	u, err := url.Parse(candidate)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	host = strings.ToLower(host)
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
+}
+
 // LLMConfig returns the llm.Config derived from this Config.
 func (c *Config) LLMConfig() llm.Config {
 	return llm.Config{
@@ -244,7 +302,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"Google OAuth", c.GoogleOAuthClientID != "" && c.GoogleOAuthClientSecret != "", "login"},
 		{"Linear OAuth", c.LinearOAuthClientID != "" && c.LinearOAuthClientSecret != "", "integration auth"},
 		{"Sentry OAuth", c.SentryOAuthClientID != "" && c.SentryOAuthClientSecret != "", "integration auth"},
-		{"GitHub App", c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "", "webhooks, PRs"},
+		{"GitHub App", c.GitHubAppEnabled(), "webhooks, PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
 
@@ -297,6 +355,28 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 
 	if c.CSRFSigningKey == "" {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
+	}
+
+	if c.Env == "production" && previewOriginHostIsLocal(c.PreviewOriginTemplate) {
+		logger.Warn().Str("preview_origin_template", c.PreviewOriginTemplate).Msg("PREVIEW_ORIGIN_TEMPLATE points at localhost in production — preview URLs in PR comments and the gateway will not resolve. Set PREVIEW_ORIGIN_TEMPLATE to e.g. https://{id}.preview.example.com.")
+	}
+
+	if c.DemoMode {
+		logger.Warn().Msg("DEMO_MODE is enabled — GitHub integrations are stubbed, seeded credentials are public. Do not use this configuration for production data.")
+		// The seeded admin in .143/seed.sql stores a bcrypt hash of
+		// defaultDemoPassword. Overriding DEMO_PASSWORD without regenerating
+		// the hash leaves the login-page banner pointing at credentials that
+		// do not log in — a subtle footgun, so warn loudly.
+		if c.DemoPassword != defaultDemoPassword || c.DemoEmail != defaultDemoEmail {
+			logger.Warn().
+				Msg("DEMO_EMAIL or DEMO_PASSWORD overridden but the seeded admin in .143/seed.sql still uses the defaults — the login banner will advertise credentials that don't sign in. Regenerate the bcrypt hash in the seed, or unset the override.")
+		}
+		// Operators enabling DemoMode on top of real GitHub App credentials
+		// will see integrations silently no-op. Call that out so the cause
+		// is easy to find in logs.
+		if c.GitHubAppID != 0 && c.GitHubAppPrivateKey != "" {
+			logger.Warn().Msg("DEMO_MODE suppresses the configured GitHub App — integrations will be skipped. Unset DEMO_MODE to re-enable.")
+		}
 	}
 }
 

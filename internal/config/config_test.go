@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -287,4 +288,314 @@ func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
 	require.Contains(t, err.Error(), "CSRF_SIGNING_KEY")
+}
+
+func TestGitHubAppEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{
+			name: "fully configured",
+			cfg:  Config{GitHubAppID: 123, GitHubAppPrivateKey: "key"},
+			want: true,
+		},
+		{
+			name: "missing app id",
+			cfg:  Config{GitHubAppPrivateKey: "key"},
+			want: false,
+		},
+		{
+			name: "missing private key",
+			cfg:  Config{GitHubAppID: 123},
+			want: false,
+		},
+		{
+			name: "demo mode disables even with credentials",
+			cfg:  Config{GitHubAppID: 123, GitHubAppPrivateKey: "key", DemoMode: true},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, tc.cfg.GitHubAppEnabled())
+		})
+	}
+}
+
+func TestLogStatus_DemoModeWarns(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	cfg := &Config{
+		SessionSecret:  "s",
+		CSRFSigningKey: "c",
+		DemoMode:       true,
+	}
+	cfg.LogStatus(logger)
+
+	require.Contains(t, buf.String(), "DEMO_MODE is enabled", "LogStatus should warn when DemoMode is set")
+}
+
+// TestLogStatus_DemoCredentialMismatch covers the boot-time warning emitted
+// when DemoMode is on but DemoEmail/DemoPassword have been overridden away
+// from the seeded defaults — the banner would advertise credentials that
+// don't actually sign in against the seeded bcrypt hash.
+func TestLogStatus_DemoCredentialMismatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "demo on + defaults does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: false,
+		},
+		{
+			name: "demo on + overridden password warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   "something-else",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo on + overridden email warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      "other@example.com",
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo off + overridden creds does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       false,
+				DemoEmail:      "other@example.com",
+				DemoPassword:   "something-else",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden")
+			} else {
+				require.NotContains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden")
+			}
+		})
+	}
+}
+
+// TestLogStatus_DemoSuppressesGitHubApp covers the boot-time warning emitted
+// when DemoMode is on but GitHub App credentials are also configured — the
+// integration is silently suppressed, so we log once at startup so the cause
+// is easy to find in logs.
+func TestLogStatus_DemoSuppressesGitHubApp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "demo on + github app creds warns",
+			cfg: Config{
+				SessionSecret:       "s",
+				CSRFSigningKey:      "c",
+				DemoMode:            true,
+				GitHubAppID:         123,
+				GitHubAppPrivateKey: "key",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "demo on + no github app creds does not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+			},
+			wantWarn: false,
+		},
+		{
+			name: "demo off + github app creds does not warn",
+			cfg: Config{
+				SessionSecret:       "s",
+				CSRFSigningKey:      "c",
+				GitHubAppID:         123,
+				GitHubAppPrivateKey: "key",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "DEMO_MODE suppresses the configured GitHub App")
+			} else {
+				require.NotContains(t, buf.String(), "DEMO_MODE suppresses the configured GitHub App")
+			}
+		})
+	}
+}
+
+func TestLogStatus_PreviewOriginTemplateLocalhostInProduction(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "production + localhost template warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://{id}.preview.localhost:9090",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "production + custom localhost variant warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://localhost:8080/{id}",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "production + real host does not warn",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "https://{id}.preview.example.com",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "production + host containing 'localhost' as substring does not warn",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "https://{id}.preview.localhost.example.com",
+			},
+			wantWarn: false,
+		},
+		{
+			name: "production + loopback IP warns",
+			cfg: Config{
+				Env:                   "production",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://127.0.0.1:9090/{id}",
+			},
+			wantWarn: true,
+		},
+		{
+			name: "development + localhost does not warn",
+			cfg: Config{
+				Env:                   "development",
+				SessionSecret:         "s",
+				CSRFSigningKey:        "c",
+				PreviewOriginTemplate: "http://{id}.preview.localhost:9090",
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "PREVIEW_ORIGIN_TEMPLATE points at localhost")
+			} else {
+				require.NotContains(t, buf.String(), "PREVIEW_ORIGIN_TEMPLATE points at localhost")
+			}
+		})
+	}
+}
+
+func TestPreviewOriginHostIsLocal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		template string
+		want     bool
+	}{
+		{name: "localhost host", template: "http://localhost:9090/{id}", want: true},
+		{name: "wildcard localhost subdomain", template: "http://{id}.preview.localhost:9090", want: true},
+		{name: "loopback IPv4", template: "http://127.0.0.1:9090/{id}", want: true},
+		{name: "loopback IPv6", template: "http://[::1]:9090/{id}", want: true},
+		{name: "real host", template: "https://{id}.preview.example.com", want: false},
+		{name: "substring localhost in real host", template: "https://{id}.localhost.example.com", want: false},
+		// url.Parse error branch: stray percent escape
+		{name: "malformed percent escape", template: "http://%zz", want: false},
+		// u.Host == "" branch: no authority component
+		{name: "relative path without scheme", template: "relative/path", want: false},
+		{name: "scheme only", template: "http:", want: false},
+		// u.Hostname() == "" branch: authority with port but empty host
+		{name: "empty host with port", template: "http://:8080/{id}", want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, previewOriginHostIsLocal(tc.template))
+		})
+	}
 }
