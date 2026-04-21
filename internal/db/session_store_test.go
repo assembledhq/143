@@ -907,3 +907,199 @@ func TestSessionStore_Unarchive(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
+
+func TestSessionStore_AcquireTurnHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = @container_id, turn_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "container-xyz")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_AcquireTurnHold_DBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`UPDATE sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "c1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "acquire turn hold")
+}
+
+func TestSessionStore_ReleaseTurnHold(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		containerID     string
+		previewHolds    bool
+		wantDestroyNow  bool
+		wantContainerID string
+	}{
+		{"destroys when no preview hold", "container-1", false, true, "container-1"},
+		{"keeps alive when preview still holds", "container-1", true, false, "container-1"},
+		{"no-op when container was already empty", "", false, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			mock.ExpectQuery(`WITH released AS \(\s*UPDATE sessions\s+SET turn_holding_container = FALSE`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows([]string{"container_id", "preview_holds"}).
+						AddRow(tt.containerID, tt.previewHolds),
+				)
+
+			destroyNow, cid, err := store.ReleaseTurnHold(context.Background(), uuid.New(), uuid.New())
+			require.NoError(t, err)
+			require.Equal(t, tt.wantDestroyNow, destroyNow)
+			require.Equal(t, tt.wantContainerID, cid)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestSessionStore_ReleaseTurnHold_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db gone"))
+
+	_, _, err = store.ReleaseTurnHold(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "release turn hold")
+}
+
+func TestSessionStore_SetContainerID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`^UPDATE sessions SET container_id = @container_id WHERE id = @id AND org_id = @org_id$`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SetContainerID(context.Background(), uuid.New(), uuid.New(), "container-abc")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_SetContainerID_DBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`UPDATE sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	err = store.SetContainerID(context.Background(), uuid.New(), uuid.New(), "c1")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "set container id")
+}
+
+func TestSessionStore_ClearContainerID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`^UPDATE sessions SET container_id = NULL WHERE id = @id AND org_id = @org_id$`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ClearContainerID_DBError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`UPDATE sessions SET container_id = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "clear container id")
+}
+
+func TestSessionStore_ListOrphanedContainers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND turn_holding_container = FALSE`).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...),
+		)
+
+	sessions, err := store.ListOrphanedContainers(context.Background())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListOrphanedContainers(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "list orphaned containers")
+}
