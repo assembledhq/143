@@ -264,7 +264,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             {status.label}
           </span>
           <span className="inline-flex items-center gap-x-1.5 text-muted-foreground">
-            <AgentBadge agentType={session.agent_type} />
+            <AgentBadge agentType={session.agent_type} labelClassName="text-xs" />
             <span aria-hidden="true" className="text-muted-foreground/50">·</span>
             <span>{triggeredByLabel}</span>
           </span>
