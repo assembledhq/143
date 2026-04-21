@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -2832,6 +2833,74 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, w.Code, "should return 202 Accepted")
 	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should indicate job was queued")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
+	t.Parallel()
+
+	// Regression: an in-flight open_pr job for the same session must not cause
+	// a 500 ENQUEUE_FAILED response. The dedupe conflict means a PR job is
+	// already queued, so the request is effectively a success.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				nil,
+				now,
+			),
+		)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+
+	// ON CONFLICT DO NOTHING fires because the dedupe_key already matches a
+	// pending job — pgx surfaces this as ErrNoRows.
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "dedupe conflict should be a success — the existing job satisfies the request")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should still indicate queued status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

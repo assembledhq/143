@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import Image from "next/image";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
@@ -986,6 +987,10 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
     },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Failed to create PR";
+      toast.error(msg);
+    },
   });
 
   // Auto-resize textarea
@@ -1379,6 +1384,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+    },
+    onError: (err) => {
+      const msg = err instanceof Error ? err.message : "Failed to create PR";
+      toast.error(msg);
     },
   });
 
