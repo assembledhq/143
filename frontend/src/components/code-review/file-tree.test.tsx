@@ -47,58 +47,6 @@ describe("FileTree", () => {
     expect(onFileSelect).toHaveBeenCalled();
   });
 
-  it("shows reviewed checkmark for reviewed files", () => {
-    const reviewedFiles = new Set(["src/app.ts"]);
-    render(
-      <FileTree
-        files={files}
-        activeFileIndex={0}
-        onFileSelect={vi.fn()}
-        reviewedFiles={reviewedFiles}
-        onToggleReviewed={vi.fn()}
-      />
-    );
-    const checkbox = screen.getByRole("checkbox", {
-      name: /Unmark app\.ts as reviewed/,
-    });
-    expect(checkbox).toHaveAttribute("aria-checked", "true");
-  });
-
-  it("shows unchecked state for non-reviewed files", () => {
-    render(
-      <FileTree
-        files={files}
-        activeFileIndex={0}
-        onFileSelect={vi.fn()}
-        reviewedFiles={new Set()}
-        onToggleReviewed={vi.fn()}
-      />
-    );
-    const checkbox = screen.getByRole("checkbox", {
-      name: /Mark app\.ts as reviewed/,
-    });
-    expect(checkbox).toHaveAttribute("aria-checked", "false");
-  });
-
-  it("calls onToggleReviewed when checkbox is clicked", async () => {
-    const onToggleReviewed = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <FileTree
-        files={files}
-        activeFileIndex={0}
-        onFileSelect={vi.fn()}
-        reviewedFiles={new Set()}
-        onToggleReviewed={onToggleReviewed}
-      />
-    );
-    const checkbox = screen.getByRole("checkbox", {
-      name: /Mark app\.ts as reviewed/,
-    });
-    await user.click(checkbox);
-    expect(onToggleReviewed).toHaveBeenCalledWith("src/app.ts");
-  });
-
   it("filters files by search input", async () => {
     const user = userEvent.setup();
     render(

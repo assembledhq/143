@@ -96,10 +96,14 @@ export function ReviewDiffView({
   const handleFileSelect = useCallback(
     (index: number) => {
       onFileChange(index);
-      diffPaneRef.current?.scrollToFile(index);
     },
     [onFileChange]
   );
+
+  // activeFileIndex can change from outside (sidebar file-tree click), so scroll via effect rather than only inside handleFileSelect.
+  useEffect(() => {
+    diffPaneRef.current?.scrollToFile(activeFileIndex);
+  }, [activeFileIndex]);
 
   const toggleViewMode = useCallback(() => {
     handleViewModeChange(viewMode === "unified" ? "split" : "unified");
