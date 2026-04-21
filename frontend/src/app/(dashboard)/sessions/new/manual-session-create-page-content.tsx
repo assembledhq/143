@@ -31,9 +31,8 @@ import { queryKeys } from "@/lib/query-keys";
 import {
   AGENTS,
   AGENTS_BY_KEY,
-  PI_INHERITED_PROVIDERS,
   agentTypeForModel,
-  piRequiredProviderForModel,
+  hasPiCredentials,
 } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
@@ -173,20 +172,13 @@ export function ManualSessionCreatePageContent() {
   const requiredProvider = AGENTS_BY_KEY[effectiveAgentType]?.providerKey ?? "";
   // Pi routes to Anthropic/OpenAI/Gemini depending on the *selected model*. For
   // curated prefixes we mirror checkPiProviderKey's per-model lookup so the
-  // banner matches what the orchestrator will accept; only fall back to the
-  // "any inherited key" rule when the prefix is unknown (PI_MODEL_CUSTOM) or
-  // when no model has been picked yet.
+  // banner matches what the orchestrator will accept. When no model has been
+  // picked we mirror piResolvedModel's hardcoded fallback (Claude Opus 4.7 →
+  // Anthropic) so the UI doesn't show "Ready to run" for a run that would hit
+  // "missing ANTHROPIC_API_KEY" from the backend.
   const hasAgentCredentials =
     effectiveAgentType === "pi"
-      ? (() => {
-          const piRequired = selectedModel ? piRequiredProviderForModel(selectedModel) : undefined;
-          if (piRequired) {
-            return resolvedCredentials.some((c) => c.provider === piRequired);
-          }
-          return PI_INHERITED_PROVIDERS.some((p) =>
-            resolvedCredentials.some((c) => c.provider === p),
-          );
-        })()
+      ? hasPiCredentials(resolvedCredentials, selectedModel)
       : resolvedCredentials.some((c) => c.provider === requiredProvider)
         || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 

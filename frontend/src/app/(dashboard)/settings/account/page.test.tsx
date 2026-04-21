@@ -318,11 +318,10 @@ describe('AccountPage', () => {
     const anthropicInput = await screen.findByLabelText('Claude Code API key');
     await user.type(anthropicInput, 'sk-ant-typed');
 
-    // Scope to the Anthropic row so a future reorder of providers can't
-    // silently make this assertion exercise the wrong row.
-    const anthropicRow = anthropicInput.closest('div.rounded-md');
-    expect(anthropicRow).not.toBeNull();
-    const saveButton = within(anthropicRow as HTMLElement).getByRole('button', { name: /^Save$/i });
+    // Scope to the Anthropic row by data-testid so a future reorder or
+    // restyle of providers can't silently exercise the wrong row.
+    const anthropicRow = screen.getByTestId('inherited-provider-row-anthropic');
+    const saveButton = within(anthropicRow).getByRole('button', { name: /^Save$/i });
     await user.click(saveButton);
 
     await waitFor(() => {

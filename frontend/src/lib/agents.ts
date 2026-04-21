@@ -9,6 +9,7 @@ import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PI_MODELS,
+  PI_MODEL_CLAUDE_OPUS_47,
 } from "@/lib/model-constants";
 
 export interface AgentEnvVar {
@@ -109,6 +110,10 @@ export const AGENTS: readonly AgentMeta[] = [
     short: "PI",
     color: "#7c3aed",
     description: "Pi — meta-agent that routes to many providers",
+    // providerKey is unused for inherited agents (Pi has no dedicated
+    // credential store). Callers must branch on inheritsProviderKeys before
+    // treating this as a lookup key; the placeholder here keeps the type
+    // shape intact but should never reach a provider-name comparison.
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
     inheritsProviderKeys: true,
@@ -168,4 +173,37 @@ export function piRequiredProviderForModel(model: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+// hasPiCredentials reports whether the resolved credential set satisfies Pi's
+// per-model provider requirement. When no model is selected we mirror
+// piResolvedModel's hardcoded default (PI_MODEL_CLAUDE_OPUS_47 → Anthropic)
+// rather than the looser "any inherited key" rule, so the UI matches what the
+// backend will actually enforce.
+export function hasPiCredentials(
+  resolvedCredentials: readonly { provider: string }[],
+  selectedModel: string | undefined,
+): boolean {
+  const effectiveModel = selectedModel ?? PI_MODEL_CLAUDE_OPUS_47;
+  const required = piRequiredProviderForModel(effectiveModel);
+  if (required) {
+    return resolvedCredentials.some((c) => c.provider === required);
+  }
+  // Unknown prefix (PI_MODEL_CUSTOM pointing at an uncurated provider): the
+  // backend falls back to "at least one inherited key", so we do too.
+  return PI_INHERITED_PROVIDERS.some((p) =>
+    resolvedCredentials.some((c) => c.provider === p),
+  );
+}
+
+// hasAnyInheritedProviderConfigured reports whether any of Pi's upstream
+// providers has a resolved credential (personal/team/org). Used by the
+// account page to decide the "Ready to run" badge.
+export function hasAnyInheritedProviderConfigured(
+  resolvedCredentials: readonly { provider: string; source?: string }[],
+): boolean {
+  return PI_INHERITED_PROVIDERS.some((p) => {
+    const source = resolvedCredentials.find((c) => c.provider === p)?.source ?? "none";
+    return source !== "none";
+  });
 }

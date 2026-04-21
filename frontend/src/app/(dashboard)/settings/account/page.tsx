@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AGENT_TYPES, KEY_PLACEHOLDERS, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
-import { PI_INHERITED_PROVIDERS } from "@/lib/agents";
+import { PI_INHERITED_PROVIDERS, hasAnyInheritedProviderConfigured } from "@/lib/agents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -309,6 +309,7 @@ export default function AccountPage() {
     return (
       <div
         key={providerKey}
+        data-testid={`inherited-provider-row-${providerKey}`}
         className="rounded-md border bg-muted/20 px-3 py-2.5 space-y-2"
       >
         <div className="flex items-center justify-between gap-2">
@@ -382,9 +383,7 @@ export default function AccountPage() {
   }
 
   function renderPersonalInheritedCard(agent: (typeof AGENT_TYPES)[number]): ReactNode {
-    const anyConfigured = PI_INHERITED_PROVIDERS.some(
-      (p) => (resolved.find((c) => c.provider === p)?.source ?? "none") !== "none",
-    );
+    const anyConfigured = hasAnyInheritedProviderConfigured(resolved);
 
     return (
       <div className="space-y-3 border-t pt-3 mt-1">
@@ -596,9 +595,7 @@ export default function AccountPage() {
                     // when any inherited provider key is resolved so users can
                     // tell at a glance that a Pi run will work.
                     const configured = agent.inheritsProviderKeys
-                      ? PI_INHERITED_PROVIDERS.some(
-                          (p) => (resolved.find((c) => c.provider === p)?.source ?? "none") !== "none",
-                        )
+                      ? hasAnyInheritedProviderConfigured(resolved)
                       : personalCreds.some((c) => c.provider === agent.providerKey && c.configured);
                     return (
                       <RadioCard
