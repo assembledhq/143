@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
@@ -19,50 +20,43 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
+import { queryKeys } from "@/lib/query-keys";
+
+type SlackChannel = { id: string; name: string; selected: boolean };
+type SlackChannelsResp = { data: SlackChannel[] } | undefined;
+
+// Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
+// `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
+// the same referential identity — `useAutosave` throws in dev when two
+// callers register different coalesce fns against the same queryKey.
+const coalesceSlackChannels = (_a: string[], b: string[]): string[] => b;
 
 function SlackChannelPicker() {
-  const queryClient = useQueryClient();
-  const { data: channelsResp, isLoading } = useQuery({
-    queryKey: ["slack-channels"],
+  const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
+    queryKey: queryKeys.integrations.slackChannels,
     queryFn: () => api.integrations.listSlackChannels(),
   });
 
-  // Derive initial selection from server state.
-  const serverSelected = channelsResp?.data
-    ? new Set(
-        channelsResp.data
-          .filter((ch: { selected: boolean; id: string }) => ch.selected)
-          .map((ch: { id: string }) => ch.id)
-      )
-    : new Set<string>();
-
-  // Track user overrides; null means "use server state".
-  const [userSelected, setUserSelected] = useState<Set<string> | null>(null);
-  const selected = userSelected ?? serverSelected;
-
-  const mutation = useMutation({
-    mutationFn: (channelIds: string[]) => api.integrations.updateSlackChannels(channelIds),
-    onSuccess: () => {
-      setUserSelected(null);
-      queryClient.invalidateQueries({ queryKey: ["slack-channels"] });
+  const { save, status } = useAutosave<string[]>({
+    queryKey: queryKeys.integrations.slackChannels,
+    mutationFn: (channelIds) => api.integrations.updateSlackChannels(channelIds),
+    applyOptimistic: (prev, channelIds) => {
+      const previous = prev as SlackChannelsResp;
+      if (!previous?.data) return previous;
+      const selectedSet = new Set(channelIds);
+      return {
+        ...previous,
+        data: previous.data.map((ch) => ({ ...ch, selected: selectedSet.has(ch.id) })),
+      };
     },
+    coalesce: coalesceSlackChannels,
   });
 
-  const toggle = (id: string) => {
-    const prev = selected;
-    const next = new Set(prev);
-    if (next.has(id)) {
-      next.delete(id);
-    } else {
-      next.add(id);
-    }
-    setUserSelected(next);
-  };
-
-  const save = () => {
-    mutation.mutate(Array.from(selected));
-  };
+  const channels = channelsResp?.data ?? [];
+  const selectedIds = channels.filter((ch) => ch.selected).map((ch) => ch.id);
+  const selected = new Set(selectedIds);
 
   if (isLoading) {
     return (
@@ -75,15 +69,25 @@ function SlackChannelPicker() {
     );
   }
 
-  const channels = channelsResp?.data ?? [];
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    save(Array.from(next));
+  };
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-sm">Monitored Slack Channels</CardTitle>
-        <CardDescription>
-          Select which channels the PM agent should monitor for actionable conversations.
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-sm">Monitored Slack Channels</CardTitle>
+            <CardDescription>
+              Select which channels the PM agent should monitor for actionable conversations.
+            </CardDescription>
+          </div>
+          <AutosaveIndicator status={status} />
+        </div>
       </CardHeader>
       <CardContent>
         {channels.length === 0 ? (
@@ -106,19 +110,9 @@ function SlackChannelPicker() {
                 </label>
               ))}
             </div>
-            <div className="flex items-center justify-between pt-2">
-              <p className="text-xs text-muted-foreground">
-                {selected.size} channel{selected.size !== 1 ? "s" : ""} selected
-              </p>
-              <Button
-                size="sm"
-                onClick={save}
-                loading={mutation.isPending}
-                disabled={mutation.isPending}
-              >
-                Save
-              </Button>
-            </div>
+            <p className="text-xs text-muted-foreground">
+              {selected.size} channel{selected.size !== 1 ? "s" : ""} selected
+            </p>
           </div>
         )}
       </CardContent>

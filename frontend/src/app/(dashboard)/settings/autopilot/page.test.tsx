@@ -32,7 +32,7 @@ describe("AutopilotSettingsPage", () => {
     expect(screen.queryByText("Priority weights")).not.toBeInTheDocument();
   });
 
-  it("saves PM cadence and model", async () => {
+  it("autosaves the PM cadence when the value changes and the input blurs", async () => {
     let capturedBody: unknown;
     server.use(
       http.get("/api/v1/settings", () => HttpResponse.json({
@@ -62,16 +62,11 @@ describe("AutopilotSettingsPage", () => {
     const scheduleInput = await screen.findByLabelText("Schedule (hours)");
     await user.clear(scheduleInput);
     await user.type(scheduleInput, "6");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.tab();
 
     await waitFor(() => {
       expect(capturedBody).toEqual({
-        settings: {
-          pm_schedule_hours: 6,
-          pm_model: "claude-sonnet-4-5",
-          autonomy_level: "auto_simple",
-          max_concurrent_runs: 3,
-        },
+        settings: { pm_schedule_hours: 6 },
       });
     });
   });
@@ -106,7 +101,7 @@ describe("AutopilotSettingsPage", () => {
     });
   });
 
-  it("saves changed autonomy level", async () => {
+  it("autosaves a changed autonomy level immediately", async () => {
     let capturedBody: unknown;
     server.use(
       http.get("/api/v1/settings", () => HttpResponse.json({
@@ -137,16 +132,10 @@ describe("AutopilotSettingsPage", () => {
 
     await screen.findByText("Execution");
     await user.click(screen.getByLabelText("Operate broadly"));
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
 
     await waitFor(() => {
       expect(capturedBody).toEqual({
-        settings: {
-          pm_schedule_hours: 4,
-          pm_model: "claude-sonnet-4-5",
-          autonomy_level: "auto_all",
-          max_concurrent_runs: 3,
-        },
+        settings: { autonomy_level: "auto_all" },
       });
     });
   });

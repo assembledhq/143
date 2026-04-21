@@ -140,11 +140,11 @@ describe('AgentPage', () => {
     expect(screen.queryByText('Execution aggressiveness')).not.toBeInTheDocument();
   });
 
-  it('shows single save button for all org settings', async () => {
+  it('renders without a save button (autosaves)', async () => {
     renderWithProviders(<AgentPage />);
 
     await screen.findAllByText('Claude Code');
-    expect(screen.getByText('Save organization settings')).toBeInTheDocument();
+    expect(screen.queryByText('Save organization settings')).not.toBeInTheDocument();
   });
 
   it('shows Active subscription when a Codex subscription is connected', async () => {
@@ -176,7 +176,7 @@ describe('AgentPage', () => {
     expect(screen.getByRole('button', { name: 'Add subscription' })).toBeInTheDocument();
   });
 
-  it('saves org settings with single mutation', async () => {
+  it('autosaves the default agent type when selection changes', async () => {
     let capturedBody: unknown;
     server.use(
       http.patch('/api/v1/settings', async ({ request }) => {
@@ -188,16 +188,13 @@ describe('AgentPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Save organization settings');
-    await user.click(screen.getByText('Save organization settings'));
+    // Switch from claude_code (default) to codex via the radio.
+    await user.click(await screen.findByRole('radio', { name: /Codex/ }));
 
     await waitFor(() => {
-      expect(capturedBody).toBeDefined();
-      const body = capturedBody as Record<string, Record<string, unknown>>;
-      expect(body.settings).toHaveProperty('default_agent_type');
-      expect(body.settings).toHaveProperty('autonomy_level');
-      expect(body.settings).toHaveProperty('execution_aggressiveness');
-      expect(body.settings).toHaveProperty('max_concurrent_runs');
+      expect(capturedBody).toEqual({
+        settings: { default_agent_type: 'codex' },
+      });
     });
   });
 
@@ -348,7 +345,7 @@ describe('AgentPage', () => {
     });
   });
 
-  it('shows success message after saving org settings', async () => {
+  it('shows the saved indicator after an autosave succeeds', async () => {
     server.use(
       http.patch('/api/v1/settings', () => {
         return HttpResponse.json(mockOrgSettings);
@@ -358,13 +355,12 @@ describe('AgentPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Save organization settings');
-    await user.click(screen.getByText('Save organization settings'));
+    await user.click(await screen.findByRole('radio', { name: /Codex/ }));
 
-    expect(await screen.findByText('Settings saved.')).toBeInTheDocument();
+    expect(await screen.findByText('Saved')).toBeInTheDocument();
   });
 
-  it('shows error message when save fails', async () => {
+  it('shows the error indicator when an autosave fails', async () => {
     server.use(
       http.patch('/api/v1/settings', () => {
         return new HttpResponse(null, { status: 500 });
@@ -374,10 +370,9 @@ describe('AgentPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AgentPage />);
 
-    await screen.findByText('Save organization settings');
-    await user.click(screen.getByText('Save organization settings'));
+    await user.click(await screen.findByRole('radio', { name: /Codex/ }));
 
-    expect(await screen.findByText('Failed to save settings.')).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't save")).toBeInTheDocument();
   });
 
   it('updates max concurrent runs input', async () => {
