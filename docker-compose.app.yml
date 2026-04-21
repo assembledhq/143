@@ -54,6 +54,7 @@ services:
     image: ghcr.io/assembledhq/143-frontend:${IMAGE_TAG:-latest}
     environment:
       API_PROXY_TARGET: http://api:8080
+      HOSTNAME: "0.0.0.0"
       NODE_ENV: production
     depends_on:
       - api
