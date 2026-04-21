@@ -10,7 +10,20 @@ func parsePlan(output string) (*Plan, error) {
 	start := strings.Index(output, "<pm-plan>")
 	end := strings.Index(output, "</pm-plan>")
 	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("pm plan tags not found")
+		// Surface common upstream failures (e.g. Claude Code CLI auth errors)
+		// so they don't get buried behind a generic "tags not found".
+		trimmed := strings.TrimSpace(output)
+		if trimmed == "" {
+			return nil, fmt.Errorf("pm plan tags not found: agent produced no output")
+		}
+		if strings.Contains(output, "Not logged in") ||
+			strings.Contains(output, "Please run /login") ||
+			strings.Contains(output, "authentication_failed") ||
+			strings.Contains(output, "invalid api key") ||
+			strings.Contains(output, "invalid_api_key") {
+			return nil, fmt.Errorf("pm agent not authenticated — configure an Anthropic API key for this org: %s", excerpt(output, 200))
+		}
+		return nil, fmt.Errorf("pm plan tags not found in agent output: %s", excerpt(output, 500))
 	}
 
 	content := strings.TrimSpace(output[start+len("<pm-plan>") : end])
@@ -19,13 +32,13 @@ func parsePlan(output string) (*Plan, error) {
 	}
 
 	var payload struct {
-		Analysis       string           `json:"analysis"`
-		Tasks          []Task           `json:"tasks"`
-		Clusters       []Cluster        `json:"clusters"`
-		Skip           []SkipEntry      `json:"skip"`
-		ProjectPlans   []ProjectPlan    `json:"project_plans,omitempty"`
-		LinearActions  []LinearAction   `json:"linear_actions,omitempty"`
-		SlotAllocation *SlotAllocation  `json:"slot_allocation,omitempty"`
+		Analysis       string          `json:"analysis"`
+		Tasks          []Task          `json:"tasks"`
+		Clusters       []Cluster       `json:"clusters"`
+		Skip           []SkipEntry     `json:"skip"`
+		ProjectPlans   []ProjectPlan   `json:"project_plans,omitempty"`
+		LinearActions  []LinearAction  `json:"linear_actions,omitempty"`
+		SlotAllocation *SlotAllocation `json:"slot_allocation,omitempty"`
 	}
 
 	if err := json.Unmarshal([]byte(content), &payload); err != nil {
@@ -55,4 +68,15 @@ func parsePlan(output string) (*Plan, error) {
 		LinearActions:  payload.LinearActions,
 		SlotAllocation: payload.SlotAllocation,
 	}, nil
+}
+
+// excerpt returns a trimmed, single-line preview of s capped at max runes so
+// error messages don't dump megabytes of CLI output into logs.
+func excerpt(s string, max int) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len([]rune(s)) > max {
+		return string([]rune(s)[:max]) + "…"
+	}
+	return s
 }

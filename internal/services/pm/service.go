@@ -302,6 +302,14 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	sbCfg := pmSandboxConfig()
+	if sbCfg.Env == nil {
+		sbCfg.Env = make(map[string]string)
+	}
+
+	// Inject Anthropic credentials so the Claude Code CLI inside the sandbox
+	// can authenticate. Without this the CLI prints "Not logged in · Please
+	// run /login" and the agent produces no plan.
+	s.applyClaudeCodeEnv(ctx, orgID, sbCfg.Env)
 
 	// Inject internal API credentials so the PM agent can create issues.
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
@@ -311,9 +319,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		if tokenErr != nil {
 			s.logger.Warn().Err(tokenErr).Msg("failed to generate internal API token — issue creation will be unavailable")
 		} else {
-			if sbCfg.Env == nil {
-				sbCfg.Env = make(map[string]string)
-			}
 			sbCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 			sbCfg.Env["INTERNAL_API_URL"] = s.internalAPIURL
 		}
@@ -524,6 +529,32 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		if err := s.sessionLogs.Create(ctx, log); err != nil {
 			s.logger.Error().Err(err).Msg("failed to persist PM log entry")
 		}
+	}
+}
+
+// applyClaudeCodeEnv fetches Anthropic credentials from the org credential
+// store and writes ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL into env. Safe to
+// call when no credential store is configured or no credential is set — the
+// env map is left unchanged and the caller surfaces the downstream failure.
+func (s *Service) applyClaudeCodeEnv(ctx context.Context, orgID uuid.UUID, env map[string]string) {
+	if s.credentials == nil || env == nil {
+		return
+	}
+	cred, err := s.credentials.Get(ctx, orgID, models.ProviderAnthropic)
+	if err != nil || cred == nil {
+		s.logger.Warn().Err(err).Msg("no Anthropic credential configured for PM agent — Claude Code CLI will fail to authenticate")
+		return
+	}
+	cfg, ok := cred.Config.(models.AnthropicConfig)
+	if !ok {
+		s.logger.Warn().Msg("Anthropic credential has unexpected config type")
+		return
+	}
+	if cfg.APIKey != "" {
+		env["ANTHROPIC_API_KEY"] = cfg.APIKey
+	}
+	if cfg.BaseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = cfg.BaseURL
 	}
 }
 
