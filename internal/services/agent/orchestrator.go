@@ -1639,6 +1639,13 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 // Scoped to agent types whose auth lives exclusively in agent_config (Amp,
 // Pi) — for the others, resolveProviderConfig already surfaces richer errors,
 // and we don't want to duplicate those rules here.
+//
+// Invariant: callers must pass the already-merged sandbox env — i.e. after
+// resolveAgentEnv has run (which layers agent_config overrides on top of
+// inherited provider creds) and after any per-run ModelOverride + Pi-specific
+// narrowing have been applied. checkAgentAuth reads credentials and the
+// resolved Pi model directly from `env`, so invoking it on a partial env
+// would either pass a misconfigured run or fail a valid one.
 func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string]string) error {
 	switch agentType {
 	case models.AgentTypeAmp:
@@ -1713,6 +1720,17 @@ func piResolvedModel(env map[string]string) string {
 // posture is intentional. Returns the unknown prefix in that case (or "" when
 // narrowing happened), so callers can log a warning that all inherited
 // provider credentials were exported to the sandbox.
+//
+// Known limitation — inherited-key leak for unknown prefixes: a run with
+// PI_MODEL_CUSTOM=moonshot/kimi-k2 (or any other non-curated provider) ships
+// every configured provider key (Anthropic, OpenAI, Gemini) into the sandbox
+// process env, even though Pi only needs Moonshot's. The keys never leave the
+// container under normal operation, but a compromised Pi CLI / prompt-injection
+// that tricked the agent into exfiltrating env vars would expose siblings too.
+// To tighten this, add the new provider's prefix and env-var name to the switch
+// above so narrowing kicks in — an explicit entry is intentionally required
+// rather than a deny-by-default so operators adopting a new Pi-supported
+// provider don't silently get auth failures.
 func narrowPiProviderKeys(env map[string]string) string {
 	model := piResolvedModel(env)
 	prefix, _, _ := strings.Cut(model, "/")

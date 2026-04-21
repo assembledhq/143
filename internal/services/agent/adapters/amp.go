@@ -81,6 +81,10 @@ var ampStreamingConfig = streamingAgentConfig{
 		)
 	},
 	ParseConfig: streamParseConfig{
+		// Capture session_id into result.AgentSessionID for tracing/observability
+		// only: Amp is lacksHeadlessResume, so we never feed this back to the CLI
+		// to resume a conversation. Persisting it lets operators correlate a 143
+		// session row with the upstream Amp run when debugging.
 		CaptureSessionID: true,
 	},
 }

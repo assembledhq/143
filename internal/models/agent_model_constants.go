@@ -149,10 +149,12 @@ func IsSupportedAmpMode(mode string) bool {
 	return false
 }
 
-// IsSupportedPiModel is permissive: Pi proxies to many providers and accepts
-// arbitrary "provider/model" patterns. We validate against the curated list,
-// but if the caller has set a PI_MODEL_CUSTOM override they bypass this check
-// at the call site (see ValidateSettingsModels).
+// IsSupportedPiModel reports whether a model is in the curated AvailablePiModels
+// list. It is strict — use it to drive UI dropdowns and to validate settings
+// writes. Pi itself accepts many more "provider/model" patterns; the permissive
+// paths live at the call sites (ValidateSettingsModels skips this check when
+// PI_MODEL_CUSTOM is set; ValidateModelForAgentType accepts any value matching
+// the "provider/model" shape for per-session overrides).
 func IsSupportedPiModel(model string) bool {
 	for _, supportedModel := range AvailablePiModels {
 		if model == supportedModel {

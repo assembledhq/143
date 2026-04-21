@@ -51,18 +51,19 @@ func TestOrgSettingsCache_Expiry(t *testing.T) {
 	c := NewOrgSettingsCache(time.Minute)
 
 	base := time.Now()
-	c.now = func() time.Time { return base }
+	current := base
+	c.SetClockForTest(func() time.Time { return current })
 
 	orgID := uuid.New()
 	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_API_KEY": "k"}})
 
 	// Advance just under the TTL — still a hit.
-	c.now = func() time.Time { return base.Add(59 * time.Second) }
+	current = base.Add(59 * time.Second)
 	_, ok := c.Get(orgID)
 	require.True(t, ok, "within-TTL read must hit")
 
 	// Advance past the TTL — miss.
-	c.now = func() time.Time { return base.Add(time.Minute + time.Second) }
+	current = base.Add(time.Minute + time.Second)
 	_, ok = c.Get(orgID)
 	require.False(t, ok, "post-TTL read must miss")
 }
