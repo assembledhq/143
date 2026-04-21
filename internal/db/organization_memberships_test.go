@@ -850,7 +850,7 @@ func TestOrganizationMembershipStore_RemoveGuarded_NoMembership(t *testing.T) {
 // the winning tx sees count above threshold and commits, the losing tx sees
 // the decremented count and refuses with ErrLastAdmin.
 //
-// The DB-level enforce_last_admin trigger (migration 000079) is the
+// The DB-level enforce_last_admin trigger (migration 000080) is the
 // belt-and-suspenders safety net for cases that bypass this path entirely
 // (ad-hoc SQL, a new handler that forgets to use RemoveGuarded, etc.). The
 // final subtest simulates the trigger firing on a DELETE and asserts the
@@ -928,7 +928,7 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 		require.Contains(t, err.Error(), "no admins", "trigger message should propagate in the returned error")
 	})
 
-	// Pinned behavior for the cascade-delete carve-out in migration 000079's
+	// Pinned behavior for the cascade-delete carve-out in migration 000080's
 	// enforce_last_admin trigger: `IF NOT EXISTS (organizations)` means a
 	// last-admin DELETE inside a transaction that *also* deleted the org
 	// must succeed without raising the invariant. At the Go layer this
