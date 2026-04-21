@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/mcp"
@@ -790,18 +791,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after workdir resolution failure")
 		}
-		if o.sessionMessages != nil {
-			errMsg := &models.SessionMessage{
-				SessionID:  session.ID,
-				OrgID:      session.OrgID,
-				TurnNumber: session.CurrentTurn + 1,
-				Role:       models.MessageRoleAssistant,
-				Content:    fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
-			}
-			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
-				log.Error().Err(createErr).Msg("failed to create error message for workdir resolution failure")
-			}
-		}
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			fmt.Sprintf("Failed to resolve the sandbox workspace: %s\n\nPlease try again in a moment.", slugErr),
+			"workdir resolution",
+		)
 		return fmt.Errorf("resolve workdir: %w", slugErr)
 	}
 	if slug != "" {
@@ -823,18 +818,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
 			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
 		}
-		if o.sessionMessages != nil {
-			errMsg := &models.SessionMessage{
-				SessionID:  session.ID,
-				OrgID:      session.OrgID,
-				TurnNumber: session.CurrentTurn + 1,
-				Role:       models.MessageRoleAssistant,
-				Content:    fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
-			}
-			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
-				log.Error().Err(createErr).Msg("failed to create error message for sandbox failure")
-			}
-		}
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
+			"sandbox creation",
+		)
 		return fmt.Errorf("create sandbox: %w", err)
 	}
 	containerStartedAt := time.Now()
@@ -1089,6 +1078,45 @@ func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Sess
 		return "", fmt.Errorf("fetch repo for session workdir: %w", err)
 	}
 	return SlugForRepo(repo.FullName), nil
+}
+
+// registerSandboxFailureMessage queues a user-visible assistant message
+// to post only if the current continue_session job is dead-lettered —
+// posting inline would fire once per retry. Direct callers without a
+// jobctx registry drop the hook and must handle the returned error
+// themselves. stage labels the warn log emitted if the DB insert fails.
+func (o *Orchestrator) registerSandboxFailureMessage(ctx context.Context, session *models.Session, content, stage string) {
+	if o.sessionMessages == nil {
+		return
+	}
+	sessionMessages := o.sessionMessages
+	sessionID := session.ID
+	orgID := session.OrgID
+	turnNumber := session.CurrentTurn + 1
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+		errMsg := &models.SessionMessage{
+			SessionID:  sessionID,
+			OrgID:      orgID,
+			TurnNumber: turnNumber,
+			Role:       models.MessageRoleAssistant,
+			Content:    content,
+		}
+		// The retryable-timeout dead-letter path fires this hook with a
+		// handler context whose deadline has just expired; detach so the
+		// terminal-message write isn't racing the very timeout that
+		// triggered it, but keep a short bound so we can't hang the poll
+		// goroutine on a wedged DB.
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 5*time.Second)
+		defer cancel()
+		if createErr := sessionMessages.Create(writeCtx, errMsg); createErr != nil {
+			o.logger.Error().
+				Err(createErr).
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Str("stage", stage).
+				Msg("failed to create dead-letter error message")
+		}
+	})
 }
 
 // maxDiffCharsInPrompt is the maximum number of characters from a stored diff
