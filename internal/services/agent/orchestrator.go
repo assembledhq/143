@@ -182,6 +182,7 @@ type Orchestrator struct {
 	userCredentials   UserCredentialProvider // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
 	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
+	orgSettingsCache  *OrgSettingsCache      // can be nil — disables Amp/Pi agent_config caching
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -210,6 +211,7 @@ type OrchestratorConfig struct {
 	Snapshots        storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
 	UsageTracker     UsageRecorder          // optional — enables billing observability
 	Cancels          *CancelRegistry        // optional — enables session cancellation from API
+	OrgSettingsCache *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
 	Logger           zerolog.Logger
 	MaxConcurrent    int
 }
@@ -242,6 +244,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		userCredentials:   cfg.UserCredentials,
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
+		orgSettingsCache:  cfg.OrgSettingsCache,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
@@ -406,6 +409,30 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	// Apply per-run model override before the auth pre-flight: for Pi the
+	// required provider key is derived from the resolved model, so checking
+	// auth against the agent_config default would let an OpenAI override
+	// past the gate on an Anthropic-only org.
+	if run.ModelOverride != nil && *run.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
+			sandboxCfg.Env[envVar] = *run.ModelOverride
+		}
+	}
+	// For Pi, drop any inherited provider keys that don't match the effective
+	// model so the sandbox only sees the single credential Pi will actually
+	// use. Runs after ModelOverride so a per-run switch shapes the env too.
+	if run.AgentType == models.AgentTypePi {
+		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
+			log.Warn().
+				Str("provider_prefix", unknownPrefix).
+				Str("model", piResolvedModel(sandboxCfg.Env)).
+				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
+		}
+	}
+	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	// Route the sandbox workdir into a repo-named subdir of HomeDir so the
 	// agent's cwd reads like `/home/sandbox/<repo>` — matching what a human
 	// would see after `git clone && cd <repo>`. Falls back to the default
@@ -424,12 +451,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
 				sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
 			}
-		}
-	}
-	// Apply per-run model override if set.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
 		}
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
@@ -771,10 +792,40 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	// Apply the per-session model override before checkAgentAuth so the
+	// pre-flight evaluates the *effective* model — see the matching block in
+	// RunAgent for the Pi-specific reasoning.
 	if session.ModelOverride != nil && *session.ModelOverride != "" {
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *session.ModelOverride
 		}
+	}
+	if session.AgentType == models.AgentTypePi {
+		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
+			log.Warn().
+				Str("provider_prefix", unknownPrefix).
+				Str("model", piResolvedModel(sandboxCfg.Env)).
+				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
+		}
+	}
+	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
+		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
+		}
+		if o.sessionMessages != nil {
+			errMsg := &models.SessionMessage{
+				SessionID:  session.ID,
+				OrgID:      session.OrgID,
+				TurnNumber: session.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    authErr.Error(),
+			}
+			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+				log.Error().Err(createErr).Msg("failed to create error message for auth pre-flight failure")
+			}
+		}
+		return authErr
 	}
 	// Look up the session's repo to derive the same WorkDir used on the
 	// initial run (see RunAgent). This must match the original: the container
@@ -1510,6 +1561,30 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 				merged["GEMINI_MODEL"] = gc.Model
 			}
 		}
+	case models.AgentTypeAmp:
+		// Amp authenticates to Sourcegraph's API with a dedicated AMP_API_KEY
+		// that lives in agent_config.amp.AMP_API_KEY — applied by the per-agent
+		// override block below. No first-class credential store (no ProviderAmp)
+		// exists today, so we intentionally do nothing here.
+	case models.AgentTypePi:
+		// Pi is a meta-agent: route to many providers via one CLI. Inherit
+		// every provider key the org already configured for the other agents,
+		// then let agent_config.pi.* override at the call site below.
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic); cfg != nil {
+			if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+				merged["ANTHROPIC_API_KEY"] = ac.APIKey
+			}
+		}
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI); cfg != nil {
+			if oc, ok := cfg.(models.OpenAIConfig); ok && oc.APIKey != "" {
+				merged["OPENAI_API_KEY"] = oc.APIKey
+			}
+		}
+		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini); cfg != nil {
+			if gc, ok := cfg.(models.GeminiConfig); ok && gc.APIKey != "" {
+				merged["GEMINI_API_KEY"] = gc.APIKey
+			}
+		}
 	}
 
 	// Integration credentials — consumed by the 143-tools CLI (preferred) and
@@ -1535,11 +1610,219 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 		}
 	}
 
+	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
+	// Scoped to Amp and Pi only — these agents have no first-class provider
+	// credential store (no ProviderAmp / ProviderPi), so agent_config is the
+	// only channel for their auth (AMP_API_KEY) and routing (PI_MODEL,
+	// PI_MODEL_CUSTOM). For claude_code/codex/gemini_cli we keep the legacy
+	// behavior: provider creds come exclusively from resolveProviderConfig,
+	// and agent_config is treated as model-default metadata (validated,
+	// stored, but not injected here) — changing that would silently flip
+	// existing orgs' active keys.
+	if agentType == models.AgentTypeAmp || agentType == models.AgentTypePi {
+		o.applyAgentConfigOverrides(ctx, orgID, agentType, merged)
+	}
+
 	if len(merged) == 0 {
 		return nil
 	}
 
 	return merged
+}
+
+// checkAgentAuth returns a user-facing error when an agent type has no chance
+// of authenticating against its upstream because the required credential is
+// missing from the resolved sandbox env. This is a pre-flight check intended
+// to beat the generic "CLI exited 1" failure with something the user can act
+// on — "configure AMP_API_KEY" instead of "amp: invalid api key".
+//
+// Scoped to agent types whose auth lives exclusively in agent_config (Amp,
+// Pi) — for the others, resolveProviderConfig already surfaces richer errors,
+// and we don't want to duplicate those rules here.
+//
+// Invariant: callers must pass the already-merged sandbox env — i.e. after
+// resolveAgentEnv has run (which layers agent_config overrides on top of
+// inherited provider creds) and after any per-run ModelOverride + Pi-specific
+// narrowing have been applied. checkAgentAuth reads credentials and the
+// resolved Pi model directly from `env`, so invoking it on a partial env
+// would either pass a misconfigured run or fail a valid one.
+func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string]string) error {
+	switch agentType {
+	case models.AgentTypeAmp:
+		if env["AMP_API_KEY"] == "" {
+			return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
+		}
+	case models.AgentTypePi:
+		return checkPiProviderKey(env)
+	}
+	return nil
+}
+
+// checkPiProviderKey asserts the provider key for Pi's *selected model* is
+// present. PI_MODEL_CUSTOM wins over PI_MODEL, with a hardcoded fallback that
+// matches piStreamingConfig.BuildCmd.
+//
+// For curated providers (anthropic/openai/google) we can pinpoint which key
+// Pi will actually need and return a precise error — cheaper than letting the
+// CLI fail with an opaque upstream 401 that doesn't say "you set PI_MODEL to
+// openai/... but only Anthropic is configured." For unknown provider prefixes
+// that users reach via PI_MODEL_CUSTOM (moonshot, etc.), we can't know which
+// env var is required, so we fall back to the weaker "at least one inherited
+// key" guarantee.
+func checkPiProviderKey(env map[string]string) error {
+	model := piResolvedModel(env)
+	prefix, _, _ := strings.Cut(model, "/")
+	switch strings.ToLower(prefix) {
+	case "anthropic":
+		if env["ANTHROPIC_API_KEY"] == "" {
+			return fmt.Errorf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	case "openai":
+		if env["OPENAI_API_KEY"] == "" {
+			return fmt.Errorf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	case "google", "gemini":
+		if env["GEMINI_API_KEY"] == "" {
+			return fmt.Errorf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	default:
+		// Unknown provider (e.g. moonshot via PI_MODEL_CUSTOM). We can't tell
+		// which env var Pi needs, so fall back to "at least one inherited key".
+		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
+			return fmt.Errorf("missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key")
+		}
+	}
+	return nil
+}
+
+// piResolvedModel returns the Pi model string the CLI will run against, using
+// the same precedence as piStreamingConfig.BuildCmd: PI_MODEL_CUSTOM > PI_MODEL
+// > hardcoded default.
+func piResolvedModel(env map[string]string) string {
+	if m := env["PI_MODEL_CUSTOM"]; m != "" {
+		return m
+	}
+	if m := env["PI_MODEL"]; m != "" {
+		return m
+	}
+	return models.PiModelClaudeOpus47
+}
+
+// narrowPiProviderKeys strips inherited provider keys that don't match Pi's
+// resolved model. Called after ModelOverride is applied, so the env reflects
+// the *effective* model — a per-run override that flips Pi from Anthropic to
+// OpenAI removes the Anthropic key from the sandbox env, even if the
+// agent_config default pointed at Anthropic.
+//
+// Only narrows for known provider prefixes (anthropic/openai/google/gemini):
+// for unknown prefixes (moonshot via PI_MODEL_CUSTOM, etc.) we can't tell
+// which key Pi will use upstream, so the weaker "keep all inherited keys"
+// posture is intentional. Returns the unknown prefix in that case (or "" when
+// narrowing happened), so callers can log a warning that all inherited
+// provider credentials were exported to the sandbox.
+//
+// Known limitation — inherited-key leak for unknown prefixes: a run with
+// PI_MODEL_CUSTOM=moonshot/kimi-k2 (or any other non-curated provider) ships
+// every configured provider key (Anthropic, OpenAI, Gemini) into the sandbox
+// process env, even though Pi only needs Moonshot's. The keys never leave the
+// container under normal operation, but a compromised Pi CLI / prompt-injection
+// that tricked the agent into exfiltrating env vars would expose siblings too.
+// To tighten this, add the new provider's prefix and env-var name to the switch
+// above so narrowing kicks in — an explicit entry is intentionally required
+// rather than a deny-by-default so operators adopting a new Pi-supported
+// provider don't silently get auth failures.
+func narrowPiProviderKeys(env map[string]string) string {
+	model := piResolvedModel(env)
+	prefix, _, _ := strings.Cut(model, "/")
+	const (
+		ak = "ANTHROPIC_API_KEY"
+		ok = "OPENAI_API_KEY"
+		gk = "GEMINI_API_KEY"
+	)
+	switch strings.ToLower(prefix) {
+	case "anthropic":
+		delete(env, ok)
+		delete(env, gk)
+	case "openai":
+		delete(env, ak)
+		delete(env, gk)
+	case "google", "gemini":
+		delete(env, ak)
+		delete(env, ok)
+	default:
+		return prefix
+	}
+	return ""
+}
+
+// applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
+// settings on top of the already-resolved provider credentials in `merged`.
+// Only called for agent types (amp, pi) that lack a first-class provider
+// credential store — for those, agent_config is the sole channel for auth
+// and routing. Non-empty values win over inherited provider creds.
+//
+// Reads go through OrgSettingsCache when configured so a burst of Amp/Pi
+// session starts for the same org amortizes to one DB lookup per TTL window.
+// The settings update handler invalidates the cache after a write, so
+// configuration changes take effect immediately rather than waiting for
+// the TTL to expire.
+func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
+	agentConfig, ok := o.loadAgentConfig(ctx, orgID, agentType)
+	if !ok {
+		return
+	}
+	for k, v := range agentConfig[string(agentType)] {
+		if v != "" {
+			merged[k] = v
+		}
+	}
+}
+
+// loadAgentConfig returns the org's AgentEnvConfig, using the orchestrator's
+// OrgSettingsCache as a front when present. Returns (nil, false) and logs a
+// warning if the org can't be loaded; callers should treat that as "no
+// overrides available" rather than failing the session start.
+func (o *Orchestrator) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (models.AgentEnvConfig, bool) {
+	if o.orgs == nil {
+		o.logger.Warn().
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("orchestrator has no orgs store; skipping agent_config overrides (agent may run without auth)")
+		return nil, false
+	}
+
+	if o.orgSettingsCache != nil {
+		if cached, hit := o.orgSettingsCache.Get(orgID); hit {
+			return cached, true
+		}
+	}
+
+	org, err := o.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		o.logger.Warn().
+			Err(err).
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("failed to load org for agent_config overrides; agent may run without auth")
+		return nil, false
+	}
+	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
+	if parseErr != nil {
+		o.logger.Warn().
+			Err(parseErr).
+			Str("agent_type", string(agentType)).
+			Str("org_id", orgID.String()).
+			Msg("failed to parse org settings for agent_config overrides; agent may run without auth")
+		return nil, false
+	}
+
+	if o.orgSettingsCache != nil {
+		// Store the (possibly nil) AgentConfig so a second hit doesn't re-fetch
+		// just to discover the org has no agent_config.
+		o.orgSettingsCache.Set(orgID, orgSettings.AgentConfig)
+	}
+
+	return orgSettings.AgentConfig, true
 }
 
 // resolveProviderConfig returns the best ProviderConfig for a provider,

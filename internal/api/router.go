@@ -34,7 +34,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, orgSettingsInvalidator handlers.OrgSettingsInvalidator) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -236,6 +236,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	teamHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetLogger(logger)
+	if orgSettingsInvalidator != nil {
+		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
+	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
 	automationHandler.SetAuditEmitter(auditEmitter)

@@ -1,0 +1,85 @@
+// Package adapters contains implementations of the agent.AgentAdapter interface
+// for specific coding agent CLIs.
+package adapters
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
+)
+
+// PiAdapter runs the Pi CLI (npm: @mariozechner/pi-coding-agent) inside a sandbox.
+//
+// Pi is a meta-agent that can route to many providers (Anthropic, OpenAI,
+// Google, Moonshot, etc.) using a single CLI. The active model is selected
+// via the --model flag, with PI_MODEL_CUSTOM (free-form) winning over
+// PI_MODEL (curated dropdown). Provider auth env vars are inherited from
+// the other configured agents in the orchestrator.
+type PiAdapter struct {
+	logger zerolog.Logger
+}
+
+// NewPiAdapter creates a new adapter for running Pi CLI.
+func NewPiAdapter(logger zerolog.Logger) *PiAdapter {
+	return &PiAdapter{
+		logger: logger,
+	}
+}
+
+// Name returns the agent identifier.
+func (a *PiAdapter) Name() models.AgentType {
+	return models.AgentTypePi
+}
+
+// PreparePrompt constructs the prompts for Pi based on the issue context.
+func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+	if input == nil || input.Issue == nil {
+		return nil, fmt.Errorf("agent input and issue are required")
+	}
+
+	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
+
+	systemPrompt := buildSystemPrompt(input)
+	userPrompt := buildUserPrompt(input)
+	files := extractFileHints(input)
+
+	return &agent.AgentPrompt{
+		SystemPrompt: systemPrompt,
+		UserPrompt:   userPrompt,
+		MaxTokens:    maxTokens,
+		Files:        files,
+	}, nil
+}
+
+// Execute runs the Pi CLI inside the sandbox and streams output. See
+// runStreamingAgent for the shared continuation handling (Pi has no headless
+// resume flag, same as Amp).
+func (a *PiAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	return runStreamingAgent(ctx, piStreamingConfig, a.logger, sandbox, prompt, logCh)
+}
+
+// piStreamingConfig wires runStreamingAgent for Pi.
+//
+// The active model is resolved inside the shell so PI_MODEL_CUSTOM can
+// override PI_MODEL, with a curated default when both are unset. Both env vars
+// are populated by the orchestrator from AgentEnvConfig["pi"].
+var piStreamingConfig = streamingAgentConfig{
+	DisplayName: "Pi",
+	CLIName:     "pi",
+	BuildCmd: func(escapedPromptPath string) string {
+		return fmt.Sprintf(
+			"pi -p \"$(cat '%s')\" --mode json --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\"",
+			escapedPromptPath,
+			models.PiModelClaudeOpus47,
+		)
+	},
+	ParseConfig: streamParseConfig{
+		MessageAsAssistant: true,
+		DoneAsResult:       true,
+		CaptureToolModel:   true,
+	},
+}
