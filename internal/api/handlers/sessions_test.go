@@ -2860,7 +2860,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
