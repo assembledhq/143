@@ -149,6 +149,13 @@ func main() {
 	// that worker only after the TTL (DefaultOrgSettingsCacheTTL) expires.
 	// That's the safety net; if you need cross-process invalidation later,
 	// wire LISTEN/NOTIFY through OrgSettingsCache.InvalidateOrg.
+	//
+	// Even in single-process mode the invalidation is *soft*: a reader racing
+	// the post-write InvalidateOrg can re-populate the cache with the
+	// pre-write value (cache miss → DB read → Set with stale row), leaving
+	// the entry stale until the next write or TTL expiry. Last-writer-wins,
+	// so no corruption — but don't rely on a strict happens-before between
+	// settings commit and next-read.
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, orgSettingsCache)
 	if err != nil {

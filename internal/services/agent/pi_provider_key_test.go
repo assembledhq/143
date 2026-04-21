@@ -133,10 +133,11 @@ func TestNarrowPiProviderKeys(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		env    map[string]string
-		want   map[string]string
-		absent []string
+		name              string
+		env               map[string]string
+		want              map[string]string
+		absent            []string
+		wantUnknownPrefix string
 	}{
 		{
 			name: "anthropic model keeps only ANTHROPIC_API_KEY",
@@ -196,7 +197,7 @@ func TestNarrowPiProviderKeys(t *testing.T) {
 			absent: []string{"ANTHROPIC_API_KEY"},
 		},
 		{
-			name: "unknown prefix keeps all inherited keys",
+			name: "unknown prefix keeps all inherited keys and reports prefix",
 			env: map[string]string{
 				"PI_MODEL_CUSTOM":   "moonshot/kimi-k2",
 				"ANTHROPIC_API_KEY": "sk-ant",
@@ -209,6 +210,7 @@ func TestNarrowPiProviderKeys(t *testing.T) {
 				"OPENAI_API_KEY":    "sk-openai",
 				"GEMINI_API_KEY":    "gem",
 			},
+			wantUnknownPrefix: "moonshot",
 		},
 		{
 			name: "empty env falls back to default prefix (anthropic)",
@@ -228,7 +230,8 @@ func TestNarrowPiProviderKeys(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			narrowPiProviderKeys(tc.env)
+			gotUnknownPrefix := narrowPiProviderKeys(tc.env)
+			require.Equal(t, tc.wantUnknownPrefix, gotUnknownPrefix, "unknown-prefix return value")
 			for k, v := range tc.want {
 				require.Equal(t, v, tc.env[k], "key %s should be kept with expected value", k)
 			}

@@ -422,7 +422,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// model so the sandbox only sees the single credential Pi will actually
 	// use. Runs after ModelOverride so a per-run switch shapes the env too.
 	if run.AgentType == models.AgentTypePi {
-		narrowPiProviderKeys(sandboxCfg.Env)
+		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
+			log.Warn().
+				Str("provider_prefix", unknownPrefix).
+				Str("model", piResolvedModel(sandboxCfg.Env)).
+				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
+		}
 	}
 	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
@@ -796,7 +801,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 	if session.AgentType == models.AgentTypePi {
-		narrowPiProviderKeys(sandboxCfg.Env)
+		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
+			log.Warn().
+				Str("provider_prefix", unknownPrefix).
+				Str("model", piResolvedModel(sandboxCfg.Env)).
+				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
+		}
 	}
 	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
@@ -1700,8 +1710,10 @@ func piResolvedModel(env map[string]string) string {
 // Only narrows for known provider prefixes (anthropic/openai/google/gemini):
 // for unknown prefixes (moonshot via PI_MODEL_CUSTOM, etc.) we can't tell
 // which key Pi will use upstream, so the weaker "keep all inherited keys"
-// posture is intentional.
-func narrowPiProviderKeys(env map[string]string) {
+// posture is intentional. Returns the unknown prefix in that case (or "" when
+// narrowing happened), so callers can log a warning that all inherited
+// provider credentials were exported to the sandbox.
+func narrowPiProviderKeys(env map[string]string) string {
 	model := piResolvedModel(env)
 	prefix, _, _ := strings.Cut(model, "/")
 	const (
@@ -1719,7 +1731,10 @@ func narrowPiProviderKeys(env map[string]string) {
 	case "google", "gemini":
 		delete(env, ak)
 		delete(env, ok)
+	default:
+		return prefix
 	}
+	return ""
 }
 
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org

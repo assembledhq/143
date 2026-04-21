@@ -78,6 +78,16 @@ func (c *OrgSettingsCache) Set(orgID uuid.UUID, config models.AgentEnvConfig) {
 // called from the settings update handler after a successful DB write so the
 // next Amp/Pi session start sees the new config without waiting for TTL
 // expiry.
+//
+// This is a soft invalidation, not a barrier: a concurrent reader that races
+// the InvalidateOrg call (cache miss → DB read → Set) can re-populate the
+// cache with the value committed just before the write, leaving the entry
+// stale until the next invalidation or TTL expiry. In practice the window is
+// microseconds and the next read wins (last-writer-wins), so no data is
+// corrupted — but callers that need a strict happens-before between "settings
+// committed" and "next session reads new value" should not rely on this
+// alone. For cross-process invalidation, see the comment in cmd/server/main.go
+// where the cache is constructed.
 func (c *OrgSettingsCache) InvalidateOrg(orgID uuid.UUID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
