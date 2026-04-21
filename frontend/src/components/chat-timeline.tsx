@@ -4,6 +4,12 @@ import { useState, useCallback, useEffect } from "react";
 import { ChevronRight, AlertTriangle, FileCode2, X, FileText, ClipboardList, Check, PenLine } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { MarkdownContent } from "@/components/markdown";
 import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
@@ -19,10 +25,81 @@ function safeDate(dateStr: string): Date | null {
 function formatTimestamp(dateStr: string): string {
   const date = safeDate(dateStr);
   if (!date) return "";
-  return date.toLocaleTimeString("en-US", {
+  return date.toLocaleTimeString(undefined, {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function formatAbsoluteDateTime(dateStr: string): string {
+  const date = safeDate(dateStr);
+  if (!date) return "";
+  return date.toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function formatDaySeparatorLabel(dateStr: string): string {
+  const date = safeDate(dateStr);
+  if (!date) return "";
+  const now = new Date();
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  const startOfDate = new Date(date).setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((startOfToday - startOfDate) / 86_400_000);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+function TimestampLabel({
+  dateStr,
+  formatter,
+  className,
+}: {
+  dateStr: string;
+  formatter: (s: string) => string;
+  className?: string;
+}) {
+  const absolute = formatAbsoluteDateTime(dateStr);
+  const label = formatter(dateStr);
+  if (!absolute) {
+    return <span className={className}>{label}</span>;
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={className}>{label}</span>
+      </TooltipTrigger>
+      <TooltipContent>{absolute}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function DaySeparator({ dateStr }: { dateStr: string }) {
+  const label = formatDaySeparatorLabel(dateStr);
+  if (!label) return null;
+  return (
+    <div className="sticky top-0 z-10 -mx-4 px-4 py-1.5 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border" />
+        <span className="font-medium tabular-nums">{label}</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    </div>
+  );
 }
 
 function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResult?: SessionLog }) {
@@ -38,9 +115,11 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
       >
         <ChevronRight className={`h-3 w-3 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="text-foreground truncate min-w-0">{label}</span>
-        <span className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0">
-          {formatTimestamp(toolUse.created_at)}
-        </span>
+        <TimestampLabel
+          dateStr={toolUse.created_at}
+          formatter={formatTimestamp}
+          className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0"
+        />
       </button>
       {open && (
         <div className="ml-7 mt-1 mb-2 space-y-1.5">
@@ -92,9 +171,11 @@ function ErrorEntry({ log }: { log: SessionLog }) {
             </button>
           )}
         </div>
-        <span className="text-xs text-muted-foreground shrink-0">
-          {formatTimestamp(log.created_at)}
-        </span>
+        <TimestampLabel
+          dateStr={log.created_at}
+          formatter={formatTimestamp}
+          className="text-xs text-muted-foreground shrink-0"
+        />
       </div>
     </div>
   );
@@ -103,7 +184,11 @@ function ErrorEntry({ log }: { log: SessionLog }) {
 function HiddenLogEntry({ log }: { log: SessionLog }) {
   return (
     <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70">
-      <span className="shrink-0 w-[52px]">{formatTimestamp(log.created_at)}</span>
+      <TimestampLabel
+        dateStr={log.created_at}
+        formatter={formatTimestamp}
+        className="shrink-0 w-[52px]"
+      />
       <Badge
         variant="secondary"
         className="shrink-0 text-xs px-1 py-0 bg-muted text-muted-foreground/60"
@@ -130,9 +215,11 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         <span className="text-muted-foreground">
           {logs.length} log {logs.length === 1 ? "entry" : "entries"}
         </span>
-        <span className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0">
-          {formatTimestamp(logs[0].created_at)}
-        </span>
+        <TimestampLabel
+          dateStr={logs[0].created_at}
+          formatter={formatTimestamp}
+          className="ml-auto text-muted-foreground/60 text-xs tabular-nums shrink-0"
+        />
       </button>
       {open && (
         <div className="ml-7 mt-1 mb-2 rounded-md border border-border bg-muted/30 py-1 overflow-x-auto max-h-[300px] overflow-y-auto">
@@ -154,12 +241,12 @@ export function formatMessageTime(dateStr: string): string {
     date.getMonth() === now.getMonth() &&
     date.getDate() === now.getDate();
   if (isToday) {
-    return date.toLocaleTimeString("en-US", {
+    return date.toLocaleTimeString(undefined, {
       hour: "numeric",
       minute: "2-digit",
     });
   }
-  return date.toLocaleDateString("en-US", {
+  return date.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -300,9 +387,11 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
-          <p className="text-xs mt-1 text-white/70">
-            {formatMessageTime(msg.created_at)}
-          </p>
+          <TimestampLabel
+            dateStr={msg.created_at}
+            formatter={formatMessageTime}
+            className="block text-xs mt-1 text-white/70"
+          />
         </div>
       </div>
     );
@@ -314,9 +403,11 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentGrid attachments={msg.attachments} />
       )}
-      <p className="text-xs mt-1 text-muted-foreground">
-        {formatMessageTime(msg.created_at)}
-      </p>
+      <TimestampLabel
+        dateStr={msg.created_at}
+        formatter={formatMessageTime}
+        className="block text-xs mt-1 text-muted-foreground"
+      />
     </AssistantBubble>
   );
 }
@@ -418,6 +509,7 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
   let hiddenBatch: SessionLog[] = [];
+  let lastDay: string | null = null;
 
   function flushHidden() {
     if (hiddenBatch.length > 0) {
@@ -428,6 +520,15 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     }
   }
 
+  function maybeEmitDaySeparator(dateStr: string) {
+    const date = safeDate(dateStr);
+    if (!date) return;
+    const day = date.toDateString();
+    if (day === lastDay) return;
+    lastDay = day;
+    rendered.push(<DaySeparator key={`day-${day}`} dateStr={dateStr} />);
+  }
+
   for (const entry of entries) {
     if (entry.kind === "log") {
       hiddenBatch.push(entry.data);
@@ -435,6 +536,10 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     }
 
     flushHidden();
+
+    const entryDateStr =
+      entry.kind === "tool_group" ? entry.toolUse.created_at : entry.data.created_at;
+    maybeEmitDaySeparator(entryDateStr);
 
     switch (entry.kind) {
       case "message":
@@ -468,9 +573,11 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
             isRunning={isRunning}
           >
             <MarkdownContent content={entry.data.content} />
-            <p className="text-xs mt-1 text-muted-foreground">
-              {formatMessageTime(entry.data.created_at)}
-            </p>
+            <TimestampLabel
+              dateStr={entry.data.created_at}
+              formatter={formatMessageTime}
+              className="block text-xs mt-1 text-muted-foreground"
+            />
           </PlanOutputBubble>
         );
         break;
@@ -520,5 +627,9 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     );
   }
 
-  return <>{rendered}</>;
+  return (
+    <TooltipProvider delayDuration={200}>
+      {rendered}
+    </TooltipProvider>
+  );
 }
