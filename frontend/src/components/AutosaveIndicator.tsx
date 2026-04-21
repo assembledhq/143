@@ -19,9 +19,10 @@ const STATUS_COPY: Record<Exclude<AutosaveStatus, "idle">, string> = {
  * Small status chip for autosave surfaces. Render one per page (or per
  * logically distinct save scope) next to the heading it describes.
  *
- * Reserves layout space even when idle so adjacent content does not reflow
- * on status changes. Uses `aria-live="polite"` so screen readers announce
- * transitions without interrupting the user.
+ * Reserves both vertical and horizontal space even when idle so adjacent
+ * content does not reflow on status transitions. `min-w` is sized to fit
+ * the longest copy variant ("Couldn't save" + icon). Uses `aria-live="polite"`
+ * so screen readers announce transitions without interrupting the user.
  */
 export function AutosaveIndicator({ status, className }: AutosaveIndicatorProps) {
   return (
@@ -29,7 +30,7 @@ export function AutosaveIndicator({ status, className }: AutosaveIndicatorProps)
       role="status"
       aria-live="polite"
       className={cn(
-        "inline-flex min-h-5 items-center gap-1.5 text-xs text-muted-foreground",
+        "inline-flex min-h-5 min-w-[6.5rem] items-center gap-1.5 text-xs text-muted-foreground",
         className,
       )}
     >

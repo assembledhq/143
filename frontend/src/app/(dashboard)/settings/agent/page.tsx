@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -37,6 +37,7 @@ import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
+import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { queryKeys } from "@/lib/query-keys";
 import {
   applyOrgSettingsPatch,
@@ -658,13 +659,6 @@ export default function AgentPage() {
   );
 }
 
-/**
- * Text field for an agent_config env var. Debounces typing locally (400ms),
- * fires on blur, and resyncs from the server only when the server value
- * diverges from the last value this field sent. Distinct from
- * useAutosaveNumericField because these values are free-form strings — we
- * don't want to parse/clamp, and an empty string means "delete this env var".
- */
 interface AgentConfigTextFieldProps {
   id: string;
   sensitive?: boolean;
@@ -680,57 +674,16 @@ function AgentConfigTextField({
   serverValue,
   onCommit,
 }: AgentConfigTextFieldProps) {
-  // Using the "store information from previous renders" pattern so we can
-  // resync local state when the server value changes for reasons other than
-  // our own save (optimistic rollback, another tab) without firing an effect.
-  const [trackedServer, setTrackedServer] = useState(serverValue);
-  const [local, setLocal] = useState(serverValue);
-  const [lastSent, setLastSent] = useState(serverValue);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  if (serverValue !== trackedServer) {
-    setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
-      setLocal(serverValue);
-      setLastSent(serverValue);
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
-
-  const commit = (value: string) => {
-    if (value === lastSent) return;
-    setLastSent(value);
-    onCommit(value);
-  };
-
+  const field = useDebouncedTextField({ serverValue, onCommit });
   return (
     <Input
       id={id}
       type={sensitive ? "password" : "text"}
       placeholder={placeholder}
-      value={local}
+      value={field.value}
       className="font-mono text-xs"
-      onChange={(e) => {
-        const value = e.target.value;
-        setLocal(value);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          debounceRef.current = null;
-          commit(value);
-        }, 400);
-      }}
-      onBlur={() => {
-        if (debounceRef.current) {
-          clearTimeout(debounceRef.current);
-          debounceRef.current = null;
-        }
-        commit(local);
-      }}
+      onChange={(e) => field.onChange(e.target.value)}
+      onBlur={field.onBlur}
     />
   );
 }

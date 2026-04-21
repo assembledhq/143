@@ -73,6 +73,15 @@ function maybeEvictQueue(key: string, entry: QueueEntry): void {
   queues.delete(key);
 }
 
+/**
+ * Clear the module-level queue map. Tests only — never call from app code.
+ * Exported so suites can guarantee isolation between cases when they reuse
+ * a queryKey or when a test leaves an in-flight/linger timer dangling.
+ */
+export function __resetAutosaveQueuesForTests(): void {
+  queues.clear();
+}
+
 function emit(entry: QueueEntry, status: QueueStatus): void {
   for (const listener of entry.listeners) {
     listener(status);
@@ -116,6 +125,17 @@ async function run<TVars>(
       // Fire the coalesced follow-up. Intentionally not awaited here — the
       // original caller's promise chain is complete; follow-ups are driven
       // by the shared queue.
+      //
+      // Closure capture: `mutationFn`, `applyOptimistic`, and `errorMessage`
+      // are the values from the *first* dispatch that kicked off this chain.
+      // Concretely: if caller A fires with its fns, then caller B queues a
+      // follow-up mid-flight, B's follow-up still runs through A's fns. The
+      // `dispatch` callback funnels every queue entry through refs that read
+      // each caller's latest values at dispatch time, so the captures here
+      // are always from a live `useAutosave` instance — but the instance is
+      // whichever one started the chain. All consumers of a shared queryKey
+      // currently pass equivalent `mutationFn`/`applyOptimistic`, so this is
+      // benign; revisit if divergent implementations ever share a key.
       void run(queryClient, entry, next, queryKey, mutationFn, applyOptimistic, errorMessage);
     } else {
       maybeEvictQueue(hashKey(queryKey), entry);

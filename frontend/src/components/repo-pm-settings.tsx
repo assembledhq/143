@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -22,6 +22,7 @@ import {
 import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
+import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import type {
   Organization,
   OrgSettings,
@@ -449,12 +450,6 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   );
 }
 
-/**
- * Textarea that debounces typing (400ms) and commits on blur. Resyncs when
- * the server value changes for reasons other than the caller's own save
- * (optimistic rollback, another tab) using the "store info from previous
- * renders" pattern so no effect-driven setState is needed.
- */
 interface DebouncedTextareaProps {
   id: string;
   rows: number;
@@ -470,53 +465,15 @@ function DebouncedTextarea({
   serverValue,
   onCommit,
 }: DebouncedTextareaProps) {
-  const [trackedServer, setTrackedServer] = useState(serverValue);
-  const [local, setLocal] = useState(serverValue);
-  const [lastSent, setLastSent] = useState(serverValue);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  if (serverValue !== trackedServer) {
-    setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
-      setLocal(serverValue);
-      setLastSent(serverValue);
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
-
-  const commit = (value: string) => {
-    if (value === lastSent) return;
-    setLastSent(value);
-    onCommit(value);
-  };
-
+  const field = useDebouncedTextField({ serverValue, onCommit });
   return (
     <Textarea
       id={id}
       rows={rows}
       placeholder={placeholder}
-      value={local}
-      onChange={(e) => {
-        const value = e.target.value;
-        setLocal(value);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          debounceRef.current = null;
-          commit(value);
-        }, 400);
-      }}
-      onBlur={() => {
-        if (debounceRef.current) {
-          clearTimeout(debounceRef.current);
-          debounceRef.current = null;
-        }
-        commit(local);
-      }}
+      value={field.value}
+      onChange={(e) => field.onChange(e.target.value)}
+      onBlur={field.onBlur}
     />
   );
 }

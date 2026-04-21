@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Button } from "@/components/ui/button";
@@ -17,6 +16,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { queryKeys } from "@/lib/query-keys";
 import { useAutosave } from "@/hooks/useAutosave";
+import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
 import type { OrgSettings } from "@/lib/types";
 
@@ -208,53 +208,19 @@ interface DebouncedTextareaProps {
 }
 
 function DebouncedTextarea({ id, rows, placeholder, serverValue, onCommit }: DebouncedTextareaProps) {
-  const [trackedServer, setTrackedServer] = useState(serverValue);
-  const [local, setLocal] = useState(serverValue);
-  const [lastSent, setLastSent] = useState(serverValue);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  if (serverValue !== trackedServer) {
-    setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
-      setLocal(serverValue);
-      setLastSent(serverValue);
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
-
-  const commit = (value: string) => {
-    if (value === lastSent) return;
-    setLastSent(value);
-    onCommit(value);
-  };
-
+  const field = useDebouncedTextField({
+    serverValue,
+    onCommit,
+    debounceMs: TEXT_DEBOUNCE_MS,
+  });
   return (
     <Textarea
       id={id}
       rows={rows}
       placeholder={placeholder}
-      value={local}
-      onChange={(event) => {
-        const value = event.target.value;
-        setLocal(value);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          debounceRef.current = null;
-          commit(value);
-        }, TEXT_DEBOUNCE_MS);
-      }}
-      onBlur={() => {
-        if (debounceRef.current) {
-          clearTimeout(debounceRef.current);
-          debounceRef.current = null;
-        }
-        commit(local);
-      }}
+      value={field.value}
+      onChange={(event) => field.onChange(event.target.value)}
+      onBlur={field.onBlur}
     />
   );
 }
@@ -267,52 +233,18 @@ interface DebouncedInputProps {
 }
 
 function DebouncedInput({ id, placeholder, serverValue, onCommit }: DebouncedInputProps) {
-  const [trackedServer, setTrackedServer] = useState(serverValue);
-  const [local, setLocal] = useState(serverValue);
-  const [lastSent, setLastSent] = useState(serverValue);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  if (serverValue !== trackedServer) {
-    setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
-      setLocal(serverValue);
-      setLastSent(serverValue);
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
-
-  const commit = (value: string) => {
-    if (value === lastSent) return;
-    setLastSent(value);
-    onCommit(value);
-  };
-
+  const field = useDebouncedTextField({
+    serverValue,
+    onCommit,
+    debounceMs: TEXT_DEBOUNCE_MS,
+  });
   return (
     <Input
       id={id}
       placeholder={placeholder}
-      value={local}
-      onChange={(event) => {
-        const value = event.target.value;
-        setLocal(value);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          debounceRef.current = null;
-          commit(value);
-        }, TEXT_DEBOUNCE_MS);
-      }}
-      onBlur={() => {
-        if (debounceRef.current) {
-          clearTimeout(debounceRef.current);
-          debounceRef.current = null;
-        }
-        commit(local);
-      }}
+      value={field.value}
+      onChange={(event) => field.onChange(event.target.value)}
+      onBlur={field.onBlur}
     />
   );
 }
