@@ -1,25 +1,8 @@
 import type { SessionLog } from "./types";
 
-/**
- * Maps a derived tool call to one of a small set of semantic icon kinds.
- * The actual lucide-react component is resolved at the call site.
- */
-export type ToolIconKind =
-  | "terminal"
-  | "file-read"
-  | "file-edit"
-  | "search"
-  | "glob"
-  | "web"
-  | "agent"
-  | "plan"
-  | "wrench";
-
 export interface ToolDisplay {
   /** Short human-readable label like `Ran \`git log\`` or `Read models.go`. */
   label: string;
-  /** Semantic icon kind — callers map to concrete icon components. */
-  icon: ToolIconKind;
   /** Normalized canonical tool name used for the template (for debugging/analytics). */
   canonical: string;
 }
@@ -132,74 +115,51 @@ export function deriveToolDisplay(toolUse: SessionLog): ToolDisplay {
   //    not for Agent/Task where `description` is the subagent task name.
   const description = input && asString(input.description);
   if (description && canonical !== "agent") {
-    return { label: `Ran ${description}`, icon: iconFor(canonical), canonical };
+    return { label: `Ran ${description}`, canonical };
   }
 
   // 2. Per-canonical-tool templates.
   switch (canonical) {
     case "bash": {
       const cmd = input && asString(input.command);
-      if (cmd) return { label: `Ran \`${shortCommand(cmd)}\``, icon: "terminal", canonical };
-      return { label: "Ran shell command", icon: "terminal", canonical };
+      if (cmd) return { label: `Ran \`${shortCommand(cmd)}\``, canonical };
+      return { label: "Ran shell command", canonical };
     }
     case "read": {
       const path = input && (asString(input.path) ?? asString(input.file_path) ?? asString(input.absolute_path));
-      if (path) return { label: `Read ${basename(path)}`, icon: "file-read", canonical };
-      return { label: "Read file", icon: "file-read", canonical };
+      if (path) return { label: `Read ${basename(path)}`, canonical };
+      return { label: "Read file", canonical };
     }
     case "edit": {
       const path = input && (asString(input.path) ?? asString(input.file_path) ?? asString(input.absolute_path));
-      if (path) return { label: `Edited ${basename(path)}`, icon: "file-edit", canonical };
-      return { label: "Edited file", icon: "file-edit", canonical };
+      if (path) return { label: `Edited ${basename(path)}`, canonical };
+      return { label: "Edited file", canonical };
     }
     case "grep": {
       const pattern = input && asString(input.pattern);
-      if (pattern) return { label: `Searched for \`${truncate(pattern, MAX_PATTERN_LEN)}\``, icon: "search", canonical };
-      return { label: "Searched files", icon: "search", canonical };
+      if (pattern) return { label: `Searched for \`${truncate(pattern, MAX_PATTERN_LEN)}\``, canonical };
+      return { label: "Searched files", canonical };
     }
     case "glob": {
       const pattern = input && asString(input.pattern);
-      if (pattern) return { label: `Found files matching \`${truncate(pattern, MAX_PATTERN_LEN)}\``, icon: "glob", canonical };
-      return { label: "Listed files", icon: "glob", canonical };
+      if (pattern) return { label: `Found files matching \`${truncate(pattern, MAX_PATTERN_LEN)}\``, canonical };
+      return { label: "Listed files", canonical };
     }
     case "web_fetch": {
       const url = input && asString(input.url);
-      if (url) return { label: `Fetched ${hostname(url)}`, icon: "web", canonical };
-      return { label: "Fetched URL", icon: "web", canonical };
+      if (url) return { label: `Fetched ${hostname(url)}`, canonical };
+      return { label: "Fetched URL", canonical };
     }
     case "agent": {
       const desc = input && (asString(input.description) ?? asString(input.prompt));
-      if (desc) return { label: `Ran agent: ${truncate(desc, 50)}`, icon: "agent", canonical };
-      return { label: "Ran subagent", icon: "agent", canonical };
+      if (desc) return { label: `Ran agent: ${truncate(desc, 50)}`, canonical };
+      return { label: "Ran subagent", canonical };
     }
     case "plan": {
-      return { label: "Updated plan", icon: "plan", canonical };
+      return { label: "Updated plan", canonical };
     }
     default:
-      return { label: `Ran ${rawTool}`, icon: "wrench", canonical: rawTool };
-  }
-}
-
-function iconFor(canonical: string): ToolIconKind {
-  switch (canonical) {
-    case "bash":
-      return "terminal";
-    case "read":
-      return "file-read";
-    case "edit":
-      return "file-edit";
-    case "grep":
-      return "search";
-    case "glob":
-      return "glob";
-    case "web_fetch":
-      return "web";
-    case "agent":
-      return "agent";
-    case "plan":
-      return "plan";
-    default:
-      return "wrench";
+      return { label: `Ran ${rawTool}`, canonical: rawTool };
   }
 }
 
