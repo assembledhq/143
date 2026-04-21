@@ -6,31 +6,26 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/models"
 )
 
-// pgErrCheckViolation is the SQLSTATE raised by the enforce_last_admin
-// constraint trigger (migration 000079) when a membership delete or role
-// update would leave the org with no admins. Normal paths go through the
-// *Guarded variants and catch the condition in Go, but any non-guarded write
-// can still trip the trigger — we translate that into ErrLastAdmin so the
-// handler layer reports the invariant consistently regardless of which layer
-// actually caught it.
-const pgErrCheckViolation = "23514"
-
 // mapLastAdminViolation returns ErrLastAdmin if err is a PgError raised by the
-// enforce_last_admin trigger, otherwise err unchanged. Callers use this to
-// funnel trigger-raised violations into the same sentinel the Guarded paths
-// return via in-tx lock-based checking.
+// enforce_last_admin trigger (migration 000079), otherwise err unchanged. The
+// *Guarded variants catch the condition in Go with in-tx admin-row locks, but
+// any non-guarded write can still trip the trigger at COMMIT time since it is
+// DEFERRABLE INITIALLY DEFERRED; funnelling both paths through this mapper
+// lets the handler layer surface a single sentinel regardless of which layer
+// actually caught the violation.
 func mapLastAdminViolation(err error) error {
 	if err == nil {
 		return nil
 	}
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgErrCheckViolation && pgErr.ConstraintName == "enforce_last_admin" {
+	if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.CheckViolation && pgErr.ConstraintName == "enforce_last_admin" {
 		return ErrLastAdmin
 	}
 	return err
@@ -67,9 +62,12 @@ const membershipSelectColumns = `user_id, org_id, role, created_at`
 
 // ListByUser returns every membership the user holds, with the joined org name
 // so the UI switcher can render without a second round-trip. Memberships are
-// ordered by created_at so the oldest membership consistently wins when the
-// middleware falls back to "first available" (keeping pre-multi-org behavior
-// stable for single-membership users).
+// ordered by (created_at, org_id) so the oldest membership consistently wins
+// when the middleware falls back to "first available" — the org_id tiebreak
+// keeps the order deterministic for rows whose created_at is identical (the
+// backfill migration inserts one per existing user at now(), so multi-org
+// users promoted during backfill would otherwise see switcher order flip
+// between pageloads).
 //
 // lint:allow-no-orgid reason="user-scoped lookup — memberships are the authoritative org set, not a target-org query"
 func (s *OrganizationMembershipStore) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.MembershipSummary, error) {
@@ -78,7 +76,7 @@ func (s *OrganizationMembershipStore) ListByUser(ctx context.Context, userID uui
 		FROM organization_memberships m
 		JOIN organizations o ON o.id = m.org_id
 		WHERE m.user_id = @user_id
-		ORDER BY m.created_at ASC`
+		ORDER BY m.created_at ASC, m.org_id ASC`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"user_id": userID})
 	if err != nil {
 		return nil, fmt.Errorf("query memberships: %w", err)
@@ -105,22 +103,48 @@ func (s *OrganizationMembershipStore) Get(ctx context.Context, userID, orgID uui
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrganizationMembership])
 }
 
+// Insert adds a new membership row. Unlike GrantAtLeast, this fails loudly on
+// a (user_id, org_id) conflict. Use it from signup paths where both the user
+// and the org were just inserted in the same transaction: there cannot
+// legitimately be a pre-existing membership, so ON CONFLICT DO NOTHING (or
+// GrantAtLeast's silent no-op) would mask a real bug. Invitation acceptance
+// and role-upgrade paths should use GrantAtLeast instead.
+func (s *OrganizationMembershipStore) Insert(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+	if !models.IsValidRole(role) {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO organization_memberships (user_id, org_id, role)
+		 VALUES (@user_id, @org_id, @role)`,
+		pgx.NamedArgs{
+			"user_id": userID,
+			"org_id":  orgID,
+			"role":    role,
+		})
+	return err
+}
+
 // GrantAtLeast inserts a membership or, if one already exists, upgrades the
 // role to the requested level — never downgrades. The name reflects the
 // semantics: after this call the user has *at least* the requested role.
+// Returns the effective role after the write so callers can echo the actual
+// granted role back to the client (e.g. an admin re-invited as viewer stays
+// admin, and the response should say so rather than parroting the invite's
+// role).
 //
 // This is the correct primitive for invitation acceptance: an idempotent
 // re-accept (e.g. a double-clicked link) must not downgrade an admin back to
 // the invite's original role, but a pending invite that legitimately upgrades
 // an existing member should apply. Privilege ordering is admin > member >
-// viewer; a request for a lower-or-equal role is a no-op.
+// viewer; a request for a lower-or-equal role is a no-op at the DB level but
+// the returned role reflects the row that now exists.
 //
 // Use UpdateRole / UpdateRoleGuarded for explicit role changes (including
 // demotions) — those paths enforce the last-admin invariant, GrantAtLeast
 // does not because it can never demote.
-func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
 	if !models.IsValidRole(role) {
-		return fmt.Errorf("invalid role %q", role)
+		return "", fmt.Errorf("invalid role %q", role)
 	}
 	query := `
 		INSERT INTO organization_memberships (user_id, org_id, role)
@@ -130,13 +154,18 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 			WHEN EXCLUDED.role = 'admin' THEN 'admin'
 			WHEN EXCLUDED.role = 'member' AND organization_memberships.role = 'viewer' THEN 'member'
 			ELSE organization_memberships.role
-		END`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		END
+		RETURNING role`
+	var effective string
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"user_id": userID,
 		"org_id":  orgID,
 		"role":    role,
-	})
-	return err
+	}).Scan(&effective)
+	if err != nil {
+		return "", err
+	}
+	return effective, nil
 }
 
 // UpdateRole changes the user's role within a specific org. Returns
@@ -182,6 +211,16 @@ func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, or
 // historical invitations are preserved as an audit trail of real actions —
 // the invited_by link survives so "who invited this person" is still
 // answerable after the inviter leaves.
+//
+// The legacy auth_sessions.org_id column is intentionally NOT touched: it is
+// NOT NULL in the schema (migration 000001) so we cannot clear it in place,
+// and the middleware no longer reads it for authorization — request-time org
+// resolution flows through last_org_id / header / oldest-membership. The
+// column is scheduled for drop shortly after the sunset window (see the
+// TODO at auth.go persistSessionTx) so carrying a stale value for the
+// handful of requests between removal and session touch is harmless;
+// deleting the session instead would regress the "graceful fallback to
+// another membership" behaviour this PR adds.
 func (s *OrganizationMembershipStore) Remove(ctx context.Context, userID, orgID uuid.UUID) error {
 	// Order matters: deleted_membership runs first and returns whether the
 	// membership existed. The follow-on CTEs gate their WHERE clauses on that

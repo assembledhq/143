@@ -565,9 +565,13 @@ func (h *AuthHandler) ClaimInvitation(w http.ResponseWriter, r *http.Request) {
 		githubLogin = *user.GitHubLogin
 	}
 
-	inv, invErr, err := h.claimInvitationForExistingUser(r.Context(), body.Token, user.Email, githubLogin, user.ID)
+	inv, effectiveRole, invErr, err := h.claimInvitationForExistingUser(r.Context(), body.Token, user.Email, githubLogin, user.ID)
 	if err != nil {
-		h.emitInvitationClaimFailed(r, user.ID, inv, "INTERNAL_ERROR", err.Error())
+		// Never surface the wrapped error text through audit: it can contain
+		// raw pgx / SQL details and the audit row is retained and served back
+		// to admin UIs. Log the detail; persist a fixed generic message.
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).Msg("failed to claim invitation")
+		h.emitInvitationClaimFailed(r, user.ID, inv, "INTERNAL_ERROR", "internal error during invitation claim")
 		writeError(w, r, http.StatusInternalServerError, "CLAIM_FAILED", "failed to claim invitation", err)
 		return
 	}
@@ -589,10 +593,14 @@ func (h *AuthHandler) ClaimInvitation(w http.ResponseWriter, r *http.Request) {
 
 	h.emitInvitationAccepted(r, user.ID, inv)
 
+	// Echo the *effective* role, not the invite's role: GrantAtLeast never
+	// downgrades, so a user who already held admin stays admin even if the
+	// invite named a lower role. Returning inv.Role would mislead the
+	// frontend switcher into rendering a role the user doesn't actually hold.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"org_id": inv.OrgID,
-			"role":   inv.Role,
+			"role":   effectiveRole,
 		},
 	})
 }
@@ -949,9 +957,13 @@ func (h *AuthHandler) acceptInvitationAndUpsertUser(
 		return nil, "", nil, fmt.Errorf("upsert invited oauth user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role); err != nil {
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role)
+	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}
+	// Sync the legacy users.role column with the effective membership role so
+	// the compat-window dual-read lands on the same value the new path sees.
+	user.Role = effectiveRole
 
 	sessionToken, err := h.persistSessionTx(ctx, tx, user)
 	if err != nil {
@@ -1019,9 +1031,14 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 		return nil, "", nil, fmt.Errorf("create invited user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role); err != nil {
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role)
+	if err != nil {
 		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
 	}
+	// Freshly-created password user: the grant is the first membership, so
+	// effectiveRole equals the invited role. Assignment is harmless and
+	// keeps the legacy users.role column in sync with the membership row.
+	user.Role = effectiveRole
 
 	sessionToken, err := h.persistSessionTx(ctx, tx, user)
 	if err != nil {

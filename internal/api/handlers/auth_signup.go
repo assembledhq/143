@@ -58,7 +58,7 @@ func (h *AuthHandler) createSignupOrg(
 
 	// TODO(2026-04-25): drop user.OrgID / user.Role assignments once the
 	// legacy single-org columns are removed from the users table. The
-	// GrantAtLeast call below is the authoritative record of this user's
+	// Insert call below is the authoritative record of this user's
 	// membership; the users.org_id / users.role fields are only set here to
 	// keep code that still reads them during the sunset period working.
 	user.OrgID = org.ID
@@ -67,7 +67,10 @@ func (h *AuthHandler) createSignupOrg(
 		return "", fmt.Errorf("create signup user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, org.ID, models.RoleAdmin); err != nil {
+	// Plain Insert (not GrantAtLeast): both the user and the org were just
+	// created in this tx, so a conflict means something is wrong — we want a
+	// loud failure rather than the silent no-op GrantAtLeast would return.
+	if err := db.NewOrganizationMembershipStore(tx).Insert(ctx, user.ID, org.ID, models.RoleAdmin); err != nil {
 		return "", fmt.Errorf("grant admin membership: %w", err)
 	}
 

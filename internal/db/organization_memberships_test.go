@@ -129,12 +129,13 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 
 			store := NewOrganizationMembershipStore(mock)
 
-			mock.ExpectExec("INSERT INTO organization_memberships").
+			mock.ExpectQuery("INSERT INTO organization_memberships").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow(tt.role))
 
-			err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), tt.role)
+			effective, err := store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), tt.role)
 			require.NoError(t, err)
+			require.Equal(t, tt.role, effective)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
@@ -149,7 +150,7 @@ func TestOrganizationMembershipStore_GrantAtLeast_InvalidRole(t *testing.T) {
 
 	store := NewOrganizationMembershipStore(mock)
 
-	err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "owner")
+	_, err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "owner")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid role")
 }
@@ -482,7 +483,7 @@ func TestOrganizationMembershipStore_RejectInvalidRole(t *testing.T) {
 	err = s.UpdateRole(context.Background(), uuid.New(), uuid.New(), "superadmin")
 	require.Error(t, err)
 
-	err = s.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "guest")
+	_, err = s.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "guest")
 	require.Error(t, err)
 }
 

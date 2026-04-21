@@ -25,6 +25,11 @@ import (
 // map to an HTTP status. The invitation is accepted inside the same tx as the
 // membership upsert, so a race on status will roll the membership back.
 //
+// Returns the effective membership role after the grant so the handler can
+// echo it to the client rather than parroting the invite's role — the two
+// differ whenever the claimer already held a higher role in the org (admin
+// re-invited as viewer stays admin; GrantAtLeast never downgrades).
+//
 // The returned *models.Invitation is non-nil whenever the invitation row was
 // loaded — including failure cases past the initial GetByToken lookup. This
 // lets the caller emit org-scoped audit events for failed claims.
@@ -32,44 +37,45 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	ctx context.Context,
 	token, userEmail, githubLogin string,
 	userID uuid.UUID,
-) (*models.Invitation, *invitationError, error) {
+) (*models.Invitation, string, *invitationError, error) {
 	if h.pool == nil {
-		return nil, nil, fmt.Errorf("auth handler pool is not configured")
+		return nil, "", nil, fmt.Errorf("auth handler pool is not configured")
 	}
 
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin claim transaction: %w", err)
+		return nil, "", nil, fmt.Errorf("begin claim transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	txInvitations := db.NewInvitationStore(tx)
 	inv, _, role, invErr := h.validateInvitationWithStore(ctx, txInvitations, token, userEmail, githubLogin)
 	if invErr != nil {
-		return invitationOrNil(inv), invErr, nil
+		return invitationOrNil(inv), "", invErr, nil
 	}
 
 	txMemberships := db.NewOrganizationMembershipStore(tx)
 
 	if err := txInvitations.Accept(ctx, inv.ID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return &inv, &invitationError{
+			return &inv, "", &invitationError{
 				status:  http.StatusGone,
 				code:    "INVITE_INVALID",
 				message: "this invitation is no longer valid",
 			}, nil
 		}
-		return &inv, nil, fmt.Errorf("accept invitation: %w", err)
+		return &inv, "", nil, fmt.Errorf("accept invitation: %w", err)
 	}
 
-	if err := txMemberships.GrantAtLeast(ctx, userID, inv.OrgID, role); err != nil {
-		return &inv, nil, fmt.Errorf("grant membership: %w", err)
+	effectiveRole, err := txMemberships.GrantAtLeast(ctx, userID, inv.OrgID, role)
+	if err != nil {
+		return &inv, "", nil, fmt.Errorf("grant membership: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return &inv, nil, fmt.Errorf("commit claim transaction: %w", err)
+		return &inv, "", nil, fmt.Errorf("commit claim transaction: %w", err)
 	}
-	return &inv, nil, nil
+	return &inv, effectiveRole, nil, nil
 }
 
 // invitationOrNil returns &inv only when the invitation row was actually
@@ -100,7 +106,7 @@ func (h *AuthHandler) claimPendingInvitationForExistingUser(
 	if token == "" {
 		return
 	}
-	inv, invErr, err := h.claimInvitationForExistingUser(r.Context(), token, userEmail, githubLogin, userID)
+	inv, _, invErr, err := h.claimInvitationForExistingUser(r.Context(), token, userEmail, githubLogin, userID)
 	if err != nil {
 		// The wrapped error can contain raw SQL or filesystem details
 		// (e.g. pgx error messages, store-layer wrap strings). Those belong

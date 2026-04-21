@@ -679,9 +679,9 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(expectedUserID, now))
 	// Grant membership inside the same tx as the invitation claim.
-	mock.ExpectExec("INSERT INTO organization_memberships").
+	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
@@ -922,9 +922,9 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(newUserID, time.Now()))
 	// Membership upsert inside the signup tx.
-	mock.ExpectExec("INSERT INTO organization_memberships").
+	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	// Create session inside the signup tx (5 named args: user_id, org_id, last_org_id, token, expires_at).
 	sessionID := uuid.New()
 	mock.ExpectQuery("INSERT INTO auth_sessions").
@@ -1310,14 +1310,14 @@ func TestAuthHandler_ClaimInvitationForExistingUser_Success(t *testing.T) {
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("INSERT INTO organization_memberships").
+	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	mock.ExpectCommit()
 
 	cfg := &config.Config{}
 	handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
-	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "existing@example.com", "", userID)
+	inv, _, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "existing@example.com", "", userID)
 	require.NoError(t, err)
 	require.Nil(t, invErr)
 	require.NotNil(t, inv)
@@ -1349,7 +1349,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_WrongEmail(t *testing.T) {
 	mock.ExpectRollback()
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
-	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "other@example.com", "", uuid.New())
+	inv, _, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "other@example.com", "", uuid.New())
 	require.NoError(t, err)
 	require.NotNil(t, inv, "invitation pointer should be returned on validation error so caller can audit the failed claim")
 	require.Equal(t, invID, inv.ID)
@@ -1449,9 +1449,9 @@ func TestAuthHandler_ClaimInvitation_Success(t *testing.T) {
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("INSERT INTO organization_memberships").
+	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	mock.ExpectCommit()
 
 	cfg := &config.Config{}
@@ -1557,9 +1557,9 @@ func TestAuthHandler_ClaimInvitation_EmitsAcceptedAudit(t *testing.T) {
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("INSERT INTO organization_memberships").
+	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	mock.ExpectCommit()
 	// Audit emitter runs post-commit; this is the row `emitInvitationAccepted`
 	// writes into audit_logs. AuditLogStore.Create binds 13 named args, which
@@ -1840,7 +1840,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_DBErrors(t *testing.T) {
 			WillReturnError(errors.New("accept"))
 		mock.ExpectRollback()
 
-		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		_, _, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -1854,12 +1854,12 @@ func TestAuthHandler_ClaimInvitationForExistingUser_DBErrors(t *testing.T) {
 		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO organization_memberships").
+		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("upsert"))
 		mock.ExpectRollback()
 
-		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		_, _, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -1873,12 +1873,12 @@ func TestAuthHandler_ClaimInvitationForExistingUser_DBErrors(t *testing.T) {
 		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO organization_memberships").
+		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 		mock.ExpectCommit().WillReturnError(errors.New("commit"))
 
-		_, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		_, _, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -1963,7 +1963,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO organization_memberships").
+		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("upsert"))
 		mock.ExpectRollback()
@@ -1982,9 +1982,9 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO organization_memberships").
+		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 		mock.ExpectQuery("INSERT INTO auth_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
@@ -2159,9 +2159,9 @@ func TestAuthHandler_ClaimPendingInvitationForExistingUser(t *testing.T) {
 		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 			WithArgs(pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-		mock.ExpectExec("INSERT INTO organization_memberships").
+		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 		mock.ExpectCommit()
 
 		cfg := &config.Config{}
@@ -2234,7 +2234,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_AcceptRace(t *testing.T) {
 
 	cfg := &config.Config{}
 	handler := NewAuthHandler(cfg, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
-	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	inv, _, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 	require.NoError(t, err)
 	require.NotNil(t, inv, "invitation pointer is returned even on accept-race so caller can audit")
 	require.Equal(t, invID, inv.ID)
@@ -2255,7 +2255,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_BeginFails(t *testing.T) {
 	mock.ExpectBegin().WillReturnError(errors.New("db down"))
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
-	_, _, err = handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	_, _, _, err = handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 	require.Error(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -2265,7 +2265,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_NilPool(t *testing.T) {
 	t.Parallel()
 
 	handler := &AuthHandler{}
-	_, _, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+	_, _, _, err := handler.claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 	require.Error(t, err)
 }
 
@@ -2287,7 +2287,7 @@ func TestAuthHandler_ClaimInvitationForExistingUser_TokenNotFound(t *testing.T) 
 	mock.ExpectRollback()
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
-	inv, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "missing", "u@example.com", "", uuid.New())
+	inv, _, invErr, err := handler.claimInvitationForExistingUser(context.Background(), "missing", "u@example.com", "", uuid.New())
 	require.NoError(t, err)
 	require.Nil(t, inv, "invitation pointer is nil when the row was never loaded")
 	require.NotNil(t, invErr)

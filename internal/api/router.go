@@ -421,10 +421,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			Users:       userStore,
 			Memberships: membershipStore,
 		}, []byte(cfg.CSRFSigningKey), logger))
-		r.Use(middleware.OrgContext)
 		r.Use(middleware.LogContext(logger))
 		r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
+		// Zero-membership-safe endpoints: a user whose only membership was
+		// just revoked still needs to load /auth/me to see the empty state,
+		// Logout to drop the session, and POST /invitations/claim to redeem
+		// a fresh invite. These routes intentionally do NOT go through
+		// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
+		// empty active role).
 		r.Get("/api/v1/auth/me", authHandler.Me)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
 		// Available to any authenticated user (no RequireRole) — an invited
@@ -437,6 +442,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
 			r.Get("/api/v1/version", healthHandler.Version)
@@ -529,6 +535,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 		// Write routes (admin and member only)
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
@@ -642,6 +649,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 		// Admin-only routes
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
