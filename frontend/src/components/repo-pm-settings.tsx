@@ -4,12 +4,12 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { DebouncedTextarea } from "@/components/debounced-fields";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -22,7 +22,6 @@ import {
 import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   Organization,
@@ -459,33 +458,5 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
         </>
       )}
     </div>
-  );
-}
-
-interface DebouncedTextareaProps {
-  id: string;
-  rows: number;
-  placeholder?: string;
-  serverValue: string;
-  onCommit: (value: string) => void;
-}
-
-function DebouncedTextarea({
-  id,
-  rows,
-  placeholder,
-  serverValue,
-  onCommit,
-}: DebouncedTextareaProps) {
-  const field = useDebouncedTextField({ serverValue, onCommit });
-  return (
-    <Textarea
-      id={id}
-      rows={rows}
-      placeholder={placeholder}
-      value={field.value}
-      onChange={(e) => field.onChange(e.target.value)}
-      onBlur={field.onBlur}
-    />
   );
 }

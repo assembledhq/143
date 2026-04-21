@@ -52,7 +52,6 @@ function SlackChannelPicker() {
       };
     },
     coalesce: coalesceSlackChannels,
-    debounceMs: 400,
   });
 
   const channels = channelsResp?.data ?? [];

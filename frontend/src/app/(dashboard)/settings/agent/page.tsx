@@ -9,6 +9,7 @@ import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AGENT_TYPES, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { DebouncedInput } from "@/components/debounced-fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -38,7 +39,6 @@ import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { queryKeys } from "@/lib/query-keys";
 import {
   applyOrgSettingsPatch,
@@ -482,8 +482,10 @@ export default function AgentPage() {
                   }
                 />
               ) : (
-                <AgentConfigTextField
+                <DebouncedInput
                   id={`org-${agent.key}-${envVar.name}`}
+                  type="text"
+                  className="font-mono text-xs"
                   placeholder={envVar.placeholder ?? "Not set"}
                   serverValue={displayValue}
                   onCommit={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
@@ -728,33 +730,6 @@ export default function AgentPage() {
         />
       )}
     </PageContainer>
-  );
-}
-
-interface AgentConfigTextFieldProps {
-  id: string;
-  placeholder: string;
-  serverValue: string;
-  onCommit: (value: string) => void;
-}
-
-function AgentConfigTextField({
-  id,
-  placeholder,
-  serverValue,
-  onCommit,
-}: AgentConfigTextFieldProps) {
-  const field = useDebouncedTextField({ serverValue, onCommit });
-  return (
-    <Input
-      id={id}
-      type="text"
-      placeholder={placeholder}
-      value={field.value}
-      className="font-mono text-xs"
-      onChange={(e) => field.onChange(e.target.value)}
-      onBlur={field.onBlur}
-    />
   );
 }
 

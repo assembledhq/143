@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { DebouncedInput, DebouncedTextarea } from "@/components/debounced-fields";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
@@ -15,14 +15,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
 import { queryKeys } from "@/lib/query-keys";
 import { useAutosave } from "@/hooks/useAutosave";
-import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
 import type { Organization, OrgSettings, ProductContext, SingleResponse } from "@/lib/types";
-
-const TEXT_DEBOUNCE_MS = 400;
 
 function parseTagList(value: string): string[] {
   return value
@@ -227,55 +223,5 @@ function AutopilotSteeringSheetBody({
         </div>
       </div>
     </SheetContent>
-  );
-}
-
-interface DebouncedTextareaProps {
-  id: string;
-  rows: number;
-  placeholder?: string;
-  serverValue: string;
-  onCommit: (value: string) => void;
-}
-
-function DebouncedTextarea({ id, rows, placeholder, serverValue, onCommit }: DebouncedTextareaProps) {
-  const field = useDebouncedTextField({
-    serverValue,
-    onCommit,
-    debounceMs: TEXT_DEBOUNCE_MS,
-  });
-  return (
-    <Textarea
-      id={id}
-      rows={rows}
-      placeholder={placeholder}
-      value={field.value}
-      onChange={(event) => field.onChange(event.target.value)}
-      onBlur={field.onBlur}
-    />
-  );
-}
-
-interface DebouncedInputProps {
-  id: string;
-  placeholder?: string;
-  serverValue: string;
-  onCommit: (value: string) => void;
-}
-
-function DebouncedInput({ id, placeholder, serverValue, onCommit }: DebouncedInputProps) {
-  const field = useDebouncedTextField({
-    serverValue,
-    onCommit,
-    debounceMs: TEXT_DEBOUNCE_MS,
-  });
-  return (
-    <Input
-      id={id}
-      placeholder={placeholder}
-      value={field.value}
-      onChange={(event) => field.onChange(event.target.value)}
-      onBlur={field.onBlur}
-    />
   );
 }
