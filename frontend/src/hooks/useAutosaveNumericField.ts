@@ -10,7 +10,10 @@ export interface UseAutosaveNumericFieldOptions<TVars> {
   clamp?: (raw: number) => number;
   /**
    * How long to wait after the last keystroke before dispatching the save.
-   * Defaults to 400ms, matching the text-input convention.
+   * Defaults to 400ms, matching the text-input convention. This differs
+   * from `useAutosave`'s own default of 0ms: `useAutosave` assumes discrete
+   * toggle/select events, whereas numeric fields are typed one character at
+   * a time and need the field-level pacing here.
    */
   debounceMs?: number;
 }

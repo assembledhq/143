@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import {
+  hashKey,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 import { captureError } from "@/lib/errors";
 
@@ -30,11 +35,17 @@ const DEFAULT_ERROR_MESSAGE = "Couldn't save. Your change was reverted.";
  * A single serialized mutation queue per queryKey, shared across all components
  * that autosave against the same cache scope. Guarantees at most one in-flight
  * mutation per scope, with coalescing of queued calls.
+ *
+ * `coalesce` is captured on the first dispatch (rather than being taken from
+ * whichever caller dispatches next) so two components that share a `queryKey`
+ * merge pending writes deterministically. Subsequent dispatchers supplying a
+ * different coalesce fn are ignored with a dev-only warning.
  */
 interface QueueEntry {
   inFlight: boolean;
   pendingVars: unknown;
   hasPending: boolean;
+  coalesce?: (queued: unknown, incoming: unknown) => unknown;
   listeners: Set<(status: QueueStatus) => void>;
 }
 
@@ -42,12 +53,8 @@ type QueueStatus = "idle" | "saving" | "saved" | "error";
 
 const queues = new Map<string, QueueEntry>();
 
-function queueKey(key: QueryKey): string {
-  return JSON.stringify(key);
-}
-
 function getQueue(key: QueryKey): QueueEntry {
-  const id = queueKey(key);
+  const id = hashKey(key);
   let entry = queues.get(id);
   if (!entry) {
     entry = {
@@ -59,6 +66,11 @@ function getQueue(key: QueryKey): QueueEntry {
     queues.set(id, entry);
   }
   return entry;
+}
+
+function maybeEvictQueue(key: string, entry: QueueEntry): void {
+  if (entry.inFlight || entry.hasPending || entry.listeners.size > 0) return;
+  queues.delete(key);
 }
 
 function emit(entry: QueueEntry, status: QueueStatus): void {
@@ -92,6 +104,9 @@ async function run<TVars>(
     toast.error(errorMessage);
     emit(entry, "error");
   } finally {
+    // NOTE: `inFlight` flips to false only after `invalidateQueries` settles.
+    // Any `save()` call that races in between lands in the pending slot; the
+    // follow-up dispatch below drains it.
     entry.inFlight = false;
     await queryClient.invalidateQueries({ queryKey });
     if (entry.hasPending) {
@@ -102,6 +117,8 @@ async function run<TVars>(
       // original caller's promise chain is complete; follow-ups are driven
       // by the shared queue.
       void run(queryClient, entry, next, queryKey, mutationFn, applyOptimistic, errorMessage);
+    } else {
+      maybeEvictQueue(hashKey(queryKey), entry);
     }
   }
 }
@@ -164,7 +181,10 @@ export function useAutosave<TVars>({
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const serializedKey = queueKey(queryKey);
+  // `hashKey` is React Query's canonical key hasher: order-stable across object
+  // keys and robust against arrays that stringify identically. Using it means
+  // our queue shares identity with the cache key the consumer already uses.
+  const serializedKey = hashKey(queryKey);
 
   // Subscribe to the shared queue's status so all hooks pointed at the same
   // queryKey see consistent saving/saved/error transitions.
@@ -185,24 +205,39 @@ export function useAutosave<TVars>({
     entry.listeners.add(listener);
     return () => {
       entry.listeners.delete(listener);
+      maybeEvictQueue(serializedKey, entry);
       if (lingerTimerRef.current) {
         clearTimeout(lingerTimerRef.current);
         lingerTimerRef.current = null;
       }
     };
-    // queryKey is captured by value (serializedKey); tolerating the array
-    // identity churn requires this dep.
+    // queryKey identity can change per render; `serializedKey` is the real dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serializedKey]);
 
   const dispatch = useCallback(
     (vars: TVars) => {
       const entry = getQueue(queryKey);
+      // First dispatcher wins on coalesce: if two components share a queryKey
+      // with different coalesce fns, the first one registered is used for all
+      // follow-ups. This keeps merges deterministic rather than dependent on
+      // which component happened to dispatch last.
+      if (!entry.coalesce && coalesceRef.current) {
+        entry.coalesce = coalesceRef.current as (a: unknown, b: unknown) => unknown;
+      } else if (
+        process.env.NODE_ENV !== "production" &&
+        entry.coalesce &&
+        coalesceRef.current &&
+        entry.coalesce !== (coalesceRef.current as (a: unknown, b: unknown) => unknown)
+      ) {
+        console.warn(
+          `useAutosave: multiple callers share queryKey ${serializedKey} but supplied different coalesce functions; ignoring the later one.`,
+        );
+      }
+
       if (entry.inFlight) {
-        // Coalesce into the pending slot — fall back to last-write-wins
-        // when the caller did not provide a coalesce fn.
-        if (entry.hasPending && coalesceRef.current) {
-          entry.pendingVars = coalesceRef.current(entry.pendingVars as TVars, vars);
+        if (entry.hasPending && entry.coalesce) {
+          entry.pendingVars = entry.coalesce(entry.pendingVars, vars);
         } else {
           entry.pendingVars = vars;
         }

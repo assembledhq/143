@@ -289,6 +289,57 @@ describe("useAutosave", () => {
     expect(callOrder).toEqual(["A", "B"]);
   });
 
+  it("shares status transitions across two hooks on the same queryKey", async () => {
+    let resolveMutation: (() => void) | undefined;
+    const mutationFn = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveMutation = resolve;
+        }),
+    );
+
+    const queryKey = ["settings", "test-shared-status"];
+    const { result: resultA } = renderHook(
+      () =>
+        useAutosave<{ settings: { v: number } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+    const { result: resultB } = renderHook(
+      () =>
+        useAutosave<{ settings: { v: number } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    expect(resultA.current.status).toBe("idle");
+    expect(resultB.current.status).toBe("idle");
+
+    act(() => {
+      resultA.current.save({ settings: { v: 1 } });
+    });
+
+    // Both hooks observe the "saving" transition even though only A dispatched.
+    await waitFor(() => expect(resultA.current.status).toBe("saving"));
+    expect(resultB.current.status).toBe("saving");
+
+    await act(async () => {
+      resolveMutation?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(resultA.current.status).toBe("saved"));
+    expect(resultB.current.status).toBe("saved");
+  });
+
   it("cancels pending debounce on unmount without firing the mutation", async () => {
     const mutationFn = vi.fn().mockResolvedValue(undefined);
     const { result, unmount } = renderHook(

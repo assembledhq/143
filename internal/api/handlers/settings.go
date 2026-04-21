@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -164,9 +166,13 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 // mergeSettingsJSON deep-merges a settings patch into the existing settings
 // blob. Objects merge recursively (so patching
 // `agent_config.codex.OPENAI_API_KEY` leaves sibling providers intact);
-// arrays and scalars are replaced wholesale. This matches autosave semantics
-// on the client, where every field mutation needs to be safe against
-// concurrent edits of unrelated fields.
+// arrays and scalars replace wholesale at whichever level they appear. This
+// matches autosave semantics on the client, where every field mutation needs
+// to be safe against concurrent edits of unrelated fields.
+//
+// The top-level patch MUST be a JSON object. Scalars, arrays, and explicit
+// `null` are rejected rather than silently ignored — "no-op" settings PATCHes
+// are a class of bug we want to surface loudly.
 func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error) {
 	var base map[string]any
 	if len(existing) > 0 {
@@ -177,9 +183,15 @@ func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error)
 	if base == nil {
 		base = map[string]any{}
 	}
+	if len(patch) == 0 || bytes.Equal(bytes.TrimSpace(patch), []byte("null")) {
+		return nil, errors.New("settings patch must be a JSON object, got null")
+	}
 	var incoming map[string]any
 	if err := json.Unmarshal(patch, &incoming); err != nil {
 		return nil, err
+	}
+	if incoming == nil {
+		return nil, errors.New("settings patch must be a JSON object")
 	}
 	merged := deepMergeMap(base, incoming)
 	return json.Marshal(merged)

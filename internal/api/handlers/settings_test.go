@@ -411,3 +411,35 @@ func TestMergeSettingsJSON_ScalarReplacesObject(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got, &parsed))
 	require.Equal(t, "gpt-5.4", parsed["llm_model"])
 }
+
+func TestMergeSettingsJSON_NullIncomingValueReplaces(t *testing.T) {
+	t.Parallel()
+	// Sending { "agent_config": null } should clear the nested object rather
+	// than being absorbed silently — this is how callers opt out of a section.
+	existing := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_API_KEY":"sk-a"}},"llm_model":"gpt-5.4"}`)
+	patch := json.RawMessage(`{"agent_config":null}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Nil(t, parsed["agent_config"])
+	// Unrelated siblings are preserved.
+	require.Equal(t, "gpt-5.4", parsed["llm_model"])
+}
+
+func TestMergeSettingsJSON_RejectsNonObjectPatch(t *testing.T) {
+	t.Parallel()
+	// Top-level scalars/arrays cannot express a field patch; we reject
+	// rather than silently discarding.
+	existing := json.RawMessage(`{"llm_model":"gpt-5.4"}`)
+
+	_, err := mergeSettingsJSON(existing, json.RawMessage(`"not-an-object"`))
+	require.Error(t, err)
+
+	_, err = mergeSettingsJSON(existing, json.RawMessage(`[1,2,3]`))
+	require.Error(t, err)
+
+	_, err = mergeSettingsJSON(existing, json.RawMessage(`null`))
+	require.Error(t, err)
+}
