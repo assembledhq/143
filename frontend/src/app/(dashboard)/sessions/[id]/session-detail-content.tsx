@@ -82,7 +82,7 @@ function hasMeaningfulDuration(startedAt?: string, completedAt?: string): boolea
   return new Date(completedAt).getTime() - new Date(startedAt).getTime() >= 1000;
 }
 
-function formatDuration(startedAt?: string, completedAt?: string): string {
+export function formatDuration(startedAt?: string, completedAt?: string): string {
   if (!startedAt) return "-";
   const start = new Date(startedAt);
   const end = completedAt ? new Date(completedAt) : new Date();
