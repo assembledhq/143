@@ -23,6 +23,27 @@ import { queryKeys } from "@/lib/query-keys";
 
 const MAX_NAME_LEN = 120;
 
+// Duck-typed ApiError.code lookup — see hooks/use-auth.ts for rationale. The
+// codes below mirror writeError calls in internal/api/handlers/organizations.go
+// and the rate-limit middleware, so the user sees human copy instead of raw
+// SCREAMING_SNAKE error codes.
+function messageForError(err: unknown): string {
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  switch (code) {
+    case "CREATE_ORG_RATE_LIMITED":
+      return "You've created too many organizations in a short time. Please wait a bit and try again.";
+    case "NAME_TOO_LONG":
+      return `Name must be ${MAX_NAME_LEN} characters or fewer.`;
+    case "MISSING_NAME":
+      return "Name is required.";
+    case "UNAUTHORIZED":
+      return "Your session expired. Please sign in again.";
+    default:
+      if (err instanceof Error && err.message) return err.message;
+      return "Failed to create organization.";
+  }
+}
+
 export interface CreateOrgDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -61,8 +82,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
       router.push("/sessions");
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : "Failed to create organization";
-      setError(msg);
+      setError(messageForError(err));
     },
   });
 

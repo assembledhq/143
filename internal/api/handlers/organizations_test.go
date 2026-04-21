@@ -12,9 +12,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -147,6 +149,50 @@ func TestOrganizationsHandler_Create_HappyPath(t *testing.T) {
 	require.Equal(t, orgID, resp.Data.ID)
 	require.Equal(t, "Acme", resp.Data.Name, "whitespace should be trimmed before persistence")
 	require.Equal(t, models.RoleAdmin, resp.Data.Role)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Happy path with an audit emitter attached — the handler must write an
+// organization.created row keyed on the NEW org (not the caller's previous
+// active org, since the route runs outside OrgContext).
+func TestOrganizationsHandler_Create_EmitsAudit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	userID := uuid.New()
+	orgID := uuid.New()
+	createdAt := time.Now()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(orgID, createdAt, createdAt))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+	// Audit row fires post-commit via the emitter. AuditLogStore.Create binds
+	// 13 named args which pgxmock sees as 13 positional args.
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
+
+	handler := NewOrganizationsHandler(mock)
+	handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
+
+	req := authedRequestAs(t, userID, `{"name":"Acme"}`)
+	w := httptest.NewRecorder()
+
+	handler.Create(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -248,6 +248,11 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 // Requires authentication: the user bucket is the primary defense and
 // anonymous callers should already have been rejected by the auth middleware
 // upstream; the IP bucket is a backstop for any future unauthenticated path.
+//
+// Bucket maps are pruned in the background to prevent unbounded memory growth
+// over process lifetime — entries idle for more than 2h (twice the refill
+// window) are discarded because a bucket that's been untouched that long is
+// indistinguishable from a fresh one anyway.
 func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 	ipBuckets := &sync.Map{}
 	userBuckets := &sync.Map{}
@@ -266,6 +271,8 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 		actual, _ := m.LoadOrStore(key, fresh)
 		return actual.(*tokenBucket)
 	}
+
+	startPruneLoop(ipBuckets, userBuckets, 10*time.Minute, 2*time.Hour)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,6 +296,40 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// startPruneLoop runs a background goroutine that evicts bucket-map entries
+// whose lastRefill is older than staleAfter. Exported as an internal helper
+// so tests can drive pruning synchronously via pruneStaleBuckets.
+func startPruneLoop(ipBuckets, userBuckets *sync.Map, interval, staleAfter time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			pruneStaleBuckets(ipBuckets, staleAfter)
+			pruneStaleBuckets(userBuckets, staleAfter)
+		}
+	}()
+}
+
+// pruneStaleBuckets removes entries whose bucket has not refilled within the
+// last staleAfter window. Safe to call concurrently with allow() because the
+// bucket's own mutex guards lastRefill.
+func pruneStaleBuckets(m *sync.Map, staleAfter time.Duration) {
+	cutoff := time.Now().Add(-staleAfter)
+	m.Range(func(key, value any) bool {
+		bucket, ok := value.(*tokenBucket)
+		if !ok {
+			return true
+		}
+		bucket.mu.Lock()
+		stale := bucket.lastRefill.Before(cutoff)
+		bucket.mu.Unlock()
+		if stale {
+			m.Delete(key)
+		}
+		return true
+	})
 }
 
 // extractIP returns the client's IP for rate-limit bucketing. Prefers the

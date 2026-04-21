@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Check, ChevronsUpDown, Plus, Settings } from "lucide-react";
@@ -37,7 +37,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
 
-  const { data: membershipsResponse, refetch } = useQuery<SingleResponse<MembershipsResponse>>({
+  const { data: membershipsResponse } = useQuery<SingleResponse<MembershipsResponse>>({
     queryKey: queryKeys.auth.memberships,
     queryFn: () => api.auth.memberships(),
   });
@@ -45,26 +45,6 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   const [tabOrgId, setTabOrgId] = useState<string | null>(() => getActiveOrgId());
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-
-  // Keep tabOrgId in sync with sessionStorage changes from other code paths
-  // in the same tab (e.g. Create Org finishing, another component calling
-  // setActiveOrgId). Cross-tab sync is intentionally not wired up — per-tab
-  // org is the whole point.
-  useEffect(() => {
-    const handler = () => setTabOrgId(getActiveOrgId());
-    window.addEventListener(ACTIVE_ORG_CHANGED_EVENT, handler);
-    return () => window.removeEventListener(ACTIVE_ORG_CHANGED_EVENT, handler);
-  }, []);
-
-  useEffect(() => {
-    const handler = () => {
-      void refetch();
-      void queryClient.invalidateQueries();
-      toast.info("Your access to an organization changed. Switched to your next available workspace.");
-    };
-    window.addEventListener(ORG_MEMBERSHIP_REVOKED_EVENT, handler);
-    return () => window.removeEventListener(ORG_MEMBERSHIP_REVOKED_EVENT, handler);
-  }, [refetch, queryClient]);
 
   const memberships = useMemo(
     () => membershipsResponse?.data?.memberships ?? [],
@@ -82,6 +62,38 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     [memberships, effectiveActiveOrgId],
   );
 
+  // Keep tabOrgId in sync with sessionStorage changes from other code paths
+  // in the same tab (e.g. Create Org finishing, another component calling
+  // setActiveOrgId). Cross-tab sync is intentionally not wired up — per-tab
+  // org is the whole point.
+  useEffect(() => {
+    const handler = () => setTabOrgId(getActiveOrgId());
+    window.addEventListener(ACTIVE_ORG_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(ACTIVE_ORG_CHANGED_EVENT, handler);
+  }, []);
+
+  // Name the currently-active org in the revocation toast. Capturing via ref
+  // lets us read the label the user *had* right before the server signaled
+  // revocation without making invalidateQueries race our own read of it.
+  const activeMembershipRef = useRef(activeMembership);
+  useEffect(() => {
+    activeMembershipRef.current = activeMembership;
+  }, [activeMembership]);
+
+  useEffect(() => {
+    const handler = () => {
+      const previousLabel = activeMembershipRef.current?.org_name;
+      void queryClient.invalidateQueries();
+      toast.info(
+        previousLabel
+          ? `Your access to ${previousLabel} changed. Switched to your next available workspace.`
+          : "Your access to an organization changed. Switched to your next available workspace.",
+      );
+    };
+    window.addEventListener(ORG_MEMBERSHIP_REVOKED_EVENT, handler);
+    return () => window.removeEventListener(ORG_MEMBERSHIP_REVOKED_EVENT, handler);
+  }, [queryClient]);
+
   const showSearch = memberships.length >= SEARCH_THRESHOLD;
   const filtered = useMemo(() => {
     if (!search) return memberships;
@@ -97,7 +109,9 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   };
 
   const orgLabel = activeMembership?.org_name ?? "Workspace";
-  const initial = orgLabel[0]?.toUpperCase() ?? "?";
+  // Index by code points, not UTF-16 code units: "🏢 Acme"[0] is a lone high
+  // surrogate that renders as a replacement char. Array.from splits correctly.
+  const initial = Array.from(orgLabel)[0]?.toUpperCase() ?? "?";
 
   return (
     <>
@@ -151,7 +165,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
                 data-testid={`org-switcher-item-${m.org_id}`}
               >
                 <div className="flex h-5 w-5 items-center justify-center rounded bg-muted text-xs font-semibold shrink-0">
-                  {m.org_name[0]?.toUpperCase() ?? "?"}
+                  {Array.from(m.org_name)[0]?.toUpperCase() ?? "?"}
                 </div>
                 <span className="truncate flex-1" title={m.org_name}>
                   {m.org_name}
