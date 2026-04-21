@@ -108,7 +108,7 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
   const inputDetail = formatToolInput(toolUse);
 
   return (
-    <div className="mx-2">
+    <div className="mx-2 min-w-0">
       <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
@@ -122,17 +122,17 @@ function ToolGroupEntry({ toolUse, toolResult }: { toolUse: SessionLog; toolResu
         />
       </button>
       {open && (
-        <div className="ml-7 mt-1 mb-2 space-y-1.5">
+        <div className="ml-7 mt-1 mb-2 space-y-1.5 min-w-0">
           {inputDetail && (
-            <div className="rounded-md border border-border bg-muted/30 p-2 overflow-x-auto">
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80">
+            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80 max-w-full">
                 {inputDetail}
               </pre>
             </div>
           )}
           {toolResult ? (
-            <div className="rounded-md border border-border bg-muted/30 p-2 overflow-x-auto">
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground">
+            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground max-w-full">
                 {toolResult.message}
               </pre>
             </div>
@@ -155,11 +155,11 @@ function ErrorEntry({ log }: { log: SessionLog }) {
   const displayMessage = !isLong || expanded ? log.message : log.message.slice(0, 200) + "...";
 
   return (
-    <div className="mx-2 rounded-md border border-red-200 dark:border-red-900/50 bg-red-500/5 px-3 py-2">
-      <div className="flex items-start gap-2">
+    <div className="mx-2 min-w-0 max-w-full rounded-md border border-red-200 dark:border-red-900/50 bg-red-500/5 px-3 py-2">
+      <div className="flex items-start gap-2 min-w-0">
         <AlertTriangle className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-red-700 dark:text-red-400">
+          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-red-700 dark:text-red-400 max-w-full">
             {displayMessage}
           </pre>
           {isLong && (
@@ -183,7 +183,7 @@ function ErrorEntry({ log }: { log: SessionLog }) {
 
 function HiddenLogEntry({ log }: { log: SessionLog }) {
   return (
-    <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70">
+    <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70 min-w-0">
       <TimestampLabel
         dateStr={log.created_at}
         formatter={formatTimestamp}
@@ -195,7 +195,7 @@ function HiddenLogEntry({ log }: { log: SessionLog }) {
       >
         {log.level}
       </Badge>
-      <span className="break-all">{log.message}</span>
+      <span className="min-w-0 flex-1 break-all">{log.message}</span>
     </div>
   );
 }
@@ -206,7 +206,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
   if (logs.length === 0) return null;
 
   return (
-    <div className="mx-2">
+    <div className="mx-2 min-w-0">
       <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-2 w-full text-left py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors text-xs group"
@@ -222,7 +222,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         />
       </button>
       {open && (
-        <div className="ml-7 mt-1 mb-2 rounded-md border border-border bg-muted/30 py-1 overflow-x-auto max-h-[300px] overflow-y-auto">
+        <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-md border border-border bg-muted/30 py-1 max-h-[300px] overflow-y-auto">
           {logs.map((log) => (
             <HiddenLogEntry key={log.id} log={log} />
           ))}
@@ -359,7 +359,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted">
+      <div className="max-w-[92%] min-w-0 rounded-lg px-3 py-2 text-sm bg-muted break-words">
         {children}
       </div>
     </div>
@@ -376,14 +376,14 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm">
+        <div className="max-w-[92%] min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words">
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
               <span className="text-xs font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
             </div>
           )}
-          {displayContent && <p className="whitespace-pre-wrap">{displayContent}</p>}
+          {displayContent && <p className="whitespace-pre-wrap break-words">{displayContent}</p>}
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
@@ -425,7 +425,7 @@ function PlanOutputBubble({
 }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50">
+      <div className="max-w-[92%] min-w-0 rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50 break-words">
         <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
           <ClipboardList className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
           <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Implementation Plan</span>
