@@ -8,6 +8,9 @@ include:
 
 services:
   caddy:
+    # caddy:2-alpine floats to latest Caddy 2.x. The Caddyfile uses
+    # `dynamic a`, which requires Caddy >= 2.6 — do not downgrade below that
+    # without also removing the dynamic upstream blocks in deploy/Caddyfile.
     image: caddy:2-alpine
     ports:
       - "80:80"
@@ -37,6 +40,10 @@ services:
       retries: 5
       start_period: 60s
     restart: unless-stopped
+    # Give in-flight requests and SSE streams up to 2 minutes to drain before
+    # Docker sends SIGKILL. Must be >= the server's Shutdown deadline in
+    # cmd/server/main.go so the process exits cleanly on its own.
+    stop_grace_period: 120s
     deploy:
       resources:
         limits:
@@ -50,7 +57,17 @@ services:
       NODE_ENV: production
     depends_on:
       - api
+    healthcheck:
+      # node -e avoids needing wget/curl in the minimal node:22-alpine image.
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
+    stop_grace_period: 120s
     deploy:
       resources:
         limits:

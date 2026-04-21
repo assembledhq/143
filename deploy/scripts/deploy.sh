@@ -104,6 +104,12 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
 fi
+if [ "$ROLE" = "app" ]; then
+  # Sync Caddyfile so the remote always has the latest reverse-proxy config.
+  # The remote compares the new hash against the currently running copy to
+  # decide whether to restart Caddy (see `stage_caddy_config_if_changed` below).
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/Caddyfile" deploy@"$HOST":/opt/143/deploy/Caddyfile.new
+fi
 if [ "$ROLE" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply
   # the egress rules (they read the sandbox network's current subnet).
@@ -135,13 +141,134 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   set -euo pipefail
   cd /opt/143
 
+  # Clean up the staged Caddyfile on any exit path.
+  # stage_caddy_config_if_changed normally consumes it (mv or rm), but this
+  # guards against a failure between the scp and that call leaving it on disk.
+  trap 'rm -f /opt/143/deploy/Caddyfile.new' EXIT
+
+  # recreate_other_services SKIP_SVCS — force-recreate every compose service
+  # except the space-separated list in SKIP_SVCS. Used to update out-of-band
+  # services (vector, etc.) without touching services that are being rolled.
   recreate_other_services() {
-    local skip="$1"
-    local others
-    others="$(docker compose -f "$COMPOSE_FILE" config --services | grep -v "^${skip}$" || true)"
-    if [ -n "$others" ]; then
-      echo "$others" | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    local skip_list="$1"
+    local all filtered=""
+    all="$(docker compose -f "$COMPOSE_FILE" config --services)"
+    for svc in $all; do
+      local match=0
+      for skip in $skip_list; do
+        if [ "$svc" = "$skip" ]; then match=1; break; fi
+      done
+      [ "$match" -eq 0 ] && filtered="$filtered $svc"
+    done
+    # shellcheck disable=SC2086
+    if [ -n "$(echo $filtered | tr -d ' ')" ]; then
+      echo $filtered | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
     fi
+  }
+
+  # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
+  # from the currently deployed deploy/Caddyfile, and when it does, promotes
+  # the staged file into place (mv). Returns 1 (and removes the staged file)
+  # when contents match. Used to avoid restarting Caddy on code-only deploys;
+  # Caddy restarts briefly unbind ports 80/443 and surface as 502s through
+  # any upstream proxy (Cloudflare, etc.).
+  stage_caddy_config_if_changed() {
+    local new_file="/opt/143/deploy/Caddyfile.new"
+    local cur_file="/opt/143/deploy/Caddyfile"
+    [ -f "$new_file" ] || return 1
+    if [ ! -f "$cur_file" ]; then
+      mv "$new_file" "$cur_file"
+      return 0
+    fi
+    if ! cmp -s "$new_file" "$cur_file"; then
+      mv "$new_file" "$cur_file"
+      return 0
+    fi
+    rm -f "$new_file"
+    return 1
+  }
+
+  # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
+  #   1. scale up by 1 alongside the existing container(s)
+  #   2. wait for the new container's health check
+  #   3. stop & remove the old container(s)
+  #   4. reconcile scale back to 1
+  # Handles the case where a prior failed roll left >1 container running by
+  # scaling to old_count+1 and treating every pre-existing container as old.
+  # Requires the service to have a HEALTHCHECK defined; falls back to
+  # treating "running" as healthy when no healthcheck is configured.
+  rolling_deploy_service() {
+    local service="$1"
+    local old_containers new_container
+
+    # Capture ALL existing containers so leftovers from a failed prior roll
+    # don't get orphaned when we stop "the" old container below.
+    old_containers="$(docker compose -f "$COMPOSE_FILE" ps -q "$service" || true)"
+    local old_count=0
+    if [ -n "$old_containers" ]; then
+      old_count="$(printf '%s\n' "$old_containers" | wc -l | tr -d ' ')"
+    fi
+    local target_scale=$((old_count + 1))
+
+    echo "Starting new $service container (scale=$target_scale, old=$old_count)..."
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$service=$target_scale" --no-recreate "$service"
+
+    # The new container is the one in all_containers but not in old_containers.
+    local all_containers
+    all_containers="$(docker compose -f "$COMPOSE_FILE" ps -q "$service")"
+    new_container=""
+    for c in $all_containers; do
+      local is_old=0
+      for o in $old_containers; do
+        if [ "$c" = "$o" ]; then is_old=1; break; fi
+      done
+      if [ "$is_old" -eq 0 ]; then new_container="$c"; break; fi
+    done
+    if [ -z "$new_container" ]; then
+      echo "ERROR: could not identify new $service container"
+      return 1
+    fi
+
+    # Short IDs make the post-mortem easier when a roll misbehaves — you can
+    # pick either ID out of the logs and dig with `docker inspect` / `logs`.
+    local old_short=""
+    for oc in $old_containers; do
+      if [ -n "$old_short" ]; then old_short="$old_short,"; fi
+      old_short="$old_short${oc:0:12}"
+    done
+    echo "Rolling $service: new=${new_container:0:12} old=${old_short:-none}"
+
+    if ! wait_container_healthy "$new_container" 180; then
+      echo "Rolling back $service — removing failed container..."
+      docker stop "$new_container" >/dev/null 2>&1 || true
+      docker rm "$new_container" >/dev/null 2>&1 || true
+      # Verify at least one old container is still serving. If every old
+      # container has died, bring the service back up from compose.
+      local any_running=0
+      for oc in $old_containers; do
+        local s
+        s="$(docker inspect --format '{{.State.Status}}' "$oc" 2>/dev/null || echo "missing")"
+        if [ "$s" = "running" ]; then any_running=1; break; fi
+      done
+      if [ "$any_running" -eq 0 ]; then
+        echo "WARNING: no old $service containers are running — restarting service..."
+        docker compose -f "$COMPOSE_FILE" up -d --no-deps "$service"
+      fi
+      return 1
+    fi
+
+    if [ -n "$old_containers" ]; then
+      # Stop each old container with a long timeout so in-flight requests and
+      # SSE streams have time to drain. Docker sends SIGTERM and only falls
+      # back to SIGKILL once stop_grace_period (compose) / -t (CLI) expires.
+      echo "Draining $old_count old $service container(s) (up to 120s each)..."
+      for oc in $old_containers; do
+        docker stop -t 120 "$oc" >/dev/null 2>&1 || true
+        docker rm "$oc" >/dev/null 2>&1 || true
+      done
+    fi
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$service=1" "$service"
+    echo "$service rolled over successfully."
   }
 
   dump_diagnostics() {
@@ -247,66 +374,45 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
   fi
 
-  # Recreate non-health-service containers (vector, caddy, frontend, etc.)
-  # BEFORE the rolling deploy. These services don't depend on the health
-  # service version, and updating them first ensures config fixes (e.g.
-  # vector.yaml, Caddyfile) are applied even if the health service roll fails.
-  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+  # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.
+  # Skip services that we roll explicitly (api, frontend) so they don't get
+  # force-recreated into downtime. Also skip caddy: we only restart it when
+  # the Caddyfile has actually changed (see below), since restarting caddy
+  # briefly unbinds ports 80/443 and surfaces as 502s to any proxy in front.
+  if [ "$ROLE" = "app" ]; then
+    echo "Updating supporting services..."
+    recreate_other_services "api frontend caddy"
+  elif [ "$ROLE" = "worker" ]; then
     echo "Updating supporting services..."
     recreate_other_services "$HEALTH_SERVICE"
   fi
 
-  # Rolling deploy for the app service:
-  #   1. Scale up a new container alongside the old one (both share the network
-  #      so the new container can reach Postgres during startup)
-  #   2. Wait for the new container's health check to pass
-  #   3. Stop the old container
-  # NOTE: --no-recreate keeps the old container as-is. If you change compose
-  # config (env vars, ports, etc.) alongside a code deploy, the old container
-  # will still run the stale config during the health-check window.
+  # Rolling deploy for both api and frontend on the app role. Order matters:
+  # api first so the new code and any new DB columns are live before the
+  # frontend that references them starts serving. --no-recreate keeps old
+  # containers as-is during the health-check window.
   if [ "$ROLE" = "app" ]; then
-    OLD_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1 || true)"
+    rolling_deploy_service api
+    rolling_deploy_service frontend
 
-    echo "Starting new $HEALTH_SERVICE container..."
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=2" --no-recreate "$HEALTH_SERVICE"
-
-    # Identify the new container
-    if [ -n "$OLD_CONTAINER" ]; then
-      NEW_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | grep -v "$OLD_CONTAINER" | head -1)"
-    else
-      NEW_CONTAINER="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-    fi
-    if [ -z "$NEW_CONTAINER" ]; then
-      echo "ERROR: could not identify new container"
-      exit 1
-    fi
-
-    if ! wait_container_healthy "$NEW_CONTAINER" 120; then
-      echo "Rolling back — removing failed container..."
-      docker stop "$NEW_CONTAINER" >/dev/null 2>&1 || true
-      docker rm "$NEW_CONTAINER" >/dev/null 2>&1 || true
-      # Ensure the old container is still serving after rollback.
-      if [ -n "$OLD_CONTAINER" ]; then
-        OLD_STATUS="$(docker inspect --format '{{.State.Status}}' "$OLD_CONTAINER" 2>/dev/null || echo "missing")"
-        if [ "$OLD_STATUS" != "running" ]; then
-          echo "WARNING: old container is $OLD_STATUS — restarting service..."
-          docker compose -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+    # Caddy: only restart when the Caddyfile contents actually changed. This
+    # keeps deploys invisible at the edge for the common case (code-only
+    # change). When the config changed, we prefer an in-place SIGUSR1 reload
+    # over a container restart so ports 80/443 stay bound throughout.
+    if stage_caddy_config_if_changed; then
+      CADDY_ID="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
+      if [ -n "$CADDY_ID" ]; then
+        echo "Caddyfile changed — reloading caddy in place..."
+        if ! docker exec "$CADDY_ID" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+          echo "In-place reload failed — falling back to container recreate."
+          docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate caddy
         fi
       else
-        docker compose -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
+        docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
       fi
-      exit 1
+    else
+      echo "Caddyfile unchanged — leaving caddy running."
     fi
-
-    # New container is healthy — remove the old one.
-    if [ -n "$OLD_CONTAINER" ]; then
-      echo "Removing old container..."
-      docker stop "$OLD_CONTAINER" >/dev/null 2>&1 || true
-      docker rm "$OLD_CONTAINER" >/dev/null 2>&1 || true
-    fi
-    # Reconcile Compose state back to scale=1 now that only one container remains.
-    docker compose -f "$COMPOSE_FILE" up -d --no-deps --scale "$HEALTH_SERVICE=1" "$HEALTH_SERVICE"
-    echo "$HEALTH_SERVICE rolled over successfully."
 
   elif [ "$ROLE" = "worker" ]; then
     # Workers poll for jobs, so running two simultaneously would double the

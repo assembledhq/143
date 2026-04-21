@@ -47,6 +47,8 @@ type SessionHandler struct {
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
+	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
+	shutdownCh <-chan struct{}
 }
 
 // SetAuditEmitter injects the audit emitter for logging session events.
@@ -62,6 +64,14 @@ func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 // SetViewStore injects the session view store for tracking unread sessions.
 func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
 	h.viewStore = vs
+}
+
+// SetShutdownSignal wires a channel that is closed when the server is
+// shutting down. SSE stream handlers listen on it so they return promptly
+// during graceful shutdown instead of blocking Server.Shutdown until its
+// deadline expires.
+func (h *SessionHandler) SetShutdownSignal(ch <-chan struct{}) {
+	h.shutdownCh = ch
 }
 
 func NewSessionHandler(
@@ -582,9 +592,23 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	// Local shutdown channel so we can safely `select` even when no signal
+	// has been wired up. A nil channel blocks forever, which is what we want
+	// as a default.
+	shutdownCh := h.shutdownCh
+
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-shutdownCh:
+			// Server is shutting down — close the stream cleanly. The
+			// EventSource client sees an EOF, fires onerror, and reconnects
+			// to the new container via Caddy. Sending a final heartbeat
+			// triggers a flush so the browser isn't blocked reading a
+			// half-buffered chunk.
+			_ = sw.WriteHeartbeat()
+			sw.Flush()
 			return
 		case <-heartbeat.C:
 			if err := sw.WriteHeartbeat(); err != nil {
