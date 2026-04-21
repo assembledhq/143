@@ -124,20 +124,28 @@ func main() {
 	var fileReader sandbox.FileReader
 	var pvProvider preview.PreviewCapableProvider
 	var snapshotExec preview.SnapshotExecutor
+	var apiSandboxProvider agent.SandboxProvider
 	apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if dockerErr == nil {
 		defer apiDockerCli.Close()
 		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
 
-		// Build preview provider so the preview subsystem can start/stop
-		// sandbox previews.
+		// Build sandbox+preview provider so the preview subsystem can start,
+		// stop, and also hydrate sandboxes from snapshot when a user clicks
+		// Start Preview on a session whose container is already torn down.
 		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
 		pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
 		snapshotExec = sandboxExec
+		apiSandboxProvider = sandboxExec
 	} else {
 		logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
 		fileReader = sandbox.NoOpFileReader{}
 	}
+
+	// Snapshot store is shared across API (preview hydrate) and worker
+	// (agent orchestrator). Constructed once so both paths agree on the
+	// storage directory.
+	apiSnapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
@@ -157,7 +165,7 @@ func main() {
 	// so no corruption — but don't rely on a strict happens-before between
 	// settings commit and next-read.
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
-	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, orgSettingsCache)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -187,7 +195,9 @@ func main() {
 		pmDocumentStore := db.NewPMDocumentStore(pool)
 		automationStore := db.NewAutomationStore(pool)
 		automationRunStore := db.NewAutomationRunStore(pool)
-		snapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
+		// Reuse the snapshot store built for the API so both paths agree on
+		// SnapshotStorageDir without duplicating configuration.
+		snapshotStore := apiSnapshotStore
 
 		auditLogStore := db.NewAuditLogStore(pool)
 		sessionLogStore := db.NewSessionLogStore(pool)
@@ -245,12 +255,27 @@ func main() {
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
 
+		// Reconcile containers that leaked when the last server exited mid-turn
+		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
+		// sees clean state. Best-effort: errors are logged, not fatal.
+		if apiSandboxProvider != nil {
+			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Minute)
+			if reconcileErr := agent.ReconcileOrphanedContainers(reconcileCtx, sessionStore, apiSandboxProvider, logger); reconcileErr != nil {
+				logger.Warn().Err(reconcileErr).Msg("startup: reconciling orphaned containers failed; leftover rows will be retried on next start")
+			}
+			reconcileCancel()
+		}
+
 		usageRollupStore := db.NewUsageRollupStore(pool)
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger,
+		reaperOpts := []agent.SessionReaperOption{
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
 			agent.WithUsageRoller(usageRollupStore),
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
-		)
+		}
+		if previewManager != nil {
+			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(previewManager))
+		}
+		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
 		go reaper.Run(ctx)
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).

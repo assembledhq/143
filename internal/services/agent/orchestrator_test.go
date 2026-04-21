@@ -209,6 +209,21 @@ func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UU
 	return models.Session{}, nil
 }
 
+func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
+	return nil
+}
+
+func (m *mockSessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (bool, string, error) {
+	// Default mock behavior: the turn held it alone, so the caller should
+	// destroy and clear. Tests that need the preview-holds-on branch can
+	// shadow this by adding a dedicated mock.
+	return true, "", nil
+}
+
+func (m *mockSessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	return nil
+}
+
 func (m *mockSessionStore) getStatusUpdates() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -73,7 +73,7 @@ const sessionCountsCap = 100
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, started_at, completed_at, token_usage,
+	container_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -85,7 +85,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, started_at, completed_at, token_usage,
+	container_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -675,6 +675,141 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 		"sandbox_state": state,
 	})
 	return err
+}
+
+// AcquireTurnHold marks the agent turn as a holder of the sandbox container
+// and records the container ID. Paired with ReleaseTurnHold, it forms half of
+// the refcount that governs container destruction (the other half is
+// preview_holding_container on the preview_instances row).
+//
+// Deliberately does NOT bump last_activity_at — the caller (orchestrator)
+// already writes status='running' via UpdateStatus on the same code path, and
+// double-bumping would waste writes. Returns an error only on DB failure;
+// zero-row updates are not treated as errors because the session row should
+// always exist by the time the orchestrator gets here.
+func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
+	query := `UPDATE sessions
+		SET container_id = @container_id, turn_holding_container = TRUE
+		WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":           sessionID,
+		"org_id":       orgID,
+		"container_id": containerID,
+	})
+	if err != nil {
+		return fmt.Errorf("acquire turn hold: %w", err)
+	}
+	return nil
+}
+
+// ReleaseTurnHold flips turn_holding_container to false and returns the
+// sibling holder state so the caller can decide whether to destroy the
+// container. The RETURNING clause reads both the container_id and the active
+// preview hold in one round-trip, eliminating the TOCTOU gap between release
+// and destroy decision.
+//
+// destroyNow is true when the caller should tear down the container AND clear
+// container_id (via ClearContainerID). destroyNow is false when the preview
+// still holds the container — the caller must leave both container_id and the
+// container itself alive.
+//
+// containerID is the ID that was recorded on the row (empty if the session
+// had no live container — a no-op release).
+func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (destroyNow bool, containerID string, err error) {
+	query := `WITH released AS (
+			UPDATE sessions
+			SET turn_holding_container = FALSE
+			WHERE id = @id AND org_id = @org_id
+			RETURNING id, container_id
+		)
+		SELECT
+			COALESCE(released.container_id, '') AS container_id,
+			COALESCE((
+				SELECT TRUE
+				FROM preview_instances
+				WHERE session_id = released.id
+				  AND org_id = @org_id
+				  AND preview_holding_container = TRUE
+				LIMIT 1
+			), FALSE) AS preview_holds
+		FROM released`
+
+	var cid string
+	var previewHolds bool
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&cid, &previewHolds)
+	if err != nil {
+		return false, "", fmt.Errorf("release turn hold: %w", err)
+	}
+	return cid != "" && !previewHolds, cid, nil
+}
+
+// SetContainerID records a new container_id on the session without touching
+// any holder flag. This is the preview-hydrate path: a preview has just
+// created a container from the session's snapshot and needs to publish its
+// ID so a concurrent ContinueSession can attach to the same container.
+// The paired hold write lives on the preview_instances row (preview
+// store's AcquirePreviewHold).
+//
+// Unlike AcquireTurnHold, this does NOT flip turn_holding_container — the
+// orchestrator owns that flag and the preview must not claim it.
+func (s *SessionStore) SetContainerID(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
+	query := `UPDATE sessions SET container_id = @container_id WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":           sessionID,
+		"org_id":       orgID,
+		"container_id": containerID,
+	})
+	if err != nil {
+		return fmt.Errorf("set container id: %w", err)
+	}
+	return nil
+}
+
+// ClearContainerID sets container_id back to NULL. Called after the caller
+// has confirmed the container is destroyed, so stale IDs don't leak into
+// subsequent preview/turn decisions.
+func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions SET container_id = NULL WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	if err != nil {
+		return fmt.Errorf("clear container id: %w", err)
+	}
+	return nil
+}
+
+// ListOrphanedContainers returns sessions whose container_id is set but no
+// holder (turn or preview) is marked true. Called on startup to clean up
+// containers that leaked from a crashed server — the reconciler destroys the
+// container (best-effort) and then calls ClearContainerID.
+//
+// Returns at most 100 rows per call; the reconciler loops until it gets an
+// empty slice so a backlog after a long outage doesn't block startup.
+// lint:allow-no-orgid reason="startup reconciler scans across all orgs by design"
+func (s *SessionStore) ListOrphanedContainers(ctx context.Context) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE container_id IS NOT NULL
+		  AND turn_holding_container = FALSE
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned containers: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.

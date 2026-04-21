@@ -167,6 +167,27 @@ export function PreviewPanel({
       });
     },
     onError: (err) => {
+      // Hydrate flow yields a few specific error codes. The server message
+      // is already user-facing for these — pass it through verbatim rather
+      // than wrapping it in a generic "Failed to start preview" prefix that
+      // buries the real issue (capacity, expired snapshot, etc.).
+      const code = (err as { code?: string })?.code;
+      if (code === "PREVIEW_CAPACITY_REACHED") {
+        setMutationError(err.message);
+        return;
+      }
+      if (code === "SNAPSHOT_EXPIRED") {
+        setMutationError(
+          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again."
+        );
+        return;
+      }
+      if (code === "NO_SANDBOX") {
+        setMutationError(
+          "Preview is unavailable on this server (Docker not configured). Contact an admin."
+        );
+        return;
+      }
       setMutationError(`Failed to start preview: ${err.message}`);
     },
   });

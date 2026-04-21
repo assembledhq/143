@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path"
 	"regexp"
 	"strings"
@@ -76,6 +75,17 @@ type SessionStore interface {
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	// AcquireTurnHold records container_id and flips turn_holding_container=TRUE.
+	// Called immediately after the orchestrator creates (or reuses) a sandbox.
+	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error
+	// ReleaseTurnHold flips turn_holding_container=FALSE and reports whether
+	// the caller should destroy the container. destroyNow is true only when no
+	// preview is holding the container; otherwise the preview keeps it alive
+	// for the "iterate between turns" flow.
+	ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (destroyNow bool, containerID string, err error)
+	// ClearContainerID sets container_id back to NULL after the caller has
+	// destroyed the container.
+	ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -466,6 +476,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	// Record the turn hold so a concurrent StartPreview can attach to this
+	// container (same ID, same filesystem) instead of hydrating a duplicate.
+	// Log-and-continue on DB error: losing the hold is a degradation (the
+	// reconciler will clean up on next startup), not a reason to fail the run.
+	if err := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID); err != nil {
+		log.Warn().Err(err).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
+	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -477,8 +494,22 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
+		destroyNow, _, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
+		if releaseErr != nil {
+			// Fall back to destroy to avoid leaking the container if we
+			// can't read the holder state.
+			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
+			destroyNow = true
+		}
+		if !destroyNow {
+			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
+		}
+		if clearErr := o.sessions.ClearContainerID(destroyCtx, run.OrgID, run.ID); clearErr != nil {
+			log.Warn().Err(clearErr).Msg("failed to clear container_id after destroy")
 		}
 	}()
 
@@ -857,25 +888,69 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 
-	sandbox, err := o.provider.Create(ctx, sandboxCfg)
-	if err != nil {
-		// For continued sessions, revert to idle instead of permanently failing
-		// so the user can retry once the infrastructure issue is resolved (e.g.
-		// Docker daemon restarted). Post an assistant message explaining the error.
-		log.Error().Err(err).Msg("sandbox creation failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
+	// Determine sandbox strategy:
+	//   - Reuse: a preview already hydrated the container; attach to it by ID
+	//     and skip both Create and Restore.
+	//   - Hydrate: a snapshot exists; create a new container and restore the
+	//     snapshot via the shared HydrateSandboxFromSnapshot helper.
+	//   - Fresh: no snapshot; create a clean container and clone fresh below.
+	var sandbox *Sandbox
+	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+	switch {
+	case reusedExisting:
+		sandbox = &Sandbox{
+			ID:        *session.ContainerID,
+			Provider:  "docker",
+			WorkDir:   sandboxCfg.WorkDir,
+			HomeDir:   sandboxCfg.HomeDir,
+			SessionID: sandboxCfg.SessionID,
+			OrgID:     sandboxCfg.OrgID,
+			Purpose:   sandboxCfg.Purpose,
 		}
-		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
-			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
+		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
+	case hasSnapshot:
+		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+		if err != nil {
+			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after hydrate failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to restore the sandbox environment: %s\n\nPlease try again in a moment.", err),
+				"sandbox hydrate",
+			)
+			return fmt.Errorf("hydrate sandbox: %w", err)
 		}
-		o.registerSandboxFailureMessage(
-			ctx,
-			session,
-			fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
-			"sandbox creation",
-		)
-		return fmt.Errorf("create sandbox: %w", err)
+	default:
+		sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		if err != nil {
+			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
+				"sandbox creation",
+			)
+			return fmt.Errorf("create sandbox: %w", err)
+		}
+	}
+	// Record the turn hold. AcquireTurnHold is idempotent — when we reused an
+	// existing container the row may already carry this ID; re-writing is
+	// harmless. Log-and-continue on DB error so losing the hold degrades to a
+	// safe "reconciler will clean up" state rather than failing the turn.
+	if err := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID); err != nil {
+		log.Warn().Err(err).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
 	}
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
@@ -889,9 +964,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			defer stopCancel()
 			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, containerStartedAt, exitReason)
 		}
+		// Detached context so DB writes + destroy succeed even if ctx was
+		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
+		destroyNow, _, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+		if releaseErr != nil {
+			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
+			destroyNow = true
+		}
+		if !destroyNow {
+			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive for the preview")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
+		}
+		if clearErr := o.sessions.ClearContainerID(destroyCtx, session.OrgID, session.ID); clearErr != nil {
+			log.Warn().Err(clearErr).Msg("failed to clear container_id after destroy")
 		}
 	}()
 
@@ -900,33 +989,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
 	}
 
-	// 5. Set up the workspace — either restore snapshot or clone fresh.
+	// 5. Set up the workspace. Three paths:
+	//   - Reuse: the container is already live (preview hydrated it); just
+	//     re-inject Codex auth and build the resume prompt.
+	//   - Hydrate: HydrateSandboxFromSnapshot already did Create+Restore;
+	//     re-inject Codex auth and build the resume prompt.
+	//   - Fresh: no snapshot; clone repo fresh and build a reconstructed
+	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
-	if hasSnapshot {
-		// Path A: Restore snapshot from storage — preserves all git changes.
-		snapshotReader, snapshotWriter := io.Pipe()
-		var restoreErr error
-		var restoreWg sync.WaitGroup
-		restoreWg.Add(1)
-		go func() {
-			defer restoreWg.Done()
-			restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-			_ = snapshotWriter.Close() // Intentionally ignored: pipe close error is not actionable here; restoreErr captures the real failure.
-		}()
-
-		if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
-			_ = snapshotReader.Close() // Intentionally ignored: we already have the restore error.
-			restoreWg.Wait()
-			o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
-			return fmt.Errorf("restore snapshot: %w", err)
-		}
-		restoreWg.Wait()
-		if restoreErr != nil {
-			o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
-			return fmt.Errorf("load snapshot: %w", restoreErr)
-		}
-
-		// Re-inject Codex auth.json if needed.
+	if reusedExisting || hasSnapshot {
+		// Re-inject Codex auth.json. Cheap, and catches the case where the
+		// file was cleared or drifted while the container was idle (or where
+		// the preview created the container without agent credentials).
 		if session.AgentType == models.AgentTypeCodex {
 			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
 				return err
@@ -944,7 +1018,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			MaxTokens:       tokenLimitForMode(session.TokenMode),
 		}
 
-		log.Info().Msg("continuing session with snapshot restore")
+		if reusedExisting {
+			log.Info().Msg("continuing session in reused sandbox (preview holds container)")
+		} else {
+			log.Info().Msg("continuing session with snapshot restore")
+		}
 	} else {
 		// Path B: No snapshot available — clone repo fresh and provide
 		// conversation history + stored diff as context so the agent can

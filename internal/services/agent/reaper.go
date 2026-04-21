@@ -25,6 +25,16 @@ type UsageRoller interface {
 	GetLatestRollupHour(ctx context.Context) (time.Time, error)
 }
 
+// PreviewStopper tears down an active preview for a given session, if any.
+// The reaper calls this before expiring a snapshot so that a preview still
+// holding the sandbox container is torn down cleanly (via the hold-aware
+// destroy path in the preview manager) before the snapshot is deleted.
+//
+// Implemented by *preview.Manager.
+type PreviewStopper interface {
+	StopActivePreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
+}
+
 // SessionReaper periodically cleans up stale sessions and expired snapshots
 // in six phases:
 //   - Phase 0: Fail sessions stuck in pending for longer than maxPendingAge
@@ -38,8 +48,9 @@ type UsageRoller interface {
 type SessionReaper struct {
 	sessions         StaleSessionLister
 	snapshotStore    storage.SnapshotStore
-	orphanCloser     OrphanCloser // nil-safe — billing orphan cleanup disabled if nil
-	usageRoller      UsageRoller  // nil-safe — usage rollup disabled if nil
+	orphanCloser     OrphanCloser   // nil-safe — billing orphan cleanup disabled if nil
+	usageRoller      UsageRoller    // nil-safe — usage rollup disabled if nil
+	previewStopper   PreviewStopper // nil-safe — if unset, reaper skips preview teardown before snapshot expiry
 	maxIdleAge       time.Duration
 	maxPendingAge    time.Duration
 	maxRunningAge    time.Duration
@@ -73,6 +84,14 @@ func WithOrphanCloser(oc OrphanCloser) SessionReaperOption {
 // WithUsageRoller enables hourly usage rollup in the reaper.
 func WithUsageRoller(ur UsageRoller) SessionReaperOption {
 	return func(r *SessionReaper) { r.usageRoller = ur }
+}
+
+// WithPreviewStopper wires in the preview manager so the reaper can tear
+// down previews before expiring their sessions' snapshots. Without this,
+// a snapshot expiry on a session whose preview is still running would
+// leave behind an orphan container.
+func WithPreviewStopper(ps PreviewStopper) SessionReaperOption {
+	return func(r *SessionReaper) { r.previewStopper = ps }
 }
 
 // NewSessionReaper creates a reaper that runs every interval, cleaning up
@@ -278,6 +297,24 @@ func (r *SessionReaper) reap(ctx context.Context) {
 	}
 
 	for _, s := range expiredSnapshots {
+		// If a preview is still holding this session's sandbox, tear it
+		// down cleanly first. StopPreview runs the hold-aware destroy
+		// path, so the container and container_id are cleared before we
+		// delete the snapshot blob. Skipping this step would either
+		// leak a container on the worker or cause a later StopPreview
+		// to misbehave against a session whose snapshot is already gone.
+		if r.previewStopper != nil {
+			if stopped, stopErr := r.previewStopper.StopActivePreviewForSession(ctx, s.OrgID, s.ID); stopErr != nil {
+				r.logger.Warn().Err(stopErr).
+					Str("session_id", s.ID.String()).
+					Msg("reaper: failed to stop preview holding expired-snapshot session; proceeding with snapshot cleanup")
+			} else if stopped {
+				r.logger.Info().
+					Str("session_id", s.ID.String()).
+					Msg("reaper: stopped preview before expiring session snapshot")
+			}
+		}
+
 		if s.SnapshotKey != nil && *s.SnapshotKey != "" {
 			if err := r.snapshotStore.Delete(ctx, *s.SnapshotKey); err != nil {
 				r.logger.Error().Err(err).

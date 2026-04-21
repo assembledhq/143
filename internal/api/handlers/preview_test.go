@@ -359,6 +359,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -410,6 +411,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, recycleConfig, recycleSandbox, "", now, now, now, nil,
+		false,
 	}
 }
 
@@ -428,7 +430,7 @@ func TestNewPreviewHandler(t *testing.T) {
 	})
 
 	sessionStore := db.NewSessionStore(mock)
-	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, zerolog.Nop())
+	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
@@ -552,7 +554,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 var sessionRowColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "started_at", "completed_at", "token_usage",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -567,7 +569,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, nil, nil, json.RawMessage(`{}`),
+		&containerID, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,

@@ -38,6 +38,12 @@ const (
 	ProviderDocker = "docker"
 )
 
+// ErrPreviewCapacity is returned by StartPreview when a concurrency cap
+// (per-user, per-org, or per-worker) would be exceeded. Handlers should
+// translate this to HTTP 503 with a friendly "try again later" message
+// rather than a 422.
+var ErrPreviewCapacity = errors.New("preview capacity reached")
+
 // =============================================================================
 // Manager
 // =============================================================================
@@ -52,7 +58,12 @@ type Manager struct {
 	store        *db.PreviewStore
 	sessionStore *db.SessionStore
 	provider     PreviewCapableProvider
-	logger       zerolog.Logger
+	// sandboxProvider is used to destroy the underlying sandbox container
+	// when the last holder (preview or turn) releases its hold. Optional —
+	// when nil, the manager will skip container destroy and only clear its
+	// own hold; the startup reconciler will mop up orphans.
+	sandboxProvider agent.SandboxProvider
+	logger          zerolog.Logger
 
 	workerNodeID string // identity of this worker for routing
 
@@ -87,17 +98,18 @@ type Manager struct {
 
 // ManagerConfig holds initialization options for the preview Manager.
 type ManagerConfig struct {
-	Store         *db.PreviewStore
-	SessionStore  *db.SessionStore
-	Provider      PreviewCapableProvider
-	Inspector     PreviewInspector
-	SnapshotCache *SnapshotCache
-	HMRWatcher    *HMRWatcher // optional; enables HMR screenshot capture
-	Logger        zerolog.Logger
-	WorkerNodeID  string
-	MaxPerUser    int
-	MaxPerOrg     int
-	MaxPerWorker  int
+	Store           *db.PreviewStore
+	SessionStore    *db.SessionStore
+	Provider        PreviewCapableProvider
+	SandboxProvider agent.SandboxProvider // used for destroy on final hold release
+	Inspector       PreviewInspector
+	SnapshotCache   *SnapshotCache
+	HMRWatcher      *HMRWatcher // optional; enables HMR screenshot capture
+	Logger          zerolog.Logger
+	WorkerNodeID    string
+	MaxPerUser      int
+	MaxPerOrg       int
+	MaxPerWorker    int
 
 	// PreviewOriginTemplate is the URL template used to compute the public
 	// origin each preview is served from, with "{id}" replaced by the preview
@@ -118,6 +130,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		store:                 cfg.Store,
 		sessionStore:          cfg.SessionStore,
 		provider:              cfg.Provider,
+		sandboxProvider:       cfg.SandboxProvider,
 		inspector:             cfg.Inspector,
 		snapshotCache:         cfg.SnapshotCache,
 		hmrWatcher:            cfg.HMRWatcher,
@@ -223,6 +236,17 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 
 	if err := m.store.CreatePreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create preview instance: %w", err)
+	}
+
+	// Claim the preview's half of the sandbox refcount. This pairs with the
+	// orchestrator's turn hold: only when both are released does the container
+	// get destroyed. Log-and-continue on DB error — losing the hold degrades
+	// to "reconciler will clean up on next startup", which is safer than
+	// failing the preview start after the row is already written.
+	if _, err := m.store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Msg("failed to acquire preview hold on sandbox; turn coexistence disabled for this preview")
 	}
 
 	m.logger.Info().
@@ -514,6 +538,48 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 		m.hmrWatcher.StopWatching(previewID)
 	}
 
+	// Release the preview hold. The store returns the sibling state so we
+	// know whether an agent turn is still using the container — if so, leave
+	// it running; otherwise destroy it here. This is the inverse of the
+	// orchestrator's ReleaseTurnHold in the common case where the user stops
+	// a preview on an idle session.
+	destroyNow, _, containerID, releaseErr := m.store.ReleasePreviewHold(ctx, orgID, previewID)
+	if releaseErr != nil {
+		// If the hold release fails we don't have clean signal about sibling
+		// state; play it safe and leave the container alone. The reconciler
+		// will eventually clean up orphans.
+		m.logger.Warn().Err(releaseErr).
+			Str("preview_id", previewID.String()).
+			Msg("failed to release preview hold; leaving container for reconciler")
+	} else if destroyNow && containerID != "" && m.sandboxProvider != nil {
+		// Detached context so destroy completes even if the HTTP ctx was
+		// cancelled while we were tearing down services above.
+		destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer destroyCancel()
+		sb := &agent.Sandbox{ID: containerID, Provider: ProviderDocker}
+		if destroyErr := m.sandboxProvider.Destroy(destroyCtx, sb); destroyErr != nil {
+			m.logger.Error().Err(destroyErr).
+				Str("preview_id", previewID.String()).
+				Str("container_id", containerID).
+				Msg("failed to destroy sandbox after final hold release")
+		}
+		// Clear container_id + mark sandbox_state=snapshotted so the next
+		// Start Preview takes the hydrate branch (not the reuse branch,
+		// which would attach to a dead container).
+		if m.sessionStore != nil {
+			if clearErr := m.sessionStore.ClearContainerID(destroyCtx, orgID, instance.SessionID); clearErr != nil {
+				m.logger.Warn().Err(clearErr).
+					Str("preview_id", previewID.String()).
+					Msg("failed to clear container_id after destroy")
+			}
+			if stateErr := m.sessionStore.UpdateSandboxState(destroyCtx, orgID, instance.SessionID, string(models.SandboxStateSnapshotted)); stateErr != nil {
+				m.logger.Warn().Err(stateErr).
+					Str("preview_id", previewID.String()).
+					Msg("failed to mark sandbox_state=snapshotted after destroy")
+			}
+		}
+	}
+
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("preview stopped")
 	return nil
 }
@@ -693,6 +759,36 @@ func (m *Manager) DialPreview(ctx context.Context, orgID, previewID uuid.UUID) (
 	}
 
 	return m.provider.DialPreview(ctx, instance.PreviewHandle)
+}
+
+// =============================================================================
+// StopActivePreviewForSession
+// =============================================================================
+
+// StopActivePreviewForSession stops the active preview for the given session,
+// if one exists. Returns (true, nil) when a preview was actually stopped,
+// (false, nil) when the session had no active preview, or (false, err) on a
+// real failure.
+//
+// Used by the reaper before it expires a snapshot: if a preview is holding
+// the sandbox container, StopPreview goes through the hold-aware destroy
+// path and tears down the container + clears container_id, so the reaper's
+// follow-up sandbox_state='destroyed' transition is clean.
+func (m *Manager) StopActivePreviewForSession(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	preview, err := m.store.GetActivePreviewForSession(ctx, orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lookup active preview for session: %w", err)
+	}
+	if preview == nil {
+		return false, nil
+	}
+	if err := m.StopPreview(ctx, orgID, preview.ID); err != nil {
+		return false, fmt.Errorf("stop active preview %s: %w", preview.ID, err)
+	}
+	return true, nil
 }
 
 // =============================================================================
@@ -895,7 +991,7 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 		return fmt.Errorf("count user previews: %w", err)
 	}
 	if userCount >= m.maxPerUser {
-		return fmt.Errorf("you have reached your limit of %d concurrent previews — stop an existing preview to start a new one", m.maxPerUser)
+		return fmt.Errorf("%w: you already have %d active previews (limit %d) — stop one before starting another", ErrPreviewCapacity, userCount, m.maxPerUser)
 	}
 
 	// Per-org cap.
@@ -904,16 +1000,17 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 		return fmt.Errorf("count org previews: %w", err)
 	}
 	if orgCount >= m.maxPerOrg {
-		return fmt.Errorf("org has reached its limit of %d concurrent previews — stop an existing preview to start a new one", m.maxPerOrg)
+		return fmt.Errorf("%w: your team has %d active previews (limit %d) — ask a teammate to stop one", ErrPreviewCapacity, orgCount, m.maxPerOrg)
 	}
 
-	// Per-worker cap.
+	// Per-worker cap. This is the capacity guardrail: when the host is
+	// saturated, a fresh StartPreview would risk OOM-killing peers.
 	workerCount, err := m.store.CountActivePreviewsByWorker(ctx, m.workerNodeID)
 	if err != nil {
 		return fmt.Errorf("count worker previews: %w", err)
 	}
 	if workerCount >= m.maxPerWorker {
-		return fmt.Errorf("worker node has reached its limit of %d concurrent previews", m.maxPerWorker)
+		return fmt.Errorf("%w: this server is at preview capacity (%d/%d) — try again in a few minutes", ErrPreviewCapacity, workerCount, m.maxPerWorker)
 	}
 
 	return nil

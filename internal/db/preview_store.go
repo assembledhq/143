@@ -49,7 +49,7 @@ const activeStatusFilter = `('starting', 'ready', 'partially_ready', 'unhealthy'
 const previewInstanceColumns = `id, session_id, org_id, user_id, profile_name, name, status,
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
-	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at`
+	last_path, memory_limit_mb, cpu_limit_millis, recycle_config, recycle_sandbox, error, created_at, updated_at, recycled_at, recycle_scheduled_at, preview_holding_container`
 
 const previewServiceColumns = `id, preview_instance_id, service_name, role, status,
 	command, cwd, port, pid, error, created_at`
@@ -251,6 +251,64 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 	return nil
 }
 
+// AcquirePreviewHold marks this preview as a holder of the shared sandbox
+// container. Called once the preview is known to be driving the container
+// (either because it hydrated one, or because it attached to a live
+// turn-created container). The session_id is returned so callers can look up
+// the session row without a second round-trip when they need to coordinate
+// teardown with turn_holding_container.
+func (s *PreviewStore) AcquirePreviewHold(ctx context.Context, orgID, previewID uuid.UUID) (sessionID uuid.UUID, err error) {
+	query := `UPDATE preview_instances
+		SET preview_holding_container = TRUE, updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		RETURNING session_id`
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     previewID,
+		"org_id": orgID,
+	}).Scan(&sessionID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("acquire preview hold: %w", err)
+	}
+	return sessionID, nil
+}
+
+// ReleasePreviewHold flips preview_holding_container to false and returns
+// the sibling state needed to decide on destroy:
+//   - sessionID: the session this preview belongs to
+//   - turnStillHolds: whether sessions.turn_holding_container is TRUE
+//   - containerID: the session's current container_id (empty when NULL)
+//
+// destroyNow is true when the caller should tear down the container and clear
+// container_id. If false, either the turn still holds it or there was no
+// container to begin with.
+//
+// Packaging these reads in one statement avoids a race where turn_holding_container
+// flips between our release and a follow-up read.
+func (s *PreviewStore) ReleasePreviewHold(ctx context.Context, orgID, previewID uuid.UUID) (destroyNow bool, sessionID uuid.UUID, containerID string, err error) {
+	query := `WITH released AS (
+			UPDATE preview_instances
+			SET preview_holding_container = FALSE, updated_at = now()
+			WHERE id = @id AND org_id = @org_id
+			RETURNING session_id
+		)
+		SELECT
+			released.session_id,
+			COALESCE(s.container_id, '') AS container_id,
+			COALESCE(s.turn_holding_container, FALSE) AS turn_holds
+		FROM released
+		JOIN sessions s ON s.id = released.session_id AND s.org_id = @org_id`
+
+	var turnHolds bool
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     previewID,
+		"org_id": orgID,
+	}).Scan(&sessionID, &containerID, &turnHolds)
+	if err != nil {
+		return false, uuid.Nil, "", fmt.Errorf("release preview hold: %w", err)
+	}
+	return containerID != "" && !turnHolds, sessionID, containerID, nil
+}
+
 // UpdatePreviewHandle updates the provider handle and primary port. A new
 // handle implies the preview process restarted successfully, so recycled_at is
 // refreshed to anchor the next recycle window.
@@ -423,11 +481,23 @@ func (s *PreviewStore) ListExpiredPreviews(ctx context.Context, cutoff time.Time
 }
 
 // ListIdlePreviews returns active previews with no activity since the cutoff.
+//
+// Previews whose session currently has an active agent turn
+// (sessions.turn_holding_container = TRUE) are excluded. While a user is
+// actively iterating — e.g. the agent is editing files and the preview is
+// hot-reloading — we do not want the idle sweeper to reap the preview out
+// from under them; turn activity is the user's implicit heartbeat.
 // lint:allow-no-orgid reason="cross-org cleanup scan for idle previews"
 func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time) ([]models.PreviewInstance, error) {
 	query := fmt.Sprintf(`SELECT %s FROM preview_instances
 		WHERE status IN %s
 		AND last_accessed_at < @idle_since
+		AND NOT EXISTS (
+			SELECT 1 FROM sessions s
+			WHERE s.id = preview_instances.session_id
+			  AND s.org_id = preview_instances.org_id
+			  AND s.turn_holding_container = TRUE
+		)
 		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"idle_since": idleSince})
