@@ -542,8 +542,10 @@ func TestAuth_InvalidSessionClearsCookie(t *testing.T) {
 
 // When the header membership lookup fails with a non-ErrNoRows error (DB
 // flake, not a missing row), resolveActiveMembership returns the error
-// unwrapped so handleToken surfaces a 403 rather than falling back to a
-// different org.
+// unwrapped so handleToken surfaces a 500 rather than silently falling back
+// to a different org. The 500 is distinct from the graceful-degrade path
+// (stale header → falls through) so operators can separate real outages
+// from "not a member".
 func TestAuth_HeaderMembershipLookupError(t *testing.T) {
 	t.Parallel()
 
@@ -584,7 +586,8 @@ func TestAuth_HeaderMembershipLookupError(t *testing.T) {
 		t.Fatal("next should not run on membership lookup failure")
 	})).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBERSHIP_RESOLUTION_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -709,8 +712,9 @@ func TestAuth_LastOrgIDUpdateFailureNonFatal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// When OldestForUser errors (not ErrNoRows), the middleware surfaces 403
-// rather than pretending the user has no memberships.
+// When OldestForUser errors (not ErrNoRows), the middleware surfaces 500
+// rather than pretending the user has no memberships. Distinct from the
+// graceful-degrade paths so operators can spot real DB outages.
 func TestAuth_OldestForUserError(t *testing.T) {
 	t.Parallel()
 
@@ -750,13 +754,16 @@ func TestAuth_OldestForUserError(t *testing.T) {
 		t.Fatal("next should not run on oldest lookup failure")
 	})).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBERSHIP_RESOLUTION_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // When the session's last_org_id hint is for a different org and that lookup
-// fails with a non-ErrNoRows error, the middleware surfaces 403 rather than
+// fails with a non-ErrNoRows error, the middleware surfaces a 500 rather than
 // silently falling back to OldestForUser (which would pick the wrong org).
+// The DB-level failure is infrastructure, not authorization — distinguishing it
+// from 403 keeps ops alerting tight.
 func TestAuth_SessionHintLookupError(t *testing.T) {
 	t.Parallel()
 
@@ -797,7 +804,8 @@ func TestAuth_SessionHintLookupError(t *testing.T) {
 		t.Fatal("next should not run on hint lookup failure")
 	})).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBERSHIP_RESOLUTION_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

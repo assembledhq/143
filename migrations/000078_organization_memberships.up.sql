@@ -9,6 +9,15 @@
 -- Only this migration is required to ship the membership infrastructure.
 -- Dropping the legacy columns happens in a later, gated migration.
 
+-- Bound how long the migration is willing to wait for locks or run overall.
+-- The backfill writes every users row and every auth_sessions row, so an
+-- unrelated long-running transaction could otherwise stall the deploy
+-- indefinitely. 30s lock_timeout lets us fail fast on contention rather than
+-- block the release; 5min statement_timeout caps total migration runtime.
+-- Both are transaction-local (reset at commit).
+SET LOCAL lock_timeout = '30s';
+SET LOCAL statement_timeout = '5min';
+
 CREATE TABLE organization_memberships (
     user_id    uuid        NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
     org_id     uuid        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

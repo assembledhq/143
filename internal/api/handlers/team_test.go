@@ -478,9 +478,11 @@ func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
 	require.Contains(t, w.Body.String(), "UPDATE_FAILED")
 }
 
-// ChangeRole returns 500 when the response-shaping user lookup fails after
-// the role has already been updated. We still 500 rather than silently
-// returning stale data; the client can re-fetch /team/members.
+// ChangeRole returns 200 with a minimal {id, role} payload when the response-
+// shaping user lookup fails after the role has already been updated. The
+// mutation succeeded at the DB level, so the client should treat it as
+// successful and re-fetch /team/members to hydrate display fields — surfacing
+// 500 would incorrectly suggest the role change failed and invite retries.
 func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	t.Parallel()
 
@@ -510,8 +512,12 @@ func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	h.ChangeRole(w, req)
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp models.SingleResponse[models.User]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, memberID, resp.Data.ID)
+	require.Equal(t, "viewer", resp.Data.Role)
 }
 
 // RemoveMember succeeds even when CountForUser fails afterward — the removal

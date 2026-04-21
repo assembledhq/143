@@ -197,20 +197,23 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the user identity row for the response payload; role comes from the
-	// updated membership so the frontend sees the new value immediately.
-	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up member", err)
-		return
-	}
-
 	memberIDStr := memberID.String()
 	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": prevRole})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for role change")
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRoleChanged, models.AuditResourceTeamMember, &memberIDStr, details)
+
+	// Role has already been updated in the DB. The follow-up display-row
+	// lookup is best-effort: if it fails, we still return 200 with a minimal
+	// payload so the client treats the mutation as succeeded (because it did).
+	// Returning 500 would suggest the role change failed and mislead retries.
+	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("member_id", memberIDStr).Msg("team: role updated but display lookup failed; returning minimal payload")
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: body.Role}})
+		return
+	}
 
 	member.Role = body.Role
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})

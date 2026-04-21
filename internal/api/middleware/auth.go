@@ -165,7 +165,13 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 
 	resolution, err := resolveActiveMembership(r, stores, user.ID, session)
 	if err != nil {
-		writeError(w, http.StatusForbidden, "NO_MEMBERSHIP", err.Error())
+		// resolveActiveMembership graceful-degrades through stale / malformed
+		// headers and stale session hints, so an error at this point can only
+		// come from a true infrastructure failure (DB unreachable, etc.). 500
+		// rather than 403 so operators can distinguish real outages from the
+		// "you're not a member of this org" case (which no longer raises).
+		logger.Warn().Err(err).Str("user_id", user.ID.String()).Msg("auth: membership resolution failed")
+		writeError(w, http.StatusInternalServerError, "MEMBERSHIP_RESOLUTION_FAILED", "failed to resolve active membership")
 		return
 	}
 	activeOrgID := resolution.orgID
