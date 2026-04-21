@@ -852,7 +852,9 @@ func TestAuth_UserLookupFails(t *testing.T) {
 // side of graceful-degrade: when the X-Active-Org-ID header names an org the
 // user no longer belongs to, the middleware sets the X-Org-Membership-Revoked
 // response header so the client can refresh its cached active-org state
-// instead of sending the stale header on every subsequent request.
+// instead of sending the stale header on every subsequent request. The value
+// is an opaque flag (see RevokedOrgHeader doc) — the client knows which org
+// it requested and the server does not need to re-confirm the UUID.
 func TestAuth_HeaderForUnrelatedOrg_EmitsRevokedHeader(t *testing.T) {
 	t.Parallel()
 
@@ -902,7 +904,7 @@ func TestAuth_HeaderForUnrelatedOrg_EmitsRevokedHeader(t *testing.T) {
 	})).ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, testOrgB.String(), w.Header().Get(RevokedOrgHeader), "should advertise the revoked org so client can refresh state")
+	require.Equal(t, RevokedOrgHeaderValue, w.Header().Get(RevokedOrgHeader), "should advertise revocation as an opaque flag so client refreshes state")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -598,9 +598,9 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_Promote(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
@@ -627,9 +627,9 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_NoChange(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -654,9 +654,9 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_LastAdmin(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -680,9 +680,9 @@ func TestOrganizationMembershipStore_UpdateRoleGuarded_NoMembership(t *testing.T
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
@@ -720,9 +720,9 @@ func TestOrganizationMembershipStore_RemoveGuarded_Success(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -748,9 +748,9 @@ func TestOrganizationMembershipStore_RemoveGuarded_LastAdmin(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -774,9 +774,9 @@ func TestOrganizationMembershipStore_RemoveGuarded_NoMembership(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+	mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
@@ -815,9 +815,9 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 		defer mock.Close()
 
 		mock.ExpectBegin()
-		mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
 		mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -842,9 +842,9 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 		defer mock.Close()
 
 		mock.ExpectBegin()
-		mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+		mock.ExpectQuery("(?s)WITH locked.+FROM organization_memberships.+FOR UPDATE").
 			WithArgs(pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 		mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
@@ -874,5 +874,31 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 		err = store.Remove(context.Background(), uuid.New(), uuid.New())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no admins", "trigger message should propagate in the returned error")
+	})
+
+	// Pinned behavior for the cascade-delete carve-out in migration 000079's
+	// enforce_last_admin trigger: `IF NOT EXISTS (organizations)` means a
+	// last-admin DELETE inside a transaction that *also* deleted the org
+	// must succeed without raising the invariant. At the Go layer this
+	// surfaces as a plain successful Remove — pgxmock cannot run the trigger
+	// itself, but we pin the "no error returned when the DB reports the
+	// DELETE succeeded" behavior so a future trigger tweak that starts
+	// raising on org-delete cascades would fail this test.
+	t.Run("plain Remove succeeds when trigger skips check for deleted org", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewOrganizationMembershipStore(mock)
+
+		mock.ExpectQuery("(?s)DELETE FROM organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+		require.NoError(t, store.Remove(context.Background(), uuid.New(), uuid.New()),
+			"Remove should succeed when the last admin is deleted alongside their org "+
+				"(enforce_last_admin returns NULL when the org no longer exists)")
 	})
 }

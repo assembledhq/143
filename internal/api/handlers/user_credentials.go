@@ -125,8 +125,12 @@ func (h *UserCredentialHandler) UpsertPersonal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Only admins can set team defaults.
-	if body.IsTeamDefault && user.Role != "admin" {
+	// Only admins can set team defaults. Read the active-org role from the
+	// request context rather than user.Role: in the multi-org world the
+	// legacy user.Role is only populated by the middleware's compat sync,
+	// and new authz checks should talk directly to the membership-derived
+	// active role so they stay correct if/when that sync is dropped.
+	if body.IsTeamDefault && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "only admins can set team defaults")
 		return
 	}

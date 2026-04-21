@@ -102,8 +102,13 @@ func (h *AuthHandler) claimPendingInvitationForExistingUser(
 	}
 	inv, invErr, err := h.claimInvitationForExistingUser(r.Context(), token, userEmail, githubLogin, userID)
 	if err != nil {
+		// The wrapped error can contain raw SQL or filesystem details
+		// (e.g. pgx error messages, store-layer wrap strings). Those belong
+		// in the structured log where ops can correlate them, not in an
+		// audit-log JSON column that is served back to admin UIs and kept
+		// forever. Persist a generic code + fixed message instead.
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", userID.String()).Msg("failed to claim pending invitation")
-		h.emitInvitationClaimFailed(r, userID, inv, "INTERNAL_ERROR", err.Error())
+		h.emitInvitationClaimFailed(r, userID, inv, "INTERNAL_ERROR", "internal error during invitation claim")
 		return
 	}
 	if invErr != nil {

@@ -29,10 +29,16 @@ CREATE TABLE organization_memberships (
 CREATE INDEX idx_memberships_user ON organization_memberships (user_id);
 CREATE INDEX idx_memberships_org  ON organization_memberships (org_id);
 
--- Backfill one membership per existing user, preserving role.
+-- Backfill one membership per existing user, preserving role. Skip rows with
+-- a NULL org_id: `users.org_id` is currently NOT NULL, but future work (e.g.
+-- zero-membership users after an org deletion cascade) may relax that, and
+-- `organization_memberships.org_id` is NOT NULL on this table so an unfiltered
+-- INSERT would abort the deploy mid-flight. Mirror the defensive
+-- `WHERE last_org_id IS NULL` filter the auth_sessions backfill below uses.
 INSERT INTO organization_memberships (user_id, org_id, role, created_at)
 SELECT id, org_id, role, created_at
 FROM users
+WHERE org_id IS NOT NULL
 ON CONFLICT (user_id, org_id) DO NOTHING;
 
 -- `last_org_id` is a per-session hint. Nullable so sign-in still works for

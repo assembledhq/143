@@ -216,10 +216,10 @@ Each step is independently revertible until step 6.
 
 1. **Schema migration.** Add `organization_memberships`. Backfill one row per existing user from `users.org_id` / `users.role`. Add nullable `auth_sessions.last_org_id` and backfill from `auth_sessions.org_id`. Keep `users.org_id` / `users.role` in place for one release as a read-through shim.
 2. **Defense-in-depth landed first.** Ship the org-bound store API, expand the static tenancy audit, and add the cross-org isolation integration test harness *before* any behavioral change. This is the PR that makes the rest safe.
-3. **Backend dual-read.** Middleware reads membership from the new table but asserts equivalence with `users.org_id` for single-org users. Log mismatches. Ship behind a feature flag for engineers first.
+3. **Backend dual-read.** Middleware reads membership from the new table but asserts equivalence with `users.org_id` for single-org users. Log mismatches.
 4. **Backend cutover.** Writes (invite accept, signup, org create, team role changes, member removal) go through the memberships table. Drop the equivalence assertion. `RequireRole` refactored to use active-org membership role.
 5. **API + frontend additions.** `active-org` endpoint, expanded `/auth/me`, `X-Active-Org-ID` API-client header, `ActiveOrgProvider`, `OrgContextSwitcher` (shipped hidden for single-org users from day 1), copy-link `?org=` writer.
-6. **Enable multi-org.** Remove the guard that prevents a user from being invited to a second org. This is the product-visible flip.
+6. **Enable multi-org.** The membership infrastructure itself is the product-visible flip: once invitation acceptance and signup write through the memberships table, a user can hold memberships in multiple orgs without further gating.
 7. **Deferred UX follow-ups.** Add command-palette switching, create-org-from-switcher, accept-invite modal polish, and optional deep-link resolver if usage shows copied links remain confusing.
 8. **Schema cleanup.** Drop `users.org_id`, `users.role`, and old `auth_sessions.org_id`. Deferred by one release minimum; requires explicit sign-off and a week of soak without membership/role-related incidents. No auto-deploy.
 
@@ -228,7 +228,6 @@ Each step is independently revertible until step 6.
 ### Phase 0: Decision and guardrails
 
 - Confirm the initial scope is memberships + active-org switching only; defer cross-org views, command-palette switching, and deep-link auto-resolve.
-- Add an implementation flag such as `multi_org_memberships_enabled` for behavioral rollout.
 - Add an internal runbook section for reverting to single-org behavior before any destructive schema cleanup.
 
 ### Phase 1: Schema and models
@@ -298,7 +297,7 @@ Each step is independently revertible until step 6.
 
 - Drop compatibility reads.
 - Drop old columns and old check constraints only after explicit sign-off.
-- Remove temporary feature flags and migration metrics after the soak window.
+- Remove migration metrics after the soak window.
 
 ## Risks considered
 

@@ -254,21 +254,28 @@ func (s *OrganizationMembershipStore) OldestForUser(ctx context.Context, userID 
 // trying to demote, remove, or insert-as-admin one of those rows blocks
 // until this tx commits. Returns the locked admin count. Callers must own
 // the surrounding transaction; the locks live for its duration.
+//
+// The CTE shape is deliberate: FOR UPDATE must run against the base table so
+// the row locks are taken, and COUNT(*) OVER () on the CTE gives us the count
+// in the same round trip. A plain `SELECT COUNT(*) ... FOR UPDATE` is not
+// valid (FOR UPDATE with aggregates is rejected), and reading rows back into
+// Go just to count them wastes a round-trip. LIMIT 1 on the outer select
+// keeps the result set a single row regardless of admin fan-out.
 func (s *OrganizationMembershipStore) lockAdminCount(ctx context.Context, tx pgx.Tx, orgID uuid.UUID) (int, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT 1
-		FROM organization_memberships
-		WHERE org_id = @org_id AND role = 'admin'
-		FOR UPDATE`, pgx.NamedArgs{"org_id": orgID})
+	var count int
+	err := tx.QueryRow(ctx, `
+		WITH locked AS (
+			SELECT 1 AS hit
+			FROM organization_memberships
+			WHERE org_id = @org_id AND role = 'admin'
+			FOR UPDATE
+		)
+		SELECT COALESCE((SELECT COUNT(*) FROM locked), 0)`,
+		pgx.NamedArgs{"org_id": orgID}).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("lock admin rows: %w", err)
 	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		count++
-	}
-	return count, rows.Err()
+	return count, nil
 }
 
 // UpdateRoleGuarded changes a member's role inside a transaction that holds
