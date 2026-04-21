@@ -734,6 +734,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isClaudeCode = session.agent_type === "claude_code";
+  // Amp and Pi have no headless resume flag, so a follow-up run replays only the
+  // new user message against the restored filesystem — the prior conversation
+  // context is not sent back to the CLI. See runStreamingAgent in
+  // internal/services/agent/adapters/stream_parser.go.
+  const lacksHeadlessResume = session.agent_type === "amp" || session.agent_type === "pi";
 
   const isRunning = session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
@@ -1119,6 +1124,16 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           <Clock className="h-3.5 w-3.5 shrink-0" />
           <span>
             This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+          </span>
+        </div>
+      )}
+
+      {/* Amp/Pi: no headless resume — warn users that follow-ups don't carry prior context. */}
+      {lacksHeadlessResume && canSendMessage && !isSnapshotExpired && (
+        <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            {session.agent_type === "amp" ? "Amp" : "Pi"} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
           </span>
         </div>
       )}

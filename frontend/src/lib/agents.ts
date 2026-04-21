@@ -119,7 +119,7 @@ export const AGENTS: readonly AgentMeta[] = [
   },
 ] as const;
 
-export const AGENTS_BY_KEY: Record<string, AgentMeta> = Object.fromEntries(
+export const AGENTS_BY_KEY: Readonly<Record<string, AgentMeta>> = Object.fromEntries(
   AGENTS.map((agent) => [agent.key, agent]),
 );
 
@@ -127,7 +127,7 @@ export const AGENTS_BY_KEY: Record<string, AgentMeta> = Object.fromEntries(
 // not user-selectable in the settings UI (so they're intentionally absent
 // from AGENTS). AgentBadge consults this as a fallback before rendering the
 // raw key.
-export const AGENT_DISPLAY_LABELS: Record<string, string> = {
+export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
   pm_agent: "PM Agent",
   custom: "Custom",
 };

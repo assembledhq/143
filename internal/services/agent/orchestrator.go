@@ -409,6 +409,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	// Route the sandbox workdir into a repo-named subdir of HomeDir so the
 	// agent's cwd reads like `/home/sandbox/<repo>` — matching what a human
 	// would see after `git clone && cd <repo>`. Falls back to the default
@@ -773,6 +777,25 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
+	}
+	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
+		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
+		}
+		if o.sessionMessages != nil {
+			errMsg := &models.SessionMessage{
+				SessionID:  session.ID,
+				OrgID:      session.OrgID,
+				TurnNumber: session.CurrentTurn + 1,
+				Role:       models.MessageRoleAssistant,
+				Content:    authErr.Error(),
+			}
+			if createErr := o.sessionMessages.Create(ctx, errMsg); createErr != nil {
+				log.Error().Err(createErr).Msg("failed to create error message for auth pre-flight failure")
+			}
+		}
+		return authErr
 	}
 	if session.ModelOverride != nil && *session.ModelOverride != "" {
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
@@ -1580,6 +1603,22 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 	}
 
 	return merged
+}
+
+// checkAgentAuth returns a user-facing error when an agent type has no chance
+// of authenticating against its upstream because the required credential is
+// missing from the resolved sandbox env. This is a pre-flight check intended
+// to beat the generic "CLI exited 1" failure with something the user can act
+// on — "configure AMP_API_KEY" instead of "amp: invalid api key".
+//
+// Scoped to agent types whose auth lives exclusively in agent_config (Amp
+// today) — for the others, resolveProviderConfig already surfaces richer
+// errors, and we don't want to duplicate those rules here.
+func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string]string) error {
+	if agentType == models.AgentTypeAmp && env["AMP_API_KEY"] == "" {
+		return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
+	}
+	return nil
 }
 
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org

@@ -54,11 +54,10 @@ func (a *AmpAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput)
 	}, nil
 }
 
-// Execute runs the Amp CLI inside the sandbox and streams output.
-//
-// Amp does not expose a stable continuation flag in headless mode, so on
-// Path A (snapshot restore) we execute a fresh `amp -x` against the restored
-// filesystem using the user's new message as the prompt.
+// Execute runs the Amp CLI inside the sandbox and streams output. The shared
+// runStreamingAgent helper handles continuation semantics — see that function
+// for details on how follow-up turns are replayed against the restored
+// filesystem without a headless resume flag.
 func (a *AmpAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return runStreamingAgent(ctx, ampStreamingConfig, a.logger, sandbox, prompt, logCh)
 }

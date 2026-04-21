@@ -55,11 +55,9 @@ func (a *PiAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) 
 	}, nil
 }
 
-// Execute runs the Pi CLI inside the sandbox and streams output.
-//
-// Pi has no headless resume flag; on Path A (snapshot restore) we run a fresh
-// `pi -p` against the restored filesystem with the user's new message as the
-// prompt.
+// Execute runs the Pi CLI inside the sandbox and streams output. See
+// runStreamingAgent for the shared continuation handling (Pi has no headless
+// resume flag, same as Amp).
 func (a *PiAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 	return runStreamingAgent(ctx, piStreamingConfig, a.logger, sandbox, prompt, logCh)
 }

@@ -2377,10 +2377,13 @@ func TestRunAgent_PiInheritsProviderKeys(t *testing.T) {
 	require.Equal(t, "moonshot/kimi-k2", capturedCfg.Env["PI_MODEL_CUSTOM"], "PI_MODEL_CUSTOM should flow from agent_config.pi")
 }
 
-// TestRunAgent_AmpNoOrgsStore ensures resolveAgentEnv handles a nil orgs
-// dependency gracefully — the Amp session still runs, just without
-// agent_config overrides.
-func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
+// TestRunAgent_AmpMissingAPIKeyFailsFast asserts that an Amp run without an
+// AMP_API_KEY in the resolved env fails the run with a clear user-facing
+// error before the sandbox is even created, rather than letting the Amp CLI
+// blow up with "invalid api key" inside the container. This covers both the
+// nil-orgs-store case and the case where the org simply hasn't configured
+// agent_config.amp.AMP_API_KEY yet.
+func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -2390,10 +2393,10 @@ func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
 
-	var capturedCfg agent.SandboxConfig
+	var sandboxCreated bool
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-		capturedCfg = cfg
-		return &agent.Sandbox{ID: "amp-no-orgs", Provider: "mock", WorkDir: "/workspace"}, nil
+		sandboxCreated = true
+		return &agent.Sandbox{ID: "amp-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
@@ -2405,7 +2408,7 @@ func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
 		DecisionLog:      d.decisions,
 		Issues:           d.issues,
 		Repositories:     d.repos,
-		// Orgs intentionally omitted.
+		// Orgs intentionally omitted to simulate "no agent_config.amp source".
 		Jobs:          d.jobs,
 		GitHub:        d.github,
 		Credentials:   d.creds,
@@ -2413,10 +2416,12 @@ func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
 		MaxConcurrent: 3,
 	})
 
-	require.NoError(t, orch.RunAgent(context.Background(), run),
-		"Amp run should succeed even when the orgs store is not wired")
-	require.NotContains(t, capturedCfg.Env, "AMP_API_KEY",
-		"without an orgs store there is nowhere to source AMP_API_KEY from")
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "Amp run without AMP_API_KEY must fail fast")
+	require.Contains(t, err.Error(), "AMP_API_KEY",
+		"error should name the missing credential so users know what to configure")
+	require.False(t, sandboxCreated,
+		"pre-flight auth check must fire before sandbox creation")
 }
 
 // TestRunAgent_AmpAgentConfigCached asserts the orchestrator's
