@@ -384,6 +384,86 @@ var handlerPreviewSnapshotTestCols = []string{
 	"viewport_width", "viewport_height", "console_errors", "file_changes", "created_at",
 }
 
+// newReservedPreviewRow builds the pgxmock row that CreatePreviewInstance
+// returns on a successful Reserve: 'starting' status, default Node config,
+// preview_holding_container still FALSE (AcquirePreviewHold flips it in a
+// separate UPDATE). Columns must match previewInstanceTestCols.
+func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
+	return []any{
+		previewID, sessionID, orgID, userID, "bootstrap", "default", "starting",
+		"docker", "test-worker", "", "app", 3000,
+		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
+		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "", now, now, nil, nil,
+		false,
+	}
+}
+
+// expectReserveSuccess emits the pgxmock sequence for a clean ReservePreview:
+// no existing active preview, all concurrency caps below their thresholds, a
+// successful INSERT, and AcquirePreviewHold. Returns the preview id seeded into
+// the INSERT's RETURNING row so tests can thread it into later expectations.
+//
+// Use this when a test's scenario requires Reserve to succeed so it can exercise
+// downstream branches (hydrate, autodetect, launch failure, etc.).
+func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uuid.UUID) uuid.UUID {
+	previewID := uuid.New()
+	now := time.Now()
+
+	// GetActivePreviewForSession — no active preview.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	// checkConcurrencyCaps: user (2 args: org+user), org (1 arg), worker (1 arg).
+	// pgxmock treats a missing WithArgs as "expect 0 args", so the per-cap argc
+	// has to match exactly or the whole Reserve fails with a generic 422.
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	// CreatePreviewInstance: 19 bound args.
+	insertArgs := make([]any, 19)
+	for i := range insertArgs {
+		insertArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(insertArgs...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+	// AcquirePreviewHold RETURNS session_id (id + org_id).
+	mock.ExpectQuery("UPDATE preview_instances\\s+SET preview_holding_container = TRUE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	return previewID
+}
+
+// expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
+// releases the hold without destroying a container (either the sandbox was
+// reused so hydratedContainerID is "", or the turn still holds it). Callers
+// that need the destroy path should build it inline.
+func expectAbortReservationNoDestroy(mock pgxmock.PgxPoolIface) {
+	// UpdatePreviewStatus: id, org_id, status, error (4 args).
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// ReleasePreviewHold returns destroyNow=false because turn_holds=true.
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(uuid.New(), "", false),
+		)
+}
+
 func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
 	recycleConfig, err := json.Marshal(models.PreviewConfig{
 		Name:    "my-preview",
@@ -661,12 +741,21 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	userID := uuid.New()
 	sessionID := uuid.New()
 
+	// GetByID returns a session with a live container so acquireSandbox takes
+	// the reuse branch.
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
 		)
+	// ReservePreview — the fix for bug #2: capacity / existing-preview checks
+	// now run BEFORE any sandbox interaction, so a pre-hydrate autodetect
+	// failure cannot leak a container.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// readWorkspacePreviewConfig fails → AbortReservation releases the hold.
+	// Reused container (hydratedContainerID == ""), so no FinalizeContainerDestroy.
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -704,6 +793,10 @@ func TestPreviewHandler_StartPreview_SnapshotExpired_NoSnapshot(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "snapshotted")...),
 		)
+	// ReservePreview succeeds before we realize the session has no usable
+	// sandbox, so the preview row exists and must be cleaned up via Abort.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -741,6 +834,8 @@ func TestPreviewHandler_StartPreview_SnapshotExpired_SandboxDestroyed(t *testing
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "destroyed")...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -779,6 +874,8 @@ func TestPreviewHandler_StartPreview_NoSandbox_WhenHydrateNotConfigured(t *testi
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -841,14 +938,13 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestPreviewHandler_StartPreview_HydrateReachesManager verifies that when
-// hydrate is configured and the session has a usable snapshot, acquireSandbox
-// successfully creates a new container and the handler proceeds into
-// manager.StartPreview. We stop short of simulating the full preview-start
-// DB dance (that path is exercised by the capacity/existing-preview cases);
-// the assertion is that hydrate publishes the new container id on the session
-// and then reaches the manager, not that the manager succeeds end-to-end.
-func TestPreviewHandler_StartPreview_HydrateReachesManager(t *testing.T) {
+// TestPreviewHandler_StartPreview_HydrateReachesLaunch verifies that when
+// hydrate is configured and the session has a usable snapshot, the handler
+// reserves the preview, hydrates a fresh sandbox, and proceeds into
+// manager.LaunchPreview. We stop short of simulating the full launch DB dance
+// by failing UpdatePreviewReservationConfig — enough to prove the handler
+// crossed into Launch after acquireSandbox, and that Abort cleans up.
+func TestPreviewHandler_StartPreview_HydrateReachesLaunch(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -866,25 +962,26 @@ func TestPreviewHandler_StartPreview_HydrateReachesManager(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
+	// Reserve runs BEFORE hydrate under the new flow — that ordering is the
+	// capacity-leak fix (bug #2) and the hold-race fix (bug #3).
+	expectReserveSuccess(mock, sessionID, orgID, userID)
 	// Hydrate publishes container_id (CAS) + transitions sandbox_state=running
-	// inside the same UPDATE. The RETURNING clause reports the proposed ID
-	// because no prior holder existed. The mock provider's default container
-	// ID is "test-sandbox"; echo it back so the preview doesn't treat this
-	// as a lost race.
+	// inside the same UPDATE. Echo the proposed id back (no lost race).
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
-	// Manager.StartPreview first queries for an existing preview; we return
-	// one so the manager short-circuits with "already has an active preview"
-	// — enough to prove the handler crossed into the manager after hydrate.
-	existing := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("SELECT .+ FROM preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
-		)
+	// Launch's first DB call is UpdatePreviewReservationConfig (needsUpdate is
+	// always true here because the reservation persisted an empty recycle
+	// sandbox). Failing it proves the handler reached Launch; Abort then
+	// releases the hold.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -904,12 +1001,13 @@ func TestPreviewHandler_StartPreview_HydrateReachesManager(t *testing.T) {
 
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "manager's already-active-preview guard should be reached after hydrate")
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure must surface as 422 PREVIEW_START_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // TestPreviewHandler_StartPreview_HydrateFails covers the error return from
-// HydrateSandboxFromSnapshot (preview.go:197-199).
+// HydrateSandboxFromSnapshot (preview.go: provider.Create → acquireSandbox
+// returns err, errCode="").
 func TestPreviewHandler_StartPreview_HydrateFails(t *testing.T) {
 	t.Parallel()
 
@@ -928,6 +1026,11 @@ func TestPreviewHandler_StartPreview_HydrateFails(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
+	// Reserve succeeds; acquireSandbox fails at provider.Create (no UPDATE
+	// sessions fires because PublishHydratedContainerID is never reached).
+	// The reservation must be aborted — hydratedID="" so no destroy.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -970,9 +1073,14 @@ func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("db down"))
+	// acquireSandbox destroyed the local container before returning, so the
+	// handler passes hydratedID="" to AbortReservation — no finalize/destroy
+	// on the manager side.
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -992,7 +1100,7 @@ func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	require.Contains(t, w.Body.String(), "PREVIEW_HYDRATE_FAILED")
-	require.Equal(t, 1, sp.GetDestroyCalls())
+	require.Equal(t, 1, sp.GetDestroyCalls(), "acquireSandbox must destroy the local container when publish fails")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1018,11 +1126,15 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
 	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
 	// lost the race.
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
+	// Handler passes hydratedID="" to Abort because acquireSandbox already
+	// destroyed the local container on the race-loss branch.
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -1069,20 +1181,21 @@ func TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate(t *testing
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowReuseWithSnapshot(sessionID, orgID, "zombie-id", &key)...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
 	// Hydrate is reached → publishes the provider's new ID via COALESCE CAS.
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
-	// Manager short-circuits with an existing active preview; we only need to
-	// prove the handler advanced past acquireSandbox.
-	existing := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("SELECT .+ FROM preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
-		)
+	// Fail Launch at UpdatePreviewReservationConfig to prove the handler
+	// advanced past acquireSandbox into the manager's launch phase.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -1104,8 +1217,8 @@ func TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate(t *testing
 
 	h.StartPreview(w, req)
 
-	// Reaching the manager's "already active preview" guard proves the zombie
-	// fallthrough landed in hydrate rather than attaching to "zombie-id".
+	// Reaching the manager's Launch-phase UpdateReservationConfig proves the
+	// zombie fallthrough landed in hydrate rather than attaching to "zombie-id".
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -1133,17 +1246,18 @@ func TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate(t *t
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowReuseWithSnapshot(sessionID, orgID, "maybe-dead", &key)...),
 		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
-	existing := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("SELECT .+ FROM preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
-		)
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -1189,16 +1303,18 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowWithContainer(sessionID, orgID, "live-container")...),
 		)
-	// Manager short-circuits with an existing active preview; we only need to
-	// prove the handler took the reuse branch (no COALESCE CAS, no hydrate).
-	existing := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("SELECT .+ FROM preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
-		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Fail Launch at UpdatePreviewReservationConfig. Absence of a COALESCE CAS
+	// in the expectation list is what proves the reuse branch fired — the
+	// ExpectationsWereMet check at the bottom will reject an unexpected hydrate.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -1215,7 +1331,7 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "reuse branch should reach manager's already-active-preview guard")
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

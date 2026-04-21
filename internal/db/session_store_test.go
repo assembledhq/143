@@ -1136,7 +1136,7 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 	})
 }
 
-func TestSessionStore_ClearContainerID(t *testing.T) {
+func TestSessionStore_ClearContainerID_CAS_Clears(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1144,12 +1144,33 @@ func TestSessionStore_ClearContainerID(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectExec(`^UPDATE sessions SET container_id = NULL WHERE id = @id AND org_id = @org_id$`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+	// WHERE clause must pin container_id = @expected AND holders=false, else
+	// the CAS isn't safe against concurrent hold acquisition.
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL\s+WHERE id = @id\s+AND org_id = @org_id\s+AND container_id = @expected\s+AND turn_holding_container = FALSE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New())
+	cleared, err := store.ClearContainerID(context.Background(), uuid.New(), uuid.New(), "abc")
 	require.NoError(t, err)
+	require.True(t, cleared)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ClearContainerID_CAS_NoMatchReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	cleared, err := store.ClearContainerID(context.Background(), uuid.New(), uuid.New(), "abc")
+	require.NoError(t, err)
+	require.False(t, cleared, "CAS must report cleared=false when no row matched")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1161,11 +1182,11 @@ func TestSessionStore_ClearContainerID_DBError(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectExec(`UPDATE sessions SET container_id = NULL`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New())
+	_, err = store.ClearContainerID(context.Background(), uuid.New(), uuid.New(), "abc")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "clear container id")
 }

@@ -158,9 +158,14 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 //     new container, restore the snapshot, and publish the new container_id.
 //   - Expired: no container and no usable snapshot; caller should return 410.
 //
+// The hydrated return distinguishes a freshly-created container from a reused
+// one: it tells AbortReservation whether the caller's teardown path should
+// destroy the sandbox (hydrate — we own it) or leave it alone (reuse — a turn
+// still owns it).
+//
 // The returned error code steers the HTTP status: "NO_SANDBOX" (409),
 // "SNAPSHOT_EXPIRED" (410), or empty for infrastructure failures (500).
-func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) (*agent.Sandbox, string, error) {
+func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) (sb *agent.Sandbox, hydrated bool, errCode string, err error) {
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
 	// whose sandbox_state has since moved to 'snapshotted'/'destroyed' should
@@ -190,7 +195,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 					Str("container_id", candidate.ID).
 					Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return candidate, "", nil
+				return candidate, false, "", nil
 			} else {
 				h.logger.Info().
 					Str("session_id", session.ID.String()).
@@ -199,17 +204,17 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 			}
 		} else {
 			// No provider wired (e.g., cold handler): trust the row.
-			return candidate, "", nil
+			return candidate, false, "", nil
 		}
 	}
 
 	// No live container. Check whether we can hydrate one from a snapshot.
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" ||
 		session.SandboxState == string(models.SandboxStateDestroyed) {
-		return nil, "SNAPSHOT_EXPIRED", fmt.Errorf("session has no sandbox container and no usable snapshot; start a new turn to continue")
+		return nil, false, "SNAPSHOT_EXPIRED", fmt.Errorf("session has no sandbox container and no usable snapshot; start a new turn to continue")
 	}
 	if h.sandboxProvider == nil || h.snapshots == nil {
-		return nil, "NO_SANDBOX", fmt.Errorf("preview hydrate is not configured on this worker")
+		return nil, false, "NO_SANDBOX", fmt.Errorf("preview hydrate is not configured on this worker")
 	}
 
 	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
@@ -226,7 +231,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, h.sandboxProvider, h.snapshots, *session.SnapshotKey, sandboxCfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("hydrate sandbox: %w", err)
+		return nil, false, "", fmt.Errorf("hydrate sandbox: %w", err)
 	}
 
 	// Publish the new container_id on the session so a concurrent ContinueSession
@@ -241,16 +246,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		// down to avoid a hydrated orphan. This is rare (DB outage) and
 		// safer than leaving an untracked container behind.
 		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
-		return nil, "", fmt.Errorf("publish container id: %w", err)
+		return nil, false, "", fmt.Errorf("publish container id: %w", err)
 	}
-	if actualID != "" && actualID != sandbox.ID {
+	if actualID != sandbox.ID {
 		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
 		h.logger.Warn().
 			Str("session_id", session.ID.String()).
 			Str("winning_container_id", actualID).
 			Str("losing_container_id", sandbox.ID).
 			Msg("preview hydrate lost race to another holder; destroyed local container")
-		return nil, "NO_SANDBOX", fmt.Errorf("another process attached to this session's sandbox first; please retry")
+		return nil, false, "NO_SANDBOX", fmt.Errorf("another process attached to this session's sandbox first; please retry")
 	}
 
 	h.logger.Info().
@@ -258,7 +263,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		Str("container_id", sandbox.ID).
 		Msg("preview hydrate: new sandbox container created from snapshot")
 
-	return sandbox, "", nil
+	return sandbox, true, "", nil
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.
@@ -330,21 +335,53 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reserve the preview BEFORE touching docker. This (a) short-circuits
+	// capacity / existing-preview failures so a 503 can never leave a hydrated
+	// container behind, and (b) acquires preview_holding_container=TRUE before
+	// hydrate publishes container_id, so a concurrent turn release's
+	// FinalizeContainerDestroy sees our hold and leaves the freshly-hydrated
+	// container alone. The config passed here is "initial" — if the client
+	// didn't supply one, we fall back to defaults and LaunchPreview will
+	// overwrite the row if workspace autodetect resolves something different.
+	initialConfig := body.Config
+	if initialConfig == nil {
+		initialConfig = defaultPreviewConfig()
+	}
+	input := preview.StartPreviewInput{
+		SessionID:     sessionID,
+		OrgID:         orgID,
+		UserID:        user.ID,
+		Config:        initialConfig,
+		BaseCommitSHA: body.BaseCommitSHA,
+		ProfileName:   body.ProfileName,
+	}
+	reservation, err := h.manager.ReservePreview(r.Context(), input)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
+		if errors.Is(err, preview.ErrPreviewCapacity) {
+			writeError(w, r, http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error())
+			return
+		}
+		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview")
+		return
+	}
+
 	// Three paths to a live sandbox, in preference order:
-	//   1. Reuse — an existing container (a turn is running, or a prior
-	//      preview already hydrated it). Attach to it by ID.
-	//   2. Hydrate — the container has been torn down but a snapshot is
-	//      available. Spin up a new container and restore the snapshot.
-	//      This is the common case for "click Start Preview on an idle
-	//      session" — the reason users previously saw NO_SANDBOX.
-	//   3. SnapshotExpired — neither a container nor a usable snapshot
-	//      exists. Tell the client to start a new turn.
-	sb, hydrateErrCode, hydrateErr := h.acquireSandbox(r.Context(), orgID, &session)
+	//   1. Reuse — attach to an existing container (a turn is running or a
+	//      prior preview already hydrated it).
+	//   2. Hydrate — the container has been torn down but a snapshot exists;
+	//      create a new container and restore the snapshot.
+	//   3. SnapshotExpired — neither a container nor a usable snapshot exists.
+	sb, hydrated, hydrateErrCode, hydrateErr := h.acquireSandbox(r.Context(), orgID, &session)
 	if hydrateErr != nil {
 		h.logger.Warn().Err(hydrateErr).
 			Str("session_id", sessionID.String()).
 			Str("error_code", hydrateErrCode).
 			Msg("preview start: failed to acquire sandbox")
+		// hydratedContainerID is "" — either we never hydrated, or
+		// acquireSandbox's race-loss branch already destroyed the local
+		// container before returning.
+		h.manager.AbortReservation(r.Context(), reservation, "", fmt.Sprintf("acquire sandbox: %v", hydrateErr))
 		switch hydrateErrCode {
 		case "SNAPSHOT_EXPIRED":
 			writeError(w, r, http.StatusGone, hydrateErrCode, hydrateErr.Error())
@@ -356,6 +393,13 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Container id we'd need to tear down on later failures. Empty when we
+	// reused an existing container — the turn still owns it.
+	hydratedID := ""
+	if hydrated {
+		hydratedID = sb.ID
+	}
+
 	if body.Config == nil {
 		// Auto-detect: first try to read .143/preview.json from the session's
 		// workspace so repos with a committed config just work. Fall back to a
@@ -365,39 +409,25 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 			// Infrastructure failure (docker exec, sandbox gone, etc.) — do
 			// not silently swap in Node.js defaults, which would start the
 			// wrong preview for a non-Node project and time out after minutes.
+			h.manager.AbortReservation(r.Context(), reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
 			writeError(w, r, http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
 			return
 		}
 		if cfg != nil {
-			body.Config = cfg
+			input.Config = cfg
 		} else {
 			h.logger.Info().
 				Str("session_id", sessionID.String()).
 				Msg("no preview config provided or committed, using Node.js defaults (npm start, port 3000)")
-			body.Config = defaultPreviewConfig()
+			// input.Config already holds defaults from the reservation.
 		}
 	}
+	input.Sandbox = sb
 
-	input := preview.StartPreviewInput{
-		SessionID:     sessionID,
-		OrgID:         orgID,
-		UserID:        user.ID,
-		Sandbox:       sb,
-		Config:        body.Config,
-		BaseCommitSHA: body.BaseCommitSHA,
-		ProfileName:   body.ProfileName,
-	}
-
-	instance, err := h.manager.StartPreview(r.Context(), input)
+	instance, err := h.manager.LaunchPreview(r.Context(), reservation, input)
 	if err != nil {
-		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview start failed")
-		if errors.Is(err, preview.ErrPreviewCapacity) {
-			// 503: transient capacity failure. Surface the actual reason
-			// (per-user / per-org / per-worker) so the UI can tell users
-			// whether to stop one of their own or wait.
-			writeError(w, r, http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error())
-			return
-		}
+		h.manager.AbortReservation(r.Context(), reservation, hydratedID, fmt.Sprintf("launch: %v", err))
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview launch failed")
 		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview")
 		return
 	}

@@ -797,21 +797,42 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	return actualContainerID, nil
 }
 
-// ClearContainerID sets container_id back to NULL unconditionally. Used by
-// the startup reconciler for orphaned containers discovered out-of-band.
-// Lifecycle code paths (orchestrator / preview manager) should call
-// FinalizeContainerDestroy instead, which does an atomic CAS that closes the
-// race between release and destroy.
-func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
-	query := `UPDATE sessions SET container_id = NULL WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":     sessionID,
-		"org_id": orgID,
+// ClearContainerID is the startup reconciler's CAS-safe orphan cleanup: it
+// clears container_id only when the expected ID still matches AND no holder
+// (turn or preview) has acquired the row between the reconciler's scan and
+// this call. Returns cleared=true when the row was updated — the caller now
+// owns the right to destroy the container. cleared=false means another
+// holder slipped in between the List and this call; the reconciler must
+// leave the container alone.
+//
+// It intentionally does not touch sandbox_state: the reconciler doesn't know
+// whether a valid snapshot exists, so deciding between 'snapshotted' and
+// 'destroyed' is the reaper's job (Phase 2 / Phase 4 in SessionReaper.reap).
+// Lifecycle code paths (orchestrator / preview manager) call
+// FinalizeContainerDestroy instead, which additionally flips sandbox_state
+// to 'snapshotted'.
+func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	query := `UPDATE sessions
+		SET container_id = NULL
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND container_id = @expected
+		  AND turn_holding_container = FALSE
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
 	})
 	if err != nil {
-		return fmt.Errorf("clear container id: %w", err)
+		return false, fmt.Errorf("clear container id: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // FinalizeContainerDestroy atomically clears container_id and marks
@@ -855,8 +876,9 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 
 // ListOrphanedContainers returns sessions whose container_id is set but no
 // holder (turn or preview) is marked true. Called on startup to clean up
-// containers that leaked from a crashed server — the reconciler destroys the
-// container (best-effort) and then calls ClearContainerID.
+// containers that leaked from a crashed server — the reconciler first calls
+// ClearContainerID (CAS-safe) and, if that claimed the row, destroys the
+// container.
 //
 // Returns at most 100 rows per call, keyset-paginated by session id > afterID
 // and ordered by id ASC. The reconciler passes the last seen id as a cursor

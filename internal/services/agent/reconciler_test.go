@@ -17,12 +17,15 @@ import (
 )
 
 type fakeOrphanStore struct {
-	batches   [][]models.Session
-	callCount atomic.Int32
-	clearErr  error
-	cleared   atomic.Int32
-	mu        sync.Mutex
-	cursors   []uuid.UUID
+	batches       [][]models.Session
+	callCount     atomic.Int32
+	clearErr      error
+	clearRaceFor  map[string]bool // keyed by expected container_id → CAS returns cleared=false
+	cleared       atomic.Int32
+	clearAttempts atomic.Int32
+	mu            sync.Mutex
+	cursors       []uuid.UUID
+	clearedIDs    []string
 }
 
 func (f *fakeOrphanStore) ListOrphanedContainers(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
@@ -36,12 +39,19 @@ func (f *fakeOrphanStore) ListOrphanedContainers(ctx context.Context, afterID uu
 	return f.batches[idx], nil
 }
 
-func (f *fakeOrphanStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
+func (f *fakeOrphanStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	f.clearAttempts.Add(1)
 	if f.clearErr != nil {
-		return f.clearErr
+		return false, f.clearErr
 	}
+	if f.clearRaceFor[expectedContainerID] {
+		return false, nil
+	}
+	f.mu.Lock()
+	f.clearedIDs = append(f.clearedIDs, expectedContainerID)
+	f.mu.Unlock()
 	f.cleared.Add(1)
-	return nil
+	return true, nil
 }
 
 func newOrphanSession(containerID string) models.Session {
@@ -100,7 +110,7 @@ func TestReconcileOrphanedContainers_SkipsEmptyContainerID(t *testing.T) {
 	require.Equal(t, int32(0), store.cleared.Load())
 }
 
-func TestReconcileOrphanedContainers_DestroyFailureLeavesRow(t *testing.T) {
+func TestReconcileOrphanedContainers_DestroyFailureAfterClearLogsButContinues(t *testing.T) {
 	t.Parallel()
 	store := &fakeOrphanStore{
 		batches: [][]models.Session{{newOrphanSession("c1")}},
@@ -109,12 +119,15 @@ func TestReconcileOrphanedContainers_DestroyFailureLeavesRow(t *testing.T) {
 	provider.DestroyFn = func(ctx context.Context, sb *agent.Sandbox) error {
 		return errors.New("daemon flaked")
 	}
-	// Default IsAlive returns (true, nil) so destroy runs and fails. We must
-	// NOT clear in that case — the container may still be alive and a
-	// subsequent startup should retry destroy rather than forget about it.
+	// The CAS-clear happens before destroy, so even if destroy fails the
+	// DB row IS cleared. This is a deliberate trade-off: with CAS-first
+	// ordering we can never destroy a container another holder has
+	// acquired, but a persistently failing destroy orphans the container
+	// on the host. The reconciler logs the leak so ops can prune manually.
 	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
 	require.NoError(t, err)
-	require.Equal(t, int32(0), store.cleared.Load())
+	require.Equal(t, int32(1), store.cleared.Load())
+	require.Equal(t, 1, provider.GetDestroyCalls())
 }
 
 func TestReconcileOrphanedContainers_IsAliveErrorSkipsRow(t *testing.T) {
@@ -132,6 +145,7 @@ func TestReconcileOrphanedContainers_IsAliveErrorSkipsRow(t *testing.T) {
 	// startup, which might see a healthier daemon.
 	require.Equal(t, 0, provider.GetDestroyCalls())
 	require.Equal(t, int32(0), store.cleared.Load())
+	require.Equal(t, int32(0), store.clearAttempts.Load())
 }
 
 func TestReconcileOrphanedContainers_ContainerGoneClearsWithoutDestroy(t *testing.T) {
@@ -147,6 +161,38 @@ func TestReconcileOrphanedContainers_ContainerGoneClearsWithoutDestroy(t *testin
 	require.NoError(t, err)
 	require.Equal(t, 0, provider.GetDestroyCalls())
 	require.Equal(t, int32(1), store.cleared.Load())
+}
+
+func TestReconcileOrphanedContainers_CASLostToNewHolderSkipsDestroy(t *testing.T) {
+	t.Parallel()
+	store := &fakeOrphanStore{
+		batches: [][]models.Session{{newOrphanSession("c1")}},
+		clearRaceFor: map[string]bool{
+			"c1": true, // simulate: a turn or preview acquired the hold between list and clear
+		},
+	}
+	provider := testutil.NewMockSandboxProvider()
+	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
+	require.NoError(t, err)
+	// The CAS-clear returned cleared=false → must NOT destroy the container,
+	// because the row is in active use by whatever holder slipped in.
+	require.Equal(t, 0, provider.GetDestroyCalls())
+	require.Equal(t, int32(0), store.cleared.Load())
+	require.Equal(t, int32(1), store.clearAttempts.Load())
+}
+
+func TestReconcileOrphanedContainers_ClearErrorLeavesRowForNextStartup(t *testing.T) {
+	t.Parallel()
+	store := &fakeOrphanStore{
+		batches:  [][]models.Session{{newOrphanSession("c1")}},
+		clearErr: errors.New("db down"),
+	}
+	provider := testutil.NewMockSandboxProvider()
+	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
+	require.NoError(t, err)
+	require.Equal(t, 0, provider.GetDestroyCalls())
+	require.Equal(t, int32(0), store.cleared.Load())
+	require.Equal(t, int32(1), store.clearAttempts.Load())
 }
 
 func TestReconcileOrphanedContainers_CursorAdvancesPastStuckRow(t *testing.T) {
@@ -184,6 +230,6 @@ type errOrphanStore struct{ err error }
 func (e *errOrphanStore) ListOrphanedContainers(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
 	return nil, e.err
 }
-func (e *errOrphanStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
-	return nil
+func (e *errOrphanStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	return false, nil
 }

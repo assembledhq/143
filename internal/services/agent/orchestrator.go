@@ -1022,13 +1022,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if actualContainerID != "" && actualContainerID != sandbox.ID {
 		destroyCtx := context.Background()
-		// Only destroy the locally-created container — reused containers came
-		// from the row's existing container_id and should never be torn down
-		// here, but reusedExisting implies sandbox.ID == *session.ContainerID,
-		// and if that differs from actualContainerID the row was rewritten
-		// under us (e.g. a preview hydrate replaced the reused ID). Either
-		// way, destroying the sandbox we hold is safe: for reuse the
-		// "destroy" is really "release our handle" since we didn't create it.
+		// Only destroy the locally-created container. When reusedExisting is
+		// true, sandbox.ID came from the row's existing container_id and
+		// belongs to whoever set it — tearing it down here would kill a
+		// container another holder is still using. On the losing-race path
+		// we instead leave it alone; the caller's retry will attach to
+		// actualContainerID via the reuse path.
 		if !reusedExisting {
 			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")

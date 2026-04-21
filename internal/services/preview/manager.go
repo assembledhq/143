@@ -170,26 +170,52 @@ type StartPreviewInput struct {
 }
 
 // =============================================================================
-// StartPreview
+// Start / Reserve / Launch / Abort
 // =============================================================================
 
-// StartPreview validates caps, resolves config, starts the preview via the
-// provider, and persists the result.
+// StartPreview is a convenience wrapper that reserves, launches, and aborts on
+// failure in a single call. Callers that need to interleave sandbox
+// acquisition between capacity checks and service startup (the preview HTTP
+// handler is the canonical case) should use ReservePreview / LaunchPreview /
+// AbortReservation directly so the hold is in place before a new container is
+// hydrated.
 func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*models.PreviewInstance, error) {
-	// 0. Validate required pointers.
+	instance, err := m.ReservePreview(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	launched, err := m.LaunchPreview(ctx, instance, input)
+	if err != nil {
+		m.AbortReservation(ctx, instance, "", fmt.Sprintf("launch failed: %v", err))
+		return nil, err
+	}
+	return launched, nil
+}
+
+// ReservePreview performs the pre-hydrate phase of preview startup: it
+// validates the config, rejects an existing active preview, enforces
+// concurrency caps, inserts the preview row (status=starting), and acquires
+// preview_holding_container.
+//
+// Reserving BEFORE sandbox hydration is load-bearing for two reasons:
+//  1. Capacity/existing-preview failures short-circuit before we touch docker,
+//     so a 503 never leaves a hydrated container behind.
+//  2. preview_holding_container=TRUE exists before the caller publishes a
+//     hydrated container_id, so a concurrent turn's FinalizeContainerDestroy
+//     sees our hold and leaves the freshly-hydrated container alone.
+//
+// The returned instance is "half-built": services/infrastructure rows have
+// not been created and the provider has not started yet. The caller must
+// follow up with LaunchPreview (success path) or AbortReservation (failure
+// path) — otherwise the preview row lingers in 'starting' with an active hold.
+func (m *Manager) ReservePreview(ctx context.Context, input StartPreviewInput) (*models.PreviewInstance, error) {
 	if m.provider == nil {
 		return nil, fmt.Errorf("preview provider is not configured")
 	}
-	if input.Sandbox == nil {
-		return nil, fmt.Errorf("sandbox must not be nil")
-	}
-
-	// 1. Validate the config.
 	if errs := ValidateConfig(input.Config); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
 	}
 
-	// 2. Check for existing active preview on this session.
 	existing, err := m.store.GetActivePreviewForSession(ctx, input.OrgID, input.SessionID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing preview: %w", err)
@@ -197,18 +223,12 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		return nil, fmt.Errorf("session already has an active preview (id=%s)", existing.ID)
 	}
 
-	// 3. Enforce concurrency caps.
 	if err := m.checkConcurrencyCaps(ctx, input.OrgID, input.UserID); err != nil {
 		return nil, err
 	}
 
-	// 4. Resolve resource limits.
 	limits := ResolveResourceLimits(input.Config)
-
-	// 5. Compute config digest.
 	configDigest := computeConfigDigest(input.Config)
-
-	// 6. Create the preview instance record (status=starting).
 	profileName := input.ProfileName
 	if profileName == "" {
 		profileName = string(models.PreviewProfileBootstrap)
@@ -230,20 +250,23 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		MemoryLimitMB:  limits.MemoryMB,
 		CPULimitMillis: limits.CPUMillis,
 	}
-	if err := storeRecycleInput(instance, input); err != nil {
-		return nil, fmt.Errorf("store recycle input: %w", err)
+	// Only store recycle bytes if we already have a sandbox at reservation
+	// time. The handler flow reserves before hydrate, so Sandbox is typically
+	// nil here; LaunchPreview populates recycle bytes once the sandbox is known.
+	if input.Sandbox != nil {
+		if err := storeRecycleInput(instance, input); err != nil {
+			return nil, fmt.Errorf("store recycle input: %w", err)
+		}
 	}
 
 	if err := m.store.CreatePreviewInstance(ctx, instance); err != nil {
 		return nil, fmt.Errorf("create preview instance: %w", err)
 	}
 
-	// Claim the preview's half of the sandbox refcount. This pairs with the
-	// orchestrator's turn hold: only when both are released does the container
-	// get destroyed. If this write fails we retry once (it's idempotent); if
-	// still failing we fail StartPreview — the preview row exists but has no
-	// hold, so without a hold the caller's hydrated container could be torn
-	// down by a later FinalizeContainerDestroy.
+	// Acquire the preview's half of the sandbox refcount. Retry once because
+	// a transient write error here leaves the row without a hold — and
+	// without a hold, a subsequent hydrate's container_id publish is exposed
+	// to concurrent FinalizeContainerDestroy.
 	var holdErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, holdErr = m.store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); holdErr == nil {
@@ -266,9 +289,73 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		Str("preview_id", instance.ID.String()).
 		Str("session_id", input.SessionID.String()).
 		Str("name", input.Config.Name).
-		Msg("starting preview")
+		Msg("preview reserved")
 
-	// 7. Create service records.
+	return instance, nil
+}
+
+// LaunchPreview takes a reserved preview and completes startup: it updates
+// the row if the caller resolved a different config after reservation (e.g.
+// workspace autodetect), creates service/infra rows, invokes the provider,
+// persists the handle, and transitions to ready.
+//
+// On failure, LaunchPreview cleans up provider-side state it created (calling
+// StopPreview if the handle was acquired) and returns the error without
+// touching the preview hold or the sandbox container — the caller is
+// responsible for AbortReservation to complete teardown.
+func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewInstance, input StartPreviewInput) (*models.PreviewInstance, error) {
+	if m.provider == nil {
+		return nil, fmt.Errorf("preview provider is not configured")
+	}
+	if input.Sandbox == nil {
+		return nil, fmt.Errorf("sandbox must not be nil")
+	}
+	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
+	}
+
+	// If the caller resolved a different config after reservation (autodetect
+	// from the sandbox workspace), or the reservation didn't persist recycle
+	// bytes because the sandbox wasn't known yet, overwrite the row now.
+	newDigest := computeConfigDigest(input.Config)
+	needsUpdate := newDigest != instance.ConfigDigest || len(instance.RecycleSandbox) == 0
+	if needsUpdate {
+		limits := ResolveResourceLimits(input.Config)
+		scratch := &models.PreviewInstance{}
+		if err := storeRecycleInput(scratch, input); err != nil {
+			return nil, fmt.Errorf("marshal recycle input: %w", err)
+		}
+		ok, err := m.store.UpdatePreviewReservationConfig(
+			ctx, input.OrgID, instance.ID,
+			input.Config.Name, input.Config.Primary, newDigest,
+			limits.MemoryMB, limits.CPUMillis,
+			scratch.RecycleConfig, scratch.RecycleSandbox,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update reserved preview config: %w", err)
+		}
+		if !ok {
+			// Status was flipped from 'starting' (e.g. a concurrent StopPreview
+			// or recycle). The caller's LaunchPreview is racing against that;
+			// bail out and let the caller tear down the hold via AbortReservation.
+			return nil, fmt.Errorf("preview reservation is no longer pending")
+		}
+		instance.Name = input.Config.Name
+		instance.PrimaryService = input.Config.Primary
+		instance.ConfigDigest = newDigest
+		instance.MemoryLimitMB = limits.MemoryMB
+		instance.CPULimitMillis = limits.CPUMillis
+		instance.RecycleConfig = scratch.RecycleConfig
+		instance.RecycleSandbox = scratch.RecycleSandbox
+	}
+
+	m.logger.Info().
+		Str("preview_id", instance.ID.String()).
+		Str("session_id", input.SessionID.String()).
+		Str("name", input.Config.Name).
+		Msg("launching reserved preview")
+
+	// Create service records.
 	for name, svcCfg := range input.Config.Services {
 		role := models.PreviewServiceRoleSupport
 		if name == input.Config.Primary {
@@ -284,15 +371,11 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 			Port:              svcCfg.Port,
 		}
 		if err := m.store.CreatePreviewService(ctx, svc); err != nil {
-			if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
-				fmt.Sprintf("failed to create service record for %q: %v", name, err)); statusErr != nil {
-				m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
-			}
 			return nil, fmt.Errorf("create service record %q: %w", name, err)
 		}
 	}
 
-	// 8. Create infrastructure records.
+	// Create infrastructure records.
 	for name, infraCfg := range input.Config.Infrastructure {
 		infra := &models.PreviewInfrastructure{
 			PreviewInstanceID: instance.ID,
@@ -301,40 +384,28 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 			Status:            models.PreviewInfraStatusProvisioning,
 		}
 		if err := m.store.CreatePreviewInfrastructure(ctx, infra); err != nil {
-			if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
-				fmt.Sprintf("failed to create infrastructure record for %q: %v", name, err)); statusErr != nil {
-				m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
-			}
 			return nil, fmt.Errorf("create infrastructure record %q: %w", name, err)
 		}
 	}
 
-	// 9. Start the preview via the provider (async-friendly).
+	// Start the preview via the provider.
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, m.platformEnv(instance.ID))
 	if err != nil {
-		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
-			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed")
-		}
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
 
-	// 10. Update instance with handle and port.
 	instance.PreviewHandle = handle.Handle
 	instance.Port = handle.PrimaryPort
 
-	// Persist the handle first — if this fails, the DB row has no route info
-	// and subsequent proxy/status calls will break. Stop the provider and fail.
+	// Persist the handle. If this fails, the DB row has no route info and
+	// subsequent proxy/status calls would break — stop the provider and
+	// return so the caller aborts.
 	if err := m.store.UpdatePreviewHandle(ctx, input.OrgID, instance.ID, handle.Handle, handle.PrimaryPort); err != nil {
 		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB, stopping provider")
 		_ = m.provider.StopPreview(ctx, handle.Handle)
-		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed, "failed to persist preview handle"); statusErr != nil {
-			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to update preview status to failed after handle error")
-		}
 		return nil, fmt.Errorf("persist preview handle: %w", err)
 	}
 
-	// Set status based on progressive preview support. Use conditional update
-	// so that a concurrent StopPreview cannot be overwritten.
 	nextStatus := models.PreviewStatusReady
 	if handle.PartiallyReady {
 		nextStatus = models.PreviewStatusPartiallyReady
@@ -351,7 +422,7 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 	}
 	instance.Status = nextStatus
 
-	// 11. Update infrastructure records with container details.
+	// Refresh infrastructure/service rows with the provider's initial snapshot.
 	if statusSnap, err := m.provider.PreviewStatus(ctx, handle.Handle); err == nil {
 		for _, infraSnap := range statusSnap.Infrastructure {
 			if err := m.store.UpdateInfraStatus(ctx, input.OrgID, instance.ID, infraSnap.Name, models.PreviewInfraStatusHealthy, ""); err != nil {
@@ -376,10 +447,6 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		Int("primary_port", handle.PrimaryPort).
 		Msg("preview ready")
 
-	// When the preview started with progressive readiness, support services
-	// are still being probed in the background. Poll the provider until all
-	// services leave "starting" status, then persist the final statuses to
-	// the database so the API returns up-to-date information.
 	if handle.PartiallyReady {
 		stopCh := make(chan struct{})
 		m.pollStopMu.Lock()
@@ -393,13 +460,87 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 		}()
 	}
 
-	// Start HMR watching now that the preview is up so the gateway can
-	// detect live-reload messages and capture screenshots.
 	if m.hmrWatcher != nil {
 		m.hmrWatcher.StartWatching(instance.ID, input.OrgID)
 	}
 
 	return instance, nil
+}
+
+// AbortReservation tears down a reservation created by ReservePreview.
+//
+// It releases the preview hold, finalize-destroys the hydrated container (if
+// any) only when the CAS confirms no other holder is keeping the session's
+// container alive, and marks the preview row failed so the partial unique
+// index releases for a retry.
+//
+// hydratedContainerID is the container id the caller published via
+// PublishHydratedContainerID. Pass "" when the sandbox was reused from a
+// turn (not hydrated) — AbortReservation must NOT destroy a reused container
+// because the turn still owns it.
+//
+// Uses a detached context with its own timeout so a shutdown mid-abort still
+// completes the hold release and container destroy.
+func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.PreviewInstance, hydratedContainerID, reason string) {
+	if instance == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 60*time.Second)
+	defer cancel()
+
+	// Flip the row to failed first so the partial unique index on
+	// (session_id) where status in active lets a retry through.
+	if err := m.store.UpdatePreviewStatus(ctx, instance.OrgID, instance.ID, models.PreviewStatusFailed, reason); err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Msg("abort reservation: failed to mark preview failed")
+	}
+
+	// Release the preview hold; learn sibling (turn) state.
+	destroyNow, _, sessionContainerID, err := m.store.ReleasePreviewHold(ctx, instance.OrgID, instance.ID)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Msg("abort reservation: failed to release preview hold; row will be mopped up by reconciler")
+		return
+	}
+
+	// Only destroy when (a) we hydrated a container the caller vouches for,
+	// (b) no turn still holds it, and (c) the session's current container_id
+	// still matches the hydrated id. If the caller didn't hydrate (reuse
+	// path) or a new holder has acquired, leave the container alone.
+	if hydratedContainerID == "" || !destroyNow || m.sandboxProvider == nil || m.sessionStore == nil {
+		return
+	}
+	if sessionContainerID != "" && sessionContainerID != hydratedContainerID {
+		m.logger.Info().
+			Str("preview_id", instance.ID.String()).
+			Str("hydrated_container_id", hydratedContainerID).
+			Str("session_container_id", sessionContainerID).
+			Msg("abort reservation: session now tracks a different container; leaving hydrated id alone")
+		return
+	}
+
+	cleared, err := m.sessionStore.FinalizeContainerDestroy(ctx, instance.OrgID, instance.SessionID, hydratedContainerID)
+	if err != nil {
+		m.logger.Warn().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Str("container_id", hydratedContainerID).
+			Msg("abort reservation: FinalizeContainerDestroy failed; container may be orphaned")
+		return
+	}
+	if !cleared {
+		// Another holder acquired between our release and now; the container
+		// is someone else's responsibility.
+		return
+	}
+	sb := &agent.Sandbox{ID: hydratedContainerID, Provider: ProviderDocker}
+	if err := m.sandboxProvider.Destroy(ctx, sb); err != nil {
+		m.logger.Error().Err(err).
+			Str("preview_id", instance.ID.String()).
+			Str("container_id", hydratedContainerID).
+			Msg("abort reservation: destroy failed; container orphaned on host")
+	}
 }
 
 // pollSupportServiceStatus polls the provider until all support services leave

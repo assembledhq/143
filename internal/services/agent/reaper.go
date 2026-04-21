@@ -303,8 +303,14 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		// delete the snapshot blob. Skipping this step would either
 		// leak a container on the worker or cause a later StopPreview
 		// to misbehave against a session whose snapshot is already gone.
+		//
+		// Detach from the reaper's ctx for this call: if the worker is
+		// shutting down mid-reap, StopPreview still needs to finish its
+		// hold-release + destroy sequence so we don't leak the container
+		// and leave preview_holding_container=TRUE stuck on the row.
 		if r.previewStopper != nil {
-			if stopped, stopErr := r.previewStopper.StopActivePreviewForSession(ctx, s.OrgID, s.ID); stopErr != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+			if stopped, stopErr := r.previewStopper.StopActivePreviewForSession(stopCtx, s.OrgID, s.ID); stopErr != nil {
 				r.logger.Warn().Err(stopErr).
 					Str("session_id", s.ID.String()).
 					Msg("reaper: failed to stop preview holding expired-snapshot session; proceeding with snapshot cleanup")
@@ -313,6 +319,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 					Str("session_id", s.ID.String()).
 					Msg("reaper: stopped preview before expiring session snapshot")
 			}
+			stopCancel()
 		}
 
 		if s.SnapshotKey != nil && *s.SnapshotKey != "" {

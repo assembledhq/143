@@ -309,6 +309,48 @@ func (s *PreviewStore) ReleasePreviewHold(ctx context.Context, orgID, previewID 
 	return containerID != "" && !turnHolds, sessionID, containerID, nil
 }
 
+// UpdatePreviewReservationConfig overwrites the config-derived fields of a
+// preview row. Called by LaunchPreview after the handler resolves the final
+// config (e.g. workspace autodetect replacing defaults) so the persisted row
+// matches the config the services are actually started from.
+//
+// This is strictly a reservation-phase update: it only applies while the
+// preview is still in 'starting' status, so a concurrent StopPreview can't be
+// clobbered. The returned bool reports whether the row was still pending.
+func (s *PreviewStore) UpdatePreviewReservationConfig(
+	ctx context.Context,
+	orgID, id uuid.UUID,
+	name, primaryService, configDigest string,
+	memoryLimitMB, cpuLimitMillis int,
+	recycleConfig, recycleSandbox []byte,
+) (bool, error) {
+	query := `UPDATE preview_instances
+		SET name = @name,
+		    primary_service = @primary,
+		    config_digest = @digest,
+		    memory_limit_mb = @memory_limit_mb,
+		    cpu_limit_millis = @cpu_limit_millis,
+		    recycle_config = @recycle_config,
+		    recycle_sandbox = @recycle_sandbox,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = 'starting'`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":               id,
+		"org_id":           orgID,
+		"name":             name,
+		"primary":          primaryService,
+		"digest":           configDigest,
+		"memory_limit_mb":  memoryLimitMB,
+		"cpu_limit_millis": cpuLimitMillis,
+		"recycle_config":   recycleConfig,
+		"recycle_sandbox":  recycleSandbox,
+	})
+	if err != nil {
+		return false, fmt.Errorf("update preview reservation config: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // UpdatePreviewHandle updates the provider handle and primary port. A new
 // handle implies the preview process restarted successfully, so recycled_at is
 // refreshed to anchor the next recycle window.
