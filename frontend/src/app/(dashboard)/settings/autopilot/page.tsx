@@ -29,15 +29,14 @@ import {
   coalesceSettingsPatch,
   type SettingsPatch,
 } from "@/lib/settings-autosave";
+import {
+  MIN_CONCURRENT_RUNS,
+  MAX_CONCURRENT_RUNS,
+  PM_SCHEDULE_MIN_HOURS,
+  PM_SCHEDULE_MAX_HOURS,
+  clampNumber,
+} from "@/lib/settings-constants";
 import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
-
-const PM_SCHEDULE_MIN = 1;
-const PM_SCHEDULE_MAX = 24;
-const MAX_CONCURRENT_MIN = 1;
-const MAX_CONCURRENT_MAX = 20;
-
-const clamp = (value: number, min: number, max: number) =>
-  Math.min(max, Math.max(min, value));
 
 export default function AutopilotSettingsPage() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -84,13 +83,13 @@ export default function AutopilotSettingsPage() {
     serverValue: scheduleHoursServer,
     autosave,
     toPatch: (v) => ({ settings: { pm_schedule_hours: v } }),
-    clamp: (v) => clamp(v, PM_SCHEDULE_MIN, PM_SCHEDULE_MAX),
+    clamp: (v) => clampNumber(v, PM_SCHEDULE_MIN_HOURS, PM_SCHEDULE_MAX_HOURS),
   });
   const maxConcurrentField = useAutosaveNumericField({
     serverValue: maxConcurrentRunsServer,
     autosave,
     toPatch: (v) => ({ settings: { max_concurrent_runs: v } }),
-    clamp: (v) => clamp(v, MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX),
+    clamp: (v) => clampNumber(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
 
   return (
@@ -110,8 +109,8 @@ export default function AutopilotSettingsPage() {
                 <Input
                   id="pm-schedule-hours"
                   type="number"
-                  min={PM_SCHEDULE_MIN}
-                  max={PM_SCHEDULE_MAX}
+                  min={PM_SCHEDULE_MIN_HOURS}
+                  max={PM_SCHEDULE_MAX_HOURS}
                   value={scheduleHoursField.value}
                   onChange={scheduleHoursField.onChange}
                   onBlur={scheduleHoursField.onBlur}
@@ -203,8 +202,8 @@ export default function AutopilotSettingsPage() {
                 <Input
                   id="max-concurrent-runs"
                   type="number"
-                  min={MAX_CONCURRENT_MIN}
-                  max={MAX_CONCURRENT_MAX}
+                  min={MIN_CONCURRENT_RUNS}
+                  max={MAX_CONCURRENT_RUNS}
                   value={maxConcurrentField.value}
                   onChange={maxConcurrentField.onChange}
                   onBlur={maxConcurrentField.onBlur}

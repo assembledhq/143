@@ -45,6 +45,13 @@ import {
   coalesceSettingsPatch,
   type SettingsPatch,
 } from "@/lib/settings-autosave";
+import {
+  MIN_CONCURRENT_RUNS,
+  MAX_CONCURRENT_RUNS,
+  MIN_SESSION_DURATION_MINUTES,
+  MAX_SESSION_DURATION_MINUTES,
+  clampNumber,
+} from "@/lib/settings-constants";
 import type {
   UserCredentialSummary,
   ResolvedCredential,
@@ -55,25 +62,15 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-// Keep these in sync with internal/models/org_settings.go —
-// DefaultMaxSessionDurationSeconds, MinMaxSessionDurationSeconds,
-// MaxMaxSessionDurationSeconds. ParseOrgSettings on the server clamps
-// whatever we send into the same range, so UI drift won't break
-// persistence, but users would see values snap.
+// Bounds live in `@/lib/settings-constants`; defaults mirror
+// `internal/models/org_settings.go`. The server clamps on save, so UI drift
+// is visible (values snap) rather than corrupting state.
 const DEFAULT_EXECUTION_SETTINGS = {
   autonomy_level: "auto_simple" as const,
   execution_aggressiveness: 2,
   max_concurrent_runs: 5,
   max_session_duration_seconds: 25 * 60,
 };
-
-const MIN_SESSION_DURATION_MINUTES = 2;
-const MAX_SESSION_DURATION_MINUTES = 120;
-const MIN_CONCURRENT_RUNS = 1;
-const MAX_CONCURRENT_RUNS = 10;
-
-const clamp = (value: number, min: number, max: number) =>
-  Math.min(max, Math.max(min, value));
 
 export default function AgentPage() {
   const queryClient = useQueryClient();
@@ -171,14 +168,14 @@ export default function AgentPage() {
     serverValue: maxConcurrentServer,
     autosave,
     toPatch: (v) => ({ settings: { max_concurrent_runs: v } }),
-    clamp: (v) => clamp(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
+    clamp: (v) => clampNumber(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
 
   const maxSessionMinutesField = useAutosaveNumericField({
     serverValue: serverSessionMinutes,
     autosave,
     toPatch: (minutes) => ({ settings: { max_session_duration_seconds: minutes * 60 } }),
-    clamp: (v) => clamp(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
+    clamp: (v) => clampNumber(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
   });
 
   // Read the latest `agent_config` from the React Query cache rather than a
@@ -220,8 +217,16 @@ export default function AgentPage() {
   // a half-typed key to the cache, and never commit on keystroke/blur. The
   // caller must press "Save key" to dispatch. See settings/AGENTS.md for the
   // policy.
+  //
+  // The patch is sparse — just the one env var under its provider — and
+  // relies on the server's `mergeSettingsJSON` to deep-merge into the
+  // existing `agent_config`. Sending the full merged object (as an earlier
+  // version did) would race with any in-flight autosave for an unrelated
+  // field in the same provider: both requests would carry overlapping
+  // sibling values and the later writer would silently clobber the earlier
+  // one. Sparse + deep-merge keeps each write scoped to the field it owns.
   const sensitiveSaveMutation = useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       agentKey,
       envVar,
       value,
@@ -229,21 +234,10 @@ export default function AgentPage() {
       agentKey: string;
       envVar: string;
       value: string;
-    }) => {
-      const current = { ...readLatestAgentConfig() };
-      const providerConfig = { ...(current[agentKey] ?? {}) };
-      if (value) {
-        providerConfig[envVar] = value;
-      } else {
-        delete providerConfig[envVar];
-      }
-      if (Object.keys(providerConfig).length > 0) {
-        current[agentKey] = providerConfig;
-      } else {
-        delete current[agentKey];
-      }
-      return api.settings.update({ settings: { agent_config: current } });
-    },
+    }) =>
+      api.settings.update({
+        settings: { agent_config: { [agentKey]: { [envVar]: value } } },
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
       toast.success("Key saved");

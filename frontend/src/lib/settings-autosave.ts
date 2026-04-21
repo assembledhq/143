@@ -30,7 +30,20 @@ export function applyOrgSettingsPatch(prev: unknown, patch: SettingsPatch): unkn
   if (process.env.NODE_ENV !== "production") {
     warnIfPartialNestedPatch(previous, patch);
   }
-  if (!previous?.data) return previous;
+  if (!previous?.data) {
+    // The save still fires, but we have nothing to optimistically apply —
+    // the user will see the indicator cycle without the value flipping
+    // locally until the server responds. Most likely cause: a save
+    // dispatched before the initial `settings.get` resolves, or after a
+    // cache eviction. Flag it so this doesn't get mistaken for a bug in
+    // the caller.
+    if (process.env.NODE_ENV !== "production") {
+      console.warn(
+        "applyOrgSettingsPatch: cache entry is empty; optimistic write skipped. The save will still fire but the UI will lag one round-trip.",
+      );
+    }
+    return previous;
+  }
   return {
     ...previous,
     data: {

@@ -336,6 +336,12 @@ export function useAutosave<TVars>({
   // before navigation isn't silently dropped. The dispatch lands in the shared
   // module-level queue, so the server round-trip survives this component
   // tearing down. In-flight mutations already started are left to complete.
+  //
+  // StrictMode safety: in dev, React runs effects mount → cleanup → mount
+  // again. On the simulated cleanup, `debouncedVarsRef.current` is still
+  // `undefined` (refs persist across the cycle but no user event has run
+  // yet), so the guard `pending !== undefined` means we don't dispatch a
+  // spurious save during the dev double-invoke.
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) {

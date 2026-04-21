@@ -27,6 +27,12 @@ import { queryKeys } from "@/lib/query-keys";
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 
+// Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
+// `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
+// the same referential identity — `useAutosave` throws in dev when two
+// callers register different coalesce fns against the same queryKey.
+const coalesceSlackChannels = (_a: string[], b: string[]): string[] => b;
+
 function SlackChannelPicker() {
   const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
     queryKey: queryKeys.integrations.slackChannels,
@@ -45,8 +51,7 @@ function SlackChannelPicker() {
         data: previous.data.map((ch) => ({ ...ch, selected: selectedSet.has(ch.id) })),
       };
     },
-    // Coalesce multi-toggle bursts: the later selection wins.
-    coalesce: (_a, b) => b,
+    coalesce: coalesceSlackChannels,
     debounceMs: 400,
   });
 
