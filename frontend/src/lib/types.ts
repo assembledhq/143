@@ -6,6 +6,25 @@ export interface Organization {
   updated_at: string;
 }
 
+export interface MembershipSummary {
+  org_id: string;
+  org_name: string;
+  role: string;
+}
+
+export interface MembershipsResponse {
+  active_org_id: string;
+  active_role: string;
+  memberships: MembershipSummary[];
+}
+
+export interface OrganizationCreated {
+  id: string;
+  name: string;
+  role: string;
+  created_at: string;
+}
+
 export interface User {
   id: string;
   org_id: string;
