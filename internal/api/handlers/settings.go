@@ -174,27 +174,50 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 // `null` are rejected rather than silently ignored — "no-op" settings PATCHes
 // are a class of bug we want to surface loudly.
 func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error) {
-	var base map[string]any
-	if len(existing) > 0 {
-		if err := json.Unmarshal(existing, &base); err != nil {
-			return nil, err
-		}
-	}
-	if base == nil {
-		base = map[string]any{}
+	// Use UseNumber() on both sides so integers survive the round-trip as
+	// json.Number rather than being promoted to float64 and re-serialized.
+	// Without this, large integers (>2^53) would lose precision, and any
+	// external diffing of the raw settings blob would see spurious changes
+	// on values like `4` that Go's default encoder prints identically but
+	// our test doubles compare byte-for-byte.
+	base, err := decodeJSONObject(existing, true /* allowEmpty */)
+	if err != nil {
+		return nil, err
 	}
 	if len(patch) == 0 || bytes.Equal(bytes.TrimSpace(patch), []byte("null")) {
 		return nil, errors.New("settings patch must be a JSON object, got null")
 	}
-	var incoming map[string]any
-	if err := json.Unmarshal(patch, &incoming); err != nil {
+	incoming, err := decodeJSONObject(patch, false /* allowEmpty */)
+	if err != nil {
 		return nil, err
-	}
-	if incoming == nil {
-		return nil, errors.New("settings patch must be a JSON object")
 	}
 	merged := deepMergeMap(base, incoming)
 	return json.Marshal(merged)
+}
+
+// decodeJSONObject unmarshals a JSON object into map[string]any while keeping
+// numeric literals as json.Number. An empty/nil input is treated as an empty
+// object when `allowEmpty` is set; otherwise it's an error.
+func decodeJSONObject(raw json.RawMessage, allowEmpty bool) (map[string]any, error) {
+	if len(raw) == 0 {
+		if allowEmpty {
+			return map[string]any{}, nil
+		}
+		return nil, errors.New("settings patch must be a JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var out map[string]any
+	if err := decoder.Decode(&out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		if allowEmpty {
+			return map[string]any{}, nil
+		}
+		return nil, errors.New("settings patch must be a JSON object")
+	}
+	return out, nil
 }
 
 // deepMergeMap returns a new map where keys from `incoming` overlay `base`.

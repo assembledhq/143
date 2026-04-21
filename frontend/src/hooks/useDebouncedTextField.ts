@@ -30,6 +30,13 @@ export interface UseDebouncedTextFieldResult {
  *
  * Distinct from `useAutosaveNumericField`: text fields don't parse or clamp,
  * and an empty string is a valid value (often meaning "delete this entry").
+ *
+ * IMPORTANT: the `onCommit` callback should dispatch through a `useAutosave`
+ * whose own `debounceMs` is `0`. This hook already paces keystrokes; stacking
+ * a second debounce on the autosave silently doubles user-perceived latency.
+ * Unlike `useAutosaveNumericField`, this hook doesn't take the autosave
+ * directly and therefore can't detect the misconfiguration — it's on the
+ * caller to keep the outer `useAutosave` at `debounceMs: 0`.
  */
 export function useDebouncedTextField({
   serverValue,

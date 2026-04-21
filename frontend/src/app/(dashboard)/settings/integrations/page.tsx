@@ -22,20 +22,19 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
-
-const SLACK_CHANNELS_KEY = ["slack-channels"] as const;
+import { queryKeys } from "@/lib/query-keys";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 
 function SlackChannelPicker() {
   const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
-    queryKey: SLACK_CHANNELS_KEY,
+    queryKey: queryKeys.integrations.slackChannels,
     queryFn: () => api.integrations.listSlackChannels(),
   });
 
   const { save, status } = useAutosave<string[]>({
-    queryKey: SLACK_CHANNELS_KEY,
+    queryKey: queryKeys.integrations.slackChannels,
     mutationFn: (channelIds) => api.integrations.updateSlackChannels(channelIds),
     applyOptimistic: (prev, channelIds) => {
       const previous = prev as SlackChannelsResp;

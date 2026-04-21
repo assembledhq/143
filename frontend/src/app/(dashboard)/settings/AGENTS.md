@@ -83,6 +83,12 @@ providers and sibling env vars. The **client's** `coalesceSettingsPatch`,
 however, shallow-merges at the `settings` level: two queued patches that both
 touch `agent_config` will see the later payload replace the earlier one.
 
+> **Canonical list:** the set of nested object keys inside `OrgSettings` is
+> declared once, in `NESTED_OBJECT_KEYS` in `@/lib/settings-autosave.ts`. That
+> set powers the dev-only "you're about to drop sibling keys" warning in
+> `applyOrgSettingsPatch`. When you add a new nested object to `OrgSettings`,
+> add its key to that set — don't duplicate the list here.
+
 The canonical pattern is therefore to send a fully merged nested object and
 **read the base from `queryClient.getQueryData`**, not from a render-time
 closure or a ref-mirrored snapshot. The cache entry is advanced synchronously

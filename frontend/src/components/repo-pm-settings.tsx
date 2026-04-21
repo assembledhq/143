@@ -42,6 +42,31 @@ const clamp = (value: number, min: number, max: number) =>
 
 type RepoPatch = { settings: RepoSettings };
 
+// Seed a PM object from org-level defaults. Used whenever the first edit on a
+// non-customized repo needs to be promoted to a full PM object — partial PM
+// objects fail server validation, so every entry point materializes the whole
+// thing up front. `override` lets callers swap in the field they're actually
+// editing (e.g. `pm_schedule_hours`) without re-specifying the rest.
+function seedPMFromOrg(
+  orgSettings: OrgSettings,
+  override: Partial<RepoPMSettings> = {},
+): RepoPMSettings {
+  return {
+    pm_schedule_hours: orgSettings.pm_schedule_hours ?? 4,
+    pm_model: orgSettings.pm_model ?? DEFAULT_PM_MODEL,
+    product_context: {
+      philosophy: orgSettings.product_context?.philosophy ?? "",
+      direction:
+        orgSettings.product_context?.direction ??
+        orgSettings.product_direction ??
+        "",
+      focus_areas: orgSettings.product_context?.focus_areas ?? [],
+      avoid_areas: orgSettings.product_context?.avoid_areas ?? [],
+    },
+    ...override,
+  };
+}
+
 interface RepoPMSettingsProps {
   repository: Repository;
 }
@@ -130,21 +155,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   // repo isn't currently customized so the first edit turns into a full PM
   // object rather than a partial one that fails server validation.
   const updatePM = (mutate: (pm: RepoPMSettings) => RepoPMSettings) => {
-    const current: RepoPMSettings =
-      repoSettings.pm ??
-      {
-        pm_schedule_hours: orgSettings.pm_schedule_hours ?? 4,
-        pm_model: orgSettings.pm_model ?? DEFAULT_PM_MODEL,
-        product_context: {
-          philosophy: orgSettings.product_context?.philosophy ?? "",
-          direction:
-            orgSettings.product_context?.direction ??
-            orgSettings.product_direction ??
-            "",
-          focus_areas: orgSettings.product_context?.focus_areas ?? [],
-          avoid_areas: orgSettings.product_context?.avoid_areas ?? [],
-        },
-      };
+    const current: RepoPMSettings = repoSettings.pm ?? seedPMFromOrg(orgSettings);
     savePM(mutate(current));
   };
 
@@ -153,20 +164,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     autosave,
     toPatch: (v) => {
       const current: RepoPMSettings =
-        repoSettings.pm ??
-        {
-          pm_schedule_hours: v,
-          pm_model: orgSettings.pm_model ?? DEFAULT_PM_MODEL,
-          product_context: {
-            philosophy: orgSettings.product_context?.philosophy ?? "",
-            direction:
-              orgSettings.product_context?.direction ??
-              orgSettings.product_direction ??
-              "",
-            focus_areas: orgSettings.product_context?.focus_areas ?? [],
-            avoid_areas: orgSettings.product_context?.avoid_areas ?? [],
-          },
-        };
+        repoSettings.pm ?? seedPMFromOrg(orgSettings, { pm_schedule_hours: v });
       return { settings: { pm: { ...current, pm_schedule_hours: v } } };
     },
     clamp: (v) => clamp(v, PM_SCHEDULE_MIN, PM_SCHEDULE_MAX),

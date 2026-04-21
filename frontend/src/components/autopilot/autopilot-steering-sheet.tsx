@@ -78,6 +78,12 @@ function AutopilotSteeringSheetBody({
   // "Done" must not drop the sheet mid-save: flushing the debounce only
   // dispatches the request, it doesn't wait for the server. Track a
   // pending-close intent and close once the autosave queue leaves "saving".
+  //
+  // NOTE: the close fires on any non-"saving" status (idle, error, offline),
+  // not just success. That's intentional — if the save errors out, the error
+  // chip has already been shown in the sheet header and there's nothing the
+  // user could do differently by being forced to stay on the surface. Closing
+  // on error also avoids a stuck sheet when the mutation fails terminally.
   const [pendingClose, setPendingClose] = useState(false);
   useEffect(() => {
     if (pendingClose && autosave.status !== "saving") {

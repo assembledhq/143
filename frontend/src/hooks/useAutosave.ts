@@ -25,6 +25,13 @@ export interface UseAutosaveResult<TVars> {
   save: (vars: TVars) => void;
   flush: () => void;
   status: AutosaveStatus;
+  /**
+   * The debounce window this hook was configured with. Field helpers that
+   * self-debounce (e.g. `useAutosaveNumericField`) read this to detect a
+   * misconfiguration where both layers would debounce and emit a dev-only
+   * warning. Not intended for caller use.
+   */
+  debounceMs: number;
 }
 
 const SAVED_LINGER_MS = 1500;
@@ -140,7 +147,12 @@ async function run(
  * useAutosave — shared autosave primitive for settings surfaces.
  *
  * Behavior:
- * - Debounces calls to `save()` by `debounceMs` (0 for toggles/selects, ~400 for text).
+ * - Debounces calls to `save()` by `debounceMs` (0 for toggles/selects, ~400
+ *   for text). NOTE: when wiring a field through `useAutosaveNumericField` or
+ *   `useDebouncedTextField`, leave this at `0` — the field helpers already
+ *   self-debounce and compounding the two windows silently doubles latency.
+ *   `useAutosaveNumericField` emits a dev-only warning when it sees the outer
+ *   `debounceMs > 0`; text-field callers need to keep this in mind manually.
  * - Coalesces concurrent saves per `queryKey` via the user-supplied `coalesce` fn.
  *   Only one mutation is in flight per `queryKey` at a time; additional calls
  *   merge into a pending payload that fires once the in-flight resolves.
@@ -329,5 +341,5 @@ export function useAutosave<TVars>({
     };
   }, [dispatch]);
 
-  return { save, flush, status };
+  return { save, flush, status, debounceMs };
 }

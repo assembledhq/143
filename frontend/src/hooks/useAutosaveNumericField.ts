@@ -32,9 +32,10 @@ export interface UseAutosaveNumericFieldResult {
  *   optimistic refetches.
  * - Self-debounces change events by `debounceMs` (default 400ms) so rapid
  *   typing doesn't spam the scope's autosave queue. The surrounding
- *   `useAutosave` should be left at `debounceMs: 0`; the numeric helper
- *   handles pacing at the field level so selects/radios on the same scope
- *   still fire instantly.
+ *   `useAutosave` MUST be left at `debounceMs: 0`; the numeric helper handles
+ *   pacing at the field level so selects/radios on the same scope still fire
+ *   instantly. The hook emits a dev-only `console.warn` if the outer
+ *   `useAutosave` is misconfigured with a non-zero debounce.
  * - On blur, cancels the debounce timer, flushes the last known value
  *   immediately, and snaps invalid/empty input back to the authoritative
  *   server value.
@@ -56,6 +57,24 @@ export function useAutosaveNumericField<TVars>({
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingValueRef = useRef<number | null>(null);
+
+  // Guard against the double-debounce footgun: if the outer `useAutosave` also
+  // debounces, keystrokes wait out BOTH windows before hitting the network,
+  // which is almost never what the caller wants. Warn once per hook instance
+  // in dev; production silently tolerates it to avoid noisy console warnings
+  // on live traffic.
+  const hasWarnedRef = useRef(false);
+  if (
+    process.env.NODE_ENV !== "production" &&
+    !hasWarnedRef.current &&
+    autosave.debounceMs > 0
+  ) {
+    hasWarnedRef.current = true;
+    console.warn(
+      `useAutosaveNumericField: the passed useAutosave hook is configured with debounceMs=${autosave.debounceMs}. ` +
+        `The field already self-debounces (${debounceMs}ms); set the outer useAutosave to debounceMs: 0 to avoid compounding both windows.`,
+    );
+  }
 
   // Hold `toPatch` and `clamp` in refs so the debounce timer reads the
   // latest closures at fire time. Without this, a timer armed during

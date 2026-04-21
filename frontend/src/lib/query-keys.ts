@@ -43,6 +43,7 @@ export const queryKeys = {
   },
   integrations: {
     all: ["integrations"] as const,
+    slackChannels: ["slack-channels"] as const,
   },
   pm: {
     status: ["pm", "status"] as const,

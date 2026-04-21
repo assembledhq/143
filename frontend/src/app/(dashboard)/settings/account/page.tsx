@@ -505,6 +505,7 @@ export default function AccountPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              disabled={!user || setTeamDefaultMutation.isPending}
               onClick={() => {
                 if (settingTeamDefaultProvider && user) {
                   setTeamDefaultMutation.mutate({

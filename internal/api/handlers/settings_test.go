@@ -443,3 +443,84 @@ func TestMergeSettingsJSON_RejectsNonObjectPatch(t *testing.T) {
 	_, err = mergeSettingsJSON(existing, json.RawMessage(`null`))
 	require.Error(t, err)
 }
+
+// Race scenario: a sensitive "Save key" click and a concurrent autosave both
+// land server-side in close succession. The two patches hit `mergeSettingsJSON`
+// sequentially but each reads its own snapshot of the existing blob — so the
+// second patch must not wipe the field the first one just wrote. Deep merge
+// at the nested-object level is what makes this safe.
+func TestMergeSettingsJSON_SensitiveSaveAndAutosaveInterleaveCleanly(t *testing.T) {
+	t.Parallel()
+	// Starting state: codex has two sibling env vars; claude_code has a key.
+	existing := json.RawMessage(`{
+		"agent_config": {
+			"codex": {"OPENAI_BASE_URL":"https://api.openai.com"},
+			"claude_code": {"ANTHROPIC_API_KEY":"claude-key"}
+		},
+		"default_agent_type": "codex"
+	}`)
+
+	// 1) Sensitive save: user submits an OPENAI_API_KEY. The client sends the
+	//    full merged agent_config it has in cache.
+	sensitivePatch := json.RawMessage(`{
+		"agent_config": {
+			"codex": {"OPENAI_BASE_URL":"https://api.openai.com","OPENAI_API_KEY":"sk-secret"},
+			"claude_code": {"ANTHROPIC_API_KEY":"claude-key"}
+		}
+	}`)
+	afterSensitive, err := mergeSettingsJSON(existing, sensitivePatch)
+	require.NoError(t, err)
+
+	// 2) Autosave: in parallel, the user flipped `default_agent_type`. Because
+	//    the client hadn't optimistically applied the sensitive save yet, its
+	//    autosave payload doesn't carry OPENAI_API_KEY. The key must survive.
+	autosavePatch := json.RawMessage(`{"default_agent_type":"claude_code"}`)
+	afterBoth, err := mergeSettingsJSON(afterSensitive, autosavePatch)
+	require.NoError(t, err)
+
+	var parsed struct {
+		AgentConfig      map[string]map[string]string `json:"agent_config"`
+		DefaultAgentType string                       `json:"default_agent_type"`
+	}
+	require.NoError(t, json.Unmarshal(afterBoth, &parsed))
+	require.Equal(t, "sk-secret", parsed.AgentConfig["codex"]["OPENAI_API_KEY"], "sensitive key survives the autosave that followed")
+	require.Equal(t, "https://api.openai.com", parsed.AgentConfig["codex"]["OPENAI_BASE_URL"])
+	require.Equal(t, "claude-key", parsed.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
+	require.Equal(t, "claude_code", parsed.DefaultAgentType)
+
+	// Reverse order: autosave lands first, sensitive save follows. The
+	// sensitive client sends the agent_config it last saw, which doesn't
+	// include the freshly-changed default_agent_type — but because the patch
+	// only touches `agent_config`, the server's deep merge preserves the
+	// top-level `default_agent_type` update.
+	afterAutosave, err := mergeSettingsJSON(existing, autosavePatch)
+	require.NoError(t, err)
+	afterAutosaveThenSensitive, err := mergeSettingsJSON(afterAutosave, sensitivePatch)
+	require.NoError(t, err)
+
+	require.NoError(t, json.Unmarshal(afterAutosaveThenSensitive, &parsed))
+	require.Equal(t, "sk-secret", parsed.AgentConfig["codex"]["OPENAI_API_KEY"])
+	require.Equal(t, "claude_code", parsed.DefaultAgentType, "autosave's top-level change survives the sensitive save that followed")
+}
+
+// Regression check for the UseNumber switch: integer settings values must
+// round-trip through mergeSettingsJSON without being promoted to floats.
+func TestMergeSettingsJSON_PreservesIntegerEncoding(t *testing.T) {
+	t.Parallel()
+	existing := json.RawMessage(`{"max_concurrent_runs":5,"pm_schedule_hours":4}`)
+	patch := json.RawMessage(`{"llm_model":"gpt-5.4"}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+	// Expect the integers to serialize back as integers, not "5.0" / "4.0".
+	require.Contains(t, string(got), `"max_concurrent_runs":5`)
+	require.Contains(t, string(got), `"pm_schedule_hours":4`)
+
+	// Large integers beyond float64's 2^53 range must survive too. This
+	// value (9_007_199_254_740_993) loses precision when funneled through
+	// float64 and re-encoded.
+	bigExisting := json.RawMessage(`{"big":9007199254740993}`)
+	bigGot, err := mergeSettingsJSON(bigExisting, json.RawMessage(`{"other":"x"}`))
+	require.NoError(t, err)
+	require.Contains(t, string(bigGot), `"big":9007199254740993`)
+}

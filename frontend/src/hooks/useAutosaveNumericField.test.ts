@@ -11,6 +11,7 @@ function makeAutosaveStub<TVars>(): UseAutosaveResult<TVars> & {
     save: vi.fn<(vars: TVars) => void>(),
     flush: vi.fn<() => void>(),
     status: "idle",
+    debounceMs: 0,
   };
 }
 
