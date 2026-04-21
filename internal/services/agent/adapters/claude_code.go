@@ -93,7 +93,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		// The prompt is a positional argument to --print.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --continue \"%s\"",
+			"claude --print --output-format stream-json --verbose --continue \"%s\"",
 			msg,
 		)
 	} else {
@@ -106,7 +106,7 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json < %s",
+			"claude --print --output-format stream-json --verbose < %s",
 			promptPath,
 		)
 	}
