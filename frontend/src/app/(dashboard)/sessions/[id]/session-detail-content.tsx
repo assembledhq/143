@@ -86,12 +86,14 @@ function formatDuration(startedAt?: string, completedAt?: string): string {
   if (!startedAt) return "-";
   const start = new Date(startedAt);
   const end = completedAt ? new Date(completedAt) : new Date();
-  const diffMs = end.getTime() - start.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
+  const diffSecs = Math.floor((end.getTime() - start.getTime()) / 1000);
   if (diffSecs < 60) return `${diffSecs}s`;
   const mins = Math.floor(diffSecs / 60);
-  const secs = diffSecs % 60;
-  return `${mins}m ${secs}s`;
+  if (mins < 60) return `${mins}m ${diffSecs % 60}s`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
 }
 
 // Live counter that ticks every second; isolated so only the text node re-renders.
