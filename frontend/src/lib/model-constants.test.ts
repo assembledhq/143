@@ -9,8 +9,10 @@ import {
   DEFAULT_LLM_MODEL,
   CLAUDE_CODE_MODEL_SONNET,
   LEGACY_PM_ALIASES,
+  LLM_PROVIDER_INFO,
   PM_MODELS_BY_PROVIDER,
   LLM_MODELS_BY_PROVIDER,
+  ownerProviderForModel,
 } from "./model-constants";
 
 describe("model constants", () => {
@@ -45,7 +47,7 @@ describe("model constants", () => {
 
   it("includes latest Gemini CLI models", () => {
     expect(AVAILABLE_GEMINI_CLI_MODELS).toEqual([
-      "gemini-3-pro-preview",
+      "gemini-3.1-pro-preview",
       "gemini-3-flash-preview",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
@@ -73,8 +75,106 @@ describe("model constants", () => {
   });
 
   it("LLM_MODELS_BY_PROVIDER maps providers to their models", () => {
-    expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "openrouter"]);
+    expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "gemini", "openrouter"]);
     expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
     expect(LLM_MODELS_BY_PROVIDER.openai.models).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
+    expect(LLM_MODELS_BY_PROVIDER.gemini.models).toEqual(["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]);
+  });
+
+  it("LLM_MODELS_BY_PROVIDER exposes OpenRouter-exclusive Qwen models", () => {
+    expect(LLM_MODELS_BY_PROVIDER.openrouter.models).toContain("qwen3-235b-a22b");
+    expect(LLM_MODELS_BY_PROVIDER.openrouter.models).toContain("qwen3-32b");
+    // These must not appear under any native provider group.
+    for (const provider of ["anthropic", "openai", "gemini"] as const) {
+      expect(LLM_MODELS_BY_PROVIDER[provider].models).not.toContain("qwen3-235b-a22b");
+      expect(LLM_MODELS_BY_PROVIDER[provider].models).not.toContain("qwen3-32b");
+    }
+  });
+
+  it("LLM_PROVIDER_INFO includes Gemini with an AIza placeholder", () => {
+    expect(LLM_PROVIDER_INFO.gemini).toMatchObject({
+      name: "Gemini",
+      keyPlaceholder: "AIza...",
+    });
+  });
+});
+
+describe("ownerProviderForModel", () => {
+  const groups = {
+    anthropic: { label: "Anthropic", models: ["claude-opus-4-6"] as readonly string[] },
+    openai: { label: "OpenAI", models: ["gpt-4o", "gpt-5.4-mini"] as readonly string[] },
+    gemini: { label: "Gemini", models: ["gemini-2.5-pro"] as readonly string[] },
+    openrouter: {
+      label: "OpenRouter",
+      models: [
+        "claude-opus-4-6",
+        "gpt-4o",
+        "gpt-5.4-mini",
+        "gemini-2.5-pro",
+        "meta-only-model",
+      ] as readonly string[],
+    },
+  };
+
+  it("returns the native provider when the model is offered natively", () => {
+    expect(ownerProviderForModel("claude-opus-4-6", groups)).toBe("anthropic");
+    expect(ownerProviderForModel("gpt-5.4-mini", groups)).toBe("openai");
+    expect(ownerProviderForModel("gemini-2.5-pro", groups)).toBe("gemini");
+  });
+
+  it("falls back to openrouter when only openrouter offers the model", () => {
+    expect(ownerProviderForModel("meta-only-model", groups)).toBe("openrouter");
+  });
+
+  it("returns null when no provider offers the model", () => {
+    expect(ownerProviderForModel("unknown-model", groups)).toBeNull();
+  });
+
+  it("returns null when the providers map is empty", () => {
+    expect(ownerProviderForModel("anything", {})).toBeNull();
+  });
+
+  it("prefers a configured native provider over an unconfigured one", () => {
+    const status = {
+      anthropic: { orgConfigured: false, platformAvailable: false },
+      openai: { orgConfigured: true, platformAvailable: false },
+      gemini: { orgConfigured: false, platformAvailable: false },
+      openrouter: { orgConfigured: true, platformAvailable: false },
+    };
+    // gpt-5.4-mini is offered by both openai (native) and openrouter; openai wins.
+    expect(ownerProviderForModel("gpt-5.4-mini", groups, status)).toBe("openai");
+  });
+
+  it("falls back to openrouter when only openrouter is configured", () => {
+    const status = {
+      anthropic: { orgConfigured: false, platformAvailable: false },
+      openai: { orgConfigured: false, platformAvailable: false },
+      gemini: { orgConfigured: false, platformAvailable: false },
+      openrouter: { orgConfigured: true, platformAvailable: false },
+    };
+    // gpt-5.4-mini is routable via OpenRouter — the owner should be openrouter
+    // so the Save button is enabled.
+    expect(ownerProviderForModel("gpt-5.4-mini", groups, status)).toBe("openrouter");
+  });
+
+  it("treats platform-available keys as configured", () => {
+    const status = {
+      anthropic: { orgConfigured: false, platformAvailable: false },
+      openai: { orgConfigured: false, platformAvailable: true },
+      gemini: { orgConfigured: false, platformAvailable: false },
+      openrouter: { orgConfigured: false, platformAvailable: false },
+    };
+    expect(ownerProviderForModel("gpt-5.4-mini", groups, status)).toBe("openai");
+  });
+
+  it("defaults to the preferred native owner when nothing is configured", () => {
+    const status = {
+      anthropic: { orgConfigured: false, platformAvailable: false },
+      openai: { orgConfigured: false, platformAvailable: false },
+      gemini: { orgConfigured: false, platformAvailable: false },
+      openrouter: { orgConfigured: false, platformAvailable: false },
+    };
+    expect(ownerProviderForModel("gpt-5.4-mini", groups, status)).toBe("openai");
+    expect(ownerProviderForModel("meta-only-model", groups, status)).toBe("openrouter");
   });
 });

@@ -35,7 +35,7 @@ var AllProviders = []ProviderName{
 
 // LLMProviders is the subset of providers that serve LLM completions.
 var LLMProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderOpenRouter,
+	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenRouter,
 }
 
 // Valid returns true if the provider name is in the canonical list.
@@ -141,14 +141,14 @@ type SlackConfig struct {
 }
 
 type NotionConfig struct {
-	AccessToken   string `json:"access_token"`              // #nosec G117 -- JSON config field
+	AccessToken   string `json:"access_token"` // #nosec G117 -- JSON config field
 	WorkspaceID   string `json:"workspace_id,omitempty"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
 }
 
 type OpenAIChatGPTConfig struct {
-	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
-	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
+	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
 	IDToken      string    `json:"id_token,omitempty"` // OIDC id_token from OAuth exchange
 	ExpiresAt    time.Time `json:"expires_at"`
 	AccountType  string    `json:"account_type"` // "plus", "pro", "team", "enterprise"
@@ -181,8 +181,8 @@ func (c GitHubAppConfig) Provider() ProviderName     { return ProviderGitHubApp 
 func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
-func (c SlackConfig) Provider() ProviderName          { return ProviderSlack }
-func (c NotionConfig) Provider() ProviderName         { return ProviderNotion }
+func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
+func (c NotionConfig) Provider() ProviderName        { return ProviderNotion }
 func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
 
 // --- Validate() implementations ---

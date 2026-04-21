@@ -17,13 +17,13 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_HAIKU,
 ] as const;
 
-export const GEMINI_CLI_MODEL_GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview";
+export const GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview";
 export const GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview";
 export const GEMINI_CLI_MODEL_GEMINI_2_5_PRO = "gemini-2.5-pro";
 export const GEMINI_CLI_MODEL_GEMINI_2_5_FLASH = "gemini-2.5-flash";
 
 export const AVAILABLE_GEMINI_CLI_MODELS = [
-  GEMINI_CLI_MODEL_GEMINI_3_PRO_PREVIEW,
+  GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW,
   GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW,
   GEMINI_CLI_MODEL_GEMINI_2_5_PRO,
   GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
@@ -81,7 +81,26 @@ export const AVAILABLE_PM_MODELS = [
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
   anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
+  gemini: { label: "Gemini", models: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
+  openrouter: {
+    label: "OpenRouter",
+    models: [
+      "claude-opus-4-7",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.4-nano",
+      "gemini-3.1-pro",
+      "gemini-3-flash",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      // OpenRouter-exclusive open-weight models — give OpenRouter-only orgs a
+      // default model they can pick and save without needing a native provider.
+      "qwen3-235b-a22b",
+      "qwen3-32b",
+    ],
+  },
 };
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
@@ -92,5 +111,39 @@ export const OPENAI_API_TYPE_CHAT = "chat";
 export const LLM_PROVIDER_INFO: Record<string, { name: string; description: string; keyPlaceholder: string }> = {
   anthropic: { name: "Anthropic", description: "Claude models (Opus, Sonnet, Haiku)", keyPlaceholder: "sk-ant-..." },
   openai: { name: "OpenAI", description: "OpenAI models (GPT series)", keyPlaceholder: "sk-..." },
+  gemini: { name: "Gemini", description: "Google Gemini models", keyPlaceholder: "AIza..." },
   openrouter: { name: "OpenRouter", description: "Access all models with a single key", keyPlaceholder: "sk-or-..." },
 };
+
+// ownerProviderForModel returns the provider whose key will actually serve the
+// model. When providerStatus is supplied, a configured provider wins over an
+// unconfigured one (native configured > openrouter configured > fall through).
+// Without providerStatus it returns the preferred owner: native first, then
+// openrouter. Returns null if no provider offers the model.
+export function ownerProviderForModel(
+  model: string,
+  modelsByProvider: Record<string, { label: string; models: readonly string[] }>,
+  providerStatus?: Record<string, { orgConfigured?: boolean; platformAvailable?: boolean }>,
+): string | null {
+  const owners: string[] = [];
+  for (const [provider, group] of Object.entries(modelsByProvider)) {
+    if (group.models.includes(model)) owners.push(provider);
+  }
+  if (owners.length === 0) return null;
+
+  const nativeOwners = owners.filter((p) => p !== "openrouter");
+  const hasOpenRouter = owners.includes("openrouter");
+
+  if (providerStatus) {
+    const isConfigured = (p: string) => {
+      const s = providerStatus[p];
+      return Boolean(s?.orgConfigured || s?.platformAvailable);
+    };
+    const configuredNative = nativeOwners.find(isConfigured);
+    if (configuredNative) return configuredNative;
+    if (hasOpenRouter && isConfigured("openrouter")) return "openrouter";
+  }
+
+  if (nativeOwners.length > 0) return nativeOwners[0];
+  return hasOpenRouter ? "openrouter" : null;
+}

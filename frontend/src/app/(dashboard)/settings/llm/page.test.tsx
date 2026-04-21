@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, waitFor, userEvent, within } from "@/test/test-utils";
 import LLMPage from "./page";
 
 const {
@@ -29,10 +29,11 @@ const {
     data: {
       openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
       anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+      gemini: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
     },
   }),
   llmDefaultsMock: vi.fn().mockResolvedValue({
-    data: { default_llm_model: "gpt-5.4-mini", available_providers: ["openai"] },
+    data: { openai: "sk-...plat" },
   }),
 }));
 
@@ -56,54 +57,56 @@ vi.mock("@/lib/errors", () => ({
   captureError: vi.fn(),
 }));
 
+async function openEditDialog(provider: "Anthropic" | "OpenAI" | "Gemini" | "OpenRouter") {
+  const user = userEvent.setup();
+  const row = (await screen.findByText(provider)).closest(
+    "[data-testid='provider-key-row']",
+  )!;
+  const button = within(row as HTMLElement).getByRole("button", { name: /^(Edit|Add)$/ });
+  await user.click(button);
+  return { user };
+}
+
 describe("LLMPage", () => {
   beforeEach(() => {
     settingsGetMock.mockClear();
     credentialsListMock.mockClear();
+    credentialsListMock.mockResolvedValue({ data: [] });
     credentialsUpdateMock.mockClear();
+    credentialsUpdateMock.mockResolvedValue({});
     credentialsDeleteMock.mockClear();
     settingsUpdateMock.mockClear();
     llmModelsMock.mockClear();
     llmDefaultsMock.mockClear();
+    llmDefaultsMock.mockResolvedValue({ data: { openai: "sk-...plat" } });
   });
 
   it("renders the page header", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /LLM/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /LLM/i, level: 1 })).toBeInTheDocument();
     });
   });
 
-  it("renders provider selection area", async () => {
+  it("renders provider keys section", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(settingsGetMock).toHaveBeenCalled();
+      expect(screen.getByText("Provider keys")).toBeInTheDocument();
     });
   });
 
-  it("renders agent credentials section", async () => {
+  it("renders default model section", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Agent credentials")).toBeInTheDocument();
-    });
-  });
-
-  it("renders model selection section", async () => {
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Default LLM model")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Default model" })).toBeInTheDocument();
     });
   });
 
   it("shows the platform-LLM alert when no platform provider is configured", async () => {
-    llmDefaultsMock.mockResolvedValueOnce({
-      data: {},
-      platform_model: "gpt-5.4-nano",
-    });
+    llmDefaultsMock.mockResolvedValueOnce({ data: {} });
 
     renderWithProviders(<LLMPage />);
 
@@ -117,10 +120,7 @@ describe("LLMPage", () => {
   });
 
   it("hides the platform-LLM alert when a platform provider is configured", async () => {
-    llmDefaultsMock.mockResolvedValueOnce({
-      data: { openai: "sk-...abc" },
-      platform_model: "gpt-5.4-nano",
-    });
+    llmDefaultsMock.mockResolvedValueOnce({ data: { openai: "sk-...abc" } });
 
     renderWithProviders(<LLMPage />);
 
@@ -132,7 +132,7 @@ describe("LLMPage", () => {
     });
   });
 
-  it("renders configured badge when credentials exist", async () => {
+  it("renders configured status dot when credentials exist", async () => {
     credentialsListMock.mockResolvedValue({
       data: [
         {
@@ -146,111 +146,81 @@ describe("LLMPage", () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Configured")).toBeInTheDocument();
+      // There should be at least one Configured dot once the list loads.
+      expect(screen.getAllByLabelText("Configured").length).toBeGreaterThan(0);
     });
   });
 
-  it("renders reasoning effort selector", async () => {
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Reasoning effort")).toBeInTheDocument();
-    });
-  });
-
-  it("renders save model button", async () => {
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Save model/i })).toBeInTheDocument();
-    });
-  });
-
-  it("renders provider card names for all providers", async () => {
-    renderWithProviders(<LLMPage />);
-
-    // Wait for all three provider cards to render. Descriptions are static
-    // constants rendered via LLM_PROVIDER_INFO and do not need separate
-    // assertions — verifying the provider names confirms the cards mount.
-    await waitFor(() => {
-      expect(screen.getByText("Anthropic")).toBeInTheDocument();
-      expect(screen.getByText("OpenAI")).toBeInTheDocument();
-      expect(screen.getByText("OpenRouter")).toBeInTheDocument();
-    });
-  });
-
-  it("renders input fields with correct placeholders for each provider", async () => {
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
-    });
-    expect(screen.getByPlaceholderText("sk-...")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("sk-or-...")).toBeInTheDocument();
-  });
-
-  it("renders save key buttons disabled when inputs are empty", async () => {
+  it("renders a row for each provider, including Gemini", async () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Anthropic")).toBeInTheDocument();
     });
-
-    const saveKeyButtons = screen.getAllByRole("button", { name: /Save key/i });
-    for (const btn of saveKeyButtons) {
-      expect(btn).toBeDisabled();
-    }
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(screen.getByText("Gemini")).toBeInTheDocument();
+    expect(screen.getByText("OpenRouter")).toBeInTheDocument();
   });
 
-  it("enables save key button when typing a key", async () => {
-    const user = userEvent.setup();
+  it("opens the Anthropic dialog with the sk-ant-... placeholder", async () => {
     renderWithProviders(<LLMPage />);
+    await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
+    });
+    expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+  });
+
+  it("opens the Gemini dialog with the AIza... placeholder", async () => {
+    renderWithProviders(<LLMPage />);
+    await openEditDialog("Gemini");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("AIza...")).toBeInTheDocument();
+    });
+  });
+
+  it("disables Save in the dialog until a key is typed", async () => {
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
+    });
+    const saveBtn = screen.getByRole("button", { name: "Save" });
+    expect(saveBtn).toBeDisabled();
+
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
+    expect(saveBtn).toBeEnabled();
+  });
+
+  it("calls credentials.update with the typed key via the dialog", async () => {
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
     });
 
-    const input = screen.getByPlaceholderText("sk-ant-...");
-    await user.type(input, "sk-ant-test123");
-
-    const saveKeyButtons = screen.getAllByRole("button", { name: /Save key/i });
-    // The first provider (Anthropic) button should now be enabled
-    expect(saveKeyButtons[0]).toBeEnabled();
-  });
-
-  it("calls credentials.update when save key is clicked", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
-    });
-
-    const input = screen.getByPlaceholderText("sk-ant-...");
-    await user.type(input, "sk-ant-test123");
-
-    const saveKeyButtons = screen.getAllByRole("button", { name: /Save key/i });
-    await user.click(saveKeyButtons[0]);
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(credentialsUpdateMock).toHaveBeenCalledWith("anthropic", { api_key: "sk-ant-test123" });
     });
   });
 
-  it("sends api_type for openai provider when saving key", async () => {
-    const user = userEvent.setup();
+  it("sends api_type for openai provider when saving via the dialog", async () => {
     renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("OpenAI");
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText("sk-...")).toBeInTheDocument();
     });
 
-    const input = screen.getByPlaceholderText("sk-...");
-    await user.type(input, "sk-openai-key");
-
-    const saveKeyButtons = screen.getAllByRole("button", { name: /Save key/i });
-    // openai is the second provider
-    await user.click(saveKeyButtons[1]);
+    await user.type(screen.getByPlaceholderText("sk-..."), "sk-openai-key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(credentialsUpdateMock).toHaveBeenCalledWith("openai", {
@@ -260,63 +230,47 @@ describe("LLMPage", () => {
     });
   });
 
-  it("renders Remove button when provider is configured", async () => {
+  it("renders the Remove button in the dialog when a provider is configured", async () => {
     credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...abc" },
-      ],
+      data: [{ provider: "openai", configured: true, masked_key: "sk-...abc" }],
     });
 
     renderWithProviders(<LLMPage />);
+    await openEditDialog("OpenAI");
 
     await waitFor(() => {
-      expect(screen.getByText("Remove")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     });
   });
 
-  it("shows masked key when provider is configured", async () => {
+  it("shows the masked key in the dialog when a provider is configured", async () => {
     credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...abc" },
-      ],
+      data: [{ provider: "openai", configured: true, masked_key: "sk-...abc" }],
     });
 
     renderWithProviders(<LLMPage />);
+    await openEditDialog("OpenAI");
 
+    // The masked key appears both in the row and in the dialog.
     await waitFor(() => {
-      expect(screen.getByText("Key: sk-...abc")).toBeInTheDocument();
+      expect(screen.getAllByText("sk-...abc").length).toBeGreaterThanOrEqual(1);
     });
+    expect(screen.getByPlaceholderText("Replace existing key...")).toBeInTheDocument();
   });
 
-  it("shows replace placeholder when provider is already configured", async () => {
+  it("opens the remove confirmation dialog from the edit dialog", async () => {
     credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...abc" },
-      ],
+      data: [{ provider: "openai", configured: true, masked_key: "sk-...abc" }],
     });
 
     renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("OpenAI");
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Replace existing key...")).toBeInTheDocument();
-    });
-  });
-
-  it("opens remove confirmation dialog when Remove is clicked", async () => {
-    const user = userEvent.setup();
-    credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...abc" },
-      ],
+      expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     });
 
-    renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Remove")).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByText("Remove"));
+    await user.click(screen.getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
       expect(screen.getByText("Remove API key")).toBeInTheDocument();
@@ -325,52 +279,32 @@ describe("LLMPage", () => {
   });
 
   it("calls credentials.delete when confirming removal", async () => {
-    const user = userEvent.setup();
     credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...abc" },
-      ],
+      data: [{ provider: "openai", configured: true, masked_key: "sk-...abc" }],
     });
 
     renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("OpenAI");
 
     await waitFor(() => {
-      expect(screen.getByText("Remove")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText("Remove"));
+    await user.click(screen.getByRole("button", { name: "Remove" }));
 
-    await waitFor(() => {
-      expect(screen.getByText("Remove API key")).toBeInTheDocument();
-    });
-
-    // The dialog has a "Remove" action button
-    const dialogRemoveBtn = screen.getByRole("button", { name: /^Remove$/ });
-    await user.click(dialogRemoveBtn);
+    // Scope the confirmation click to the AlertDialog so we don't accidentally
+    // click the "Remove" button in the still-open ProviderKeyDialog.
+    const confirmDialog = await screen.findByRole("alertdialog");
+    await user.click(within(confirmDialog).getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
       expect(credentialsDeleteMock).toHaveBeenCalledWith("openai");
     });
   });
 
-  it("calls settings.update when save model is clicked", async () => {
-    const user = userEvent.setup();
+  it("toggles password visibility when the eye icon is clicked", async () => {
     renderWithProviders(<LLMPage />);
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Save model/i })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: /Save model/i }));
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalled();
-    });
-  });
-
-  it("toggles password visibility when eye icon is clicked", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
@@ -379,11 +313,129 @@ describe("LLMPage", () => {
     const input = screen.getByPlaceholderText("sk-ant-...");
     expect(input).toHaveAttribute("type", "password");
 
-    // Find the eye toggle button closest to this input
-    const inputContainer = input.closest(".relative.flex-1")!;
-    const toggleBtn = inputContainer.querySelector("button")!;
-    await user.click(toggleBtn);
-
+    await user.click(screen.getByRole("button", { name: /show key/i }));
     expect(input).toHaveAttribute("type", "text");
+  });
+
+  it("calls settings.update when Save is clicked on the default model card", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<LLMPage />);
+
+    // The default model is gpt-5.4-mini which is owned by OpenAI, and OpenAI is
+    // present as a platform provider, so the Save button is enabled.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save default model" })).toBeEnabled();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Save default model" }));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalled();
+    });
+  });
+
+  it("shows the owner caption 'Uses your OpenAI key' when OpenAI is the default owner", async () => {
+    renderWithProviders(<LLMPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Uses your OpenAI key/)).toBeInTheDocument();
+    });
+  });
+
+  it("shows an amber warning when no provider for the default model is configured", async () => {
+    llmDefaultsMock.mockResolvedValueOnce({ data: {} });
+
+    renderWithProviders(<LLMPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/No provider key configured/)).toBeInTheDocument();
+    });
+  });
+
+  it("closes the edit dialog after a successful save", async () => {
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: /Anthropic API key/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it("stays open when reopening a provider dialog shortly after a successful save", async () => {
+    renderWithProviders(<LLMPage />);
+    const first = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+    });
+
+    await first.user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test");
+    await first.user.click(screen.getByRole("button", { name: "Save" }));
+
+    // Dialog closes after the save.
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: /Anthropic API key/i })).not.toBeInTheDocument();
+    });
+
+    // Reopen the same provider's dialog immediately — the lingering "success"
+    // save status must not cause it to auto-close.
+    await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
+    });
+
+    // Confirm it's still open after a microtask — the auto-close effect would
+    // have fired by now if it were going to.
+    await Promise.resolve();
+    expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
+  });
+
+  it("surfaces the server error message when saving a key fails", async () => {
+    credentialsUpdateMock.mockRejectedValueOnce(new Error("Invalid API key"));
+
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Invalid API key")).toBeInTheDocument();
+    });
+  });
+
+  it("surfaces an error dialog and re-enables the row when delete fails", async () => {
+    credentialsListMock.mockResolvedValueOnce({
+      data: [{ provider: "anthropic", configured: true, masked_key: "sk-ant-••••" }],
+    });
+    credentialsDeleteMock.mockRejectedValueOnce(new Error("Something broke"));
+
+    renderWithProviders(<LLMPage />);
+    const { user } = await openEditDialog("Anthropic");
+
+    // Click the "Remove" ghost button inside the edit dialog.
+    const editDialog = await screen.findByRole("dialog");
+    await user.click(within(editDialog).getByRole("button", { name: "Remove" }));
+
+    // Confirm in the AlertDialog that opens (scope by the dialog title).
+    const confirmDialog = await screen.findByRole("alertdialog");
+    await user.click(within(confirmDialog).getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn.?t remove API key/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("Something broke")).toBeInTheDocument();
   });
 });

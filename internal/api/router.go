@@ -144,11 +144,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(containerUsageStore, handlers.WithRollupStore(usageRollupStore))
-	platformModel := cfg.PlatformLLMModel
-	if platformModel == "" {
-		platformModel = "gpt-5.4-nano"
-	}
-	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv(), platformModel)
+	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
