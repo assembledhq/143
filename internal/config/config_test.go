@@ -82,6 +82,20 @@ func TestLoad_LLMConfig(t *testing.T) {
 }
 
 //nolint:paralleltest // uses t.Setenv
+func TestPlatformLLMConfig_PropagatesGeminiFields(t *testing.T) {
+	t.Setenv("PLATFORM_LLM_MODEL", "gpt-5.4-nano")
+	t.Setenv("GEMINI_API_KEY", "AIza-test-key")
+	t.Setenv("GEMINI_BASE_URL", "https://gemini.example.com")
+
+	cfg := Load()
+	platform := cfg.PlatformLLMConfig()
+
+	require.Equal(t, llm.ModelName("gpt-5.4-nano"), platform.Model, "platform model should come from PLATFORM_LLM_MODEL")
+	require.Equal(t, "AIza-test-key", platform.GeminiAPIKey, "platform config must propagate GEMINI_API_KEY")
+	require.Equal(t, "https://gemini.example.com", platform.GeminiBaseURL, "platform config must propagate GEMINI_BASE_URL")
+}
+
+//nolint:paralleltest // uses t.Setenv
 func TestLogStatus_AllConfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://test")
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "gh-id")
@@ -93,6 +107,7 @@ func TestLogStatus_AllConfigured(t *testing.T) {
 	t.Setenv("ENCRYPTION_MASTER_KEY", "master-key")
 	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("GEMINI_API_KEY", "AIza-test")
 	t.Setenv("SESSION_SECRET", "secret")
 
 	cfg := Load()
@@ -100,6 +115,23 @@ func TestLogStatus_AllConfigured(t *testing.T) {
 	require.NotPanics(t, func() {
 		cfg.LogStatus(zerolog.Nop())
 	})
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestLogStatus_IncludesGeminiProvider(t *testing.T) {
+	t.Setenv("LLM_MODEL", "gemini-2.5-pro")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "AIza-test-key")
+	t.Setenv("SESSION_SECRET", "test-secret")
+
+	cfg := Load()
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	cfg.LogStatus(logger)
+
+	require.Contains(t, buf.String(), "gemini", "LogStatus should mention the gemini provider")
 }
 
 //nolint:paralleltest // uses t.Setenv
@@ -141,14 +173,16 @@ func TestSafeLLMEnv_MasksAPIKeys(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api3-abcdef1234567890")
 	t.Setenv("OPENAI_API_KEY", "sk-proj-abcdefgh1234")
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-v1-abcdefgh5678")
+	t.Setenv("GEMINI_API_KEY", "AIzaSy-abcdefgh1234")
 
 	cfg := Load()
 	safe := cfg.SafeLLMEnv()
 
-	require.Len(t, safe, 3, "should include all three providers")
+	require.Len(t, safe, 4, "should include all four providers")
 	require.Equal(t, "sk-a••••7890", safe["anthropic"])
 	require.Equal(t, "sk-p••••1234", safe["openai"])
 	require.Equal(t, "sk-o••••5678", safe["openrouter"])
+	require.Equal(t, "AIza••••1234", safe["gemini"])
 }
 
 //nolint:paralleltest // uses t.Setenv

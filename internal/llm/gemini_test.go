@@ -279,6 +279,64 @@ func TestGeminiProvider_BaseURLTrailingSlashIsTolerated(t *testing.T) {
 	require.Equal(t, "/v1beta/models/gemini-2.5-flash:generateContent", gotPath, "trailing slash on baseURL must not leak into the path")
 }
 
+func TestGeminiProvider_Complete_InvalidJSONResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer server.Close()
+
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "sys", "user", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unmarshal response", "invalid JSON should surface as unmarshal error")
+}
+
+func TestGeminiProvider_Complete_NoTextNoFinishReason(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(geminiResponse{
+			Candidates: []geminiCandidate{{Content: geminiContent{Parts: []geminiPart{}}}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "sys", "user", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no text in first candidate")
+	require.NotContains(t, err.Error(), "finishReason", "no finishReason should be included when none was returned")
+}
+
+func TestGeminiProvider_Complete_TransportError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	// Close immediately so the client.Do call fails with a transport error.
+	server.Close()
+
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "sys", "user", "")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrServerError, "transport failure should map to ErrServerError")
+}
+
+func TestThinkingBudgetFor_UnknownEffortReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	_, ok := thinkingBudgetFor("")
+	require.False(t, ok, "empty reasoning effort should not yield a thinking budget")
+
+	_, ok = thinkingBudgetFor("not-a-level")
+	require.False(t, ok, "unknown reasoning effort should not yield a thinking budget")
+}
+
 func TestModelSupportsThinking(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
