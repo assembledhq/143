@@ -293,7 +293,7 @@ describe('TeamSettingsPage', () => {
     expect(screen.getAllByText('Member').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('updates another member role when admin changes the role selection', async () => {
+  it('prompts for confirmation before changing another member role', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
@@ -302,12 +302,35 @@ describe('TeamSettingsPage', () => {
     });
 
     await user.click(roleSelectTrigger);
-    const viewerOption = await screen.findByRole('option', { name: 'Viewer' });
-    await user.click(viewerOption);
+    await user.click(await screen.findByRole('option', { name: 'Viewer' }));
+
+    // A confirmation AlertDialog must appear before the API is called.
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    expect(changeRoleMock).not.toHaveBeenCalled();
+
+    // Confirm and verify the role change fires with the new value.
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
 
     await waitFor(() => {
       expect(changeRoleMock).toHaveBeenCalledWith('user-2', 'viewer');
     });
+  });
+
+  it('does not change the role when the confirmation dialog is cancelled', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    const roleSelectTrigger = await screen.findByRole('combobox', {
+      name: 'Role for Member User',
+    });
+
+    await user.click(roleSelectTrigger);
+    await user.click(await screen.findByRole('option', { name: 'Viewer' }));
+
+    await screen.findByRole('alertdialog');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(changeRoleMock).not.toHaveBeenCalled();
   });
 
   it('disables management actions for non-admin users', async () => {

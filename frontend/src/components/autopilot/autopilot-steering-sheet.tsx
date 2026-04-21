@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { DebouncedInput, DebouncedTextarea } from "@/components/debounced-fields";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
@@ -14,9 +15,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
 import { queryKeys } from "@/lib/query-keys";
-import type { OrgSettings } from "@/lib/types";
+import { useAutosave } from "@/hooks/useAutosave";
+import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
+import type { Organization, OrgSettings, ProductContext, SingleResponse } from "@/lib/types";
 
 function parseTagList(value: string): string[] {
   return value
@@ -38,7 +40,6 @@ export function AutopilotSteeringSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       {open && (
         <AutopilotSteeringSheetBody
-          key={JSON.stringify(settings)}
           onOpenChange={onOpenChange}
           settings={settings}
         />
@@ -55,86 +56,136 @@ function AutopilotSteeringSheetBody({
   settings: OrgSettings;
 }) {
   const queryClient = useQueryClient();
-  const [philosophy, setPhilosophy] = useState(settings.product_context?.philosophy ?? "");
-  const [direction, setDirection] = useState(settings.product_context?.direction ?? settings.product_direction ?? "");
-  const [focusAreas, setFocusAreas] = useState((settings.product_context?.focus_areas ?? []).join(", "));
-  const [avoidAreas, setAvoidAreas] = useState((settings.product_context?.avoid_areas ?? []).join(", "));
-  const [autonomyLevel, setAutonomyLevel] = useState<NonNullable<OrgSettings["autonomy_level"]>>(settings.autonomy_level ?? "auto_simple");
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const serverPhilosophy = settings.product_context?.philosophy ?? "";
+  const serverDirection =
+    settings.product_context?.direction ?? settings.product_direction ?? "";
+  const serverFocusAreas = (settings.product_context?.focus_areas ?? []).join(", ");
+  const serverAvoidAreas = (settings.product_context?.avoid_areas ?? []).join(", ");
+  const serverAutonomy: NonNullable<OrgSettings["autonomy_level"]> =
+    settings.autonomy_level ?? "auto_simple";
 
-  const mutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      onOpenChange(false);
-    },
-    onError: (error) => {
-      console.error("failed to save autopilot steering", error);
-      setSaveError("Failed to save changes.");
-    },
+  const autosave = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: (payload) => api.settings.update(payload),
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
 
-  function handleSave() {
-    mutation.mutate({
+  // "Done" must not drop the sheet mid-save: flushing the debounce only
+  // dispatches the request, it doesn't wait for the server. Track a
+  // pending-close intent and close once the autosave queue reaches a terminal
+  // success state.
+  //
+  // On "error" we keep the sheet open so the indicator and the user's inputs
+  // stay on screen — dropping the surface under a failing save would hide the
+  // error chip and strand the user with no clear way to retry.
+  const [pendingClose, setPendingClose] = useState(false);
+  useEffect(() => {
+    if (pendingClose && (autosave.status === "idle" || autosave.status === "saved")) {
+      onOpenChange(false);
+    }
+  }, [pendingClose, autosave.status, onOpenChange]);
+
+  // Build a product_context patch by merging the proposed field change against
+  // the latest cached values, not the closure snapshot. Fields debounced
+  // separately (Philosophy vs. Direction) can commit within the same tick; a
+  // closure read would seed save2's full object from the pre-save1 snapshot
+  // and clobber save1. `queryClient.getQueryData` returns the optimistic cache
+  // that each save's `applyOptimistic` advances synchronously.
+  const saveProductContext = (patch: {
+    philosophy?: string;
+    direction?: string;
+    focus_areas?: string[];
+    avoid_areas?: string[];
+  }) => {
+    const cached = queryClient.getQueryData<SingleResponse<Organization>>(queryKeys.settings.all);
+    const latest = (cached?.data?.settings ?? {}) as OrgSettings;
+    const latestContext: Partial<ProductContext> = latest.product_context ?? {};
+    const next = {
+      philosophy: patch.philosophy ?? latestContext.philosophy ?? serverPhilosophy,
+      direction:
+        patch.direction ??
+        latestContext.direction ??
+        latest.product_direction ??
+        serverDirection,
+      focus_areas:
+        patch.focus_areas ?? latestContext.focus_areas ?? parseTagList(serverFocusAreas),
+      avoid_areas:
+        patch.avoid_areas ?? latestContext.avoid_areas ?? parseTagList(serverAvoidAreas),
+    };
+    const payload: SettingsPatch = {
       settings: {
-        autonomy_level: autonomyLevel,
-        product_direction: direction,
-        product_context: {
-          philosophy,
-          direction,
-          focus_areas: parseTagList(focusAreas),
-          avoid_areas: parseTagList(avoidAreas),
-        },
+        product_context: next,
+        // Mirror `direction` to the legacy `product_direction` for consumers
+        // that still read it.
+        ...(patch.direction !== undefined ? { product_direction: patch.direction } : {}),
       },
-    });
-  }
+    };
+    autosave.save(payload);
+  };
 
   return (
     <SheetContent className="w-full sm:max-w-xl">
       <SheetHeader>
-        <SheetTitle>Edit direction</SheetTitle>
-        <SheetDescription>Adjust the product context that guides Autopilot recommendations.</SheetDescription>
+        <div className="flex items-center justify-between">
+          <div>
+            <SheetTitle>Edit direction</SheetTitle>
+            <SheetDescription>
+              Adjust the product context that guides Autopilot recommendations.
+            </SheetDescription>
+          </div>
+          <AutosaveIndicator status={autosave.status} />
+        </div>
       </SheetHeader>
       <div className="mt-6 space-y-5">
         <div className="space-y-2">
           <Label htmlFor="autopilot-philosophy">Philosophy</Label>
-          <Textarea
+          <DebouncedTextarea
             id="autopilot-philosophy"
             rows={4}
-            value={philosophy}
-            onChange={(event) => setPhilosophy(event.target.value)}
+            serverValue={serverPhilosophy}
+            onCommit={(value) => saveProductContext({ philosophy: value })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-direction">Current direction</Label>
-          <Textarea
+          <DebouncedTextarea
             id="autopilot-direction"
             rows={3}
-            value={direction}
-            onChange={(event) => setDirection(event.target.value)}
+            serverValue={serverDirection}
+            onCommit={(value) => saveProductContext({ direction: value })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-focus-areas">Focus areas</Label>
-          <Input
+          <DebouncedInput
             id="autopilot-focus-areas"
-            value={focusAreas}
-            onChange={(event) => setFocusAreas(event.target.value)}
+            serverValue={serverFocusAreas}
             placeholder="auth, incidents, checkout"
+            onCommit={(value) => saveProductContext({ focus_areas: parseTagList(value) })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-avoid-areas">Avoid areas</Label>
-          <Input
+          <DebouncedInput
             id="autopilot-avoid-areas"
-            value={avoidAreas}
-            onChange={(event) => setAvoidAreas(event.target.value)}
+            serverValue={serverAvoidAreas}
             placeholder="redesigns, polish"
+            onCommit={(value) => saveProductContext({ avoid_areas: parseTagList(value) })}
           />
         </div>
         <div className="space-y-3">
           <Label>Autonomy level</Label>
-          <RadioGroup value={autonomyLevel} onValueChange={(value) => setAutonomyLevel(value as NonNullable<OrgSettings["autonomy_level"]>)}>
+          <RadioGroup
+            value={serverAutonomy}
+            onValueChange={(value) =>
+              autosave.save({
+                settings: {
+                  autonomy_level: value as NonNullable<OrgSettings["autonomy_level"]>,
+                },
+              })
+            }
+          >
             <label className="flex items-center gap-3 rounded-lg border p-3">
               <RadioGroupItem value="manual" aria-label="Suggest" />
               <div>
@@ -158,11 +209,16 @@ function AutopilotSteeringSheetBody({
             </label>
           </RadioGroup>
         </div>
-        {saveError && <p className="text-sm text-destructive">{saveError}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={handleSave} disabled={mutation.isPending}>
-            {mutation.isPending ? "Saving..." : "Save"}
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            disabled={pendingClose && autosave.status === "saving"}
+            onClick={() => {
+              autosave.flush();
+              setPendingClose(true);
+            }}
+          >
+            {pendingClose && autosave.status === "saving" ? "Saving…" : "Done"}
           </Button>
         </div>
       </div>

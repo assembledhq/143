@@ -16,11 +16,8 @@ describe("DefaultModelCard", () => {
         ownerProvider="openai"
         ownerProviderInfo={{ name: "OpenAI" }}
         ownerConfigured
-        saving={false}
-        saveStatus="idle"
         onChange={() => {}}
         onReasoningChange={() => {}}
-        onSave={() => {}}
       />,
     );
     expect(screen.getByText(/Uses your OpenAI key/)).toBeInTheDocument();
@@ -35,37 +32,16 @@ describe("DefaultModelCard", () => {
         ownerProvider="openai"
         ownerProviderInfo={{ name: "OpenAI" }}
         ownerConfigured={false}
-        saving={false}
-        saveStatus="idle"
         onChange={() => {}}
         onReasoningChange={() => {}}
-        onSave={() => {}}
       />,
     );
     expect(screen.getByText(/No provider key configured/)).toBeInTheDocument();
   });
 
-  it("disables the Save button when the owner is not configured", () => {
-    renderWithProviders(
-      <DefaultModelCard
-        value="gpt-5.4-mini"
-        reasoningEffort=""
-        modelGroups={groups}
-        ownerProvider={null}
-        ownerConfigured={false}
-        saving={false}
-        saveStatus="idle"
-        onChange={() => {}}
-        onReasoningChange={() => {}}
-        onSave={() => {}}
-      />,
-    );
-    expect(screen.getByRole("button", { name: "Save default model" })).toBeDisabled();
-  });
-
-  it("invokes onSave when the Save button is clicked", async () => {
+  it("fires onChange when a new model is selected", async () => {
     const user = userEvent.setup();
-    const onSave = vi.fn();
+    const onChange = vi.fn();
     renderWithProviders(
       <DefaultModelCard
         value="gpt-5.4-mini"
@@ -74,15 +50,13 @@ describe("DefaultModelCard", () => {
         ownerProvider="openai"
         ownerProviderInfo={{ name: "OpenAI" }}
         ownerConfigured
-        saving={false}
-        saveStatus="idle"
-        onChange={() => {}}
+        onChange={onChange}
         onReasoningChange={() => {}}
-        onSave={onSave}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Save default model" }));
-    expect(onSave).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("combobox", { name: /LLM Model/i }));
+    await user.click(await screen.findByRole("option", { name: "gpt-4o" }));
+    expect(onChange).toHaveBeenCalledWith("gpt-4o");
   });
 
   it("disables the model select when there are no model groups", () => {
@@ -93,11 +67,8 @@ describe("DefaultModelCard", () => {
         modelGroups={[]}
         ownerProvider={null}
         ownerConfigured={false}
-        saving={false}
-        saveStatus="idle"
         onChange={() => {}}
         onReasoningChange={() => {}}
-        onSave={() => {}}
       />,
     );
     expect(screen.getByRole("combobox", { name: /LLM Model/i })).toBeDisabled();

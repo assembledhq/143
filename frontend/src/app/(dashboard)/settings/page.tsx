@@ -1,14 +1,22 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { useAuth } from "@/hooks/use-auth";
+import { useAutosave } from "@/hooks/useAutosave";
+import {
+  applyOrgSettingsPatch,
+  coalesceSettingsPatch,
+  type SettingsPatch,
+} from "@/lib/settings-autosave";
 import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
@@ -18,9 +26,8 @@ const PR_AUTHORSHIP_OPTIONS = [
 ] as const;
 
 function PRAuthorshipSettings() {
-  const queryClient = useQueryClient();
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 
@@ -29,14 +36,19 @@ function PRAuthorshipSettings() {
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
 
-  const mutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  const { save, status } = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: (payload) => api.settings.update(payload),
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
 
   return (
     <section className="space-y-3">
-      <h2 className="text-xs font-medium text-foreground">Pull requests</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-medium text-foreground">Pull requests</h2>
+        <AutosaveIndicator status={status} />
+      </div>
       <Card>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -56,7 +68,7 @@ function PRAuthorshipSettings() {
                     value={option.value}
                     checked={currentAuthorship === option.value}
                     onChange={() =>
-                      mutation.mutate({ settings: { pr_authorship: option.value } })
+                      save({ settings: { pr_authorship: option.value } })
                     }
                     className="mt-0.5"
                   />
@@ -74,7 +86,7 @@ function PRAuthorshipSettings() {
               id="pr-draft-default"
               checked={currentDraftDefault}
               onChange={(e) =>
-                mutation.mutate({ settings: { pr_draft_default: e.target.checked } })
+                save({ settings: { pr_draft_default: e.target.checked } })
               }
             />
             <Label htmlFor="pr-draft-default" className="cursor-pointer">
@@ -88,7 +100,7 @@ function PRAuthorshipSettings() {
                 id="auto-archive-on-pr-close"
                 checked={currentAutoArchive}
                 onChange={(e) =>
-                  mutation.mutate({ settings: { auto_archive_on_pr_close: e.target.checked } })
+                  save({ settings: { auto_archive_on_pr_close: e.target.checked } })
                 }
               />
               <Label htmlFor="auto-archive-on-pr-close" className="cursor-pointer">
@@ -108,7 +120,7 @@ function PRAuthorshipSettings() {
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 

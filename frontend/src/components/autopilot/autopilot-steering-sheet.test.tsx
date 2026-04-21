@@ -17,7 +17,7 @@ const baseSettings: OrgSettings = {
 };
 
 describe("AutopilotSteeringSheet", () => {
-  it("renders the current steering fields", async () => {
+  it("renders the current steering fields", () => {
     renderWithProviders(
       <AutopilotSteeringSheet open onOpenChange={vi.fn()} settings={baseSettings} />
     );
@@ -28,9 +28,8 @@ describe("AutopilotSteeringSheet", () => {
     expect(screen.getByDisplayValue("auth")).toBeInTheDocument();
   });
 
-  it("saves the steering settings payload and closes on success", async () => {
+  it("autosaves the philosophy change with the merged product_context payload", async () => {
     let capturedBody: unknown;
-    const onOpenChange = vi.fn();
     server.use(
       http.patch("/api/v1/settings", async ({ request }) => {
         capturedBody = await request.json();
@@ -40,18 +39,17 @@ describe("AutopilotSteeringSheet", () => {
 
     const user = userEvent.setup();
     renderWithProviders(
-      <AutopilotSteeringSheet open onOpenChange={onOpenChange} settings={baseSettings} />
+      <AutopilotSteeringSheet open onOpenChange={vi.fn()} settings={baseSettings} />
     );
 
-    await user.clear(screen.getByLabelText("Philosophy"));
-    await user.type(screen.getByLabelText("Philosophy"), "Reliability first, then speed.");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    const philosophy = screen.getByLabelText("Philosophy");
+    await user.clear(philosophy);
+    await user.type(philosophy, "Reliability first, then speed.");
+    await user.tab();
 
     await waitFor(() => {
       expect(capturedBody).toEqual({
         settings: {
-          autonomy_level: "auto_simple",
-          product_direction: "Payments hardening this quarter.",
           product_context: {
             philosophy: "Reliability first, then speed.",
             direction: "Payments hardening this quarter.",
@@ -61,7 +59,16 @@ describe("AutopilotSteeringSheet", () => {
         },
       });
     });
+  });
 
+  it("closes the sheet when Done is clicked", async () => {
+    const onOpenChange = vi.fn();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <AutopilotSteeringSheet open onOpenChange={onOpenChange} settings={baseSettings} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

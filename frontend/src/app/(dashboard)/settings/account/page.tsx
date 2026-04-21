@@ -151,6 +151,7 @@ export default function AccountPage() {
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
+  const [settingTeamDefaultProvider, setSettingTeamDefaultProvider] = useState<string | null>(null);
   const [personalCodexMethodOverride, setPersonalCodexMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
 
@@ -186,6 +187,11 @@ export default function AccountPage() {
       api.userCredentials.setTeamDefault(provider, userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+      setSettingTeamDefaultProvider(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-key-set-team-default" });
+      setSettingTeamDefaultProvider(null);
     },
   });
 
@@ -539,7 +545,7 @@ export default function AccountPage() {
             variant="outline"
             size="sm"
             className="text-xs"
-            onClick={() => setTeamDefaultMutation.mutate({ provider: providerKey, userId: user.id })}
+            onClick={() => setSettingTeamDefaultProvider(providerKey)}
             disabled={setTeamDefaultMutation.isPending}
           >
             <Shield className="mr-1 h-3 w-3" />
@@ -628,6 +634,40 @@ export default function AccountPage() {
           </Card>
         </section>
       </div>
+
+      {/* Set as Team Default Confirmation Dialog */}
+      <AlertDialog
+        open={!!settingTeamDefaultProvider}
+        onOpenChange={(open) => !open && setSettingTeamDefaultProvider(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Set as team default</AlertDialogTitle>
+            {settingTeamDefaultProvider && (
+              <AlertDialogDescription>
+                Your personal {providerDisplayName(settingTeamDefaultProvider)} key will become the team default. Other members without their own personal key will use your credential for sessions. You can change or remove the team default at any time.
+              </AlertDialogDescription>
+            )}
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!user || setTeamDefaultMutation.isPending}
+              onClick={(event) => {
+                event.preventDefault();
+                if (settingTeamDefaultProvider && user) {
+                  setTeamDefaultMutation.mutate({
+                    provider: settingTeamDefaultProvider,
+                    userId: user.id,
+                  });
+                }
+              }}
+            >
+              Set as team default
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Remove Personal Key Dialog */}
       <AlertDialog open={!!removingProvider} onOpenChange={(open) => !open && setRemovingProvider(null)}>
