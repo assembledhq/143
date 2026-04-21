@@ -1065,7 +1065,7 @@ func TestCheckConcurrencyCaps_WorkerExceeded(t *testing.T) {
 	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPreviewCapacity)
-	require.Contains(t, err.Error(), "this server is at preview capacity")
+	require.Contains(t, err.Error(), "all preview slots are in use")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1389,17 +1389,75 @@ func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
 				AddRow(sessionID, "container-1", false),
 		)
 
-	// After destroy, clear container_id and mark sandbox_state=snapshotted.
-	mock.ExpectExec("UPDATE sessions SET container_id = NULL").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions SET sandbox_state").
+	// FinalizeContainerDestroy CAS: clears container_id + snapshotted state
+	// atomically. Matches one row since no new holder is present.
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL, sandbox_state = 'snapshotted'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = mgr.StopPreview(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.Equal(t, 1, sandboxProvider.GetDestroyCalls(), "final hold release must destroy the container")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStopPreview_LeavesSandboxWhenNewHolderAcquiredAfterRelease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	// ReleasePreviewHold reports destroyNow=true based on its snapshot...
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+	// ...but the FinalizeContainerDestroy CAS matches zero rows because a new
+	// holder acquired in the gap. We must NOT destroy the container.
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), "container-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "must not destroy when a new holder acquired in the release gap")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

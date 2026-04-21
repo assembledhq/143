@@ -556,26 +556,33 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 		// cancelled while we were tearing down services above.
 		destroyCtx, destroyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer destroyCancel()
-		sb := &agent.Sandbox{ID: containerID, Provider: ProviderDocker}
-		if destroyErr := m.sandboxProvider.Destroy(destroyCtx, sb); destroyErr != nil {
-			m.logger.Error().Err(destroyErr).
-				Str("preview_id", previewID.String()).
-				Str("container_id", containerID).
-				Msg("failed to destroy sandbox after final hold release")
-		}
-		// Clear container_id + mark sandbox_state=snapshotted so the next
-		// Start Preview takes the hydrate branch (not the reuse branch,
-		// which would attach to a dead container).
+		// FinalizeContainerDestroy atomically clears container_id and marks
+		// sandbox_state='snapshotted' only if no holder has come back in the
+		// gap between ReleasePreviewHold and here. If it returns false we
+		// must leave the container alone — a new holder owns it now.
+		// Order: clear container_id FIRST via the CAS, THEN destroy the
+		// container, so a concurrent reuse-path reader sees the cleared row
+		// and takes the hydrate branch instead of attaching to a dying ID.
 		if m.sessionStore != nil {
-			if clearErr := m.sessionStore.ClearContainerID(destroyCtx, orgID, instance.SessionID); clearErr != nil {
-				m.logger.Warn().Err(clearErr).
+			cleared, finalizeErr := m.sessionStore.FinalizeContainerDestroy(destroyCtx, orgID, instance.SessionID, containerID)
+			if finalizeErr != nil {
+				m.logger.Warn().Err(finalizeErr).
 					Str("preview_id", previewID.String()).
-					Msg("failed to clear container_id after destroy")
-			}
-			if stateErr := m.sessionStore.UpdateSandboxState(destroyCtx, orgID, instance.SessionID, string(models.SandboxStateSnapshotted)); stateErr != nil {
-				m.logger.Warn().Err(stateErr).
+					Str("container_id", containerID).
+					Msg("failed to finalize container destroy; leaving container for reconciler")
+			} else if !cleared {
+				m.logger.Info().
 					Str("preview_id", previewID.String()).
-					Msg("failed to mark sandbox_state=snapshotted after destroy")
+					Str("container_id", containerID).
+					Msg("another holder acquired between preview release and destroy; leaving container alive")
+			} else {
+				sb := &agent.Sandbox{ID: containerID, Provider: ProviderDocker}
+				if destroyErr := m.sandboxProvider.Destroy(destroyCtx, sb); destroyErr != nil {
+					m.logger.Error().Err(destroyErr).
+						Str("preview_id", previewID.String()).
+						Str("container_id", containerID).
+						Msg("failed to destroy sandbox after final hold release")
+				}
 			}
 		}
 	}
@@ -781,9 +788,6 @@ func (m *Manager) StopActivePreviewForSession(ctx context.Context, orgID, sessio
 			return false, nil
 		}
 		return false, fmt.Errorf("lookup active preview for session: %w", err)
-	}
-	if preview == nil {
-		return false, nil
 	}
 	if err := m.StopPreview(ctx, orgID, preview.ID); err != nil {
 		return false, fmt.Errorf("stop active preview %s: %w", preview.ID, err)
@@ -1010,7 +1014,7 @@ func (m *Manager) checkConcurrencyCaps(ctx context.Context, orgID, userID uuid.U
 		return fmt.Errorf("count worker previews: %w", err)
 	}
 	if workerCount >= m.maxPerWorker {
-		return fmt.Errorf("%w: this server is at preview capacity (%d/%d) — try again in a few minutes", ErrPreviewCapacity, workerCount, m.maxPerWorker)
+		return fmt.Errorf("%w: all preview slots are in use (%d/%d) — try again in a few minutes", ErrPreviewCapacity, workerCount, m.maxPerWorker)
 	}
 
 	return nil

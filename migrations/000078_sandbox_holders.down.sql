@@ -1,3 +1,4 @@
+DROP INDEX IF EXISTS idx_preview_instances_active_hold;
 DROP INDEX IF EXISTS idx_sessions_orphaned_containers;
 
 ALTER TABLE preview_instances

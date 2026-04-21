@@ -161,7 +161,12 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 // The returned error code steers the HTTP status: "NO_SANDBOX" (409),
 // "SNAPSHOT_EXPIRED" (410), or empty for infrastructure failures (500).
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) (*agent.Sandbox, string, error) {
-	if session.ContainerID != nil && *session.ContainerID != "" {
+	// Reuse is only safe when the row believes the container is actually
+	// running. A lingering container_id from a crashed worker or a session
+	// whose sandbox_state has since moved to 'snapshotted'/'destroyed' should
+	// fall through to hydrate/expired instead of attaching to a dead ID.
+	if session.ContainerID != nil && *session.ContainerID != "" &&
+		session.SandboxState == string(models.SandboxStateRunning) {
 		return &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
@@ -199,19 +204,27 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	}
 
 	// Publish the new container_id on the session so a concurrent ContinueSession
-	// attaches to the same container (preview + turn coexistence), and mark the
-	// sandbox as running so the reaper knows it's live again.
-	if err := h.sessionStore.SetContainerID(ctx, orgID, session.ID, sandbox.ID); err != nil {
+	// attaches to the same container (preview + turn coexistence). The CAS
+	// inside PublishHydratedContainerID only writes when container_id IS NULL,
+	// so if an orchestrator has already published a different ID we become the
+	// loser: destroy the local container and return an error asking the caller
+	// to retry (the retry's reuse path picks up the winner).
+	actualID, err := h.sessionStore.PublishHydratedContainerID(ctx, orgID, session.ID, sandbox.ID)
+	if err != nil {
 		// We have a live container but couldn't publish its ID — tear it
 		// down to avoid a hydrated orphan. This is rare (DB outage) and
 		// safer than leaving an untracked container behind.
 		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
 		return nil, "", fmt.Errorf("publish container id: %w", err)
 	}
-	if err := h.sessionStore.UpdateSandboxState(ctx, orgID, session.ID, string(models.SandboxStateRunning)); err != nil {
-		h.logger.Warn().Err(err).
+	if actualID != "" && actualID != sandbox.ID {
+		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
+		h.logger.Warn().
 			Str("session_id", session.ID.String()).
-			Msg("preview hydrate: failed to mark sandbox_state=running")
+			Str("winning_container_id", actualID).
+			Str("losing_container_id", sandbox.ID).
+			Msg("preview hydrate lost race to another holder; destroyed local container")
+		return nil, "NO_SANDBOX", fmt.Errorf("another process attached to this session's sandbox first; please retry")
 	}
 
 	h.logger.Info().

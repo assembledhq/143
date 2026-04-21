@@ -677,29 +677,37 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 	return err
 }
 
-// AcquireTurnHold marks the agent turn as a holder of the sandbox container
-// and records the container ID. Paired with ReleaseTurnHold, it forms half of
-// the refcount that governs container destruction (the other half is
-// preview_holding_container on the preview_instances row).
+// AcquireTurnHold marks the agent turn as a holder of the sandbox container.
+// It uses COALESCE so a concurrently-published container_id (e.g. from a
+// preview that hydrated first) is preserved rather than overwritten. The
+// returned actualContainerID is the ID that is now stored on the row:
+//   - Equal to proposedContainerID → we won the race; the caller's sandbox is
+//     the authoritative one.
+//   - Different from proposedContainerID → another caller published first; the
+//     caller should destroy their just-created sandbox and attach to
+//     actualContainerID instead.
+//
+// Paired with ReleaseTurnHold, it forms half of the refcount that governs
+// container destruction (the other half is preview_holding_container on the
+// preview_instances row).
 //
 // Deliberately does NOT bump last_activity_at — the caller (orchestrator)
 // already writes status='running' via UpdateStatus on the same code path, and
-// double-bumping would waste writes. Returns an error only on DB failure;
-// zero-row updates are not treated as errors because the session row should
-// always exist by the time the orchestrator gets here.
-func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
+// double-bumping would waste writes.
+func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error) {
 	query := `UPDATE sessions
-		SET container_id = @container_id, turn_holding_container = TRUE
-		WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		SET container_id = COALESCE(container_id, @container_id),
+		    turn_holding_container = TRUE
+		WHERE id = @id AND org_id = @org_id
+		RETURNING COALESCE(container_id, '')`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
 		"org_id":       orgID,
-		"container_id": containerID,
-	})
-	if err != nil {
-		return fmt.Errorf("acquire turn hold: %w", err)
+		"container_id": proposedContainerID,
+	}).Scan(&actualContainerID); err != nil {
+		return "", fmt.Errorf("acquire turn hold: %w", err)
 	}
-	return nil
+	return actualContainerID, nil
 }
 
 // ReleaseTurnHold flips turn_holding_container to false and returns the
@@ -708,9 +716,11 @@ func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uui
 // preview hold in one round-trip, eliminating the TOCTOU gap between release
 // and destroy decision.
 //
-// destroyNow is true when the caller should tear down the container AND clear
-// container_id (via ClearContainerID). destroyNow is false when the preview
-// still holds the container — the caller must leave both container_id and the
+// destroyNow is true when, at the time of the release, no other holder was
+// active. Callers MUST NOT act on this signal directly: pass containerID into
+// FinalizeContainerDestroy, which atomically re-checks holders and clears
+// container_id only if still safe. destroyNow is false when the preview still
+// holds the container — the caller must leave both container_id and the
 // container itself alive.
 //
 // containerID is the ID that was recorded on the row (empty if the session
@@ -746,31 +756,43 @@ func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uui
 	return cid != "" && !previewHolds, cid, nil
 }
 
-// SetContainerID records a new container_id on the session without touching
-// any holder flag. This is the preview-hydrate path: a preview has just
-// created a container from the session's snapshot and needs to publish its
+// PublishHydratedContainerID is the preview-hydrate CAS: a preview has just
+// created a container from the session's snapshot and wants to publish its
 // ID so a concurrent ContinueSession can attach to the same container.
-// The paired hold write lives on the preview_instances row (preview
-// store's AcquirePreviewHold).
+//
+// The UPDATE only writes container_id when the row's current container_id IS
+// NULL, so a concurrent orchestrator that already published one wins the race
+// and the preview becomes the loser. The returned actualContainerID is the ID
+// now stored on the row:
+//   - Equal to proposedContainerID → we won; caller's sandbox is authoritative.
+//   - Different → the caller must destroy its just-created sandbox and attach
+//     to actualContainerID instead.
 //
 // Unlike AcquireTurnHold, this does NOT flip turn_holding_container — the
-// orchestrator owns that flag and the preview must not claim it.
-func (s *SessionStore) SetContainerID(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
-	query := `UPDATE sessions SET container_id = @container_id WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+// orchestrator owns that flag and the preview must not claim it. It also
+// marks sandbox_state=running so the reaper and the reuse path see the live
+// container.
+func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error) {
+	query := `UPDATE sessions
+		SET container_id = COALESCE(container_id, @container_id),
+		    sandbox_state = CASE WHEN container_id IS NULL THEN 'running' ELSE sandbox_state END
+		WHERE id = @id AND org_id = @org_id
+		RETURNING COALESCE(container_id, '')`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
 		"org_id":       orgID,
-		"container_id": containerID,
-	})
-	if err != nil {
-		return fmt.Errorf("set container id: %w", err)
+		"container_id": proposedContainerID,
+	}).Scan(&actualContainerID); err != nil {
+		return "", fmt.Errorf("publish hydrated container id: %w", err)
 	}
-	return nil
+	return actualContainerID, nil
 }
 
-// ClearContainerID sets container_id back to NULL. Called after the caller
-// has confirmed the container is destroyed, so stale IDs don't leak into
-// subsequent preview/turn decisions.
+// ClearContainerID sets container_id back to NULL unconditionally. Used by
+// the startup reconciler for orphaned containers discovered out-of-band.
+// Lifecycle code paths (orchestrator / preview manager) should call
+// FinalizeContainerDestroy instead, which does an atomic CAS that closes the
+// race between release and destroy.
 func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
 	query := `UPDATE sessions SET container_id = NULL WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -781,6 +803,45 @@ func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uu
 		return fmt.Errorf("clear container id: %w", err)
 	}
 	return nil
+}
+
+// FinalizeContainerDestroy atomically clears container_id and marks
+// sandbox_state='snapshotted', but only when the caller's view of the world
+// still holds: no holder is active and the container_id still matches
+// expectedContainerID. Returns true when the row was updated (the caller owns
+// the destroy), false when another holder has come back (the caller must
+// leave the container alone — someone else is using it).
+//
+// This is the TOCTOU-safe companion to ReleaseTurnHold / ReleasePreviewHold.
+// A release reports "destroyNow=true" based on a snapshot of state inside its
+// own SQL, but in the window between release and the Go-side destroy a new
+// holder can acquire. FinalizeContainerDestroy re-checks atomically: if the
+// new holder has set turn_holding_container=TRUE, or a preview has set
+// preview_holding_container=TRUE, the UPDATE matches zero rows and destroy
+// is skipped. Clearing container_id and destroying the container is the
+// ordering that prevents new reuse-path readers from attaching to a dying ID.
+func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	query := `UPDATE sessions
+		SET container_id = NULL, sandbox_state = 'snapshotted'
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND container_id = @expected
+		  AND turn_holding_container = FALSE
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("finalize container destroy: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ListOrphanedContainers returns sessions whose container_id is set but no

@@ -577,7 +577,10 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		0, time.Now(),
-		"none", nil, nil, nil,
+		// sandbox_state must be "running" for the reuse branch of
+		// acquireSandbox to attach to the lingering container_id; otherwise
+		// the stale-ID guard falls through to hydrate/expired.
+		"running", nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil, time.Now(),
 	}
@@ -843,13 +846,14 @@ func TestPreviewHandler_StartPreview_HydrateReachesManager(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
-	// Hydrate publishes container_id + marks sandbox_state=running.
-	mock.ExpectExec("UPDATE sessions SET container_id").
+	// Hydrate publishes container_id (CAS) + transitions sandbox_state=running
+	// inside the same UPDATE. The RETURNING clause reports the proposed ID
+	// because no prior holder existed. The mock provider's default container
+	// ID is "test-sandbox"; echo it back so the preview doesn't treat this
+	// as a lost race.
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions SET sandbox_state").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
 	// Manager.StartPreview first queries for an existing preview; we return
 	// one so the manager short-circuits with "already has an active preview"
 	// — enough to prove the handler crossed into the manager after hydrate.
@@ -925,9 +929,10 @@ func TestPreviewHandler_StartPreview_HydrateFails(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestPreviewHandler_StartPreview_SetContainerIDFails covers the SetContainerID
-// error branch that destroys the just-created sandbox (preview.go:204-210).
-func TestPreviewHandler_StartPreview_SetContainerIDFails(t *testing.T) {
+// TestPreviewHandler_StartPreview_PublishContainerIDFails covers the
+// PublishHydratedContainerID error branch that destroys the just-created
+// sandbox (preview.go: CAS failure in hydrate path).
+func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -945,7 +950,7 @@ func TestPreviewHandler_StartPreview_SetContainerIDFails(t *testing.T) {
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
-	mock.ExpectExec("UPDATE sessions SET container_id").
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("db down"))
 
@@ -971,9 +976,11 @@ func TestPreviewHandler_StartPreview_SetContainerIDFails(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// TestPreviewHandler_StartPreview_UpdateSandboxStateFailsButContinues covers
-// the log-and-continue branch when UpdateSandboxState fails (preview.go:211-215).
-func TestPreviewHandler_StartPreview_UpdateSandboxStateFailsButContinues(t *testing.T) {
+// TestPreviewHandler_StartPreview_PublishLosesRace covers the CAS-loss branch
+// of PublishHydratedContainerID: a concurrent orchestrator already published
+// a different container_id, so the preview must destroy its local sandbox and
+// surface a NO_SANDBOX error instructing the caller to retry.
+func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -991,20 +998,11 @@ func TestPreviewHandler_StartPreview_UpdateSandboxStateFailsButContinues(t *test
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
 		)
-	mock.ExpectExec("UPDATE sessions SET container_id").
+	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
+	// lost the race.
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec("UPDATE sessions SET sandbox_state").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnError(errors.New("state update boom"))
-	existing := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("SELECT .+ FROM preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows(previewInstanceTestCols).
-				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
-		)
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -1022,7 +1020,9 @@ func TestPreviewHandler_StartPreview_UpdateSandboxStateFailsButContinues(t *test
 
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "NO_SANDBOX")
+	require.Equal(t, 1, sp.GetDestroyCalls(), "local container must be destroyed on race loss")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

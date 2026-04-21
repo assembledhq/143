@@ -26,3 +26,14 @@ ALTER TABLE preview_instances
 CREATE INDEX IF NOT EXISTS idx_sessions_orphaned_containers
     ON sessions (id)
     WHERE container_id IS NOT NULL AND turn_holding_container = FALSE;
+
+-- Supports the "does any preview still hold this session's sandbox?" probe
+-- issued by ReleaseTurnHold, FinalizeContainerDestroy, ListOrphanedContainers,
+-- and the release-preview-hold CAS in preview_store. Without this partial
+-- index those queries fall back to a full scan of preview_instances, which
+-- grows unbounded as terminal previews accumulate. Only TRUE rows are
+-- indexed (the common case is FALSE once a preview stops), so the index
+-- stays small and lookups are O(live-holders-per-session).
+CREATE INDEX IF NOT EXISTS idx_preview_instances_active_hold
+    ON preview_instances (session_id, org_id)
+    WHERE preview_holding_container = TRUE;

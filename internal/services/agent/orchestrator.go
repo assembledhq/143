@@ -75,17 +75,26 @@ type SessionStore interface {
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
-	// AcquireTurnHold records container_id and flips turn_holding_container=TRUE.
-	// Called immediately after the orchestrator creates (or reuses) a sandbox.
-	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error
+	// AcquireTurnHold flips turn_holding_container=TRUE and publishes the
+	// turn's proposed container_id via COALESCE. The returned
+	// actualContainerID is the container_id now stored on the row: equal to
+	// proposedContainerID when the caller won the race, different when a
+	// concurrent preview-hydrate published first. In the latter case the
+	// caller must destroy its just-created sandbox and attach to the
+	// actualContainerID instead.
+	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error)
 	// ReleaseTurnHold flips turn_holding_container=FALSE and reports whether
 	// the caller should destroy the container. destroyNow is true only when no
 	// preview is holding the container; otherwise the preview keeps it alive
 	// for the "iterate between turns" flow.
 	ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (destroyNow bool, containerID string, err error)
-	// ClearContainerID sets container_id back to NULL after the caller has
-	// destroyed the container.
-	ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error
+	// FinalizeContainerDestroy is the TOCTOU-safe companion to
+	// ReleaseTurnHold: it atomically clears container_id and marks
+	// sandbox_state='snapshotted' only when no holder has come back and the
+	// container_id still matches expectedContainerID. Returns true when the
+	// caller owns the destroy, false when a new holder acquired in the gap
+	// (caller must leave the container alone).
+	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -478,10 +487,25 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
-	// Log-and-continue on DB error: losing the hold is a degradation (the
-	// reconciler will clean up on next startup), not a reason to fail the run.
-	if err := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID); err != nil {
-		log.Warn().Err(err).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
+	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
+	// if a concurrent preview hydrate won, actualID will differ from our
+	// sandbox.ID and we must drop the local container we just created.
+	// On DB error we degrade to a safe "reconciler will clean up" state rather
+	// than failing the run.
+	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
+	if holdErr != nil {
+		log.Warn().Err(holdErr).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
+	} else if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+			log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Str("losing_container_id", sandbox.ID).
+			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
+		o.failRun(ctx, run, "sandbox race: another holder attached first, please retry")
+		return fmt.Errorf("sandbox race: actual container %s != created %s", actualContainerID, sandbox.ID)
 	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -494,7 +518,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
-		destroyNow, _, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
+		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
 		if releaseErr != nil {
 			// Fall back to destroy to avoid leaking the container if we
 			// can't read the holder state.
@@ -505,11 +529,27 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive")
 			return
 		}
+		// FinalizeContainerDestroy re-checks holder state atomically and only
+		// clears container_id when it still matches the expected ID with no
+		// holder active. This closes the window between the release above and
+		// the physical destroy below where a new holder could have acquired.
+		// Order: clear container_id FIRST (via the CAS) then destroy, so new
+		// reuse-path readers hydrate fresh rather than attach to a dying ID.
+		expectedID := releasedID
+		if expectedID == "" {
+			expectedID = sandbox.ID
+		}
+		cleared, finalizeErr := o.sessions.FinalizeContainerDestroy(destroyCtx, run.OrgID, run.ID, expectedID)
+		if finalizeErr != nil {
+			log.Warn().Err(finalizeErr).Msg("failed to finalize container destroy; skipping destroy to avoid dropping a live holder's container")
+			return
+		}
+		if !cleared {
+			log.Info().Str("container_id", sandbox.ID).Msg("another holder acquired between release and destroy; leaving container alive")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
-		}
-		if clearErr := o.sessions.ClearContainerID(destroyCtx, run.OrgID, run.ID); clearErr != nil {
-			log.Warn().Err(clearErr).Msg("failed to clear container_id after destroy")
 		}
 	}()
 
@@ -945,12 +985,45 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("create sandbox: %w", err)
 		}
 	}
-	// Record the turn hold. AcquireTurnHold is idempotent — when we reused an
-	// existing container the row may already carry this ID; re-writing is
-	// harmless. Log-and-continue on DB error so losing the hold degrades to a
-	// safe "reconciler will clean up" state rather than failing the turn.
-	if err := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID); err != nil {
-		log.Warn().Err(err).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
+	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
+	// when we reused a container (the row's container_id already matches our
+	// sandbox.ID). When we freshly hydrated, a concurrent preview hydrate may
+	// have published first — in that case actualContainerID differs from
+	// sandbox.ID and we must destroy our local container and abort so the
+	// user's retry picks up the winner via the reuse path.
+	// Log-and-continue on DB error so losing the hold degrades to a safe
+	// "reconciler will clean up" state rather than failing the turn.
+	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
+	if holdErr != nil {
+		log.Warn().Err(holdErr).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
+	} else if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		// Only destroy the locally-created container — reused containers came
+		// from the row's existing container_id and should never be torn down
+		// here, but reusedExisting implies sandbox.ID == *session.ContainerID,
+		// and if that differs from actualContainerID the row was rewritten
+		// under us (e.g. a preview hydrate replaced the reused ID). Either
+		// way, destroying the sandbox we hold is safe: for reuse the
+		// "destroy" is really "release our handle" since we didn't create it.
+		if !reusedExisting {
+			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
+			}
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Str("losing_container_id", sandbox.ID).
+			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after losing hydrate race")
+		}
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			"Another session activity was starting at the same time. Please try again.",
+			"sandbox race",
+		)
+		return fmt.Errorf("sandbox race: actual container %s != local %s", actualContainerID, sandbox.ID)
 	}
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
@@ -967,7 +1040,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
-		destroyNow, _, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
 		if releaseErr != nil {
 			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
 			destroyNow = true
@@ -976,11 +1049,25 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive for the preview")
 			return
 		}
+		// FinalizeContainerDestroy re-checks holder state atomically: if a
+		// preview or another turn acquired between our release and this
+		// destroy, the CAS matches zero rows and we skip destroy so the new
+		// holder's container isn't ripped out from under it.
+		expectedID := releasedID
+		if expectedID == "" {
+			expectedID = sandbox.ID
+		}
+		cleared, finalizeErr := o.sessions.FinalizeContainerDestroy(destroyCtx, session.OrgID, session.ID, expectedID)
+		if finalizeErr != nil {
+			log.Warn().Err(finalizeErr).Msg("failed to finalize container destroy; skipping destroy to avoid dropping a live holder's container")
+			return
+		}
+		if !cleared {
+			log.Info().Str("container_id", sandbox.ID).Msg("another holder acquired between release and destroy; leaving container alive")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
-		}
-		if clearErr := o.sessions.ClearContainerID(destroyCtx, session.OrgID, session.ID); clearErr != nil {
-			log.Warn().Err(clearErr).Msg("failed to clear container_id after destroy")
 		}
 	}()
 

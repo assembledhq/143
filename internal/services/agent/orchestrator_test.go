@@ -124,12 +124,13 @@ type mockSessionStore struct {
 	turnUpdates      []turnUpdate
 	failureUpdates   []failureUpdate
 	countRunningErr  error
+	acquireHoldFn    func(proposedContainerID string) (string, error)
 	acquireHoldErr   error
 	releaseHoldFn    func() (bool, string, error)
-	clearContainerFn func() error
+	finalizeFn       func(expectedContainerID string) (bool, error)
 	acquireHoldCalls int
 	releaseHoldCalls int
-	clearContCalls   int
+	finalizeCalls    int
 }
 
 type failureUpdate struct {
@@ -215,12 +216,20 @@ func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UU
 	return models.Session{}, nil
 }
 
-func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, containerID string) error {
+func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (string, error) {
 	m.mu.Lock()
 	m.acquireHoldCalls++
+	fn := m.acquireHoldFn
 	err := m.acquireHoldErr
 	m.mu.Unlock()
-	return err
+	if fn != nil {
+		return fn(proposedContainerID)
+	}
+	if err != nil {
+		return "", err
+	}
+	// Default: caller's proposal wins.
+	return proposedContainerID, nil
 }
 
 func (m *mockSessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (bool, string, error) {
@@ -235,15 +244,16 @@ func (m *mockSessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID
 	return true, "", nil
 }
 
-func (m *mockSessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error {
+func (m *mockSessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
 	m.mu.Lock()
-	m.clearContCalls++
-	fn := m.clearContainerFn
+	m.finalizeCalls++
+	fn := m.finalizeFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn()
+		return fn(expectedContainerID)
 	}
-	return nil
+	// Default: CAS succeeds.
+	return true, nil
 }
 
 func (m *mockSessionStore) getStatusUpdates() []string {
@@ -694,7 +704,7 @@ func TestRunAgent_PreviewHoldsContainerSkipsDestroy(t *testing.T) {
 
 	require.Equal(t, 1, d.sessions.acquireHoldCalls)
 	require.Equal(t, 1, d.sessions.releaseHoldCalls)
-	require.Equal(t, 0, d.sessions.clearContCalls, "ClearContainerID must not run while preview holds")
+	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must be left alive while preview holds")
 }
 
@@ -756,9 +766,10 @@ func TestRunAgent_AcquireHoldErrorDoesNotFailRun(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
-// TestRunAgent_ClearContainerIDErrorLogsAndContinues covers the log-and-continue
-// branch when ClearContainerID errors (orchestrator.go:490-492).
-func TestRunAgent_ClearContainerIDErrorLogsAndContinues(t *testing.T) {
+// TestRunAgent_FinalizeDestroyErrorSkipsDestroy covers the log-and-continue
+// branch when FinalizeContainerDestroy errors: we skip destroy so we don't
+// tear down a container that another holder may have just acquired.
+func TestRunAgent_FinalizeDestroyErrorSkipsDestroy(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -766,8 +777,8 @@ func TestRunAgent_ClearContainerIDErrorLogsAndContinues(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.sessions.clearContainerFn = func() error {
-		return errors.New("db write failed")
+	d.sessions.finalizeFn = func(expectedContainerID string) (bool, error) {
+		return false, errors.New("db write failed")
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
@@ -781,8 +792,38 @@ func TestRunAgent_ClearContainerIDErrorLogsAndContinues(t *testing.T) {
 	orch := buildOrchestrator(d)
 	require.NoError(t, orch.RunAgent(context.Background(), run))
 
-	require.Equal(t, 1, d.provider.GetDestroyCalls())
-	require.Equal(t, 1, d.sessions.clearContCalls)
+	require.Equal(t, 0, d.provider.GetDestroyCalls(), "must not destroy when finalize CAS errors")
+	require.Equal(t, 1, d.sessions.finalizeCalls)
+}
+
+// TestRunAgent_FinalizeDestroyReturnsFalseSkipsDestroy covers the CAS-lost
+// branch: a new holder acquired between ReleaseTurnHold and FinalizeContainerDestroy.
+func TestRunAgent_FinalizeDestroyReturnsFalseSkipsDestroy(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.finalizeFn = func(expectedContainerID string) (bool, error) {
+		// Simulate a preview grabbing the container after release.
+		return false, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "ok",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, 0, d.provider.GetDestroyCalls(), "must not destroy when finalize CAS loses the race")
+	require.Equal(t, 1, d.sessions.finalizeCalls)
 }
 
 func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
@@ -1625,7 +1666,7 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.NoError(t, orch.ContinueSession(context.Background(), session))
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "sandbox must stay alive while preview holds it")
-	require.Equal(t, 0, d.sessions.clearContCalls, "container_id must not be cleared while preview holds")
+	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
 }

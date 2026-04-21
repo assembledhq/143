@@ -911,18 +911,41 @@ func TestSessionStore_Unarchive(t *testing.T) {
 func TestSessionStore_AcquireTurnHold(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	t.Run("publishes proposed ID when container_id was null", func(t *testing.T) {
+		t.Parallel()
 
-	store := NewSessionStore(mock)
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = @container_id, turn_holding_container = TRUE`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
 
-	err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "container-xyz")
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+		store := NewSessionStore(mock)
+		mock.ExpectQuery(`UPDATE sessions\s+SET container_id = COALESCE\(container_id, @container_id\),\s+turn_holding_container = TRUE`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("container-xyz"))
+
+		got, err := store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "container-xyz")
+		require.NoError(t, err)
+		require.Equal(t, "container-xyz", got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns existing ID when another holder published first", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectQuery(`UPDATE sessions`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("winner"))
+
+		got, err := store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "loser")
+		require.NoError(t, err)
+		require.Equal(t, "winner", got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
 func TestSessionStore_AcquireTurnHold_DBError(t *testing.T) {
@@ -933,11 +956,11 @@ func TestSessionStore_AcquireTurnHold_DBError(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectExec(`UPDATE sessions`).
+	mock.ExpectQuery(`UPDATE sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "c1")
+	_, err = store.AcquireTurnHold(context.Background(), uuid.New(), uuid.New(), "c1")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "acquire turn hold")
 }
@@ -999,24 +1022,47 @@ func TestSessionStore_ReleaseTurnHold_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "release turn hold")
 }
 
-func TestSessionStore_SetContainerID(t *testing.T) {
+func TestSessionStore_PublishHydratedContainerID(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	t.Run("publishes when container_id was null", func(t *testing.T) {
+		t.Parallel()
 
-	store := NewSessionStore(mock)
-	mock.ExpectExec(`^UPDATE sessions SET container_id = @container_id WHERE id = @id AND org_id = @org_id$`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
 
-	err = store.SetContainerID(context.Background(), uuid.New(), uuid.New(), "container-abc")
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+		store := NewSessionStore(mock)
+		mock.ExpectQuery(`UPDATE sessions\s+SET container_id = COALESCE\(container_id, @container_id\)`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("container-abc"))
+
+		got, err := store.PublishHydratedContainerID(context.Background(), uuid.New(), uuid.New(), "container-abc")
+		require.NoError(t, err)
+		require.Equal(t, "container-abc", got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns existing ID when orchestrator published first", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectQuery(`UPDATE sessions`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
+
+		got, err := store.PublishHydratedContainerID(context.Background(), uuid.New(), uuid.New(), "preview-losing")
+		require.NoError(t, err)
+		require.Equal(t, "orch-winner", got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
 }
 
-func TestSessionStore_SetContainerID_DBError(t *testing.T) {
+func TestSessionStore_PublishHydratedContainerID_DBError(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1024,13 +1070,70 @@ func TestSessionStore_SetContainerID_DBError(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectExec(`UPDATE sessions`).
+	mock.ExpectQuery(`UPDATE sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	err = store.SetContainerID(context.Background(), uuid.New(), uuid.New(), "c1")
+	_, err = store.PublishHydratedContainerID(context.Background(), uuid.New(), uuid.New(), "c1")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "set container id")
+	require.Contains(t, err.Error(), "publish hydrated container id")
+}
+
+func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("clears row when no holder has returned", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL, sandbox_state = 'snapshotted'`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		cleared, err := store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
+		require.NoError(t, err)
+		require.True(t, cleared)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns false when CAS matches zero rows", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		cleared, err := store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
+		require.NoError(t, err)
+		require.False(t, cleared)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("wraps db error", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("boom"))
+
+		_, err = store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "finalize container destroy")
+	})
 }
 
 func TestSessionStore_ClearContainerID(t *testing.T) {
