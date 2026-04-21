@@ -108,6 +108,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	organizationsHandler := handlers.NewOrganizationsHandler(pool)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	if prService != nil {
 		repoHandler.SetPRService(prService)
@@ -228,6 +229,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
+	organizationsHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
 	if canceller != nil {
 		sessionHandler.SetCanceller(canceller)
@@ -454,6 +456,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		// token the server looks up, so tightening beyond the default 20 rps
 		// IP limit forces any enumeration attempt into detectable territory.
 		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
+
+		// Creating a new org is zero-membership-safe for the same reason the
+		// other routes in this block are: a user whose only membership was
+		// just revoked must be able to create a fresh org to recover, and
+		// OrgContext would 403 them before they could. Rate-limited 5/hour
+		// per user and per IP to cap spam: a human creates maybe one org per
+		// onboarding, so a bucket any larger is just room for scripted abuse.
+		r.With(middleware.CreateOrgRateLimit(5)).Post("/api/v1/organizations", organizationsHandler.Create)
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {

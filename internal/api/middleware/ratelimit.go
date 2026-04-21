@@ -237,6 +237,60 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 	}
 }
 
+// CreateOrgRateLimit returns a per-hour rate limiter for POST /organizations.
+// Sized much tighter than ClaimRateLimit: a legitimate user creates an org
+// maybe once per onboarding and then never again, so any bucket that refills
+// faster than once every few minutes is room for spam. 5/hour per user and
+// per IP keeps the door open for the rare genuine multi-org case (a user
+// creating two workspaces in the same session) while closing it on scripted
+// creation from a single credential or host.
+//
+// Requires authentication: the user bucket is the primary defense and
+// anonymous callers should already have been rejected by the auth middleware
+// upstream; the IP bucket is a backstop for any future unauthenticated path.
+func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
+	ipBuckets := &sync.Map{}
+	userBuckets := &sync.Map{}
+	refillPerSecond := float64(perHour) / 3600.0
+
+	getBucket := func(m *sync.Map, key string) *tokenBucket {
+		if existing, ok := m.Load(key); ok {
+			return existing.(*tokenBucket)
+		}
+		fresh := &tokenBucket{
+			tokens:     float64(perHour),
+			maxTokens:  float64(perHour),
+			refillRate: refillPerSecond,
+			lastRefill: time.Now(),
+		}
+		actual, _ := m.LoadOrStore(key, fresh)
+		return actual.(*tokenBucket)
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := remoteAddrIP(r)
+			if !getBucket(ipBuckets, ip).allow() {
+				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("create-org rate limit exceeded (IP)")
+				w.Header().Set("Retry-After", "3600")
+				http.Error(w, `{"error":{"code":"CREATE_ORG_RATE_LIMITED","message":"too many organization-creation attempts; try again later"}}`, http.StatusTooManyRequests)
+				return
+			}
+
+			if user := UserFromContext(r.Context()); user != nil {
+				if !getBucket(userBuckets, user.ID.String()).allow() {
+					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("create-org rate limit exceeded (user)")
+					w.Header().Set("Retry-After", "3600")
+					http.Error(w, `{"error":{"code":"CREATE_ORG_RATE_LIMITED","message":"too many organization-creation attempts; try again later"}}`, http.StatusTooManyRequests)
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // extractIP returns the client's IP for rate-limit bucketing. Prefers the
 // first entry in X-Forwarded-For when present (reverse-proxy deployments) and
 // otherwise falls back to the TCP peer address. The XFF path trusts its input

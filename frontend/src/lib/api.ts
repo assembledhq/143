@@ -1,3 +1,5 @@
+import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
 const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
@@ -41,11 +43,20 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers['X-CSRF-Token'] = getCSRFToken();
   }
 
+  const activeOrgId = getActiveOrgId();
+  if (activeOrgId) {
+    headers['X-Active-Org-ID'] = activeOrgId;
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers,
   });
+
+  if (typeof window !== 'undefined' && res.headers.get('X-Org-Membership-Revoked') === '1') {
+    window.dispatchEvent(new CustomEvent(ORG_MEMBERSHIP_REVOKED_EVENT));
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -143,6 +154,12 @@ export const api = {
     register: (email: string, password: string, name: string, invitation?: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
     logout: () => post('/api/v1/auth/logout'),
+    memberships: () =>
+      get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+  },
+  organizations: {
+    create: (name: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
   },
   repositories: {
     list: () => get<import('./types').ListResponse<import('./types').Repository>>('/api/v1/repositories'),
