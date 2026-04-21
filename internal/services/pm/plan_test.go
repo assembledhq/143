@@ -173,6 +173,28 @@ func TestExcerpt_TruncatesAndCollapsesNewlines(t *testing.T) {
 		"excerpt should leave short input unchanged")
 }
 
+func TestExcerpt_RedactsAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	got := excerpt("failed with key sk-ant-api03-abcdef0123456789ABCDEF", 200)
+	require.Contains(t, got, "sk-***REDACTED***", "excerpt should redact Anthropic-shaped API keys")
+	require.NotContains(t, got, "api03-abcdef", "excerpt should not leak key material")
+
+	got = excerpt("openai error: sk-proj-AbCdEf1234567890xyz failed", 200)
+	require.Contains(t, got, "sk-***REDACTED***", "excerpt should redact OpenAI-shaped API keys")
+	require.NotContains(t, got, "AbCdEf1234567890", "excerpt should not leak OpenAI key material")
+}
+
+func TestParsePlan_AuthFailureCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	// Upstream CLI may format the message differently; detection should be
+	// robust to capitalization.
+	_, err := parsePlan("ERROR: NOT LOGGED IN to anthropic")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not authenticated", "auth detection should be case-insensitive")
+}
+
 func TestParsePlan_InvalidEnums(t *testing.T) {
 	t.Parallel()
 
