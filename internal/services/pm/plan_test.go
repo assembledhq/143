@@ -127,6 +127,52 @@ func TestParsePlan_WithLinearActions(t *testing.T) {
 	require.Equal(t, "re_prioritize", plan.LinearActions[0].Action, "should parse linear action type")
 }
 
+func TestParsePlan_AuthFailureSurface(t *testing.T) {
+	t.Parallel()
+
+	// Claude Code CLI prints this when ANTHROPIC_API_KEY is missing.
+	output := `{"type":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}],"error":"authentication_failed"}`
+
+	_, err := parsePlan(output)
+	require.Error(t, err, "missing auth should produce an error")
+	require.Contains(t, err.Error(), "not authenticated", "error should identify auth root cause, not tag parsing")
+}
+
+func TestParsePlan_EmptyOutput(t *testing.T) {
+	t.Parallel()
+
+	_, err := parsePlan("   \n\n   ")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no output", "empty output should produce a descriptive error")
+}
+
+func TestParsePlan_MissingTagsIncludesExcerpt(t *testing.T) {
+	t.Parallel()
+
+	// Non-auth output without tags should still surface a snippet so the
+	// operator can diagnose why the agent didn't emit a plan.
+	output := "I thought about this for a while but decided not to emit a plan."
+
+	_, err := parsePlan(output)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pm plan tags not found")
+	require.Contains(t, err.Error(), "decided not to emit", "error should embed output excerpt")
+}
+
+func TestExcerpt_TruncatesAndCollapsesNewlines(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "hello world", excerpt("  hello\nworld  ", 100),
+		"excerpt should trim edges and collapse newlines into spaces")
+
+	long := "abcdefghijklmnop"
+	got := excerpt(long, 5)
+	require.Equal(t, "abcde…", got, "excerpt should cap at max runes and append ellipsis")
+
+	require.Equal(t, "fits", excerpt("fits", 10),
+		"excerpt should leave short input unchanged")
+}
+
 func TestParsePlan_InvalidEnums(t *testing.T) {
 	t.Parallel()
 

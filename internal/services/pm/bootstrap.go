@@ -58,6 +58,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 
 	sbCfg := bootstrapSandboxConfig()
 	sbCfg.Env = resolveBootstrapEnv(&creds, ghToken, &repo)
+	s.applyClaudeCodeEnv(ctx, params.orgID, sbCfg.Env)
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, noop, fmt.Errorf("create sandbox: %w", err)

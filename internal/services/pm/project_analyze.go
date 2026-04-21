@@ -69,6 +69,10 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 
 	// Create sandbox and clone repo.
 	sbCfg := pmSandboxConfig()
+	if sbCfg.Env == nil {
+		sbCfg.Env = make(map[string]string)
+	}
+	s.applyClaudeCodeEnv(ctx, orgID, sbCfg.Env)
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
