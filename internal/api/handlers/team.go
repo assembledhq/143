@@ -47,7 +47,7 @@ type teamUserStore interface {
 type teamMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error)
-	RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, error)
+	RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (prevRole string, revokedInvitations int, err error)
 	CountForUser(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
@@ -253,7 +253,7 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	// delete (plus the org-scoped cleanups in the underlying Remove CTE) all
 	// inside a transaction that locks the org's admin rows. Two concurrent
 	// admin removals can't both pass the count > 1 check.
-	prevRole, err := h.memberships.RemoveGuarded(r.Context(), memberID, orgID)
+	prevRole, revokedInvitations, err := h.memberships.RemoveGuarded(r.Context(), memberID, orgID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
@@ -267,9 +267,16 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	removedIDStr := memberID.String()
-	details, marshalErr := json.Marshal(map[string]string{
-		"removed_email": member.Email,
-		"previous_role": prevRole,
+	// revoked_invitations is the number of pending invitations this member
+	// authored in this org that Remove flipped to 'revoked' as part of
+	// cleanup. Including it keeps the member-removed audit row self-
+	// describing — an operator reading only audit history can reconcile
+	// invitation status flips to this removal without cross-referencing
+	// timestamps.
+	details, marshalErr := json.Marshal(map[string]any{
+		"removed_email":       member.Email,
+		"previous_role":       prevRole,
+		"revoked_invitations": revokedInvitations,
 	})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for member removal")
@@ -418,6 +425,12 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberInvited, models.AuditResourceInvitation, &invIDStr, invDetails)
 
+	// generateRandomString returns a hex-encoded string, so `token` is always
+	// in [0-9a-f] and safe to concatenate into the query string without
+	// url.QueryEscape. If the generator ever moves to base64 (or any
+	// encoding that can produce `+`, `/`, `=`, or reserved URL chars) this
+	// concat must be swapped for url.Values / url.QueryEscape to avoid
+	// producing malformed accept links.
 	acceptURL := h.frontendURL + "/invite/accept?token=" + token
 
 	// Look up org name for the email.

@@ -97,13 +97,20 @@ func (s *UserStore) GetByGitHubID(ctx context.Context, githubID int64) (models.U
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
-// GetByEmail looks up a user by email address (cross-org, email is globally unique).
+// GetByEmail looks up a user by email address (cross-org, email is globally
+// unique). Matches case-insensitively: `users.email` is case-preserving in
+// the schema, but OAuth callbacks have historically written mixed-case emails
+// (`John@Foo.com`) and the handler layer increasingly normalizes to lower
+// (invite lookups, signup dedup). Looking up with `LOWER(email) = LOWER(@email)`
+// makes the Go layer agnostic to the stored casing so invitation dedup and
+// "email already exists" paths stay consistent with invitation claim's own
+// case-insensitive match (strings.EqualFold in validateInvitation).
 // lint:allow-no-orgid reason="pre-auth login lookup; email is globally unique"
 func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM users
-		WHERE email = @email`, userSelectColumns)
+		WHERE LOWER(email) = LOWER(@email)`, userSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"email": email})
 	if err != nil {
@@ -286,6 +293,13 @@ func (s *UserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, rol
 }
 
 // Delete removes a user from their org.
+//
+// The DELETE FROM users cascades through organization_memberships, so if the
+// user is the last admin of *any* org (not just orgID — a multi-membership
+// user could be sole admin elsewhere) the enforce_last_admin trigger rejects
+// the cascade at commit. We map that into ErrLastAdmin so the operator-facing
+// caller gets the same sentinel as the membership store's guarded paths
+// rather than a raw pgconn.PgError.
 func (s *UserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
 	// Clear known user references before deletion to avoid FK failures for active users.
 	query := `
@@ -311,7 +325,7 @@ func (s *UserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
 		"org_id": orgID,
 	}).Scan(&deleted)
 	if err != nil {
-		return err
+		return mapLastAdminViolation(err)
 	}
 	if !deleted {
 		return pgx.ErrNoRows

@@ -778,16 +778,20 @@ func TestOrganizationMembershipStore_RemoveGuarded_Success(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+	mock.ExpectQuery("(?s)SELECT COUNT\\(\\*\\) FROM invitations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 	mock.ExpectQuery("(?s)WITH deleted_membership.+cleared_answers").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectCommit()
 
-	prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+	prev, revoked, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
 		context.Background(), uuid.New(), uuid.New(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, "admin", prev)
+	require.Equal(t, 3, revoked, "RemoveGuarded should surface the pending-invitations snapshot for audit details")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -808,11 +812,12 @@ func TestOrganizationMembershipStore_RemoveGuarded_LastAdmin(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
 	mock.ExpectRollback()
 
-	prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+	prev, revoked, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
 		context.Background(), uuid.New(), uuid.New(),
 	)
 	require.ErrorIs(t, err, ErrLastAdmin)
 	require.Equal(t, "admin", prev)
+	require.Equal(t, 0, revoked, "refused removes must not claim to have revoked any invitations")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -834,7 +839,7 @@ func TestOrganizationMembershipStore_RemoveGuarded_NoMembership(t *testing.T) {
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
 
-	_, err = NewOrganizationMembershipStore(mock).RemoveGuarded(
+	_, _, err = NewOrganizationMembershipStore(mock).RemoveGuarded(
 		context.Background(), uuid.New(), uuid.New(),
 	)
 	require.ErrorIs(t, err, pgx.ErrNoRows)
@@ -873,12 +878,15 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 		mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+		mock.ExpectQuery("(?s)SELECT COUNT\\(\\*\\) FROM invitations").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 		mock.ExpectQuery("(?s)WITH deleted_membership").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 		mock.ExpectCommit()
 
-		prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+		prev, _, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
 			context.Background(), uuid.New(), uuid.New(),
 		)
 		require.NoError(t, err)
@@ -902,7 +910,7 @@ func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemo
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
 		mock.ExpectRollback()
 
-		prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+		prev, _, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
 			context.Background(), uuid.New(), uuid.New(),
 		)
 		require.ErrorIs(t, err, ErrLastAdmin)

@@ -406,7 +406,7 @@ func TestAuthHandler_EmailLogin(t *testing.T) {
 			name: "nonexistent email returns 401",
 			body: map[string]string{"email": "nobody@example.com", "password": "12345678"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(userColumns))
 			},
@@ -417,7 +417,7 @@ func TestAuthHandler_EmailLogin(t *testing.T) {
 			name: "oauth-only account returns 401 with hint",
 			body: map[string]string{"email": "oauth@example.com", "password": "12345678"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -527,7 +527,7 @@ func TestAuthHandler_Register_DuplicateEmail(t *testing.T) {
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	// GetByEmail returns a user (duplicate)
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(userColumns).
@@ -558,7 +558,7 @@ func TestAuthHandler_Register_InvitationClaimFailureReturnsGone(t *testing.T) {
 	orgID := uuid.New()
 	invitationID := uuid.New()
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -738,7 +738,7 @@ func TestAuthHandler_Register_WithInvitation_NotFound(t *testing.T) {
 	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
 	// GetByEmail returns no user
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	// Begin transaction
@@ -769,7 +769,7 @@ func TestAuthHandler_Register_WithInvitation_Expired(t *testing.T) {
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -801,7 +801,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -833,7 +833,7 @@ func TestAuthHandler_Register_WithInvitation_AlreadyAccepted(t *testing.T) {
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -865,7 +865,7 @@ func TestAuthHandler_Register_WithInvitation_Revoked(t *testing.T) {
 
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -901,7 +901,7 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 	newUserID := uuid.New()
 
 	// GetByEmail returns no rows (new user)
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	// Begin transaction
@@ -1041,7 +1041,7 @@ func TestAuthHandler_Register_WithInvitation_ClearsCookie(t *testing.T) {
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()
@@ -1214,7 +1214,7 @@ func TestAuthHandler_Register_NoInvitation_Success(t *testing.T) {
 	now := time.Now()
 
 	// GetByEmail returns no rows (fresh user).
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	// Signup transaction: create org, user, admin membership, commit.
@@ -1264,7 +1264,7 @@ func TestAuthHandler_Register_NoInvitation_UserCreateFailsRollsBack(t *testing.T
 	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(userColumns))
 	mock.ExpectBegin()

@@ -71,7 +71,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK
 		{"session_logs", "into session_logs"}, // no org_id column; scoped via session_id FK
 		{"users", "where github_id"},          // pre-auth lookup by GitHub ID
-		{"users", "where email"},              // pre-auth lookup by email
+		{"users", "where lower(email)"},       // pre-auth lookup by email (case-insensitive)
 		{"users", "where google_id"},          // pre-auth lookup by Google ID
 		// GetByIDGlobal: the auth middleware loads user identity *before* the
 		// active-org is resolved (multi-org users; org comes from the session

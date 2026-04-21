@@ -42,8 +42,11 @@ func TestAuthSessionStore_Create(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, generatedID, session.ID)
 	require.Equal(t, now, session.CreatedAt)
-	require.NotNil(t, session.LastOrgID)
-	require.Equal(t, session.OrgID, *session.LastOrgID)
+	// last_org_id stays nil unless the caller supplied one — the auth
+	// middleware is responsible for resolving and persisting it on first
+	// use. See the comment on AuthSessionStore.Create for why we no longer
+	// seed it from session.OrgID.
+	require.Nil(t, session.LastOrgID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

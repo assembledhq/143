@@ -415,24 +415,27 @@ func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, use
 // admin in the org, so the same TOCTOU race that UpdateRoleGuarded prevents
 // for demotions is also prevented for removals.
 //
-// Returns the previous role on success. Returns ErrLastAdmin if removing the
+// Returns the previous role and the number of pending invitations the removal
+// revoked (the underlying Remove CTE flips status='pending' → 'revoked' for
+// any invitations the user authored in this org, and the team handler
+// surfaces that count in the audit event so the status flips are
+// reconstructible from audit alone). Returns ErrLastAdmin if removing the
 // member would leave the org with no admins, or pgx.ErrNoRows if the
-// membership does not exist. The org-scoped cleanups (cleared answers,
-// deleted invitations) run inside the same tx via the underlying Remove CTE.
-func (s *OrganizationMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, error) {
+// membership does not exist.
+func (s *OrganizationMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, int, error) {
 	if s.pool == nil {
-		return "", fmt.Errorf("RemoveGuarded requires a pool-backed store")
+		return "", 0, fmt.Errorf("RemoveGuarded requires a pool-backed store")
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
+		return "", 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	adminCount, err := s.lockAdminCount(ctx, tx, orgID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	var prevRole string
@@ -443,26 +446,41 @@ func (s *OrganizationMembershipStore) RemoveGuarded(ctx context.Context, userID,
 		pgx.NamedArgs{"user_id": userID, "org_id": orgID}).Scan(&prevRole)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", pgx.ErrNoRows
+			return "", 0, pgx.ErrNoRows
 		}
-		return "", fmt.Errorf("read membership: %w", err)
+		return "", 0, fmt.Errorf("read membership: %w", err)
 	}
 
 	if prevRole == "admin" && adminCount <= 1 {
-		return prevRole, ErrLastAdmin
+		return prevRole, 0, ErrLastAdmin
+	}
+
+	// Snapshot the pending-invitations-authored-by-this-user count inside
+	// the same tx. The Remove CTE below revokes exactly this set. A concurrent
+	// CreateInvitation by the same user could theoretically race, but every
+	// mutating team path (including CreateInvitation) requires admin role and
+	// would have to come from *this* same user — who is about to be removed;
+	// the count is an audit-quality snapshot, not a load-bearing invariant.
+	var revokedInvitationCount int
+	err = tx.QueryRow(ctx, `
+		SELECT COUNT(*) FROM invitations
+		WHERE org_id = @org_id AND invited_by = @user_id AND status = 'pending'`,
+		pgx.NamedArgs{"user_id": userID, "org_id": orgID}).Scan(&revokedInvitationCount)
+	if err != nil {
+		return "", 0, fmt.Errorf("count pending invitations: %w", err)
 	}
 
 	if err := NewOrganizationMembershipStore(tx).Remove(ctx, userID, orgID); err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	// See UpdateRoleGuarded for why commit errors are mapped: the trigger is
 	// DEFERRED and fires at COMMIT, so a last-admin violation that the in-tx
 	// check somehow misses would otherwise surface here as a raw PgError.
 	if err := tx.Commit(ctx); err != nil {
-		return "", mapLastAdminViolation(fmt.Errorf("commit tx: %w", err))
+		return "", 0, mapLastAdminViolation(fmt.Errorf("commit tx: %w", err))
 	}
-	return prevRole, nil
+	return prevRole, revokedInvitationCount, nil
 }
 
 // ListUserIDsByOrg returns just the user_id set for an org, ordered by when

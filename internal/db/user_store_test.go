@@ -132,7 +132,7 @@ func TestUserStore_GetByEmail(t *testing.T) {
 		{
 			name: "returns user when found by email",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\)`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -143,7 +143,7 @@ func TestUserStore_GetByEmail(t *testing.T) {
 		{
 			name: "returns error when user not found by email",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("SELECT .+ FROM users WHERE email").
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\)`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(userColumns))
 			},

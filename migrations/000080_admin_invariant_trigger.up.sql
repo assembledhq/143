@@ -16,6 +16,20 @@
 -- reshuffle admins (e.g. promote-then-demote in one tx) see the final state
 -- at commit time rather than tripping mid-flight. Apps that need the check
 -- to fire earlier in a tx can `SET CONSTRAINTS enforce_last_admin IMMEDIATE`.
+--
+-- The DEFERRED semantics are LOAD-BEARING, not a performance tweak. Do not
+-- flip this to IMMEDIATE without auditing every mutating admin path:
+--   * UpdateRoleGuarded's in-tx demote check reads prevRole, takes the
+--     lock, then runs the UPDATE. An IMMEDIATE trigger would fire after
+--     the UPDATE and before the Go layer had a chance to check the count,
+--     so a future path that inserts a replacement admin and demotes the
+--     old one in one tx would spuriously fail on the intermediate state.
+--   * Any future migration that backfills role changes across existing
+--     memberships needs a single commit boundary to see "net roles", not
+--     each row in isolation.
+-- The Go-layer *Guarded methods and the commit-time mapLastAdminViolation
+-- helper assume the check fires at COMMIT only; see
+-- internal/db/organization_memberships.go.
 
 CREATE OR REPLACE FUNCTION enforce_last_admin_invariant()
 RETURNS TRIGGER AS $$

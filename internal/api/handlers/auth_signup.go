@@ -26,6 +26,13 @@ type signupUserCreateFunc func(ctx context.Context, userStore *db.UserStore, use
 // no way to log in. The caller provides the user-creation step as a closure
 // so the same helper serves all three flows without branching on provider.
 // The returned sessionToken should be installed into the response cookies.
+//
+// orgName is treated as a display string, not a uniqueness key. Two users
+// named "Alice" who sign up concurrently produce two orgs both named
+// "Alice's Org"; the primary key (UUID) still disambiguates them in every
+// downstream lookup, and the org switcher renders the (possibly duplicate)
+// name alongside the id. Renaming is a user action post-signup rather than a
+// constraint we try to enforce at creation time.
 func (h *AuthHandler) createSignupOrg(
 	ctx context.Context,
 	orgName string,

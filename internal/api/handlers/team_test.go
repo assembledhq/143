@@ -57,7 +57,7 @@ func (m *mockTeamUserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, github
 type mockTeamMembershipStore struct {
 	getFn               func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error)
-	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, error)
+	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, int, error)
 	countForUserFn      func(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
@@ -73,11 +73,11 @@ func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID,
 	}
 	return "member", nil
 }
-func (m *mockTeamMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, error) {
+func (m *mockTeamMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, int, error) {
 	if m.removeGuardedFn != nil {
 		return m.removeGuardedFn(ctx, userID, orgID)
 	}
-	return "member", nil
+	return "member", 0, nil
 }
 func (m *mockTeamMembershipStore) CountForUser(ctx context.Context, userID uuid.UUID) (int, error) {
 	if m.countForUserFn != nil {
@@ -405,8 +405,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
-					return "admin", db.ErrLastAdmin
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+					return "admin", 0, db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -422,8 +422,8 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 				},
 			},
 			memberships: &mockTeamMembershipStore{
-				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
-					return "member", nil
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+					return "member", 0, nil
 				},
 			},
 			expectedCode: http.StatusNoContent,
@@ -537,7 +537,7 @@ func TestTeamHandler_RemoveMember_CountForUserErrorIsLogged(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) { return "member", nil },
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) { return "member", 0, nil },
 			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, fmt.Errorf("count down") },
 		},
 		&mockTeamSessionStore{
@@ -573,7 +573,7 @@ func TestTeamHandler_RemoveMember_DeleteSessionsErrorIsLogged(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) { return "member", nil },
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) { return "member", 0, nil },
 			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
 		},
 		&mockTeamSessionStore{
@@ -846,8 +846,8 @@ func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
-				return "", pgx.ErrNoRows
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+				return "", 0, pgx.ErrNoRows
 			},
 		},
 		nil, nil, nil,
@@ -880,8 +880,8 @@ func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
 			},
 		},
 		&mockTeamMembershipStore{
-			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, error) {
-				return "", fmt.Errorf("boom")
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+				return "", 0, fmt.Errorf("boom")
 			},
 		},
 		nil, nil, nil,

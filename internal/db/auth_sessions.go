@@ -25,30 +25,24 @@ func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSessi
 		VALUES (@user_id, @org_id, @last_org_id, @token, @expires_at)
 		RETURNING id, created_at`
 
-	// last_org_id defaults to the same org the session was created against so
-	// that a fresh login resolves to the expected active membership without
-	// requiring the client to echo the X-Active-Org-ID header on its first
-	// request. Callers that explicitly set LastOrgID (e.g. during post-login
-	// restoration) win over the default.
-	lastOrgID := session.LastOrgID
-	if lastOrgID == nil {
-		lastOrgID = &session.OrgID
-	}
-
+	// last_org_id is left NULL unless the caller explicitly supplies it.
+	// During the multi-org compat window session.OrgID tracks the user's
+	// legacy primary org, which may already point at an org the user has
+	// since been removed from. Prepopulating last_org_id from it would
+	// mean fresh logins fire the revoked-org header on their very first
+	// request. Instead we rely on the auth middleware's normal resolution
+	// (header → hint → OldestForUser) and persist the result back once on
+	// first use, so the hint always points at a live membership.
 	args := pgx.NamedArgs{
 		"user_id":     session.UserID,
 		"org_id":      session.OrgID,
-		"last_org_id": lastOrgID,
+		"last_org_id": session.LastOrgID,
 		"token":       session.Token,
 		"expires_at":  session.ExpiresAt,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	if err := row.Scan(&session.ID, &session.CreatedAt); err != nil {
-		return err
-	}
-	session.LastOrgID = lastOrgID
-	return nil
+	return row.Scan(&session.ID, &session.CreatedAt)
 }
 
 // GetByToken returns the active session matching the opaque token, if any.
