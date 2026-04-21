@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
+import { renderWithProviders, screen, waitFor, within, userEvent } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import AccountPage from './page';
 import type { UserCredentialSummary, ResolvedCredential, ListResponse } from '@/lib/types';
@@ -318,9 +318,12 @@ describe('AccountPage', () => {
     const anthropicInput = await screen.findByLabelText('Claude Code API key');
     await user.type(anthropicInput, 'sk-ant-typed');
 
-    // Save the Anthropic-row key (the first Save is the Claude Code row).
-    const saveButtons = screen.getAllByRole('button', { name: /^Save$/i });
-    await user.click(saveButtons[0]);
+    // Scope to the Anthropic row so a future reorder of providers can't
+    // silently make this assertion exercise the wrong row.
+    const anthropicRow = anthropicInput.closest('div.rounded-md');
+    expect(anthropicRow).not.toBeNull();
+    const saveButton = within(anthropicRow as HTMLElement).getByRole('button', { name: /^Save$/i });
+    await user.click(saveButton);
 
     await waitFor(() => {
       expect(capturedProvider).toBe('anthropic');

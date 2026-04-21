@@ -144,3 +144,28 @@ export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
 export function agentTypeForModel(model: string): string | undefined {
   return AGENTS.find((a) => a.models.includes(model))?.key;
 }
+
+// Upstream providers Pi can route to. Mirrors the curated-provider switch in
+// checkPiProviderKey (internal/services/agent/orchestrator.go); keep these in
+// sync so the UI's "any inherited key" fallback matches the backend's.
+export const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
+
+// piRequiredProviderForModel returns the provider key whose credential Pi will
+// actually need for `model`, or undefined for unknown prefixes (e.g. moonshot
+// reached via PI_MODEL_CUSTOM). Mirrors the curated-provider switch in
+// checkPiProviderKey — callers should fall back to the "any inherited key"
+// rule when this returns undefined.
+export function piRequiredProviderForModel(model: string): string | undefined {
+  const prefix = model.split("/")[0]?.toLowerCase() ?? "";
+  switch (prefix) {
+    case "anthropic":
+      return "anthropic";
+    case "openai":
+      return "openai";
+    case "google":
+    case "gemini":
+      return "gemini";
+    default:
+      return undefined;
+  }
+}

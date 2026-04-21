@@ -28,7 +28,13 @@ import { api } from "@/lib/api";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENTS, agentTypeForModel } from "@/lib/agents";
+import {
+  AGENTS,
+  AGENTS_BY_KEY,
+  PI_INHERITED_PROVIDERS,
+  agentTypeForModel,
+  piRequiredProviderForModel,
+} from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
@@ -164,23 +170,23 @@ export function ManualSessionCreatePageContent() {
 
   // Determine which agent type would be used and whether credentials exist.
   const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
-  const AGENT_PROVIDER_MAP: Record<string, string> = {
-    codex: "openai",
-    claude_code: "anthropic",
-    gemini_cli: "gemini",
-    amp: "amp",
-  };
-  // Pi is a meta-agent that routes to Anthropic/OpenAI/Gemini depending on the
-  // model. Consider it configured as long as any of those providers has a
-  // resolved credential — matches checkPiProviderKey's "at least one inherited
-  // key" fallback in internal/services/agent/orchestrator.go.
-  const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
-  const requiredProvider = AGENT_PROVIDER_MAP[effectiveAgentType] ?? "";
+  const requiredProvider = AGENTS_BY_KEY[effectiveAgentType]?.providerKey ?? "";
+  // Pi routes to Anthropic/OpenAI/Gemini depending on the *selected model*. For
+  // curated prefixes we mirror checkPiProviderKey's per-model lookup so the
+  // banner matches what the orchestrator will accept; only fall back to the
+  // "any inherited key" rule when the prefix is unknown (PI_MODEL_CUSTOM) or
+  // when no model has been picked yet.
   const hasAgentCredentials =
     effectiveAgentType === "pi"
-      ? PI_INHERITED_PROVIDERS.some((p) =>
-          resolvedCredentials.some((c) => c.provider === p),
-        )
+      ? (() => {
+          const piRequired = selectedModel ? piRequiredProviderForModel(selectedModel) : undefined;
+          if (piRequired) {
+            return resolvedCredentials.some((c) => c.provider === piRequired);
+          }
+          return PI_INHERITED_PROVIDERS.some((p) =>
+            resolvedCredentials.some((c) => c.provider === p),
+          );
+        })()
       : resolvedCredentials.some((c) => c.provider === requiredProvider)
         || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 

@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AGENT_TYPES, KEY_PLACEHOLDERS, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
+import { PI_INHERITED_PROVIDERS } from "@/lib/agents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,10 +34,6 @@ import type {
   ResolvedCredential,
   ListResponse,
 } from "@/lib/types";
-
-// Providers Pi routes to upstream — mirrors the switch in
-// internal/services/agent/orchestrator.go:checkPiProviderKey.
-const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
 
 /* ------------------------------------------------------------------ */
 /*  GitHub PR Connection                                              */
