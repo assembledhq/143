@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -223,6 +224,12 @@ func codeChallenge(verifier string) string {
 // PKCE challenge, state, redirect, and scopes.
 func (s *Service) buildAuthorizeURL(challenge, state string) string {
 	q := url.Values{}
+	// code=true mirrors what the Claude Code CLI sends on its own authorize
+	// request: it opts Anthropic's /cai/oauth/authorize into the "show the
+	// user the <code>#<state> paste box" flow instead of doing a
+	// traditional redirect to redirect_uri. Without it, Anthropic would
+	// attempt a browser redirect to platform.claude.com/oauth/code/callback
+	// and the user would never see the code they need to paste back here.
 	q.Set("code", "true")
 	q.Set("client_id", s.clientID)
 	q.Set("response_type", "code")
@@ -304,7 +311,12 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	}
 	cred, err := s.credentials.GetByProviderAndLabel(ctx, orgID, models.ProviderAnthropic, label)
 	if err != nil {
-		return nil, ErrPendingAuthNotFound
+		// Only "no row" should surface as ErrPendingAuthNotFound (→ 404).
+		// Transient DB errors must bubble up as 500s so operators can see them.
+		if isNotFoundError(err) {
+			return nil, ErrPendingAuthNotFound
+		}
+		return nil, fmt.Errorf("lookup pending subscription: %w", err)
 	}
 	cfg, ok := cred.Config.(models.AnthropicConfig)
 	if !ok || cfg.Subscription == nil {
@@ -313,7 +325,9 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	if cfg.Subscription.State == "" || cfg.Subscription.CodeVerifier == "" {
 		return nil, ErrPendingAuthNotFound
 	}
-	if returnedState != cfg.Subscription.State {
+	// Constant-time compare on the CSRF state to avoid leaking it via timing
+	// side channels. ConstantTimeCompare also returns 0 for length mismatches.
+	if subtle.ConstantTimeCompare([]byte(returnedState), []byte(cfg.Subscription.State)) != 1 {
 		return nil, ErrInvalidPaste
 	}
 
@@ -487,6 +501,9 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 		if err := s.credentials.UpdateStatusByID(ctx, orgID, credID, "invalid"); err != nil {
 			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
 		}
+		// Drop the per-credential refresh mutex so sync.Map doesn't grow
+		// indefinitely as credentials churn through the "invalid" state.
+		s.refreshMu.Delete(credID.String())
 		return nil, fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode)
 	}
 
@@ -599,6 +616,10 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		if statusErr := s.credentials.UpdateStatusByID(ctx, orgID, cred.ID, "invalid"); statusErr != nil {
 			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
 		}
+		// Drop the per-credential refresh mutex — the credential is out of
+		// rotation now, and keeping the entry around would leak sync.Map
+		// memory across the process lifetime.
+		s.refreshMu.Delete(cred.ID.String())
 	}
 
 	if lastErr != nil {
@@ -662,8 +683,42 @@ func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID 
 }
 
 // DisconnectAll removes every Claude subscription for the org, leaving any
-// Anthropic API-key row (label="") in place.
+// Anthropic API-key row (label="") in place. Ordering matches Disconnect:
+// the DB rows are disabled first so a concurrent refresh cannot resurrect
+// a credential after we've dropped its mutex; only then do we clean up
+// the in-memory maps.
 func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
+	if s.credentials == nil {
+		// Still clean the init mutexes so test doubles without a store
+		// don't leak entries.
+		s.clearInitMutexesForOrg(orgID)
+		return nil
+	}
+
+	// Snapshot the subscription IDs before disabling so we can clear their
+	// refresh mutexes afterwards. ListByProvider errors are non-fatal here:
+	// the DisableLabeled call below is the source of truth.
+	creds, _ := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+
+	if err := s.credentials.DisableLabeled(ctx, orgID, models.ProviderAnthropic); err != nil {
+		return err
+	}
+
+	for _, cred := range creds {
+		if cred.Label == "" {
+			continue // leave the API-key row alone
+		}
+		s.refreshMu.Delete(cred.ID.String())
+	}
+	s.clearInitMutexesForOrg(orgID)
+
+	return nil
+}
+
+// clearInitMutexesForOrg drops every init-side mutex scoped to orgID. Used
+// by DisconnectAll so a subsequent InitiateOAuth gets a fresh mutex instead
+// of reusing a stale one that might still be held by an in-flight call.
+func (s *Service) clearInitMutexesForOrg(orgID uuid.UUID) {
 	orgPrefix := orgID.String() + ":"
 	s.initMu.Range(func(key, _ any) bool {
 		if k, ok := key.(string); ok && strings.HasPrefix(k, orgPrefix) {
@@ -671,20 +726,6 @@ func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
 		}
 		return true
 	})
-
-	if s.credentials == nil {
-		return nil
-	}
-
-	creds, _ := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
-	for _, cred := range creds {
-		if cred.Label == "" {
-			continue // leave the API-key row alone
-		}
-		s.refreshMu.Delete(cred.ID.String())
-	}
-
-	return s.credentials.DisableLabeled(ctx, orgID, models.ProviderAnthropic)
 }
 
 // ListSubscriptions returns all connected Claude subscriptions for an org.

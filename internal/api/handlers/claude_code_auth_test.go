@@ -58,13 +58,16 @@ func (s *claudeStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (*model
 	return nil, errors.New("not found")
 }
 func (s *claudeStoreStub) GetByProviderAndLabel(context.Context, uuid.UUID, models.ProviderName, string) (*models.DecryptedCredential, error) {
-	return nil, errors.New("not found")
+	// Use the sentinel the service understands so CompleteOAuth maps it to
+	// ErrPendingAuthNotFound (404); a plain errors.New would now be treated
+	// as a real DB failure and surface as a 500.
+	return nil, claudecodeauth.ErrCredentialNotFound
 }
 func (s *claudeStoreStub) ListByProvider(context.Context, uuid.UUID, models.ProviderName) ([]models.DecryptedCredential, error) {
 	return nil, nil
 }
 func (s *claudeStoreStub) ClaimNextLabeledRoundRobin(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
-	return nil, errors.New("not found")
+	return nil, claudecodeauth.ErrCredentialNotFound
 }
 func (s *claudeStoreStub) DisableByID(context.Context, uuid.UUID, uuid.UUID) error {
 	if s.disableErr != nil {

@@ -134,6 +134,34 @@ func TestOrgCredentialStore_Get(t *testing.T) {
 	}
 }
 
+// TestOrgCredentialStore_Get_FiltersLabelEmpty asserts the contract that
+// Get returns only the singleton label=” row. Providers that mix an
+// API-key row (label=”) with labeled subscription rows (label!=”)
+// depend on this filter so resolveProviderConfig doesn't accidentally
+// return a subscription row when an API key is expected. If this test
+// ever breaks, audit every Get caller in the repo before relaxing the
+// filter.
+func TestOrgCredentialStore_Get_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	// The SQL must include `label = ''` — this regex enforces it.
+	mock.ExpectQuery(`SELECT .* FROM org_credentials .* label = ''`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(credColumns).
+			AddRow(uuid.New(), uuid.New(), "anthropic", "", crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`)), "active", nil, nil, nil, time.Now(), time.Now()))
+
+	store := NewOrgCredentialStore(mock, nil)
+	cred, err := store.Get(context.Background(), uuid.New(), models.ProviderAnthropic)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Empty(t, cred.Label, "Get must return only the singleton label='' row")
+	require.NoError(t, mock.ExpectationsWereMet(), "Get query must filter on label = ''")
+}
+
 func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 	t.Parallel()
 

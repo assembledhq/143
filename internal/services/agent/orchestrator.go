@@ -2134,7 +2134,7 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	// sandbox user's home dir (see RunAgent step 7) so the Codex CLI
 	// resolves ~/.codex/auth.json to this path.
 	authDir := path.Join(sandbox.HomeDir, ".codex")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
 
 	var mkdirOut, mkdirErr bytes.Buffer
 	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
@@ -2175,10 +2175,12 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 // was written, (false, nil) when no subscription exists so the API-key
 // fallback should be used, or (false, err) on failure.
 //
-// TBD: the Claude Code CLI credentials file schema is not yet publicly
-// documented. The shape below (claudeAiOauth.{accessToken, refreshToken,
-// expiresAt, subscriptionType}) is the observed Claude Code CLI format —
-// confirm against the official docs before production rollout.
+// Credentials file schema: the shape (claudeAiOauth.{accessToken,
+// refreshToken, expiresAt, subscriptionType}) is what the Claude Code CLI
+// writes itself when a user runs `claude login` — we're reproducing its
+// output format verbatim so the CLI picks the file up without modification.
+// If Anthropic ever changes this format, update this marshal block and the
+// AnthropicSubscription struct together.
 func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if o.claudeCodeAuth == nil {
 		return false, nil
@@ -2205,7 +2207,10 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	}
 
 	authDir := path.Join(sandbox.HomeDir, ".claude")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+	// Single-quote the path defensively even though HomeDir is orchestrator-
+	// controlled today; a future refactor could start threading user input
+	// through HomeDir and we don't want a silent shell-injection footgun.
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
 
 	var mkdirOut, mkdirErr bytes.Buffer
 	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)

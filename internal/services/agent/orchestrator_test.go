@@ -1444,7 +1444,7 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	require.Contains(
 		t,
 		d.provider.ExecCalls,
-		"mkdir -p /home/sandbox/.codex",
+		"mkdir -p '/home/sandbox/.codex'",
 		"codex auth setup should create the auth directory under the sandbox user's home",
 	)
 
@@ -2911,6 +2911,9 @@ func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypePi
+	// defaultDeps seeds an Anthropic API key so the Claude Code happy path
+	// works out of the box; strip it here so Pi fails its pre-flight key check.
+	d.creds = &mockCredentialProvider{}
 
 	var sandboxCreated bool
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
