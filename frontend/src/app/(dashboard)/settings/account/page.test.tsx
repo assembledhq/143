@@ -280,6 +280,68 @@ describe('AccountPage', () => {
     expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
   });
 
+  it('shows Pi card with Ready-to-run badge when an inherited provider is configured', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<AccountPage />);
+
+    const piLabels = await screen.findAllByText('Pi');
+    expect(piLabels.length).toBeGreaterThanOrEqual(1);
+
+    await user.click(piLabels[0]);
+
+    expect(await screen.findByText('Ready to run')).toBeInTheDocument();
+    // Anthropic row shows the masked key from mockPersonalCreds with its own Remove.
+    expect(screen.getByText('sk-ant-...abc')).toBeInTheDocument();
+    // OpenAI and Gemini rows render inline API key inputs (Codex has no
+    // personal key in the default fixture, so a Save button is present).
+    expect(screen.getAllByRole('button', { name: /^Save$/i }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('lets the user save an inherited provider key inline from the Pi card', async () => {
+    setupHandlers({ personal: [], resolved: [] });
+    let capturedProvider: string | null = null;
+    server.use(
+      http.put('/api/v1/settings/credentials/personal/:provider', async ({ params }) => {
+        capturedProvider = params.provider as string;
+        return HttpResponse.json({
+          data: { provider: capturedProvider, configured: true, is_team_default: false, masked_key: 'sk-ant-new', status: 'active' },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AccountPage />);
+
+    const piLabels = await screen.findAllByText('Pi');
+    await user.click(piLabels[0]);
+
+    const anthropicInput = await screen.findByLabelText('Claude Code API key');
+    await user.type(anthropicInput, 'sk-ant-typed');
+
+    // Save the Anthropic-row key (the first Save is the Claude Code row).
+    const saveButtons = screen.getAllByRole('button', { name: /^Save$/i });
+    await user.click(saveButtons[0]);
+
+    await waitFor(() => {
+      expect(capturedProvider).toBe('anthropic');
+    });
+  });
+
+  it('warns on Pi card when no inherited provider keys are configured', async () => {
+    setupHandlers({ personal: [], resolved: [] });
+    const user = userEvent.setup();
+    renderWithProviders(<AccountPage />);
+
+    const piLabels = await screen.findAllByText('Pi');
+    await user.click(piLabels[0]);
+
+    expect(await screen.findByText('Add a key to run')).toBeInTheDocument();
+    // All three provider rows should render their API key inputs inline.
+    expect(screen.getByLabelText('Claude Code API key')).toBeInTheDocument();
+    expect(screen.getByLabelText('Codex API key')).toBeInTheDocument();
+    expect(screen.getByLabelText('Gemini CLI API key')).toBeInTheDocument();
+  });
+
   it('hides Set as team default for non-admin users', async () => {
     useAuthMock.mockReturnValue({
       user: { id: 'user-2', name: 'Bob', email: 'bob@example.com', role: 'member' },

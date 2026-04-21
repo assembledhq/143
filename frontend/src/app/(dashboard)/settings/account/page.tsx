@@ -34,6 +34,10 @@ import type {
   ListResponse,
 } from "@/lib/types";
 
+// Providers Pi routes to upstream — mirrors the switch in
+// internal/services/agent/orchestrator.go:checkPiProviderKey.
+const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
+
 /* ------------------------------------------------------------------ */
 /*  GitHub PR Connection                                              */
 /* ------------------------------------------------------------------ */
@@ -297,8 +301,132 @@ export default function AccountPage() {
     );
   }
 
+  function renderInheritedProviderRow(providerKey: string): ReactNode {
+    const cred = personalCreds.find((c) => c.provider === providerKey);
+    const r = resolved.find((c) => c.provider === providerKey);
+    const source = r?.source ?? "none";
+    const status = keySaveStatus[providerKey] ?? "idle";
+    const label = providerDisplayName(providerKey);
+    const placeholder = KEY_PLACEHOLDERS[providerKey] ?? "API key";
+
+    return (
+      <div
+        key={providerKey}
+        className="rounded-md border bg-muted/20 px-3 py-2.5 space-y-2"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium">{label}</span>
+          <Badge variant={sourceBadgeVariant(source)} className="text-xs px-1.5 py-0">
+            {sourceLabel(source)}
+          </Badge>
+        </div>
+
+        {cred?.configured ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-mono text-muted-foreground truncate">
+              {cred.masked_key}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground shrink-0"
+              onClick={() => setRemovingProvider(providerKey)}
+              disabled={deleteMutation.isPending}
+            >
+              Remove
+            </Button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Input
+                type={showKeys[providerKey] ? "text" : "password"}
+                placeholder={placeholder}
+                value={apiKeys[providerKey] ?? ""}
+                onChange={(e) =>
+                  setApiKeys((prev) => ({ ...prev, [providerKey]: e.target.value }))
+                }
+                className="pr-9 font-mono text-xs"
+                aria-label={`${label} API key`}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setShowKeys((prev) => ({ ...prev, [providerKey]: !prev[providerKey] }))
+                }
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                aria-label={showKeys[providerKey] ? "Hide key" : "Show key"}
+              >
+                {showKeys[providerKey] ? (
+                  <EyeOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => handleSavePersonalKey(providerKey)}
+              disabled={!apiKeys[providerKey]?.trim() || status === "saving"}
+            >
+              {status === "saving" ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        )}
+
+        {status === "success" && (
+          <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved.</p>
+        )}
+        {status === "error" && (
+          <p className="text-xs text-destructive">Failed to save key.</p>
+        )}
+      </div>
+    );
+  }
+
+  function renderPersonalInheritedCard(agent: (typeof AGENT_TYPES)[number]): ReactNode {
+    const anyConfigured = PI_INHERITED_PROVIDERS.some(
+      (p) => (resolved.find((c) => c.provider === p)?.source ?? "none") !== "none",
+    );
+
+    return (
+      <div className="space-y-3 border-t pt-3 mt-1">
+        {renderAgentConfigHeader({
+          title: agent.label,
+          badges: (
+            <Badge
+              variant={anyConfigured ? "success" : "outline"}
+              className="text-xs px-1.5 py-0"
+            >
+              {anyConfigured ? (
+                <>
+                  <Check className="mr-0.5 h-3 w-3" />
+                  Ready to run
+                </>
+              ) : (
+                "Add a key to run"
+              )}
+            </Badge>
+          ),
+        })}
+
+        <p className="text-xs text-muted-foreground">
+          {agent.label} routes to Anthropic, OpenAI, or Gemini depending on the model.
+          Add at least one key below and {agent.label} will use it automatically.
+        </p>
+
+        <div className="space-y-2">
+          {PI_INHERITED_PROVIDERS.map((provider) => renderInheritedProviderRow(provider))}
+        </div>
+      </div>
+    );
+  }
+
   function renderPersonalCredentialCard(): ReactNode {
     const agent = AGENT_TYPES.find((a) => a.key === effectivePersonalAgentType) ?? AGENT_TYPES[0];
+    if (agent.inheritsProviderKeys) {
+      return renderPersonalInheritedCard(agent);
+    }
     const providerKey = agent.providerKey;
     const cred = personalCreds.find((c) => c.provider === providerKey);
     const status = keySaveStatus[providerKey] ?? "idle";
@@ -466,15 +594,22 @@ export default function AccountPage() {
                   onValueChange={setPersonalAgentType}
                   className="grid grid-cols-3 gap-3"
                 >
-                  {AGENT_TYPES.filter((a) => !a.inheritsProviderKeys).map((agent) => {
-                    const cred = personalCreds.find((c) => c.provider === agent.providerKey);
+                  {AGENT_TYPES.map((agent) => {
+                    // Pi has no personal credential of its own — surface a check
+                    // when any inherited provider key is resolved so users can
+                    // tell at a glance that a Pi run will work.
+                    const configured = agent.inheritsProviderKeys
+                      ? PI_INHERITED_PROVIDERS.some(
+                          (p) => (resolved.find((c) => c.provider === p)?.source ?? "none") !== "none",
+                        )
+                      : personalCreds.some((c) => c.provider === agent.providerKey && c.configured);
                     return (
                       <RadioCard
                         key={agent.key}
                         value={agent.key}
                         label={agent.label}
                         selected={effectivePersonalAgentType === agent.key}
-                        icon={cred?.configured ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : undefined}
+                        icon={configured ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : undefined}
                       />
                     );
                   })}

@@ -168,11 +168,21 @@ export function ManualSessionCreatePageContent() {
     codex: "openai",
     claude_code: "anthropic",
     gemini_cli: "gemini",
+    amp: "amp",
   };
+  // Pi is a meta-agent that routes to Anthropic/OpenAI/Gemini depending on the
+  // model. Consider it configured as long as any of those providers has a
+  // resolved credential — matches checkPiProviderKey's "at least one inherited
+  // key" fallback in internal/services/agent/orchestrator.go.
+  const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
   const requiredProvider = AGENT_PROVIDER_MAP[effectiveAgentType] ?? "";
   const hasAgentCredentials =
-    resolvedCredentials.some((c) => c.provider === requiredProvider)
-    || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
+    effectiveAgentType === "pi"
+      ? PI_INHERITED_PROVIDERS.some((p) =>
+          resolvedCredentials.some((c) => c.provider === p),
+        )
+      : resolvedCredentials.some((c) => c.provider === requiredProvider)
+        || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 
   const createManualSessionMutation = useMutation({
     mutationFn: () =>
