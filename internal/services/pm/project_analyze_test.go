@@ -28,7 +28,7 @@ func (m *mockAdapter) Execute(ctx context.Context, sb *agent.Sandbox, prompt *ag
 // mockSandbox is a minimal stub for agent.SandboxProvider.
 type mockSandbox struct{}
 
-func (m *mockSandbox) Name() string                      { return "mock" }
+func (m *mockSandbox) Name() string { return "mock" }
 func (m *mockSandbox) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 	return &agent.Sandbox{}, nil
 }
@@ -45,6 +45,9 @@ func (m *mockSandbox) WriteFile(ctx context.Context, sb *agent.Sandbox, path str
 	return nil
 }
 func (m *mockSandbox) Destroy(ctx context.Context, sb *agent.Sandbox) error { return nil }
+func (m *mockSandbox) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	return true, nil
+}
 func (m *mockSandbox) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
 }

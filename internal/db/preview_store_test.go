@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -75,6 +77,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
+		false,
 	}
 }
 
@@ -1415,4 +1418,162 @@ func TestPreviewStore_UpdatePRPreviewStatus(t *testing.T) {
 	err = store.UpdatePRPreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PRPreviewStatusRunning)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_AcquirePreviewHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	sessionID := uuid.New()
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	got, err := store.AcquirePreviewHold(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.Equal(t, sessionID, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_AcquirePreviewHold_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	mock.ExpectQuery(`UPDATE preview_instances`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.AcquirePreviewHold(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "acquire preview hold")
+}
+
+func TestPreviewStore_ReleasePreviewHold(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		containerID   string
+		turnHolds     bool
+		wantDestroyer bool
+	}{
+		{"destroys when turn does not hold", "container-1", false, true},
+		{"keeps alive when turn still holds", "container-1", true, false},
+		{"no-op when container already cleared", "", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+			sessionID := uuid.New()
+			mock.ExpectQuery(`WITH released AS \(\s*UPDATE preview_instances\s+SET preview_holding_container = FALSE`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+						AddRow(sessionID, tt.containerID, tt.turnHolds),
+				)
+
+			destroyNow, gotSession, cid, err := store.ReleasePreviewHold(context.Background(), uuid.New(), uuid.New())
+			require.NoError(t, err)
+			require.Equal(t, tt.wantDestroyer, destroyNow)
+			require.Equal(t, sessionID, gotSession)
+			require.Equal(t, tt.containerID, cid)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPreviewStore_ReleasePreviewHold_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, _, _, err = store.ReleasePreviewHold(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "release preview hold")
+}
+
+func TestPreviewStore_UpdatePreviewReservationConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		rows   int64
+		wantOk bool
+	}{
+		{"updates reserved row", 1, true},
+		{"no-op when status already changed", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+
+			mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+				WithArgs(previewAnyArgs(9)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			ok, err := store.UpdatePreviewReservationConfig(
+				context.Background(),
+				uuid.New(), uuid.New(),
+				"my-preview", "web", "sha256:abc",
+				512, 500,
+				[]byte(`{"version":"3"}`), []byte(`{"id":"sandbox-1"}`),
+			)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantOk, ok)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPreviewStore_UpdatePreviewReservationConfig_ExecError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec(`UPDATE preview_instances`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnError(errors.New("db down"))
+
+	_, err = store.UpdatePreviewReservationConfig(
+		context.Background(),
+		uuid.New(), uuid.New(),
+		"my-preview", "web", "sha256:abc",
+		512, 500,
+		nil, nil,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update preview reservation config")
 }

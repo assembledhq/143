@@ -56,6 +56,10 @@ func (m *pmSandboxMock) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 	return nil
 }
 
+func (m *pmSandboxMock) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	return true, nil
+}
+
 func (m *pmSandboxMock) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
 }
@@ -132,10 +136,10 @@ func TestWriteProductContextToAgentsMD(t *testing.T) {
 			expects:   []string{"# existing", "## Product Context", "**Philosophy:** reliability", "**Current direction:** stability", "**Focus areas:** timeouts", "**Avoid areas:** new features"},
 		},
 		{
-			name:      "still writes section when read fails",
-			pc:        &models.ProductContext{Philosophy: "ship", Direction: "payments"},
-			readErr:   fmt.Errorf("missing file"),
-			expects:   []string{"## Product Context", "**Philosophy:** ship", "**Current direction:** payments"},
+			name:    "still writes section when read fails",
+			pc:      &models.ProductContext{Philosophy: "ship", Direction: "payments"},
+			readErr: fmt.Errorf("missing file"),
+			expects: []string{"## Product Context", "**Philosophy:** ship", "**Current direction:** payments"},
 		},
 		{
 			name:      "returns write error",
@@ -173,4 +177,3 @@ func TestWriteProductContextToAgentsMD(t *testing.T) {
 		})
 	}
 }
-
