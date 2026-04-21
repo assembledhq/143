@@ -23,16 +23,22 @@ import (
 )
 
 // stubRepoLookup satisfies automationRepoLookup for Create/Update tests that
-// supply a repository_id.
+// supply a repository_id. Status defaults to active so existing tests that
+// exercise the happy path don't need to opt in.
 type stubRepoLookup struct {
-	err error
+	err    error
+	status models.RepositoryStatus
 }
 
 func (s *stubRepoLookup) GetByID(_ context.Context, _, repoID uuid.UUID) (models.Repository, error) {
 	if s.err != nil {
 		return models.Repository{}, s.err
 	}
-	return models.Repository{ID: repoID}, nil
+	status := s.status
+	if status == "" {
+		status = models.RepositoryStatusActive
+	}
+	return models.Repository{ID: repoID, Status: string(status)}, nil
 }
 
 func automationTestColumns() []string {
@@ -322,6 +328,24 @@ func TestAutomationHandler_Create_RepoIDNotFoundInOrg(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+func TestAutomationHandler_Create_RejectsDisconnectedRepo(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	h.SetRepositoryStore(&stubRepoLookup{status: models.RepositoryStatusDisconnected})
+
+	body := map[string]any{
+		"name":          "n",
+		"goal":          "g",
+		"repository_id": uuid.New().String(),
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "REPO_DISCONNECTED")
+}
+
 func TestAutomationHandler_Create_RepoIDFailsClosedWhenNoStore(t *testing.T) {
 	t.Parallel()
 
@@ -559,6 +583,39 @@ func TestAutomationHandler_Update_InvalidID(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.Update(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestAutomationHandler_Update_RejectsDisconnectedRepo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := "days"
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetRepositoryStore(&stubRepoLookup{status: models.RepositoryStatusDisconnected})
+
+	body := map[string]any{"repository_id": uuid.New().String()}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "REPO_DISCONNECTED")
 }
 
 // --- Delete ---

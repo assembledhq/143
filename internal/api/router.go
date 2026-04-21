@@ -199,6 +199,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
 	projectHandler.SetJobStore(jobStore)
+	projectHandler.SetRepositoryStore(repoStore)
 
 	automationStore := db.NewAutomationStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
@@ -567,6 +568,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+			r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
+			r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
 			r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
 			r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
 			r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)

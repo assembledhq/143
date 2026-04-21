@@ -943,7 +943,7 @@ type mockRepoStore struct {
 	err   error
 }
 
-func (m *mockRepoStore) ListByOrg(_ context.Context, _ uuid.UUID) ([]models.Repository, error) {
+func (m *mockRepoStore) ListByOrg(_ context.Context, _ uuid.UUID, _ db.RepositoryFilters) ([]models.Repository, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

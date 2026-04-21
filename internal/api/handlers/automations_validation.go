@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -74,12 +75,10 @@ func validateTimezone(tz string) error {
 }
 
 // resolveRepositoryID parses a repository_id from a request and verifies it
-// belongs to orgID. Returns nil + nil for empty input. The error is one a
-// handler can return directly (already user-safe).
-//
-// Fails closed when no repo store is configured: the router always calls
-// SetRepositoryStore so a missing store means a wiring bug, not a
-// less-secure-but-usable path.
+// belongs to orgID and is still active. Returns nil + nil for empty input.
+// Errors are user-safe and can be returned directly from handlers; the
+// errRepoDisconnected sentinel (defined in repo_active.go) lets handlers
+// distinguish disconnected repos so they can return REPO_DISCONNECTED.
 func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.UUID, raw string) (*uuid.UUID, error) {
 	if raw == "" {
 		return nil, nil
@@ -88,11 +87,15 @@ func (h *AutomationHandler) resolveRepositoryID(ctx context.Context, orgID uuid.
 	if err != nil {
 		return nil, fmt.Errorf("invalid repository_id")
 	}
-	if h.repoStore == nil {
-		return nil, fmt.Errorf("repository lookup not configured")
-	}
-	if _, err := h.repoStore.GetByID(ctx, orgID, parsed); err != nil {
-		return nil, fmt.Errorf("repository not found in this org")
+	if _, err := requireActiveRepo(ctx, h.repoStore, orgID, parsed); err != nil {
+		switch {
+		case errors.Is(err, errRepoDisconnected):
+			return nil, errRepoDisconnected
+		case errors.Is(err, errRepoStoreUnconfigured):
+			return nil, fmt.Errorf("repository lookup not configured")
+		default:
+			return nil, fmt.Errorf("repository not found in this org")
+		}
 	}
 	return &parsed, nil
 }

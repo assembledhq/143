@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -97,7 +98,7 @@ type schedulerRuntimeRepoStoreMock struct {
 	err   error
 }
 
-func (m *schedulerRuntimeRepoStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+func (m *schedulerRuntimeRepoStoreMock) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.RepositoryFilters) ([]models.Repository, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

@@ -74,6 +74,24 @@ type Repository struct {
 	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 }
 
+// RepositoryStatus is a typed string for the `repositories.status` column.
+// Defined as a distinct type (not a plain string alias) so that boundary-layer
+// APIs like RepositoryStore.SetStatus reject arbitrary callers passing raw
+// strings and require one of the known constants below.
+type RepositoryStatus string
+
+const (
+	RepositoryStatusActive       RepositoryStatus = "active"
+	RepositoryStatusDisconnected RepositoryStatus = "disconnected"
+)
+
+// IsActive reports whether the repo is currently usable for new work. Disconnected
+// repos remain readable (existing sessions still load) but must be rejected from
+// any code path that creates new sessions, runs, projects, or automations.
+func (r Repository) IsActive() bool {
+	return RepositoryStatus(r.Status) == RepositoryStatusActive
+}
+
 // RepoSummary is the API model for repository summary data in the context switcher.
 type RepoSummary struct {
 	RepositoryID        uuid.UUID `json:"repository_id"`

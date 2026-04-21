@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -166,7 +167,7 @@ func (m *successOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.
 
 type failingRepoStore struct{}
 
-func (m *failingRepoStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+func (m *failingRepoStore) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.RepositoryFilters) ([]models.Repository, error) {
 	return nil, nil
 }
 

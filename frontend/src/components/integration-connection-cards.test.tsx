@@ -56,7 +56,10 @@ describe("integration connection cards", () => {
     renderWithProviders(
       <SourceControlIntegrationCard
         githubConnected
-        githubRepoNames={["acme/api", "acme/web"]}
+        githubRepos={[
+          { id: "r1", full_name: "acme/api", status: "active" },
+          { id: "r2", full_name: "acme/web", status: "active" },
+        ]}
         onConnectGitHub={vi.fn()}
       />
     );
@@ -69,12 +72,49 @@ describe("integration connection cards", () => {
     renderWithProviders(
       <SourceControlIntegrationCard
         githubConnected={false}
-        githubRepoNames={["acme/api"]}
+        githubRepos={[{ id: "r1", full_name: "acme/api", status: "active" }]}
         onConnectGitHub={vi.fn()}
       />
     );
 
     expect(screen.queryByText("acme/api")).not.toBeInTheDocument();
+  });
+
+  it("shows per-repo disconnect button and calls onDisconnectRepo on confirm", async () => {
+    const user = userEvent.setup();
+    const onDisconnectRepo = vi.fn();
+
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        githubRepos={[{ id: "r1", full_name: "acme/api", status: "active" }]}
+        onConnectGitHub={vi.fn()}
+        onDisconnectRepo={onDisconnectRepo}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Disconnect acme/api" }));
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    expect(onDisconnectRepo).toHaveBeenCalledWith("r1");
+  });
+
+  it("renders Reconnect button for disconnected repos and calls onReconnectRepo", async () => {
+    const user = userEvent.setup();
+    const onReconnectRepo = vi.fn();
+
+    renderWithProviders(
+      <SourceControlIntegrationCard
+        githubConnected
+        githubRepos={[{ id: "r1", full_name: "acme/api", status: "disconnected" }]}
+        onConnectGitHub={vi.fn()}
+        onReconnectRepo={onReconnectRepo}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reconnect acme/api" }));
+
+    expect(onReconnectRepo).toHaveBeenCalledWith("r1");
   });
 
   it("disables Linear connect when already connected and no disconnect handler", () => {
