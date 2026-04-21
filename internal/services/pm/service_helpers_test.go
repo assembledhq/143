@@ -1,7 +1,6 @@
 package pm
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -20,7 +19,7 @@ func TestNewService(t *testing.T) {
 	jobs := &mockJobStore{}
 	plans := &mockPlanStore{}
 
-	svc := NewService(issues, sessions, nil, orgs, nil, jobs, plans, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(issues, sessions, nil, orgs, nil, jobs, plans, nil, nil, nil, nil, nil, zerolog.Nop())
 	require.Equal(t, issues, svc.issues, "NewService should store issue dependency")
 	require.Equal(t, sessions, svc.sessions, "NewService should store agent run dependency")
 	require.Equal(t, orgs, svc.orgs, "NewService should store org dependency")
@@ -77,86 +76,4 @@ func TestPlanToModelAndTokenMode(t *testing.T) {
 	require.Equal(t, "low", tokenModeFromComplexity(models.PMTaskComplexitySimple), "tokenModeFromComplexity should use low tokens for simple tasks")
 	require.Equal(t, "high", tokenModeFromComplexity(models.PMTaskComplexityModerate), "tokenModeFromComplexity should use high tokens for moderate tasks")
 	require.Equal(t, "high", tokenModeFromComplexity(models.PMTaskComplexityComplex), "tokenModeFromComplexity should use high tokens for complex tasks")
-}
-
-func TestApplyClaudeCodeEnv(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-
-	t.Run("no credential store leaves env unchanged", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{logger: zerolog.Nop()}
-		env := map[string]string{"EXISTING": "value"}
-		svc.applyClaudeCodeEnv(context.Background(), orgID, env)
-		require.Equal(t, map[string]string{"EXISTING": "value"}, env)
-	})
-
-	t.Run("nil env map is a no-op", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{
-			credentials: &mockCredStore{creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant-test"}},
-			}},
-			logger: zerolog.Nop(),
-		}
-		// Should not panic despite nil env.
-		svc.applyClaudeCodeEnv(context.Background(), orgID, nil)
-	})
-
-	t.Run("missing credential leaves env unchanged", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{
-			credentials: &mockCredStore{creds: map[models.ProviderName]*models.DecryptedCredential{}},
-			logger:      zerolog.Nop(),
-		}
-		env := map[string]string{}
-		svc.applyClaudeCodeEnv(context.Background(), orgID, env)
-		require.Empty(t, env, "missing Anthropic credential should leave env empty")
-	})
-
-	t.Run("wrong config type leaves env unchanged", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{
-			credentials: &mockCredStore{creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.OpenAIConfig{APIKey: "sk-openai"}},
-			}},
-			logger: zerolog.Nop(),
-		}
-		env := map[string]string{}
-		svc.applyClaudeCodeEnv(context.Background(), orgID, env)
-		require.Empty(t, env, "unexpected config type should leave env untouched")
-	})
-
-	t.Run("injects api key and base url when present", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{
-			credentials: &mockCredStore{creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.AnthropicConfig{
-					APIKey:  "sk-ant-real",
-					BaseURL: "https://anthropic.example.com",
-				}},
-			}},
-			logger: zerolog.Nop(),
-		}
-		env := map[string]string{}
-		svc.applyClaudeCodeEnv(context.Background(), orgID, env)
-		require.Equal(t, "sk-ant-real", env["ANTHROPIC_API_KEY"])
-		require.Equal(t, "https://anthropic.example.com", env["ANTHROPIC_BASE_URL"])
-	})
-
-	t.Run("omits base url when not set", func(t *testing.T) {
-		t.Parallel()
-		svc := &Service{
-			credentials: &mockCredStore{creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant-only"}},
-			}},
-			logger: zerolog.Nop(),
-		}
-		env := map[string]string{}
-		svc.applyClaudeCodeEnv(context.Background(), orgID, env)
-		require.Equal(t, "sk-ant-only", env["ANTHROPIC_API_KEY"])
-		_, hasBase := env["ANTHROPIC_BASE_URL"]
-		require.False(t, hasBase, "base URL should not be set when empty")
-	})
 }

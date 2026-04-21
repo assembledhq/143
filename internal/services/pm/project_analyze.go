@@ -19,8 +19,8 @@ import (
 // with a project-focused prompt, and calls executeProjectPlan to create tasks
 // and dispatch runs. This is the entry point for the project_cycle job.
 func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
-	if s.adapter == nil || s.sandbox == nil {
-		return fmt.Errorf("pm adapter or sandbox not configured")
+	if s.sandbox == nil || s.env == nil {
+		return fmt.Errorf("pm sandbox or env helper not configured")
 	}
 	if s.projects == nil || s.projectTasks == nil || s.projectCycles == nil {
 		return fmt.Errorf("project stores not configured")
@@ -67,12 +67,21 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		return fmt.Errorf("marshal project context: %w", err)
 	}
 
+	agentType := resolveAgentType(settings)
+	adapter, err := s.pickAdapter(agentType)
+	if err != nil {
+		return fmt.Errorf("pick adapter: %w", err)
+	}
+
 	// Create sandbox and clone repo.
 	sbCfg := pmSandboxConfig()
+	sbCfg.Env = s.env.Resolve(ctx, orgID, agentType, nil)
 	if sbCfg.Env == nil {
 		sbCfg.Env = make(map[string]string)
 	}
-	s.applyClaudeCodeEnv(ctx, orgID, sbCfg.Env)
+	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+		return fmt.Errorf("agent auth preflight: %w", err)
+	}
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
@@ -82,6 +91,12 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy project PM sandbox")
 		}
 	}()
+
+	if agentType == models.AgentTypeCodex {
+		if _, err := s.env.InjectCodexAuth(ctx, orgID, sb); err != nil {
+			return fmt.Errorf("inject codex auth: %w", err)
+		}
+	}
 
 	var token string
 	if s.github != nil {
@@ -118,7 +133,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	defer close(logCh)
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	if err != nil {
 		return fmt.Errorf("project pm agent execution: %w", err)
 	}

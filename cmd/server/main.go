@@ -475,6 +475,19 @@ func buildServices(
 		models.AgentTypePi:         adapters.NewPiAdapter(logger),
 	}
 
+	// Shared agent env/auth helper — consumed by both the session Orchestrator
+	// and the PM service so both paths resolve provider credentials, Codex
+	// auth.json, and agent_config overrides through a single code path.
+	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
+		Credentials:      credentialStore,
+		UserCredentials:  userCredentialStore,
+		Orgs:             orgStore,
+		OrgSettingsCache: orgSettingsCache,
+		CodexAuth:        codexAuthSvc,
+		Provider:         sandboxProvider,
+		Logger:           logger,
+	})
+
 	// Orchestrator.
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
@@ -485,6 +498,7 @@ func buildServices(
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,
+		Env:              agentEnv,
 		Sessions:         sessionStore,
 		SessionLogs:      sessionLogStore,
 		SessionQuestions: sessionQuestionStore,
@@ -528,7 +542,6 @@ func buildServices(
 		sessionStore, orgStore, jobStore, llmClient, logger,
 	)
 
-	pmAdapter := adapters.NewClaudeCodeAdapter(logger)
 	pmSvc := pm.NewService(
 		issueStore,
 		sessionStore,
@@ -539,7 +552,8 @@ func buildServices(
 		pmPlanStore,
 		pmDecisionLogStore,
 		sandboxProvider,
-		pmAdapter,
+		agentAdapters,
+		agentEnv,
 		ghSvc,
 		logger,
 	)

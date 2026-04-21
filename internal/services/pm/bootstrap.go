@@ -56,12 +56,40 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	creds := s.fetchIntegrationCredentials(ctx, params.orgID)
 	creds.github = ghToken != ""
 
+	org, err := s.orgs.GetByID(ctx, params.orgID)
+	if err != nil {
+		return nil, noop, fmt.Errorf("get org: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return nil, noop, fmt.Errorf("parse org settings: %w", err)
+	}
+	agentType := resolveAgentType(settings)
+	adapter, err := s.pickAdapter(agentType)
+	if err != nil {
+		return nil, noop, fmt.Errorf("pick adapter: %w", err)
+	}
+
 	sbCfg := bootstrapSandboxConfig()
-	sbCfg.Env = resolveBootstrapEnv(&creds, ghToken, &repo)
-	s.applyClaudeCodeEnv(ctx, params.orgID, sbCfg.Env)
+	sbCfg.Env = s.env.Resolve(ctx, params.orgID, agentType, nil)
+	if sbCfg.Env == nil {
+		sbCfg.Env = make(map[string]string)
+	}
+	applyGitHubEnv(sbCfg.Env, ghToken, &repo)
+	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+		return nil, noop, fmt.Errorf("agent auth preflight: %w", err)
+	}
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, noop, fmt.Errorf("create sandbox: %w", err)
+	}
+	if agentType == models.AgentTypeCodex {
+		if _, err := s.env.InjectCodexAuth(ctx, params.orgID, sb); err != nil {
+			if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
+				s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox after codex auth failure")
+			}
+			return nil, noop, fmt.Errorf("inject codex auth: %w", err)
+		}
 	}
 	cleanup := func() {
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
@@ -109,7 +137,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	if _, err := s.adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
+	if _, err := adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
 		close(logCh)
 		logWg.Wait()
 		cleanup()
@@ -125,8 +153,8 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 // integrations and the codebase, then writes a structured PM context file.
 // The output is extracted from the sandbox and stored in pm_documents.
 func (s *Service) RunBootstrap(ctx context.Context, orgID uuid.UUID) error {
-	if s.adapter == nil || s.sandbox == nil {
-		return fmt.Errorf("pm adapter or sandbox not configured")
+	if s.sandbox == nil || s.env == nil {
+		return fmt.Errorf("pm sandbox or env helper not configured")
 	}
 	if s.pmDocuments == nil {
 		return fmt.Errorf("pm document store not configured")
@@ -294,13 +322,14 @@ func bootstrapSandboxConfig() agent.SandboxConfig {
 	return cfg
 }
 
-// resolveBootstrapEnv builds the sandbox env vars for bootstrap/refresh agents.
-// This injects integration credentials (SENTRY_AUTH_TOKEN, LINEAR_ACCESS_TOKEN, etc.)
-// so the 143-tools CLI can authenticate, plus GITHUB_TOKEN and repo info for PR review tools.
-func resolveBootstrapEnv(creds *integrationCredentials, ghToken string, repo *models.Repository) map[string]string {
-	env := make(map[string]string)
-
-	// GitHub token and repo info for code review tools.
+// applyGitHubEnv layers repo-scoped GitHub env vars (GITHUB_TOKEN and the
+// owner/name pair used by code-review skills) onto an env map already populated
+// by AgentEnv.Resolve. Repo context is not an AgentEnv concern — it's specific
+// to bootstrap/refresh runs that clone a single repo — so it lives here.
+func applyGitHubEnv(env map[string]string, ghToken string, repo *models.Repository) {
+	if env == nil {
+		return
+	}
 	if ghToken != "" {
 		env["GITHUB_TOKEN"] = ghToken
 	}
@@ -311,31 +340,4 @@ func resolveBootstrapEnv(creds *integrationCredentials, ghToken string, repo *mo
 			env["GITHUB_REPO_NAME"] = parts[1]
 		}
 	}
-
-	if creds.sentry != nil {
-		if cfg, ok := creds.sentry.Config.(models.SentryConfig); ok {
-			if cfg.AccessToken != "" {
-				env["SENTRY_AUTH_TOKEN"] = cfg.AccessToken
-			}
-			if cfg.OrgSlug != "" {
-				env["SENTRY_ORG_SLUG"] = cfg.OrgSlug
-			}
-		}
-	}
-	if creds.linear != nil {
-		if cfg, ok := creds.linear.Config.(models.LinearConfig); ok {
-			if cfg.AccessToken != "" {
-				env["LINEAR_ACCESS_TOKEN"] = cfg.AccessToken
-			}
-		}
-	}
-	if creds.notion != nil {
-		if cfg, ok := creds.notion.Config.(models.NotionConfig); ok {
-			if cfg.AccessToken != "" {
-				env["NOTION_ACCESS_TOKEN"] = cfg.AccessToken
-			}
-		}
-	}
-
-	return env
 }

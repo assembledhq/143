@@ -18,6 +18,17 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 )
 
+// resolveAgentType returns the agent type the PM should run under for this
+// org. It consults settings.DefaultAgentType with a fallback to the
+// platform-wide default. Centralised so Analyze, AnalyzeProject, and bootstrap
+// all pick the same agent and stay in lock-step with session selection.
+func resolveAgentType(settings models.OrgSettings) models.AgentType {
+	if settings.DefaultAgentType != "" {
+		return settings.DefaultAgentType
+	}
+	return models.DefaultDefaultAgentType
+}
+
 type issueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
 	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.IssueFilters) ([]models.Issue, error)
@@ -135,11 +146,26 @@ type Service struct {
 	credentials       credentialStore   // nil-safe
 	skills            SkillsBuilder     // nil-safe: bootstrap disabled if nil
 	sandbox           agent.SandboxProvider
-	adapter           agent.AgentAdapter
+	adapters          map[models.AgentType]agent.AgentAdapter
+	env               *agent.AgentEnv
 	github            agent.GitHubTokenProvider
 	internalAPIURL    string // base URL for internal API (e.g. "http://server:8080/api/v1/internal")
 	internalAPISecret string // signing secret for internal API tokens
 	logger            zerolog.Logger
+}
+
+// pickAdapter returns the adapter for the org's default agent type. Returns an
+// error when the adapter map is missing the requested type so callers fail fast
+// with a readable message instead of a nil-dereference mid-run.
+func (s *Service) pickAdapter(agentType models.AgentType) (agent.AgentAdapter, error) {
+	if s.adapters == nil {
+		return nil, fmt.Errorf("pm adapters not configured")
+	}
+	adapter, ok := s.adapters[agentType]
+	if !ok || adapter == nil {
+		return nil, fmt.Errorf("no adapter registered for agent type %q", agentType)
+	}
+	return adapter, nil
 }
 
 func NewService(
@@ -152,7 +178,8 @@ func NewService(
 	plans planStore,
 	decisionLog decisionLogStore,
 	sandbox agent.SandboxProvider,
-	adapter agent.AgentAdapter,
+	adapters map[models.AgentType]agent.AgentAdapter,
+	env *agent.AgentEnv,
 	github agent.GitHubTokenProvider,
 	logger zerolog.Logger,
 ) *Service {
@@ -166,7 +193,8 @@ func NewService(
 		plans:        plans,
 		decisionLog:  decisionLog,
 		sandbox:      sandbox,
-		adapter:      adapter,
+		adapters:     adapters,
+		env:          env,
 		github:       github,
 		logger:       logger,
 	}
@@ -240,8 +268,8 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 }
 
 func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
-	if s.adapter == nil || s.sandbox == nil {
-		return nil, fmt.Errorf("pm adapter or sandbox not configured")
+	if s.sandbox == nil || s.env == nil {
+		return nil, fmt.Errorf("pm sandbox or env helper not configured")
 	}
 	if err := trigger.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid trigger: %w", err)
@@ -301,15 +329,17 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return nil, failSession("gather context", err)
 	}
 
+	agentType := resolveAgentType(ctxBundle.settings)
+	adapter, err := s.pickAdapter(agentType)
+	if err != nil {
+		return nil, failSession("pick adapter", err)
+	}
+
 	sbCfg := pmSandboxConfig()
+	sbCfg.Env = s.env.Resolve(ctx, orgID, agentType, nil)
 	if sbCfg.Env == nil {
 		sbCfg.Env = make(map[string]string)
 	}
-
-	// Inject Anthropic credentials so the Claude Code CLI inside the sandbox
-	// can authenticate. Without this the CLI prints "Not logged in · Please
-	// run /login" and the agent produces no plan.
-	s.applyClaudeCodeEnv(ctx, orgID, sbCfg.Env)
 
 	// Inject internal API credentials so the PM agent can create issues.
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
@@ -324,6 +354,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}
 
+	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+		return nil, failSession("agent auth preflight", err)
+	}
+
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, failSession("create sandbox", err)
@@ -333,6 +367,12 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
 		}
 	}()
+
+	if agentType == models.AgentTypeCodex {
+		if _, err := s.env.InjectCodexAuth(ctx, orgID, sb); err != nil {
+			return nil, failSession("inject codex auth", err)
+		}
+	}
 
 	var token string
 	if s.github != nil {
@@ -399,7 +439,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 	if err != nil {
@@ -529,32 +569,6 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 		if err := s.sessionLogs.Create(ctx, log); err != nil {
 			s.logger.Error().Err(err).Msg("failed to persist PM log entry")
 		}
-	}
-}
-
-// applyClaudeCodeEnv fetches Anthropic credentials from the org credential
-// store and writes ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL into env. Safe to
-// call when no credential store is configured or no credential is set — the
-// env map is left unchanged and the caller surfaces the downstream failure.
-func (s *Service) applyClaudeCodeEnv(ctx context.Context, orgID uuid.UUID, env map[string]string) {
-	if s.credentials == nil || env == nil {
-		return
-	}
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderAnthropic)
-	if err != nil || cred == nil {
-		s.logger.Warn().Err(err).Msg("no Anthropic credential configured for PM agent — Claude Code CLI will fail to authenticate")
-		return
-	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok {
-		s.logger.Warn().Msg("Anthropic credential has unexpected config type")
-		return
-	}
-	if cfg.APIKey != "" {
-		env["ANTHROPIC_API_KEY"] = cfg.APIKey
-	}
-	if cfg.BaseURL != "" {
-		env["ANTHROPIC_BASE_URL"] = cfg.BaseURL
 	}
 }
 

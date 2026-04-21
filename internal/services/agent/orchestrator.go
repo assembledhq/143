@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -204,14 +203,12 @@ type Orchestrator struct {
 	orgs              OrgStore
 	jobs              JobStore
 	github            GitHubTokenProvider
-	codexAuth         CodexAuthProvider      // can be nil
 	claudeCodeAuth    ClaudeCodeAuthProvider // can be nil
-	credentials       CredentialProvider
-	memory            MemoryService          // can be nil
-	userCredentials   UserCredentialProvider // can be nil
-	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
-	orgSettingsCache  *OrgSettingsCache      // can be nil — disables Amp/Pi agent_config caching
+	credentials       CredentialProvider    // can be nil — disables integration-skills doc generation
+	memory            MemoryService         // can be nil
+	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
+	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
+	env               *AgentEnv             // owns env resolution, auth pre-flight, Codex auth injection
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -242,8 +239,13 @@ type OrchestratorConfig struct {
 	UsageTracker     UsageRecorder          // optional — enables billing observability
 	Cancels          *CancelRegistry        // optional — enables session cancellation from API
 	OrgSettingsCache *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
-	Logger           zerolog.Logger
-	MaxConcurrent    int
+	// Env owns env resolution + auth pre-flight + Codex auth injection,
+	// shared with the PM service. Optional: when nil, NewOrchestrator
+	// constructs an AgentEnv from the other OrchestratorConfig fields so
+	// existing call sites (notably tests) don't have to change.
+	Env           *AgentEnv
+	Logger        zerolog.Logger
+	MaxConcurrent int
 }
 
 // NewOrchestrator creates an Orchestrator with the given dependencies.
@@ -251,6 +253,22 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	maxConcurrent := cfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = defaultMaxConcurrent
+	}
+
+	// Fall back to constructing an AgentEnv from the inlined config fields when
+	// the caller didn't pass one. main.go passes Env explicitly so PM can share
+	// it; tests leave it nil and get a functionally equivalent AgentEnv for free.
+	env := cfg.Env
+	if env == nil {
+		env = NewAgentEnv(AgentEnvDeps{
+			Credentials:      cfg.Credentials,
+			UserCredentials:  cfg.UserCredentials,
+			Orgs:             cfg.Orgs,
+			OrgSettingsCache: cfg.OrgSettingsCache,
+			CodexAuth:        cfg.CodexAuth,
+			Provider:         cfg.Provider,
+			Logger:           cfg.Logger,
+		})
 	}
 
 	return &Orchestrator{
@@ -264,18 +282,16 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		projectTasks:      cfg.ProjectTasks,
 		automationRuns:    cfg.AutomationRuns,
 		issues:            cfg.Issues,
-		repositories:      cfg.Repositories,
-		orgs:              cfg.Orgs,
-		jobs:              cfg.Jobs,
-		github:            cfg.GitHub,
-		codexAuth:         cfg.CodexAuth,
-		claudeCodeAuth:    cfg.ClaudeCodeAuth,
-		credentials:       cfg.Credentials,
-		memory:            cfg.Memory,
-		userCredentials:   cfg.UserCredentials,
-		snapshots:         cfg.Snapshots,
-		usageTracker:      cfg.UsageTracker,
-		orgSettingsCache:  cfg.OrgSettingsCache,
+			repositories:      cfg.Repositories,
+			orgs:              cfg.Orgs,
+			jobs:              cfg.Jobs,
+			github:            cfg.GitHub,
+			claudeCodeAuth:    cfg.ClaudeCodeAuth,
+			credentials:       cfg.Credentials,
+			memory:            cfg.Memory,
+			snapshots:         cfg.Snapshots,
+			usageTracker:      cfg.UsageTracker,
+		env:               env,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
@@ -436,7 +452,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	sandboxCfg.SessionID = run.ID.String()
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
-	sandboxCfg.Env = o.resolveAgentEnv(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
+	sandboxCfg.Env = o.env.Resolve(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -460,7 +476,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
 		}
 	}
-	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
+	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
 	}
@@ -623,8 +639,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// 9b. Integration tools (143-tools CLI) are pre-installed in the container
-	// image. Credentials are injected via env vars (resolveAgentEnv), and the
-	// skills doc is injected into the prompt (buildIntegrationSkills). No
+	// image. Credentials are injected via env vars (AgentEnv.Resolve), and the
+	// skills doc is injected into the prompt (BuildIntegrationSkills). No
 	// per-CLI config file injection needed — all agents can shell out directly.
 
 	// 10. Execute agent with log streaming.
@@ -885,13 +901,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
-	sandboxCfg.Env = o.resolveAgentEnv(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
+	sandboxCfg.Env = o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
-	// Apply the per-session model override before checkAgentAuth so the
-	// pre-flight evaluates the *effective* model — see the matching block in
-	// RunAgent for the Pi-specific reasoning.
+	// Apply the per-session model override before the auth pre-flight so
+	// AgentEnv.CheckAuth evaluates the *effective* model — see the matching
+	// block in RunAgent for the Pi-specific reasoning.
 	if session.ModelOverride != nil && *session.ModelOverride != "" {
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *session.ModelOverride
@@ -905,7 +921,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
 		}
 	}
-	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
+	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after auth pre-flight failure")
@@ -1304,14 +1320,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
-	// Inject auth credentials into the sandbox.
-	switch session.AgentType {
-	case models.AgentTypeCodex:
-		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
-		if err != nil {
-			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
-		}
-		if !injected {
+		// Inject auth credentials into the sandbox.
+		switch session.AgentType {
+		case models.AgentTypeCodex:
+			injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
+			if err != nil {
+				return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
+			}
+			if !injected {
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	case models.AgentTypeClaudeCode:
@@ -1637,7 +1653,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 // ensureCodexAuth injects Codex auth credentials into the sandbox, failing the
 // run with a codex_auth_expired category if injection fails or no creds exist.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	injected, err := o.injectCodexAuth(ctx, run.OrgID, sandbox)
+	injected, err := o.env.InjectCodexAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("codex auth injection failed: %s", err),
@@ -1686,477 +1702,6 @@ func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, j
 			Str("job_type", jobType).
 			Msg("failed to enqueue follow-up job")
 	}
-}
-
-// integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
-type integrationCredentials struct {
-	Sentry *models.SentryConfig
-	Linear *models.LinearConfig
-	Notion *models.NotionConfig
-}
-
-// fetchIntegrationCredentials retrieves the Sentry, Linear, and Notion configs
-// for an org from the credential provider. Returns nil configs if unavailable.
-func (o *Orchestrator) fetchIntegrationCredentials(ctx context.Context, orgID uuid.UUID) integrationCredentials {
-	var ic integrationCredentials
-	if o.credentials == nil {
-		return ic
-	}
-
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderSentry); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.SentryConfig); ok {
-			ic.Sentry = &cfg
-		}
-	}
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderLinear); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.LinearConfig); ok {
-			ic.Linear = &cfg
-		}
-	}
-	if cred, err := o.credentials.Get(ctx, orgID, models.ProviderNotion); err == nil && cred != nil {
-		if cfg, ok := cred.Config.(models.NotionConfig); ok {
-			ic.Notion = &cfg
-		}
-	}
-	return ic
-}
-
-// resolveAgentEnv builds the sandbox env vars for the given agent type.
-// It checks credentials in order: user personal → team default → org credential.
-// Codex CLI auth is handled via auth.json injection (injectCodexAuth), not env vars.
-//
-// Invariant: sandbox env must only come from org-scoped DB credentials. Do NOT
-// fall back to server-level env vars (e.g. cfg.AnthropicAPIKey, cfg.OpenAIAPIKey)
-// — those are 143.dev-level platform credentials and would leak across orgs in
-// a multi-tenant deployment. Server-level LLM keys are reserved for 143's own
-// internal LLM calls via Config.LLMConfig().
-func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
-	merged := make(map[string]string)
-
-	switch agentType {
-	case models.AgentTypeClaudeCode:
-		// Always keep the Anthropic API key in env when configured. The Claude
-		// Code CLI should prefer ~/.claude/.credentials.json when a
-		// subscription file is present, but retaining ANTHROPIC_API_KEY here
-		// gives the run a real fallback if subscription token lookup/refresh
-		// fails after sandbox creation.
-		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
-		if ac, ok := cfg.(models.AnthropicConfig); ok {
-			if ac.APIKey != "" {
-				merged["ANTHROPIC_API_KEY"] = ac.APIKey
-			}
-			if ac.BaseURL != "" {
-				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
-			}
-		}
-	case models.AgentTypeCodex:
-		// Codex CLI authenticates via ~/.codex/auth.json (injected by
-		// injectCodexAuth), NOT via the CODEX_API_KEY env var. The env
-		// var makes Codex call api.openai.com/v1/responses which requires
-		// the api.responses.write scope — a scope the ChatGPT OAuth token
-		// does not carry. The auth.json path uses the ChatGPT backend
-		// instead, which accepts the OAuth token as-is.
-		//
-		// Inject the general OpenAI API key as OPENAI_API_KEY for other
-		// tools in the sandbox (not used by Codex CLI itself).
-		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI)
-		if oc, ok := cfg.(models.OpenAIConfig); ok {
-			if oc.APIKey != "" {
-				merged["OPENAI_API_KEY"] = oc.APIKey
-			}
-			if oc.BaseURL != "" {
-				merged["OPENAI_BASE_URL"] = oc.BaseURL
-			}
-		}
-		// Skip Codex CLI's internal bwrap (bubblewrap) sandboxing. The
-		// container is already isolated by Docker + gVisor (dropped caps,
-		// read-only rootfs, non-root user, PID limits), so bwrap is
-		// redundant and fails because gVisor doesn't support the
-		// unprivileged user namespaces that bwrap requires.
-		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
-	case models.AgentTypeGeminiCLI:
-		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
-		if gc, ok := cfg.(models.GeminiConfig); ok {
-			if gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
-			if gc.Model != "" {
-				merged["GEMINI_MODEL"] = gc.Model
-			}
-		}
-	case models.AgentTypeAmp:
-		// Amp authenticates to Sourcegraph's API with a dedicated AMP_API_KEY
-		// that lives in agent_config.amp.AMP_API_KEY — applied by the per-agent
-		// override block below. No first-class credential store (no ProviderAmp)
-		// exists today, so we intentionally do nothing here.
-	case models.AgentTypePi:
-		// Pi is a meta-agent: route to many providers via one CLI. Inherit
-		// every provider key the org already configured for the other agents,
-		// then let agent_config.pi.* override at the call site below.
-		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic); cfg != nil {
-			if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
-				merged["ANTHROPIC_API_KEY"] = ac.APIKey
-			}
-		}
-		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI); cfg != nil {
-			if oc, ok := cfg.(models.OpenAIConfig); ok && oc.APIKey != "" {
-				merged["OPENAI_API_KEY"] = oc.APIKey
-			}
-		}
-		if cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini); cfg != nil {
-			if gc, ok := cfg.(models.GeminiConfig); ok && gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
-		}
-	}
-
-	// Integration credentials — consumed by the 143-tools CLI (preferred) and
-	// 143-mcp binary inside the sandbox. Agents use the CLI via shell commands;
-	// the MCP server is only for IDE integrations. See internal/services/mcp/AGENTS.md.
-	ic := o.fetchIntegrationCredentials(ctx, orgID)
-	if ic.Sentry != nil {
-		if ic.Sentry.AccessToken != "" {
-			merged["SENTRY_AUTH_TOKEN"] = ic.Sentry.AccessToken
-		}
-		if ic.Sentry.OrgSlug != "" {
-			merged["SENTRY_ORG_SLUG"] = ic.Sentry.OrgSlug
-		}
-	}
-	if ic.Linear != nil {
-		if ic.Linear.AccessToken != "" {
-			merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
-		}
-	}
-	if ic.Notion != nil {
-		if ic.Notion.AccessToken != "" {
-			merged["NOTION_ACCESS_TOKEN"] = ic.Notion.AccessToken
-		}
-	}
-
-	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
-	// Scoped to Amp and Pi only — these agents have no first-class provider
-	// credential store (no ProviderAmp / ProviderPi), so agent_config is the
-	// only channel for their auth (AMP_API_KEY) and routing (PI_MODEL,
-	// PI_MODEL_CUSTOM). For claude_code/codex/gemini_cli we keep the legacy
-	// behavior: provider creds come exclusively from resolveProviderConfig,
-	// and agent_config is treated as model-default metadata (validated,
-	// stored, but not injected here) — changing that would silently flip
-	// existing orgs' active keys.
-	if agentType == models.AgentTypeAmp || agentType == models.AgentTypePi {
-		o.applyAgentConfigOverrides(ctx, orgID, agentType, merged)
-	}
-
-	if len(merged) == 0 {
-		return nil
-	}
-
-	return merged
-}
-
-// checkAgentAuth returns a user-facing error when an agent type has no chance
-// of authenticating against its upstream because the required credential is
-// missing from the resolved sandbox env. This is a pre-flight check intended
-// to beat the generic "CLI exited 1" failure with something the user can act
-// on — "configure AMP_API_KEY" instead of "amp: invalid api key".
-//
-// Scoped to agent types whose auth lives exclusively in agent_config (Amp,
-// Pi) — for the others, resolveProviderConfig already surfaces richer errors,
-// and we don't want to duplicate those rules here.
-//
-// Invariant: callers must pass the already-merged sandbox env — i.e. after
-// resolveAgentEnv has run (which layers agent_config overrides on top of
-// inherited provider creds) and after any per-run ModelOverride + Pi-specific
-// narrowing have been applied. checkAgentAuth reads credentials and the
-// resolved Pi model directly from `env`, so invoking it on a partial env
-// would either pass a misconfigured run or fail a valid one.
-func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string]string) error {
-	switch agentType {
-	case models.AgentTypeAmp:
-		if env["AMP_API_KEY"] == "" {
-			return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
-		}
-	case models.AgentTypePi:
-		return checkPiProviderKey(env)
-	}
-	return nil
-}
-
-// checkPiProviderKey asserts the provider key for Pi's *selected model* is
-// present. PI_MODEL_CUSTOM wins over PI_MODEL, with a hardcoded fallback that
-// matches piStreamingConfig.BuildCmd.
-//
-// For curated providers (anthropic/openai/google) we can pinpoint which key
-// Pi will actually need and return a precise error — cheaper than letting the
-// CLI fail with an opaque upstream 401 that doesn't say "you set PI_MODEL to
-// openai/... but only Anthropic is configured." For unknown provider prefixes
-// that users reach via PI_MODEL_CUSTOM (moonshot, etc.), we can't know which
-// env var is required, so we fall back to the weaker "at least one inherited
-// key" guarantee.
-func checkPiProviderKey(env map[string]string) error {
-	model := piResolvedModel(env)
-	prefix, _, _ := strings.Cut(model, "/")
-	switch strings.ToLower(prefix) {
-	case "anthropic":
-		if env["ANTHROPIC_API_KEY"] == "" {
-			return fmt.Errorf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)
-		}
-	case "openai":
-		if env["OPENAI_API_KEY"] == "" {
-			return fmt.Errorf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)
-		}
-	case "google", "gemini":
-		if env["GEMINI_API_KEY"] == "" {
-			return fmt.Errorf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)
-		}
-	default:
-		// Unknown provider (e.g. moonshot via PI_MODEL_CUSTOM). We can't tell
-		// which env var Pi needs, so fall back to "at least one inherited key".
-		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
-			return fmt.Errorf("missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key")
-		}
-	}
-	return nil
-}
-
-// piResolvedModel returns the Pi model string the CLI will run against, using
-// the same precedence as piStreamingConfig.BuildCmd: PI_MODEL_CUSTOM > PI_MODEL
-// > hardcoded default.
-func piResolvedModel(env map[string]string) string {
-	if m := env["PI_MODEL_CUSTOM"]; m != "" {
-		return m
-	}
-	if m := env["PI_MODEL"]; m != "" {
-		return m
-	}
-	return models.PiModelClaudeOpus47
-}
-
-// narrowPiProviderKeys strips inherited provider keys that don't match Pi's
-// resolved model. Called after ModelOverride is applied, so the env reflects
-// the *effective* model — a per-run override that flips Pi from Anthropic to
-// OpenAI removes the Anthropic key from the sandbox env, even if the
-// agent_config default pointed at Anthropic.
-//
-// Only narrows for known provider prefixes (anthropic/openai/google/gemini):
-// for unknown prefixes (moonshot via PI_MODEL_CUSTOM, etc.) we can't tell
-// which key Pi will use upstream, so the weaker "keep all inherited keys"
-// posture is intentional. Returns the unknown prefix in that case (or "" when
-// narrowing happened), so callers can log a warning that all inherited
-// provider credentials were exported to the sandbox.
-//
-// Known limitation — inherited-key leak for unknown prefixes: a run with
-// PI_MODEL_CUSTOM=moonshot/kimi-k2 (or any other non-curated provider) ships
-// every configured provider key (Anthropic, OpenAI, Gemini) into the sandbox
-// process env, even though Pi only needs Moonshot's. The keys never leave the
-// container under normal operation, but a compromised Pi CLI / prompt-injection
-// that tricked the agent into exfiltrating env vars would expose siblings too.
-// To tighten this, add the new provider's prefix and env-var name to the switch
-// above so narrowing kicks in — an explicit entry is intentionally required
-// rather than a deny-by-default so operators adopting a new Pi-supported
-// provider don't silently get auth failures.
-func narrowPiProviderKeys(env map[string]string) string {
-	model := piResolvedModel(env)
-	prefix, _, _ := strings.Cut(model, "/")
-	const (
-		ak = "ANTHROPIC_API_KEY"
-		ok = "OPENAI_API_KEY"
-		gk = "GEMINI_API_KEY"
-	)
-	switch strings.ToLower(prefix) {
-	case "anthropic":
-		delete(env, ok)
-		delete(env, gk)
-	case "openai":
-		delete(env, ak)
-		delete(env, gk)
-	case "google", "gemini":
-		delete(env, ak)
-		delete(env, ok)
-	default:
-		return prefix
-	}
-	return ""
-}
-
-// applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
-// settings on top of the already-resolved provider credentials in `merged`.
-// Only called for agent types (amp, pi) that lack a first-class provider
-// credential store — for those, agent_config is the sole channel for auth
-// and routing. Non-empty values win over inherited provider creds.
-//
-// Reads go through OrgSettingsCache when configured so a burst of Amp/Pi
-// session starts for the same org amortizes to one DB lookup per TTL window.
-// The settings update handler invalidates the cache after a write, so
-// configuration changes take effect immediately rather than waiting for
-// the TTL to expire.
-func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
-	agentConfig, ok := o.loadAgentConfig(ctx, orgID, agentType)
-	if !ok {
-		return
-	}
-	for k, v := range agentConfig[string(agentType)] {
-		if v != "" {
-			merged[k] = v
-		}
-	}
-}
-
-// loadAgentConfig returns the org's AgentEnvConfig, using the orchestrator's
-// OrgSettingsCache as a front when present. Returns (nil, false) and logs a
-// warning if the org can't be loaded; callers should treat that as "no
-// overrides available" rather than failing the session start.
-func (o *Orchestrator) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (models.AgentEnvConfig, bool) {
-	if o.orgs == nil {
-		o.logger.Warn().
-			Str("agent_type", string(agentType)).
-			Str("org_id", orgID.String()).
-			Msg("orchestrator has no orgs store; skipping agent_config overrides (agent may run without auth)")
-		return nil, false
-	}
-
-	if o.orgSettingsCache != nil {
-		if cached, hit := o.orgSettingsCache.Get(orgID); hit {
-			return cached, true
-		}
-	}
-
-	org, err := o.orgs.GetByID(ctx, orgID)
-	if err != nil {
-		o.logger.Warn().
-			Err(err).
-			Str("agent_type", string(agentType)).
-			Str("org_id", orgID.String()).
-			Msg("failed to load org for agent_config overrides; agent may run without auth")
-		return nil, false
-	}
-	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
-	if parseErr != nil {
-		o.logger.Warn().
-			Err(parseErr).
-			Str("agent_type", string(agentType)).
-			Str("org_id", orgID.String()).
-			Msg("failed to parse org settings for agent_config overrides; agent may run without auth")
-		return nil, false
-	}
-
-	if o.orgSettingsCache != nil {
-		// Store the (possibly nil) AgentConfig so a second hit doesn't re-fetch
-		// just to discover the org has no agent_config.
-		o.orgSettingsCache.Set(orgID, orgSettings.AgentConfig)
-	}
-
-	return orgSettings.AgentConfig, true
-}
-
-// resolveProviderConfig returns the best ProviderConfig for a provider,
-// checking in order: user personal → team default → org credential.
-func (o *Orchestrator) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	// 1. Check user's personal credential.
-	if userID != nil && o.userCredentials != nil {
-		if cred, err := o.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil {
-			return cred.Config
-		}
-	}
-
-	// 2. Check team default credential.
-	if o.userCredentials != nil {
-		if cred, err := o.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil {
-			return cred.Config
-		}
-	}
-
-	// 3. Fall back to org credential.
-	if o.credentials != nil {
-		if cred, err := o.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
-			return cred.Config
-		}
-	}
-
-	return nil
-}
-
-// injectCodexAuth writes a ~/.codex/auth.json file into the sandbox if
-// a ChatGPT OAuth token exists for this org. This is the primary Codex
-// auth mechanism — auth.json tells the CLI to use the ChatGPT backend
-// which accepts the OAuth token without needing api.responses.write scope.
-// Returns (true, nil) if auth was injected, (false, nil) if no OAuth
-// token is available, or (false, err) on failure.
-func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
-	if o.codexAuth == nil {
-		return false, nil
-	}
-
-	// Use round-robin selection across all active subscriptions for this org.
-	// GetValidToken claims the least-recently-used credential, refreshing it
-	// in-band if it's near expiry. This is the canonical path; the legacy
-	// single-credential RefreshToken would always pick the same row and bypass
-	// round-robin entirely.
-	cfg, err := o.codexAuth.GetValidToken(ctx, orgID)
-	if err != nil {
-		return false, fmt.Errorf("get codex auth token: %w", err)
-	}
-	if cfg == nil {
-		// No OAuth token — not an error, agent will use API key.
-		return false, nil
-	}
-
-	// Omit the refresh_token from auth.json so the Codex CLI never
-	// attempts to refresh the token itself. If the CLI refreshes the
-	// token inside the sandbox, it consumes the refresh_token on
-	// OpenAI's servers, but the sandbox-side token is lost when the
-	// container is destroyed. Our DB then holds a stale refresh_token,
-	// and the next turn's RefreshToken() call gets refresh_token_reused.
-	// By omitting refresh_token, the CLI uses the fresh access_token
-	// (15-min TTL) as-is, and our server retains sole ownership of
-	// the refresh_token for future turns.
-	authJSON, err := json.Marshal(map[string]interface{}{
-		"auth_mode": "chatgpt",
-		"tokens": map[string]string{
-			"access_token":  cfg.AccessToken,
-			"refresh_token": "",
-			"id_token":      cfg.IDToken,
-		},
-		"last_refresh": time.Now().Format(time.RFC3339),
-	})
-	if err != nil {
-		return false, fmt.Errorf("marshal auth.json: %w", err)
-	}
-
-	// Write auth.json under $HOME/.codex. The sandbox env sets HOME to the
-	// sandbox user's home dir (see RunAgent step 7) so the Codex CLI
-	// resolves ~/.codex/auth.json to this path.
-	authDir := path.Join(sandbox.HomeDir, ".codex")
-	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
-
-	var mkdirOut, mkdirErr bytes.Buffer
-	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
-	if err != nil {
-		return false, fmt.Errorf("create .codex dir: %w", err)
-	}
-	if exitCode != 0 {
-		return false, fmt.Errorf("create .codex dir: mkdir exited with code %d: %s", exitCode, mkdirErr.String())
-	}
-
-	authPath := authDir + "/auth.json"
-	if err := o.provider.WriteFile(ctx, sandbox, authPath, authJSON); err != nil {
-		return false, fmt.Errorf("write auth.json: %w", err)
-	}
-
-	// Write config.toml to disable Codex's internal bwrap sandboxing.
-	// The container is already isolated by Docker + gVisor so bwrap is
-	// redundant and fails because gVisor doesn't support the unprivileged
-	// user namespaces that bwrap requires.
-	configTOML := []byte("sandbox_mode = \"danger-full-access\"\n")
-	configPath := authDir + "/config.toml"
-	if err := o.provider.WriteFile(ctx, sandbox, configPath, configTOML); err != nil {
-		return false, fmt.Errorf("write config.toml: %w", err)
-	}
-
-	o.logger.Debug().
-		Str("org_id", orgID.String()).
-		Msg("injected codex auth.json and config.toml into sandbox")
-
-	return true, nil
 }
 
 // injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
@@ -2308,7 +1853,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
 
 func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
-	cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
+	cfg := o.env.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
 	ac, ok := cfg.(models.AnthropicConfig)
 	if !ok || ac.APIKey == "" {
 		return errClaudeCodeFallbackUnavailable
@@ -2355,7 +1900,7 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 		return ""
 	}
 
-	ic := o.fetchIntegrationCredentials(ctx, orgID)
+	ic := o.env.fetchIntegrationCredentials(ctx, orgID)
 	reg := integration.NewRegistry()
 
 	// Register integrations based on available credentials.
@@ -2614,7 +2159,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
 
-	reinjected, reinjectErr := o.injectCodexAuth(ctx, orgID, sandbox)
+	reinjected, reinjectErr := o.env.InjectCodexAuth(ctx, orgID, sandbox)
 	if reinjectErr != nil {
 		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
 		return result, err

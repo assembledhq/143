@@ -3057,7 +3057,7 @@ func TestRunAgent_PiProviderMismatchFailsFast(t *testing.T) {
 // TestRunAgent_PiModelOverrideEvaluatedByPreflight asserts that when a per-run
 // ModelOverride switches Pi to a different provider, the pre-flight auth check
 // evaluates the *override* — not the agent_config default. Without applying
-// the override before checkAgentAuth, an org with only ANTHROPIC_API_KEY plus
+// the override before AgentEnv.CheckAuth, an org with only ANTHROPIC_API_KEY plus
 // agent_config.pi.PI_MODEL = anthropic/... would let an OpenAI override past
 // the gate and fail at runtime with an opaque upstream 401.
 func TestRunAgent_PiModelOverrideEvaluatedByPreflight(t *testing.T) {
