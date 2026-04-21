@@ -60,6 +60,10 @@ export default function TeamSettingsPage() {
   const [actionError, setActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<User | null>(null);
+  const [pendingRoleChange, setPendingRoleChange] = useState<{
+    member: User;
+    newRole: string;
+  } | null>(null);
   const [ghSearchQuery, setGhSearchQuery] = useState("");
   const [debouncedGhQuery, setDebouncedGhQuery] = useState("");
 
@@ -296,12 +300,10 @@ export default function TeamSettingsPage() {
                         ) : (
                           <Select
                             value={member.role}
-                            onValueChange={(role) =>
-                              changeRoleMutation.mutate({
-                                id: member.id,
-                                role,
-                              })
-                            }
+                            onValueChange={(role) => {
+                              if (role === member.role) return;
+                              setPendingRoleChange({ member, newRole: role });
+                            }}
                           >
                             <SelectTrigger
                               size="default"
@@ -554,6 +556,62 @@ export default function TeamSettingsPage() {
           </AlertDialogContent>
         </AlertDialog>
       )}
+
+      {/* Change Role Confirmation Dialog */}
+      <AlertDialog
+        open={!!pendingRoleChange}
+        onOpenChange={(open) => !open && setPendingRoleChange(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Change role</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingRoleChange?.member.id === currentUser?.id ? (
+                <>
+                  You&apos;re about to change your own role from{" "}
+                  <span className="font-medium">
+                    {capitalize(pendingRoleChange?.member.role ?? "")}
+                  </span>{" "}
+                  to{" "}
+                  <span className="font-medium">
+                    {capitalize(pendingRoleChange?.newRole ?? "")}
+                  </span>
+                  . You may lose access to admin features and won&apos;t be able to undo this
+                  yourself.
+                </>
+              ) : (
+                <>
+                  Change {pendingRoleChange?.member.name}&apos;s role from{" "}
+                  <span className="font-medium">
+                    {capitalize(pendingRoleChange?.member.role ?? "")}
+                  </span>{" "}
+                  to{" "}
+                  <span className="font-medium">
+                    {capitalize(pendingRoleChange?.newRole ?? "")}
+                  </span>
+                  ? Their permissions will update immediately.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingRoleChange) {
+                  changeRoleMutation.mutate({
+                    id: pendingRoleChange.member.id,
+                    role: pendingRoleChange.newRole,
+                  });
+                  setPendingRoleChange(null);
+                }
+              }}
+            >
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Remove Member Confirmation Dialog */}
       <AlertDialog open={!!removingMember} onOpenChange={(open) => !open && setRemovingMember(null)}>

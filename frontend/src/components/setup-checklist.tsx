@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Check } from "lucide-react";
 import { api } from "@/lib/api";
@@ -12,7 +13,6 @@ import {
   AdditionalIntegrationCards,
   SourceControlIntegrationCard,
 } from "@/components/integration-connection-cards";
-import { AgentSettingsEditor } from "@/components/agent-settings-editor";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
@@ -27,22 +27,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { OrgSettings } from "@/lib/types";
-
-function AgentSettingsModal({ onClose, initialAgentType }: { onClose: () => void; initialAgentType?: OrgSettings["default_agent_type"] }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-2xl rounded-lg border bg-background p-6 shadow-lg">
-        <AgentSettingsEditor
-          title="Configure coding agent"
-          description="Set your default agent and configure credentials."
-          initialAgentType={initialAgentType}
-          setupMode
-          onClose={onClose}
-        />
-      </div>
-    </div>
-  );
-}
 
 function StepSection({
   step,
@@ -123,8 +107,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
 
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [settingsAgentType, setSettingsAgentType] = useState<OrgSettings["default_agent_type"]>("codex");
   const [selectedAgentTypeOverride, setSelectedAgentType] = useState<AgentType | null>(null);
 
   const { data: codexAuthResponse } = useQuery({
@@ -181,15 +163,8 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
                 {selectedAgent.ctaLabel}
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setSettingsAgentType(selectedAgentType);
-                setShowSettingsModal(true);
-              }}
-            >
-              {selectedAgent.configureLabel}
+            <Button size="sm" variant="outline" asChild>
+              <Link href="/settings/agent">{selectedAgent.configureLabel}</Link>
             </Button>
           </div>
         </CardContent>
@@ -201,15 +176,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
           onConnected={() => {
             setShowDeviceCodeModal(false);
             queryClient.invalidateQueries({ queryKey: queryKeys.codexAuth.status });
-          }}
-        />
-      )}
-      {showSettingsModal && (
-        <AgentSettingsModal
-          initialAgentType={settingsAgentType}
-          onClose={() => {
-            setShowSettingsModal(false);
-            queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
           }}
         />
       )}

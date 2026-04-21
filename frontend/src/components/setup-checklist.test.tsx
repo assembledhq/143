@@ -50,10 +50,6 @@ vi.mock("@/hooks/use-github-repo-sync", () => ({
   }),
 }));
 
-vi.mock("@/components/agent-settings-editor", () => ({
-  AgentSettingsEditor: () => <div data-testid="agent-settings-editor" />,
-}));
-
 vi.mock("@/components/codex-device-code-modal", () => ({
   CodexDeviceCodeModal: () => null,
 }));
