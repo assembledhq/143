@@ -141,9 +141,14 @@ func main() {
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,
-	// the orchestrator reads it when resolving Amp/Pi agent_config. Both the
-	// router and the worker orchestrator must see the same instance or
-	// invalidation breaks.
+	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
+	// process deployments (MODE=all), the router and worker share this instance
+	// so a settings write is observed immediately. In split deployments
+	// (MODE=api + separate MODE=worker), the worker process holds its own
+	// cache that the API process can't reach — settings updates take effect on
+	// that worker only after the TTL (DefaultOrgSettingsCacheTTL) expires.
+	// That's the safety net; if you need cross-process invalidation later,
+	// wire LISTEN/NOTIFY through OrgSettingsCache.InvalidateOrg.
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, orgSettingsCache)
 	if err != nil {

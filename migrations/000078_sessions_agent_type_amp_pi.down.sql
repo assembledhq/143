@@ -1,6 +1,8 @@
--- Roll back to the pre-migration-78 allowlist (claude_code/gemini_cli/codex/pm_agent).
+-- Drop 'amp' and 'pi' from the sessions.agent_type allowlist, restoring the
+-- pre-migration-78 set (claude_code, gemini_cli, codex, pm_agent — pm_agent
+-- stays; it is not user-selectable but is still written by the PM service).
 --
--- This migration is destructive to any persisted Amp or Pi sessions and will
+-- This rollback is destructive to any persisted Amp or Pi sessions and will
 -- fail at VALIDATE CONSTRAINT below if any rows remain with
 -- agent_type IN ('amp', 'pi'). Run the following playbook before applying:
 --

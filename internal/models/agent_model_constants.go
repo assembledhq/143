@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -159,6 +160,40 @@ func IsSupportedPiModel(model string) bool {
 	return false
 }
 
+// AllowedAgentConfigKeys lists the env-var keys that may be set in
+// settings.agent_config[<agent>] for agents whose agent_config is propagated
+// directly into the sandbox env (Amp, Pi). Bounds the blast radius of an org
+// admin smuggling arbitrary vars (PATH, LD_PRELOAD, NODE_OPTIONS, …) into
+// the container by way of agent_config.
+//
+// Scoped to Amp and Pi today — those are the only agent types whose
+// agent_config the orchestrator's resolveAgentEnv injects (see
+// applyAgentConfigOverrides). Other agents pull credentials from the
+// encrypted credential store, so unknown agent_config keys for them are
+// stored-but-ignored rather than security-relevant. Add an agent here when
+// that changes.
+var AllowedAgentConfigKeys = map[AgentType]map[string]struct{}{
+	AgentTypeAmp: {
+		"AMP_API_KEY": {},
+		"AMP_MODE":    {},
+	},
+	AgentTypePi: {
+		"PI_MODEL":        {},
+		"PI_MODEL_CUSTOM": {},
+	},
+}
+
+// sortedKeys returns the keys of a string-set in lexicographic order so the
+// "allowed: [...]" hint in validation errors is stable across runs.
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ValidateModelForAgentType checks whether the given model is valid for the given agent type.
 func ValidateModelForAgentType(agentType AgentType, model string) error {
 	switch agentType {
@@ -285,7 +320,15 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	}
 
 	for agentTypeStr, envVars := range settings.AgentConfig {
-		switch AgentType(agentTypeStr) {
+		agentType := AgentType(agentTypeStr)
+		if allowed, gated := AllowedAgentConfigKeys[agentType]; gated {
+			for key := range envVars {
+				if _, ok := allowed[key]; !ok {
+					return fmt.Errorf("agent_config.%s.%s is not an allowed key (allowed: %v)", agentTypeStr, key, sortedKeys(allowed))
+				}
+			}
+		}
+		switch agentType {
 		case AgentTypeCodex:
 			model := envVars["OPENAI_MODEL"]
 			if model != "" && !IsSupportedCodexModel(model) {

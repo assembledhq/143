@@ -1621,9 +1621,48 @@ func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string
 			return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
 		}
 	case models.AgentTypePi:
-		// Pi routes through whichever provider its model string selects, so
-		// at least one inherited provider key must be present. Without any,
-		// the CLI would fail with an opaque upstream 401.
+		return checkPiProviderKey(env)
+	}
+	return nil
+}
+
+// checkPiProviderKey asserts the provider key for Pi's *selected model* is
+// present. PI_MODEL_CUSTOM wins over PI_MODEL, with a hardcoded fallback that
+// matches piStreamingConfig.BuildCmd.
+//
+// For curated providers (anthropic/openai/google) we can pinpoint which key
+// Pi will actually need and return a precise error — cheaper than letting the
+// CLI fail with an opaque upstream 401 that doesn't say "you set PI_MODEL to
+// openai/... but only Anthropic is configured." For unknown provider prefixes
+// that users reach via PI_MODEL_CUSTOM (moonshot, etc.), we can't know which
+// env var is required, so we fall back to the weaker "at least one inherited
+// key" guarantee.
+func checkPiProviderKey(env map[string]string) error {
+	model := env["PI_MODEL_CUSTOM"]
+	if model == "" {
+		model = env["PI_MODEL"]
+	}
+	if model == "" {
+		// Matches the hardcoded fallback in piStreamingConfig.BuildCmd.
+		model = models.PiModelClaudeSonnet46
+	}
+	prefix, _, _ := strings.Cut(model, "/")
+	switch strings.ToLower(prefix) {
+	case "anthropic":
+		if env["ANTHROPIC_API_KEY"] == "" {
+			return fmt.Errorf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	case "openai":
+		if env["OPENAI_API_KEY"] == "" {
+			return fmt.Errorf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	case "google", "gemini":
+		if env["GEMINI_API_KEY"] == "" {
+			return fmt.Errorf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)
+		}
+	default:
+		// Unknown provider (e.g. moonshot via PI_MODEL_CUSTOM). We can't tell
+		// which env var Pi needs, so fall back to "at least one inherited key".
 		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
 			return fmt.Errorf("missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key")
 		}

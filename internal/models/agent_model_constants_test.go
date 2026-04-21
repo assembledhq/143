@@ -331,6 +331,38 @@ func TestValidateSettingsModels(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Allowlist guard: org admin tries to inject PATH via agent_config.amp.
+			// Without the AllowedAgentConfigKeys check, applyAgentConfigOverrides
+			// would happily propagate this into the sandbox env.
+			name: "rejects unknown amp key",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"amp": {"AMP_API_KEY": "amp_x", "PATH": "/evil/bin"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unknown pi key",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"pi": {"PI_MODEL": PiModelClaudeSonnet46, "LD_PRELOAD": "/tmp/x.so"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			// Sanity check: legacy agents are not gated by the allowlist (their
+			// agent_config is stored-but-not-injected by the orchestrator), so
+			// unknown keys there must keep validating.
+			name: "accepts unknown key on non-allowlisted agent",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex": {"OPENAI_BASE_URL": "https://proxy.example/v1"},
+				},
+			},
+		},
 	}
 
 	for _, testCase := range tests {
