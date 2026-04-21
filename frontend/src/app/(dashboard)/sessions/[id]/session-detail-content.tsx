@@ -54,7 +54,6 @@ import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
-import { useReviewedFiles } from "@/hooks/use-reviewed-files";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
@@ -480,8 +479,6 @@ function ChangesTab({
   activeFileIndex,
   onFileSelect,
   onOpenReview,
-  reviewedFiles,
-  onToggleReviewed,
   comments,
   onCommentClick,
   passes,
@@ -494,8 +491,6 @@ function ChangesTab({
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
   onOpenReview: (fileIndex?: number) => void;
-  reviewedFiles: Set<string>;
-  onToggleReviewed: (filePath: string) => void;
   comments: SessionReviewComment[];
   onCommentClick: (filePath: string) => void;
   passes: DiffPassEntry[];
@@ -554,8 +549,6 @@ function ChangesTab({
               files={filteredFiles}
               activeFileIndex={activeFileIndex}
               onFileSelect={handleFileClick}
-              reviewedFiles={reviewedFiles}
-              onToggleReviewed={onToggleReviewed}
             />
           </div>
         </div>
@@ -1413,7 +1406,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
   const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
 
-  const { reviewedFiles, toggleReviewed } = useReviewedFiles(id);
   const {
     comments,
     commentsByLine,
@@ -1643,8 +1635,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                 activeFileIndex={activeFileIndex}
                 onFileSelect={setActiveFileIndex}
                 onOpenReview={openReview}
-                reviewedFiles={reviewedFiles}
-                onToggleReviewed={toggleReviewed}
                 comments={comments}
                 onCommentClick={handleCommentClick}
                 passes={passes}
