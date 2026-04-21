@@ -187,11 +187,18 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
   },
   repositories: {
-    list: () => get<import('./types').ListResponse<import('./types').Repository>>('/api/v1/repositories'),
+    list: (opts?: { includeDisconnected?: boolean }) => {
+      const qs = opts?.includeDisconnected ? '?include_disconnected=true' : '';
+      return get<import('./types').ListResponse<import('./types').Repository>>(`/api/v1/repositories${qs}`);
+    },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`),
     update: (id: string, data: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}`, data),
     delete: (id: string) => del(`/api/v1/repositories/${id}`),
+    disconnect: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}/disconnect`),
+    reconnect: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}/reconnect`),
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),

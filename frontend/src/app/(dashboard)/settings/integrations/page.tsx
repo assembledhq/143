@@ -23,13 +23,17 @@ import {
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { queryKeys } from "@/lib/query-keys";
+import {
+  useDisconnectRepository,
+  useReconnectRepository,
+} from "@/hooks/use-repository-connection";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
 // `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
-// the same referential identity — `useAutosave` throws in dev when two
+// the same referential identity - `useAutosave` throws in dev when two
 // callers register different coalesce fns against the same queryKey.
 const coalesceSlackChannels = (_a: string[], b: string[]): string[] => b;
 
@@ -126,11 +130,16 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  // Fetch disconnected repos too so the user has a "Reconnect" affordance —
+  // without this, a user-disconnected repo becomes a ghost with no discoverable
+  // path back to active.
   const { data: reposResp } = useQuery({
-    queryKey: ["repositories"],
-    queryFn: () => api.repositories.list(),
+    queryKey: ["repositories", { includeDisconnected: true }],
+    queryFn: () => api.repositories.list({ includeDisconnected: true }),
   });
   const disconnectMutation = useDisconnectIntegration();
+  const disconnectRepoMutation = useDisconnectRepository();
+  const reconnectRepoMutation = useReconnectRepository();
 
   // Notion token dialog state.
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
@@ -166,9 +175,16 @@ export default function IntegrationsPage() {
     (integration) => integration.provider === "notion" && integration.status === "active"
   );
 
-  const connectedRepoNames = (reposResp?.data ?? [])
-    .filter((r) => r.status === "active")
-    .map((r) => r.full_name);
+  const githubRepos = (reposResp?.data ?? []).map((r) => ({
+    id: r.id,
+    full_name: r.full_name,
+    status: r.status,
+  }));
+  const pendingRepoID = disconnectRepoMutation.isPending
+    ? (disconnectRepoMutation.variables ?? null)
+    : reconnectRepoMutation.isPending
+      ? (reconnectRepoMutation.variables ?? null)
+      : null;
 
   return (
     <PageContainer size="default">
@@ -179,7 +195,10 @@ export default function IntegrationsPage() {
         />
       <AllIntegrationCards
         githubConnected={Boolean(githubIntegration)}
-        githubRepoNames={connectedRepoNames}
+        githubRepos={githubRepos}
+        onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
+        onReconnectRepo={(id) => reconnectRepoMutation.mutate(id)}
+        pendingRepoID={pendingRepoID}
         sentryConnected={Boolean(sentryIntegration)}
         linearConnected={Boolean(linearIntegration)}
         linearLoading={false}

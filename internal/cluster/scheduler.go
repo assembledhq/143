@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -32,7 +33,7 @@ type schedulerPlanStore interface {
 }
 
 type schedulerRepoStore interface {
-	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error)
+	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.RepositoryFilters) ([]models.Repository, error)
 }
 
 type schedulerAutomationStore interface {
@@ -191,7 +192,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		}
 
 		// Check if any repos have custom PM settings; if so, enqueue per-repo jobs.
-		repos, err := s.repos.ListByOrg(ctx, orgID)
+		repos, err := s.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{})
 		if err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("scheduler failed to list repos")
 			repos = nil

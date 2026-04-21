@@ -198,7 +198,11 @@ export function SetupChecklist() {
 
   const integrations = integrationsResponse?.data ?? [];
   const repositories = repositoriesResponse?.data ?? [];
-  const githubRepoNames = repositories.map((repository) => repository.full_name);
+  const githubRepos = repositories.map((r) => ({
+    id: r.id,
+    full_name: r.full_name,
+    status: r.status,
+  }));
   const githubIntegration = integrations.find((integration) => integration.provider === "github" && integration.status === "active");
   const sentryIntegration = integrations.find((integration) => integration.provider === "sentry" && integration.status === "active");
   const linearIntegration = integrations.find((integration) => integration.provider === "linear" && integration.status === "active");
@@ -217,7 +221,7 @@ export function SetupChecklist() {
         <div className="space-y-3">
           <SourceControlIntegrationCard
             githubConnected={Boolean(githubIntegration)}
-            githubRepoNames={githubRepoNames}
+            githubRepos={githubRepos}
             onConnectGitHub={() => api.integrations.loginGitHub()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}

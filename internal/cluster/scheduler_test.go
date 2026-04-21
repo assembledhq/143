@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -64,7 +65,7 @@ type mockRepos struct {
 	repos []models.Repository
 }
 
-func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error) {
+func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.RepositoryFilters) ([]models.Repository, error) {
 	return m.repos, nil
 }
 

@@ -42,7 +42,7 @@ type orgStore interface {
 }
 
 type repoStore interface {
-	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Repository, error)
+	ListByOrg(ctx context.Context, orgID uuid.UUID, filters db.RepositoryFilters) ([]models.Repository, error)
 	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
 }
 
@@ -212,7 +212,7 @@ func (s *Service) SetSkillsBuilder(sb SkillsBuilder) {
 // Note: for multi-repo orgs, this only returns one repo. Bootstrap/refresh will
 // only cover that single repo's codebase.
 func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.UUID) (models.Repository, error) {
-	repos, err := s.repos.ListByOrg(ctx, orgID)
+	repos, err := s.repos.ListByOrg(ctx, orgID, db.RepositoryFilters{})
 	if err != nil {
 		return models.Repository{}, fmt.Errorf("list repositories: %w", err)
 	}

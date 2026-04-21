@@ -1873,6 +1873,27 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedCode: http.StatusNotFound,
 			expectedBody: "REPOSITORY_NOT_FOUND",
 		},
+		{
+			name: "rejects creation against a disconnected repository",
+			body: `{"message":"Fix bug","agent_type":"claude_code","repository_id":"` + uuid.New().String() + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				cols := []string{
+					"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+					"private", "language", "description", "clone_url", "installation_id", "status",
+					"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+				}
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(cols).AddRow(
+						uuid.New(), orgID, uuid.New(), int64(1), "org/repo", "main",
+						false, nil, nil, "https://github.com/org/repo.git", int64(1),
+						"disconnected", nil, nil, json.RawMessage(`{}`), now, now,
+					))
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "REPO_DISCONNECTED",
+		},
 	}
 
 	for _, tt := range tests {

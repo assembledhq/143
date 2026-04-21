@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -388,11 +389,22 @@ func TestProjectHandler_Create(t *testing.T) {
 	defer mock.Close()
 
 	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
 	orgID := uuid.New()
 	userID := uuid.New()
 	repoID := uuid.New()
+	integrationID := uuid.New()
 	now := time.Now()
 
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO projects").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -480,6 +492,105 @@ func TestProjectHandler_Create_InvalidRepoID(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestProjectHandler_Create_RejectsDisconnectedRepo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "disconnected",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	body, _ := json.Marshal(map[string]string{
+		"title":         "New Project",
+		"goal":          "Build something",
+		"repository_id": repoID.String(),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewBuffer(body))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "REPO_DISCONNECTED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectHandler_Create_RepoNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	body, _ := json.Marshal(map[string]string{
+		"title":         "New Project",
+		"goal":          "Build something",
+		"repository_id": uuid.New().String(),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewBuffer(body))
+	ctx := middleware.WithOrgID(req.Context(), uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: uuid.New()})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestProjectHandler_Create_RepoStoreUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{
+		"title":         "New Project",
+		"goal":          "Build something",
+		"repository_id": uuid.New().String(),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects", bytes.NewBuffer(body))
+	ctx := middleware.WithOrgID(req.Context(), uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: uuid.New()})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "REPO_STORE_UNCONFIGURED")
 }
 
 // --- Delete handler tests ---

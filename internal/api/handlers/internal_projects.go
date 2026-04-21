@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,12 +31,12 @@ const maxOpenProposalsPerRepo = 3
 // InternalProjectHandler handles project proposal creation from sandbox agents
 // via internal API tokens.
 type InternalProjectHandler struct {
-	txStarter         db.TxStarter
-	projectStore      *db.ProjectStore
-	projectTaskStore  *db.ProjectTaskStore
-	repoStore         *db.RepositoryStore
-	signingSecret     string
-	logger            zerolog.Logger
+	txStarter        db.TxStarter
+	projectStore     *db.ProjectStore
+	projectTaskStore *db.ProjectTaskStore
+	repoStore        *db.RepositoryStore
+	signingSecret    string
+	logger           zerolog.Logger
 
 	// perTokenRepoCount tracks how many proposals each token has created per repo.
 	// Keyed by hash(token):repoID. This is intentionally in-memory: counters
@@ -153,9 +154,15 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	repo, err := h.repoStore.GetByID(r.Context(), claims.OrgID, repoID)
-	if err != nil || repo.OrgID != claims.OrgID {
-		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY", "repository not found in this organization")
+	if _, err := requireActiveRepo(r.Context(), h.repoStore, claims.OrgID, repoID); err != nil {
+		switch {
+		case errors.Is(err, errRepoDisconnected):
+			writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to propose projects")
+		case errors.Is(err, errRepoStoreUnconfigured):
+			writeError(w, r, http.StatusInternalServerError, "REPO_STORE_UNCONFIGURED", "repository lookup not configured")
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY", "repository not found in this organization")
+		}
 		return
 	}
 
