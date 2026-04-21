@@ -1,8 +1,9 @@
 "use client";
 
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
+import { Check, CheckCircle2, Eye, EyeOff, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
@@ -180,11 +181,21 @@ export default function AgentPage() {
     clamp: (v) => clamp(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
   });
 
+  // Read the latest `agent_config` from a ref rather than the render-time
+  // closure. Rapid successive edits (e.g. typing in two providers' keys
+  // back-to-back, or a debounced commit firing while a model select has
+  // already advanced the optimistic cache) would otherwise seed a merge
+  // from a stale snapshot and wipe the intervening optimistic writes.
+  const agentConfigRef = useRef(agentConfig);
+  useEffect(() => {
+    agentConfigRef.current = agentConfig;
+  });
+
   // Write an env var into agent_config. Because the server's mergeSettingsJSON
   // is shallow at the top level, we always send the FULL merged agent_config
   // so sibling providers (claude_code, gemini_cli) aren't wiped out.
   function saveAgentConfigField(agentKey: string, envVar: string, value: string) {
-    const current = { ...agentConfig };
+    const current = { ...agentConfigRef.current };
     const providerConfig = { ...(current[agentKey] ?? {}) };
     if (value) {
       providerConfig[envVar] = value;
@@ -200,6 +211,45 @@ export default function AgentPage() {
 
     autosave.save({ settings: { agent_config: current } });
   }
+
+  // Sensitive env vars (API keys) intentionally skip the autosave pipeline:
+  // we never prefill the plaintext into the input, never optimistically apply
+  // a half-typed key to the cache, and never commit on keystroke/blur. The
+  // caller must press "Save key" to dispatch. See settings/AGENTS.md for the
+  // policy.
+  const sensitiveSaveMutation = useMutation({
+    mutationFn: async ({
+      agentKey,
+      envVar,
+      value,
+    }: {
+      agentKey: string;
+      envVar: string;
+      value: string;
+    }) => {
+      const current = { ...agentConfigRef.current };
+      const providerConfig = { ...(current[agentKey] ?? {}) };
+      if (value) {
+        providerConfig[envVar] = value;
+      } else {
+        delete providerConfig[envVar];
+      }
+      if (Object.keys(providerConfig).length > 0) {
+        current[agentKey] = providerConfig;
+      } else {
+        delete current[agentKey];
+      }
+      return api.settings.update({ settings: { agent_config: current } });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
+      toast.success("Key saved");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "org-agent-sensitive-key-save" });
+      toast.error("Failed to save key");
+    },
+  });
 
   const removeSubscriptionMutation = useMutation({
     mutationFn: (id: string) => api.codexAuth.removeSubscription(id),
@@ -381,6 +431,12 @@ export default function AgentPage() {
 
         {envVarsToRender.map((envVar) => {
           const displayValue = agentConfig[agent.key]?.[envVar.name] ?? "";
+          const isPendingSensitiveSave = Boolean(
+            envVar.sensitive &&
+              sensitiveSaveMutation.isPending &&
+              sensitiveSaveMutation.variables?.agentKey === agent.key &&
+              sensitiveSaveMutation.variables?.envVar === envVar.name,
+          );
 
           return (
             <div key={envVar.name} className="space-y-1">
@@ -388,6 +444,12 @@ export default function AgentPage() {
                 <Label htmlFor={`org-${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
                   {envVar.label}
                 </Label>
+                {envVar.sensitive && displayValue && (
+                  <span className="inline-flex items-center text-xs text-emerald-600 dark:text-emerald-400">
+                    <Check className="mr-0.5 h-3 w-3" />
+                    Configured
+                  </span>
+                )}
               </div>
               {envVar.options ? (
                 <Select
@@ -408,10 +470,23 @@ export default function AgentPage() {
                     ))}
                   </SelectContent>
                 </Select>
+              ) : envVar.sensitive ? (
+                <AgentConfigSensitiveField
+                  id={`org-${agent.key}-${envVar.name}`}
+                  placeholder={envVar.placeholder ?? "API key"}
+                  hasExistingValue={Boolean(displayValue)}
+                  isSaving={isPendingSensitiveSave}
+                  onSave={(value) =>
+                    sensitiveSaveMutation.mutate({
+                      agentKey: agent.key,
+                      envVar: envVar.name,
+                      value,
+                    })
+                  }
+                />
               ) : (
                 <AgentConfigTextField
                   id={`org-${agent.key}-${envVar.name}`}
-                  sensitive={envVar.sensitive}
                   placeholder={envVar.placeholder ?? "Not set"}
                   serverValue={displayValue}
                   onCommit={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
@@ -661,7 +736,6 @@ export default function AgentPage() {
 
 interface AgentConfigTextFieldProps {
   id: string;
-  sensitive?: boolean;
   placeholder: string;
   serverValue: string;
   onCommit: (value: string) => void;
@@ -669,7 +743,6 @@ interface AgentConfigTextFieldProps {
 
 function AgentConfigTextField({
   id,
-  sensitive,
   placeholder,
   serverValue,
   onCommit,
@@ -678,12 +751,75 @@ function AgentConfigTextField({
   return (
     <Input
       id={id}
-      type={sensitive ? "password" : "text"}
+      type="text"
       placeholder={placeholder}
       value={field.value}
       className="font-mono text-xs"
       onChange={(e) => field.onChange(e.target.value)}
       onBlur={field.onBlur}
     />
+  );
+}
+
+interface AgentConfigSensitiveFieldProps {
+  id: string;
+  placeholder: string;
+  hasExistingValue: boolean;
+  isSaving: boolean;
+  onSave: (value: string) => void;
+}
+
+// Sensitive fields own their input state — the plaintext key is never
+// seeded from the server cache, so reloads and background refetches can't
+// resurface a partially typed value or pre-populate the DOM. Save is
+// explicit: the caller dispatches a full-object patch through the
+// non-optimistic `sensitiveSaveMutation` on the parent page.
+function AgentConfigSensitiveField({
+  id,
+  placeholder,
+  hasExistingValue,
+  isSaving,
+  onSave,
+}: AgentConfigSensitiveFieldProps) {
+  const [value, setValue] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const trimmed = value.trim();
+  const canSave = trimmed.length > 0 && !isSaving;
+
+  return (
+    <div className="flex gap-2">
+      <div className="relative flex-1">
+        <Input
+          id={id}
+          type={showKey ? "text" : "password"}
+          placeholder={hasExistingValue ? "Replace existing key..." : placeholder}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="pr-9 font-mono text-xs"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <button
+          type="button"
+          onClick={() => setShowKey((prev) => !prev)}
+          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          aria-label={showKey ? "Hide key" : "Show key"}
+        >
+          {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <Button
+        size="sm"
+        onClick={() => {
+          if (!canSave) return;
+          onSave(trimmed);
+          setValue("");
+          setShowKey(false);
+        }}
+        disabled={!canSave}
+      >
+        {isSaving ? "Saving..." : "Save key"}
+      </Button>
+    </div>
   );
 }

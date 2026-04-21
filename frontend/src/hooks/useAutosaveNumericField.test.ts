@@ -64,6 +64,40 @@ describe("useAutosaveNumericField", () => {
     expect(autosave.save).toHaveBeenCalledWith({ settings: { n: 10 } });
   });
 
+  it("dispatches using the latest toPatch closure when it changes after the debounce was armed", () => {
+    vi.useFakeTimers();
+    try {
+      const autosave = makeAutosaveStub<{ settings: { n: number; tag: string } }>();
+      let tag = "v1";
+      const { result, rerender } = renderHook(() =>
+        useAutosaveNumericField({
+          serverValue: 5,
+          autosave,
+          toPatch: (n) => ({ settings: { n, tag } }),
+        }),
+      );
+
+      act(() => {
+        result.current.onChange(changeEvent("7"));
+      });
+
+      // Caller swaps the `toPatch` closure — e.g. because a sibling field was
+      // optimistically updated and the component rerendered with a fresh
+      // snapshot — before the debounce timer fires.
+      tag = "v2";
+      rerender();
+
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+
+      expect(autosave.save).toHaveBeenCalledTimes(1);
+      expect(autosave.save).toHaveBeenCalledWith({ settings: { n: 7, tag: "v2" } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resets to the server value when blurred with non-numeric garbage", () => {
     const autosave = makeAutosaveStub<{ settings: { n: number } }>();
     const { result } = renderHook(() =>

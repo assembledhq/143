@@ -47,11 +47,16 @@ edits.
 | ------------------------------- | ------------ | --------- |
 | Toggle / checkbox / radio       | `0`          | change    |
 | Select                          | `0`          | change    |
-| Text / textarea / number        | `400`        | blur via `flush()` |
+| Text / textarea / number        | `400`        | blur (via field hook) |
 | Tag list (Enter-to-add)         | `0`          | change    |
 
-For text/number, also pair with `onBlur={flush}` so advancing with Tab commits
-immediately.
+For text and number inputs, use the per-field hooks (`useDebouncedTextField`,
+`useAutosaveNumericField`) instead of calling `save`/`flush` from the component.
+They own the local input state, debounce the commit, and return an `onBlur`
+handler that flushes on Tab-away — wire that directly to the input
+(`onBlur={field.onBlur}`). Reach for the raw `autosave.flush()` only from
+composite controls (e.g. the "Done" button on a sheet) that need to force a
+flush outside of blur.
 
 ### Optimistic update helpers
 

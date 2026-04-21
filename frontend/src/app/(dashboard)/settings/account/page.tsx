@@ -496,9 +496,11 @@ export default function AccountPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Set as team default</AlertDialogTitle>
-            <AlertDialogDescription>
-              Your personal {providerDisplayName(settingTeamDefaultProvider ?? "")} key will become the team default. Other members without their own personal key will use your credential for sessions. You can change or remove the team default at any time.
-            </AlertDialogDescription>
+            {settingTeamDefaultProvider && (
+              <AlertDialogDescription>
+                Your personal {providerDisplayName(settingTeamDefaultProvider)} key will become the team default. Other members without their own personal key will use your credential for sessions. You can change or remove the team default at any time.
+              </AlertDialogDescription>
+            )}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>

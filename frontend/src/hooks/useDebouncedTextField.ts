@@ -41,9 +41,30 @@ export function useDebouncedTextField({
   const [lastSent, setLastSent] = useState(serverValue);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Hold `onCommit` in a ref so the debounce timer reads the latest
+  // closure at fire time. Without this, a timer armed during render N
+  // would call render N's `onCommit`, which may close over stale props
+  // the caller built it from (e.g. a nested-object merge against the
+  // render-N cache snapshot). Assignment lives in an effect per
+  // react-hooks/refs.
+  const onCommitRef = useRef(onCommit);
+  useEffect(() => {
+    onCommitRef.current = onCommit;
+  });
+
+  // Resync when the server value changes for reasons other than our own
+  // commit (rollback, another tab, refetch). Two guards:
+  //   1. Only overwrite if the new server value differs from what we last
+  //      sent — otherwise we'd stomp mid-edit state on every successful save.
+  //   2. Don't overwrite while the user has uncommitted typed input. A
+  //      divergence between `local` and `lastSent` means the user has
+  //      typed something the debounce hasn't dispatched yet; that intent
+  //      is more recent than any incoming server refetch. Using state
+  //      rather than a ref keeps render-body lint rules happy.
   if (serverValue !== trackedServer) {
     setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
+    const hasPendingEdit = local !== lastSent;
+    if (serverValue !== lastSent && !hasPendingEdit) {
       setLocal(serverValue);
       setLastSent(serverValue);
     }
@@ -58,7 +79,7 @@ export function useDebouncedTextField({
   const commit = (value: string) => {
     if (value === lastSent) return;
     setLastSent(value);
-    onCommit(value);
+    onCommitRef.current(value);
   };
 
   const onChange = (next: string) => {

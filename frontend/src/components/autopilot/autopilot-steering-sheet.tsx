@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Button } from "@/components/ui/button";
@@ -71,6 +72,16 @@ function AutopilotSteeringSheetBody({
     applyOptimistic: applyOrgSettingsPatch,
     coalesce: coalesceSettingsPatch,
   });
+
+  // "Done" must not drop the sheet mid-save: flushing the debounce only
+  // dispatches the request, it doesn't wait for the server. Track a
+  // pending-close intent and close once the autosave queue leaves "saving".
+  const [pendingClose, setPendingClose] = useState(false);
+  useEffect(() => {
+    if (pendingClose && autosave.status !== "saving") {
+      onOpenChange(false);
+    }
+  }, [pendingClose, autosave.status, onOpenChange]);
 
   // Build a product_context patch by merging the proposed field change against
   // the currently displayed values. The server shallow-merges at the top-level
@@ -186,12 +197,13 @@ function AutopilotSteeringSheetBody({
         <div className="flex justify-end">
           <Button
             variant="outline"
+            disabled={pendingClose && autosave.status === "saving"}
             onClick={() => {
               autosave.flush();
-              onOpenChange(false);
+              setPendingClose(true);
             }}
           >
-            Done
+            {pendingClose && autosave.status === "saving" ? "Saving…" : "Done"}
           </Button>
         </div>
       </div>

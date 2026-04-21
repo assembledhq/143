@@ -245,14 +245,21 @@ export function useAutosave<TVars>({
       if (!entry.coalesce && coalesceRef.current) {
         entry.coalesce = coalesceRef.current as (a: unknown, b: unknown) => unknown;
       } else if (
-        process.env.NODE_ENV !== "production" &&
         entry.coalesce &&
         coalesceRef.current &&
         entry.coalesce !== (coalesceRef.current as (a: unknown, b: unknown) => unknown)
       ) {
-        console.warn(
-          `useAutosave: multiple callers share queryKey ${serializedKey} but supplied different coalesce functions; ignoring the later one.`,
-        );
+        // Two components share a queryKey but passed different coalesce fns.
+        // In dev this is a bug — the queue's merge semantics depend on the
+        // registered coalesce and silently ignoring the later one produces
+        // mismatched cache writes. Throw loudly so the conflict surfaces
+        // during development. In production, fall back to keeping the first
+        // so we don't crash live sessions over a merge-strategy drift.
+        const message = `useAutosave: multiple callers share queryKey ${serializedKey} but supplied different coalesce functions. Every component autosaving against the same queryKey must pass an identical (referentially-stable) coalesce fn.`;
+        if (process.env.NODE_ENV !== "production") {
+          throw new Error(message);
+        }
+        console.warn(message);
       }
 
       if (entry.inFlight) {

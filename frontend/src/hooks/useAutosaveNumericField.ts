@@ -57,13 +57,31 @@ export function useAutosaveNumericField<TVars>({
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingValueRef = useRef<number | null>(null);
 
+  // Hold `toPatch` and `clamp` in refs so the debounce timer reads the
+  // latest closures at fire time. Without this, a timer armed during
+  // render N would call render N's `toPatch`, which may close over stale
+  // props (e.g. `repoSettings.pm` that has since been optimistically
+  // updated). Assignment lives in an effect per react-hooks/refs.
+  const toPatchRef = useRef(toPatch);
+  const clampRef = useRef(clamp);
+  useEffect(() => {
+    toPatchRef.current = toPatch;
+    clampRef.current = clamp;
+  });
+
   // Resync when the server value changes for reasons other than our own
-  // save (rollback, another tab, refetch). Guard: only overwrite local if
-  // the new server value differs from what we last sent — otherwise we'd
-  // stomp mid-edit state on every successful save.
+  // save (rollback, another tab, refetch). Two guards:
+  //   1. Only overwrite if the new server value differs from what we last
+  //      sent — otherwise we'd stomp mid-edit state on every successful save.
+  //   2. Don't overwrite while the user has uncommitted typed input. A
+  //      divergence between `local` and `String(lastSent)` means the user
+  //      has typed something the debounce hasn't dispatched yet; that
+  //      intent is more recent than any incoming server refetch. Using
+  //      state rather than a ref keeps render-body lint rules happy.
   if (serverValue !== trackedServer) {
     setTrackedServer(serverValue);
-    if (serverValue !== lastSent) {
+    const hasPendingEdit = local !== String(lastSent);
+    if (serverValue !== lastSent && !hasPendingEdit) {
       setLocal(String(serverValue));
       setLastSent(serverValue);
     }
@@ -80,7 +98,7 @@ export function useAutosaveNumericField<TVars>({
 
   const dispatch = (clamped: number) => {
     setLastSent(clamped);
-    autosave.save(toPatch(clamped));
+    autosave.save(toPatchRef.current(clamped));
   };
 
   const onChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -89,7 +107,7 @@ export function useAutosaveNumericField<TVars>({
     if (raw.trim() === "") return;
     const parsed = Number.parseInt(raw, 10);
     if (Number.isNaN(parsed)) return;
-    const clamped = clamp ? clamp(parsed) : parsed;
+    const clamped = clampRef.current ? clampRef.current(parsed) : parsed;
     pendingValueRef.current = clamped;
     if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
     debounceTimerRef.current = setTimeout(() => {
@@ -112,7 +130,7 @@ export function useAutosaveNumericField<TVars>({
       pendingValueRef.current = null;
       return;
     }
-    const clamped = clamp ? clamp(parsed) : parsed;
+    const clamped = clampRef.current ? clampRef.current(parsed) : parsed;
     if (String(clamped) !== local) setLocal(String(clamped));
     pendingValueRef.current = null;
     if (clamped !== lastSent) dispatch(clamped);

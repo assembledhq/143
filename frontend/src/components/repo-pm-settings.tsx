@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
+import { queryKeys } from "@/lib/query-keys";
 import type {
   Organization,
   OrgSettings,
@@ -46,8 +47,9 @@ interface RepoPMSettingsProps {
 }
 
 export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
+  const queryClient = useQueryClient();
   const { data: orgResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 
@@ -96,7 +98,15 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
 
   const autosave = useAutosave<RepoPatch>({
     queryKey: ["repository", repository.id],
-    mutationFn: (payload) => api.repositories.update(repository.id, payload),
+    mutationFn: async (payload) => {
+      const result = await api.repositories.update(repository.id, payload);
+      // useAutosave invalidates its own queryKey on settle. The repositories
+      // list query (rendered by the sidebar, repo picker, etc.) caches the
+      // same data under a different key, so invalidate it here too; otherwise
+      // list views show stale PM settings until the next navigation.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+      return result;
+    },
     applyOptimistic: (prev, patch) => {
       const previous = prev as SingleResponse<Repository> | undefined;
       if (!previous?.data) return previous;
