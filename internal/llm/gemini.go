@@ -63,9 +63,11 @@ const (
 
 // modelSupportsThinking returns true if the Gemini model accepts a
 // generationConfig.thinkingConfig block. Applies to gemini-2.5-* and
-// gemini-3-* generations; legacy 2.0/1.5 models reject it.
+// the gemini-3 / gemini-3.x generations; legacy 2.0/1.5 models reject it.
 func modelSupportsThinking(model string) bool {
-	return strings.HasPrefix(model, "gemini-2.5-") || strings.HasPrefix(model, "gemini-3-")
+	return strings.HasPrefix(model, "gemini-2.5-") ||
+		strings.HasPrefix(model, "gemini-3-") ||
+		strings.HasPrefix(model, "gemini-3.")
 }
 
 func (p *GeminiProvider) Complete(ctx context.Context, model, systemPrompt, userPrompt string, reasoningEffort ReasoningEffort) (string, error) {
@@ -122,12 +124,19 @@ func (p *GeminiProvider) Complete(ctx context.Context, model, systemPrompt, user
 	}
 
 	if len(result.Candidates) == 0 {
+		if reason := result.PromptFeedback.BlockReason; reason != "" {
+			return "", fmt.Errorf("no candidates in response (prompt blocked: %s)", reason)
+		}
 		return "", fmt.Errorf("no candidates in response")
 	}
-	for _, part := range result.Candidates[0].Content.Parts {
+	candidate := result.Candidates[0]
+	for _, part := range candidate.Content.Parts {
 		if part.Text != "" {
 			return part.Text, nil
 		}
+	}
+	if candidate.FinishReason != "" {
+		return "", fmt.Errorf("no text in first candidate (finishReason: %s)", candidate.FinishReason)
 	}
 	return "", fmt.Errorf("no text in first candidate")
 }
@@ -173,9 +182,15 @@ type geminiThinkingConfig struct {
 }
 
 type geminiResponse struct {
-	Candidates []geminiCandidate `json:"candidates"`
+	Candidates     []geminiCandidate    `json:"candidates"`
+	PromptFeedback geminiPromptFeedback `json:"promptFeedback"`
 }
 
 type geminiCandidate struct {
-	Content geminiContent `json:"content"`
+	Content      geminiContent `json:"content"`
+	FinishReason string        `json:"finishReason,omitempty"`
+}
+
+type geminiPromptFeedback struct {
+	BlockReason string `json:"blockReason,omitempty"`
 }

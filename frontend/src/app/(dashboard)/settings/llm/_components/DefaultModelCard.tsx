@@ -57,7 +57,7 @@ export function DefaultModelCard({
               </SelectTrigger>
               <SelectContent>
                 {!hasModels ? (
-                  <SelectItem value={value} disabled>
+                  <SelectItem value="__no_providers__" disabled>
                     No providers configured
                   </SelectItem>
                 ) : (

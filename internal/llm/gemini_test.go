@@ -221,6 +221,44 @@ func TestGeminiProvider_Complete_NoCandidates(t *testing.T) {
 	require.Contains(t, err.Error(), "no candidates")
 }
 
+func TestGeminiProvider_Complete_PromptBlockedSurfacesReason(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(geminiResponse{
+			Candidates:     nil,
+			PromptFeedback: geminiPromptFeedback{BlockReason: "SAFETY"},
+		})
+	}))
+	defer server.Close()
+
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "sys", "user", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SAFETY", "blockReason should appear in the error message")
+}
+
+func TestGeminiProvider_Complete_NoTextSurfacesFinishReason(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(geminiResponse{
+			Candidates: []geminiCandidate{{
+				Content:      geminiContent{Parts: []geminiPart{}},
+				FinishReason: "MAX_TOKENS",
+			}},
+		})
+	}))
+	defer server.Close()
+
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "sys", "user", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "MAX_TOKENS", "finishReason should appear in the error message")
+}
+
 func TestModelSupportsThinking(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -231,6 +269,8 @@ func TestModelSupportsThinking(t *testing.T) {
 		{"gemini-2.5-flash", true},
 		{"gemini-3-pro-preview", true},
 		{"gemini-3-flash-preview", true},
+		{"gemini-3.1-pro-preview", true},
+		{"gemini-3.1-flash-lite-preview", true},
 		{"gemini-2.0-flash", false},
 		{"gemini-1.5-pro", false},
 	}

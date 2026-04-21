@@ -47,7 +47,7 @@ describe("model constants", () => {
 
   it("includes latest Gemini CLI models", () => {
     expect(AVAILABLE_GEMINI_CLI_MODELS).toEqual([
-      "gemini-3-pro-preview",
+      "gemini-3.1-pro-preview",
       "gemini-3-flash-preview",
       "gemini-2.5-pro",
       "gemini-2.5-flash",
@@ -78,7 +78,7 @@ describe("model constants", () => {
     expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "gemini", "openrouter"]);
     expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
     expect(LLM_MODELS_BY_PROVIDER.openai.models).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
-    expect(LLM_MODELS_BY_PROVIDER.gemini.models).toEqual(["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]);
+    expect(LLM_MODELS_BY_PROVIDER.gemini.models).toEqual(["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]);
   });
 
   it("LLM_PROVIDER_INFO includes Gemini with an AIza placeholder", () => {

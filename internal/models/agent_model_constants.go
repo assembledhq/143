@@ -32,14 +32,14 @@ const (
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet, ClaudeCodeModelHaiku}
 
 const (
-	GeminiCLIModelGemini3ProPreview   = "gemini-3-pro-preview"
+	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
 	GeminiCLIModelGemini3FlashPreview = "gemini-3-flash-preview"
 	GeminiCLIModelGemini25Pro         = "gemini-2.5-pro"
 	GeminiCLIModelGemini25Flash       = "gemini-2.5-flash"
 )
 
 var AvailableGeminiCLIModels = []string{
-	GeminiCLIModelGemini3ProPreview,
+	GeminiCLIModelGemini31ProPreview,
 	GeminiCLIModelGemini3FlashPreview,
 	GeminiCLIModelGemini25Pro,
 	GeminiCLIModelGemini25Flash,
@@ -160,9 +160,10 @@ var AvailableLLMModels = []string{
 	"gpt-5.4",
 	"gpt-5.4-mini",
 	"gpt-5.4-nano",
+	"gemini-3.1-pro",
+	"gemini-3-flash",
 	"gemini-2.5-pro",
 	"gemini-2.5-flash",
-	"gemini-2.0-flash",
 }
 
 // LLMModelsByProvider returns general-purpose LLM models grouped by provider.
@@ -172,8 +173,8 @@ func LLMModelsByProvider() map[string][]string {
 	return map[string][]string{
 		"anthropic":  {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
 		"openai":     {"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
-		"gemini":     {"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"},
-		"openrouter": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"},
+		"gemini":     {"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"},
+		"openrouter": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"},
 	}
 }
 

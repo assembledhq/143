@@ -29,7 +29,7 @@ const {
     data: {
       openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
       anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
-      gemini: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+      gemini: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
     },
   }),
   llmDefaultsMock: vi.fn().mockResolvedValue({
@@ -59,7 +59,9 @@ vi.mock("@/lib/errors", () => ({
 
 async function openEditDialog(provider: "Anthropic" | "OpenAI" | "Gemini" | "OpenRouter") {
   const user = userEvent.setup();
-  const row = (await screen.findByText(provider)).closest("div.rounded-lg")!;
+  const row = (await screen.findByText(provider)).closest(
+    "[data-testid='provider-key-row']",
+  )!;
   const button = within(row as HTMLElement).getByRole("button", { name: /^(Edit|Add)$/ });
   await user.click(button);
   return { user };
@@ -381,5 +383,35 @@ describe("LLMPage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("heading", { name: /Anthropic API key/i })).not.toBeInTheDocument();
     });
+  });
+
+  it("stays open when reopening a provider dialog shortly after a successful save", async () => {
+    renderWithProviders(<LLMPage />);
+    const first = await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("sk-ant-...")).toBeInTheDocument();
+    });
+
+    await first.user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test");
+    await first.user.click(screen.getByRole("button", { name: "Save" }));
+
+    // Dialog closes after the save.
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: /Anthropic API key/i })).not.toBeInTheDocument();
+    });
+
+    // Reopen the same provider's dialog immediately — the lingering "success"
+    // save status must not cause it to auto-close.
+    await openEditDialog("Anthropic");
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
+    });
+
+    // Confirm it's still open after a microtask — the auto-close effect would
+    // have fired by now if it were going to.
+    await Promise.resolve();
+    expect(screen.getByRole("heading", { name: /Anthropic API key/i })).toBeInTheDocument();
   });
 });

@@ -33,7 +33,7 @@ func TestGeminiCLIModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{GeminiCLIModelGemini3ProPreview, GeminiCLIModelGemini3FlashPreview, GeminiCLIModelGemini25Pro, GeminiCLIModelGemini25Flash},
+		[]string{GeminiCLIModelGemini31ProPreview, GeminiCLIModelGemini3FlashPreview, GeminiCLIModelGemini25Pro, GeminiCLIModelGemini25Flash},
 		AvailableGeminiCLIModels,
 		"AvailableGeminiCLIModels should include current Gemini 3 and 2.5 options",
 	)
@@ -55,7 +55,7 @@ func TestLLMModelConstants(t *testing.T) {
 	require.Equal(t, []string{
 		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
-		"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+		"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -70,8 +70,8 @@ func TestLLMModelsByProvider(t *testing.T) {
 	require.Contains(t, byProvider, "openrouter")
 	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
-	require.Equal(t, []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"}, byProvider["gemini"])
-	require.Contains(t, byProvider["openrouter"], "gemini-2.5-pro", "openrouter should proxy gemini models too")
+	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"}, byProvider["gemini"])
+	require.Contains(t, byProvider["openrouter"], "gemini-3.1-pro", "openrouter should proxy the latest gemini models too")
 }
 
 // TestLLMProvidersHaveModels guards against drift between the LLMProviders
@@ -108,7 +108,7 @@ func TestValidateModelForAgentType(t *testing.T) {
 	}{
 		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet},
-		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini3ProPreview},
+		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini31ProPreview},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
 		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
@@ -152,7 +152,7 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"codex":       {"OPENAI_MODEL": CodexModelGPT53Codex},
 					"claude_code": {"ANTHROPIC_MODEL": ClaudeCodeModelSonnet},
-					"gemini_cli":  {"GEMINI_MODEL": GeminiCLIModelGemini3ProPreview},
+					"gemini_cli":  {"GEMINI_MODEL": GeminiCLIModelGemini31ProPreview},
 				},
 			},
 		},
@@ -173,7 +173,7 @@ func TestValidateSettingsModels(t *testing.T) {
 		{
 			name: "accepts gemini model as pm model",
 			settings: OrgSettings{
-				PMModel: GeminiCLIModelGemini3ProPreview,
+				PMModel: GeminiCLIModelGemini31ProPreview,
 			},
 		},
 		{

@@ -202,7 +202,7 @@ type NoProvidersError struct {
 }
 
 func (e *NoProvidersError) Error() string {
-	return fmt.Sprintf("no configured providers available for model %q: set ANTHROPIC_API_KEY or OPENAI_API_KEY", e.Model)
+	return fmt.Sprintf("no configured providers available for model %q: set one of ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or OPENROUTER_API_KEY", e.Model)
 }
 
 // truncate shortens a string to maxLen, appending "..." if truncated.

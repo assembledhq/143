@@ -193,6 +193,13 @@ export default function LLMPage() {
     keyMutation.mutate({ provider, config });
   }
 
+  function openEditor(provider: string) {
+    // Clear any lingering save status from a previous save so a freshly opened
+    // dialog doesn't immediately auto-close on a stale "success".
+    setKeySaveStatus((prev) => ({ ...prev, [provider]: "idle" }));
+    setEditingProvider(provider);
+  }
+
   const editingInfo = editingProvider ? LLM_PROVIDER_INFO[editingProvider] : null;
   const editingStatus = editingProvider ? providerStatus[editingProvider] : undefined;
   const editingSaveStatus = editingProvider ? keySaveStatus[editingProvider] ?? "idle" : "idle";
@@ -259,7 +266,7 @@ export default function LLMPage() {
                 info={LLM_PROVIDER_INFO[provider]}
                 status={providerStatus[provider] ?? { orgConfigured: false, platformAvailable: false }}
                 isDefaultOwner={provider === ownerProvider}
-                onEdit={() => setEditingProvider(provider)}
+                onEdit={() => openEditor(provider)}
               />
             ))}
           </div>

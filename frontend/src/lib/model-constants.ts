@@ -17,13 +17,13 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_HAIKU,
 ] as const;
 
-export const GEMINI_CLI_MODEL_GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview";
+export const GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview";
 export const GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview";
 export const GEMINI_CLI_MODEL_GEMINI_2_5_PRO = "gemini-2.5-pro";
 export const GEMINI_CLI_MODEL_GEMINI_2_5_FLASH = "gemini-2.5-flash";
 
 export const AVAILABLE_GEMINI_CLI_MODELS = [
-  GEMINI_CLI_MODEL_GEMINI_3_PRO_PREVIEW,
+  GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW,
   GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW,
   GEMINI_CLI_MODEL_GEMINI_2_5_PRO,
   GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
@@ -81,8 +81,8 @@ export const AVAILABLE_PM_MODELS = [
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
   anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
-  gemini: { label: "Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] },
+  gemini: { label: "Gemini", models: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
+  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
 };
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";

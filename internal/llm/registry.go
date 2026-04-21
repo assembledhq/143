@@ -64,6 +64,22 @@ var defaultChains = map[ModelName][]providerModel{
 	},
 
 	// Gemini models — primary: Gemini API, cross-provider fallback, then OpenRouter.
+	// The human-friendly key is what the user picks in the dropdown; ModelID is the
+	// provider-specific API identifier (Gemini 3.x models ship as "-preview" strings).
+	"gemini-3.1-pro": {
+		{ProviderName: "gemini", ModelID: "gemini-3.1-pro-preview"},
+		{ProviderName: "anthropic", ModelID: "claude-opus-4-7"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "openrouter", ModelID: "google/gemini-3.1-pro-preview"},
+	},
+	"gemini-3-flash": {
+		{ProviderName: "gemini", ModelID: "gemini-3-flash-preview"},
+		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openrouter", ModelID: "google/gemini-3-flash-preview"},
+	},
 	"gemini-2.5-pro": {
 		{ProviderName: "gemini", ModelID: "gemini-2.5-pro"},
 		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
@@ -77,13 +93,6 @@ var defaultChains = map[ModelName][]providerModel{
 		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
 		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
 		{ProviderName: "openrouter", ModelID: "google/gemini-2.5-flash"},
-	},
-	"gemini-2.0-flash": {
-		{ProviderName: "gemini", ModelID: "gemini-2.0-flash"},
-		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
-		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
-		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
-		{ProviderName: "openrouter", ModelID: "google/gemini-2.0-flash"},
 	},
 }
 
