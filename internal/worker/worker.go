@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/jobctx"
 )
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
@@ -161,6 +163,7 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	handlerCtx := withJobOrgID(ctx, orgID)
+	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	w.logger.Info().Str("job_id", jobID.String()).Str("job_type", jobType).Msg("processing job")
 	if err := handler(handlerCtx, jobType, payload); err != nil {
 		// FatalError means the failure is persistent — dead-letter immediately
@@ -169,6 +172,7 @@ func (w *Worker) poll(ctx context.Context) {
 		if errors.As(err, &fatal) {
 			w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed (fatal, skipping retries)")
 			w.deadLetterJob(ctx, jobID, err.Error())
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 			return
 		}
 		// RetryableError means we should retry without consuming an attempt
@@ -182,7 +186,9 @@ func (w *Worker) poll(ctx context.Context) {
 					Str("job_id", jobID.String()).
 					Dur("age", time.Since(jobCreatedAt)).
 					Msg("retryable job exceeded max duration, dead-lettering")
-				w.deadLetterJob(ctx, jobID, fmt.Sprintf("retryable job timed out after %s: %s", maxRetryableDuration, err.Error()))
+				timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
+				w.deadLetterJob(ctx, jobID, timeoutErr.Error())
+				jobctx.RunDeadLetterHooks(handlerCtx, timeoutErr)
 				return
 			}
 			w.logger.Info().Err(err).Str("job_id", jobID.String()).Msg("job deferred (retryable)")
@@ -192,6 +198,7 @@ func (w *Worker) poll(ctx context.Context) {
 		w.logger.Error().Err(err).Str("job_id", jobID.String()).Msg("job failed")
 		if attempts+1 >= maxAttempts {
 			w.deadLetterJob(ctx, jobID, err.Error())
+			jobctx.RunDeadLetterHooks(handlerCtx, err)
 		} else {
 			w.retryJob(ctx, jobID, err.Error(), attempts+1)
 		}
