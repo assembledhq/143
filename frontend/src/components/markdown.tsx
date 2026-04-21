@@ -45,7 +45,7 @@ const components: Components = {
   code: Code,
   // Paragraphs
   p({ children }) {
-    return <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>;
+    return <p className="mb-2 last:mb-0 leading-relaxed break-words">{children}</p>;
   },
   // Headings
   h1({ children }) {
