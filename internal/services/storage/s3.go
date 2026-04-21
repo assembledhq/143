@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -54,6 +55,13 @@ func (s *S3SnapshotStore) Load(ctx context.Context, key string, writer io.Writer
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// S3-compatible stores report missing keys as NoSuchKey. Wrap the
+		// sentinel so callers can distinguish "snapshot gone" (expected,
+		// return a 410 to the user) from transport errors (500-class).
+		var nsk *s3types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return fmt.Errorf("download snapshot %s: %w", key, ErrSnapshotNotFound)
+		}
 		return fmt.Errorf("download snapshot %s: %w", key, err)
 	}
 	defer result.Body.Close()

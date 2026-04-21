@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -34,7 +35,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, orgSettingsInvalidator handlers.OrgSettingsInvalidator) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, codexAuthSvc *codexauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -79,7 +80,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		var err error
 		cryptoSvc, err = crypto.NewService(cfg.EncryptionMasterKey)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
@@ -308,12 +309,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		Store:                 previewStore,
 		SessionStore:          sessionStore,
 		Provider:              previewProvider,
+		SandboxProvider:       sandboxProvider,
 		Inspector:             previewInspector,
 		SnapshotCache:         previewSnapshotCache,
 		HMRWatcher:            hmrWatcher,
 		Logger:                logger,
 		WorkerNodeID:          "local", // MODE=all: single-node
 		PreviewOriginTemplate: cfg.PreviewOriginTemplate,
+		MaxPerUser:            cfg.PreviewMaxPerUser,
+		MaxPerOrg:             cfg.PreviewMaxPerOrg,
+		MaxPerWorker:          cfg.PreviewMaxPerWorker,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -348,7 +353,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		// returning from NewRouter, rather than silently failing in a goroutine.
 		gwListener, listenErr := net.Listen("tcp", addr)
 		if listenErr != nil {
-			return nil, nil, nil, nil, fmt.Errorf("preview gateway listen on %s: %w", addr, listenErr)
+			return nil, nil, nil, nil, nil, fmt.Errorf("preview gateway listen on %s: %w", addr, listenErr)
 		}
 		go func() {
 			if gwErr := gwSrv.Serve(gwListener); gwErr != nil && gwErr != http.ErrServerClosed {
@@ -357,7 +362,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		}()
 	}
 
-	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, fileReader, logger)
+	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, fileReader, sandboxProvider, snapshotStore, logger)
 	previewHandler.SetAuditEmitter(auditEmitter)
 
 	// Upload store: use S3 if configured, otherwise fall back to local filesystem.
@@ -691,5 +696,5 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 	})
 
-	return r, gwSrv, recycleWorker, inspectorCloser, nil
+	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
 }

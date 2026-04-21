@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"path"
 	"regexp"
 	"strings"
@@ -76,6 +75,26 @@ type SessionStore interface {
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	// AcquireTurnHold flips turn_holding_container=TRUE and publishes the
+	// turn's proposed container_id via COALESCE. The returned
+	// actualContainerID is the container_id now stored on the row: equal to
+	// proposedContainerID when the caller won the race, different when a
+	// concurrent preview-hydrate published first. In the latter case the
+	// caller must destroy its just-created sandbox and attach to the
+	// actualContainerID instead.
+	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error)
+	// ReleaseTurnHold flips turn_holding_container=FALSE and reports whether
+	// the caller should destroy the container. destroyNow is true only when no
+	// preview is holding the container; otherwise the preview keeps it alive
+	// for the "iterate between turns" flow.
+	ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (destroyNow bool, containerID string, err error)
+	// FinalizeContainerDestroy is the TOCTOU-safe companion to
+	// ReleaseTurnHold: it atomically clears container_id and marks
+	// sandbox_state='snapshotted' only when no holder has come back and the
+	// container_id still matches expectedContainerID. Returns true when the
+	// caller owns the destroy, false when a new holder acquired in the gap
+	// (caller must leave the container alone).
+	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -466,6 +485,35 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if o.usageTracker != nil {
 		usageEventID = o.usageTracker.ContainerStarted(ctx, run.OrgID, run.ID, sandbox, sandboxCfg, containerStartedAt)
 	}
+	// Record the turn hold so a concurrent StartPreview can attach to this
+	// container (same ID, same filesystem) instead of hydrating a duplicate.
+	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
+	// if a concurrent preview hydrate won, actualID will differ from our
+	// sandbox.ID and we must drop the local container we just created.
+	// On DB error we destroy the local container and fail the run — if we
+	// left it alive the reconciler couldn't find it (no container_id row
+	// reference) and it would leak until server restart.
+	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
+	if holdErr != nil {
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+			log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
+		}
+		o.failRun(ctx, run, fmt.Sprintf("acquire turn hold: %s", holdErr))
+		return fmt.Errorf("acquire turn hold: %w", holdErr)
+	}
+	if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+			log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Str("losing_container_id", sandbox.ID).
+			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
+		o.failRun(ctx, run, "sandbox race: another holder attached first, please retry")
+		return fmt.Errorf("sandbox race: actual container %s != created %s", actualContainerID, sandbox.ID)
+	}
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
 		if o.usageTracker != nil {
@@ -477,6 +525,36 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
+		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
+		if releaseErr != nil {
+			// Fall back to destroy to avoid leaking the container if we
+			// can't read the holder state.
+			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
+			destroyNow = true
+		}
+		if !destroyNow {
+			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive")
+			return
+		}
+		// FinalizeContainerDestroy re-checks holder state atomically and only
+		// clears container_id when it still matches the expected ID with no
+		// holder active. This closes the window between the release above and
+		// the physical destroy below where a new holder could have acquired.
+		// Order: clear container_id FIRST (via the CAS) then destroy, so new
+		// reuse-path readers hydrate fresh rather than attach to a dying ID.
+		expectedID := releasedID
+		if expectedID == "" {
+			expectedID = sandbox.ID
+		}
+		cleared, finalizeErr := o.sessions.FinalizeContainerDestroy(destroyCtx, run.OrgID, run.ID, expectedID)
+		if finalizeErr != nil {
+			log.Warn().Err(finalizeErr).Msg("failed to finalize container destroy; skipping destroy to avoid dropping a live holder's container")
+			return
+		}
+		if !cleared {
+			log.Info().Str("container_id", sandbox.ID).Msg("another holder acquired between release and destroy; leaving container alive")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
@@ -857,25 +935,118 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 
-	sandbox, err := o.provider.Create(ctx, sandboxCfg)
-	if err != nil {
-		// For continued sessions, revert to idle instead of permanently failing
-		// so the user can retry once the infrastructure issue is resolved (e.g.
-		// Docker daemon restarted). Post an assistant message explaining the error.
-		log.Error().Err(err).Msg("sandbox creation failed during continue_session")
-		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
-			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
+	// Determine sandbox strategy:
+	//   - Reuse: a preview already hydrated the container; attach to it by ID
+	//     and skip both Create and Restore.
+	//   - Hydrate: a snapshot exists; create a new container and restore the
+	//     snapshot via the shared HydrateSandboxFromSnapshot helper.
+	//   - Fresh: no snapshot; create a clean container and clone fresh below.
+	var sandbox *Sandbox
+	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+	switch {
+	case reusedExisting:
+		sandbox = &Sandbox{
+			ID:        *session.ContainerID,
+			Provider:  "docker",
+			WorkDir:   sandboxCfg.WorkDir,
+			HomeDir:   sandboxCfg.HomeDir,
+			SessionID: sandboxCfg.SessionID,
+			OrgID:     sandboxCfg.OrgID,
+			Purpose:   sandboxCfg.Purpose,
 		}
-		if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
-			log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
+		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
+	case hasSnapshot:
+		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+		if err != nil {
+			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after hydrate failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to restore the sandbox environment: %s\n\nPlease try again in a moment.", err),
+				"sandbox hydrate",
+			)
+			return fmt.Errorf("hydrate sandbox: %w", err)
+		}
+	default:
+		sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		if err != nil {
+			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after sandbox failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
+				"sandbox creation",
+			)
+			return fmt.Errorf("create sandbox: %w", err)
+		}
+	}
+	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
+	// when we reused a container (the row's container_id already matches our
+	// sandbox.ID). When we freshly hydrated, a concurrent preview hydrate may
+	// have published first — in that case actualContainerID differs from
+	// sandbox.ID and we must destroy our local container and abort so the
+	// user's retry picks up the winner via the reuse path.
+	// On DB error we destroy any locally-created sandbox and fail the turn —
+	// if we left it alive the reconciler couldn't find it (no container_id
+	// row reference) and it would leak.
+	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
+	if holdErr != nil {
+		destroyCtx := context.Background()
+		if !reusedExisting {
+			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+				log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
+			}
+		}
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
 		}
 		o.registerSandboxFailureMessage(
 			ctx,
 			session,
-			fmt.Sprintf("Failed to start the sandbox environment: %s\n\nPlease try again in a moment. If this persists, check that Docker is running.", err),
-			"sandbox creation",
+			fmt.Sprintf("Failed to acquire sandbox lease: %s\n\nPlease try again in a moment.", holdErr),
+			"turn hold",
 		)
-		return fmt.Errorf("create sandbox: %w", err)
+		return fmt.Errorf("acquire turn hold: %w", holdErr)
+	}
+	if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		// Only destroy the locally-created container. When reusedExisting is
+		// true, sandbox.ID came from the row's existing container_id and
+		// belongs to whoever set it — tearing it down here would kill a
+		// container another holder is still using. On the losing-race path
+		// we instead leave it alone; the caller's retry will attach to
+		// actualContainerID via the reuse path.
+		if !reusedExisting {
+			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
+			}
+		}
+		log.Warn().
+			Str("winning_container_id", actualContainerID).
+			Str("losing_container_id", sandbox.ID).
+			Msg("another holder published container_id first; aborting turn so the user can retry against the winning container")
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after losing hydrate race")
+		}
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			"Another session activity was starting at the same time. Please try again.",
+			"sandbox race",
+		)
+		return fmt.Errorf("sandbox race: actual container %s != local %s", actualContainerID, sandbox.ID)
 	}
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
@@ -889,7 +1060,35 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			defer stopCancel()
 			o.usageTracker.ContainerStopped(stopCtx, session.OrgID, session.ID, usageEventID, containerStartedAt, exitReason)
 		}
+		// Detached context so DB writes + destroy succeed even if ctx was
+		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
+		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+		if releaseErr != nil {
+			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
+			destroyNow = true
+		}
+		if !destroyNow {
+			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive for the preview")
+			return
+		}
+		// FinalizeContainerDestroy re-checks holder state atomically: if a
+		// preview or another turn acquired between our release and this
+		// destroy, the CAS matches zero rows and we skip destroy so the new
+		// holder's container isn't ripped out from under it.
+		expectedID := releasedID
+		if expectedID == "" {
+			expectedID = sandbox.ID
+		}
+		cleared, finalizeErr := o.sessions.FinalizeContainerDestroy(destroyCtx, session.OrgID, session.ID, expectedID)
+		if finalizeErr != nil {
+			log.Warn().Err(finalizeErr).Msg("failed to finalize container destroy; skipping destroy to avoid dropping a live holder's container")
+			return
+		}
+		if !cleared {
+			log.Info().Str("container_id", sandbox.ID).Msg("another holder acquired between release and destroy; leaving container alive")
+			return
+		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
@@ -900,33 +1099,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.cancels.Register(session.ID, sandbox, o.provider, cancel)
 	}
 
-	// 5. Set up the workspace — either restore snapshot or clone fresh.
+	// 5. Set up the workspace. Three paths:
+	//   - Reuse: the container is already live (preview hydrated it); just
+	//     re-inject Codex auth and build the resume prompt.
+	//   - Hydrate: HydrateSandboxFromSnapshot already did Create+Restore;
+	//     re-inject Codex auth and build the resume prompt.
+	//   - Fresh: no snapshot; clone repo fresh and build a reconstructed
+	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
-	if hasSnapshot {
-		// Path A: Restore snapshot from storage — preserves all git changes.
-		snapshotReader, snapshotWriter := io.Pipe()
-		var restoreErr error
-		var restoreWg sync.WaitGroup
-		restoreWg.Add(1)
-		go func() {
-			defer restoreWg.Done()
-			restoreErr = o.snapshots.Load(ctx, *session.SnapshotKey, snapshotWriter)
-			_ = snapshotWriter.Close() // Intentionally ignored: pipe close error is not actionable here; restoreErr captures the real failure.
-		}()
-
-		if err := o.provider.Restore(ctx, sandbox, snapshotReader); err != nil {
-			_ = snapshotReader.Close() // Intentionally ignored: we already have the restore error.
-			restoreWg.Wait()
-			o.failRun(ctx, session, fmt.Sprintf("restore snapshot: %s", err))
-			return fmt.Errorf("restore snapshot: %w", err)
-		}
-		restoreWg.Wait()
-		if restoreErr != nil {
-			o.failRun(ctx, session, fmt.Sprintf("load snapshot from storage: %s", restoreErr))
-			return fmt.Errorf("load snapshot: %w", restoreErr)
-		}
-
-		// Re-inject Codex auth.json if needed.
+	if reusedExisting || hasSnapshot {
+		// Re-inject Codex auth.json. Cheap, and catches the case where the
+		// file was cleared or drifted while the container was idle (or where
+		// the preview created the container without agent credentials).
 		if session.AgentType == models.AgentTypeCodex {
 			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
 				return err
@@ -944,7 +1128,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			MaxTokens:       tokenLimitForMode(session.TokenMode),
 		}
 
-		log.Info().Msg("continuing session with snapshot restore")
+		if reusedExisting {
+			log.Info().Msg("continuing session in reused sandbox (preview holds container)")
+		} else {
+			log.Info().Msg("continuing session with snapshot restore")
+		}
 	} else {
 		// Path B: No snapshot available — clone repo fresh and provide
 		// conversation history + stored diff as context so the agent can

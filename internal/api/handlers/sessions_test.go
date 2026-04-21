@@ -48,7 +48,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "started_at", "completed_at", "token_usage",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -78,7 +78,7 @@ func TestSessionHandler_List(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 							nil, nil, nil, nil,
-							nil, &now, &now, nil,
+							nil, false, &now, &now, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -164,7 +164,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -260,7 +260,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -352,7 +352,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -401,7 +401,7 @@ func TestSessionHandler_List_EmitsCursorWhenFull(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -581,7 +581,7 @@ func TestSessionHandler_Get(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -1362,7 +1362,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -1452,7 +1452,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -1515,7 +1515,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -1542,7 +1542,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -1838,7 +1838,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -1900,7 +1900,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -2083,7 +2083,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2125,7 +2125,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, &now, nil,
+							nil, false, &now, &now, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2209,7 +2209,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2235,7 +2235,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2278,7 +2278,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2325,7 +2325,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2367,7 +2367,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2397,7 +2397,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2428,7 +2428,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2458,7 +2458,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						pgxmock.NewRows(sessionColumns).AddRow(
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
-							nil, &now, nil, nil,
+							nil, false, &now, nil, nil,
 							nil, nil, nil, false,
 							nil, nil, nil, nil, nil,
 							nil, nil, nil, nil,
@@ -2788,7 +2788,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
@@ -2860,7 +2860,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
@@ -2924,7 +2924,7 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil, // diff is nil
 				nil, nil, nil, nil,
@@ -2978,7 +2978,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
@@ -3075,7 +3075,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, &now, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
@@ -3145,7 +3145,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -3199,7 +3199,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
@@ -3277,7 +3277,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).AddRow(
 				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
 				nil, nil, nil, nil,
-				nil, &now, nil, nil,
+				nil, false, &now, nil, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,

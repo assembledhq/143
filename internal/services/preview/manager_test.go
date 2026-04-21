@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -123,6 +124,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -143,7 +145,7 @@ var previewAccessSessionTestCols = []string{
 var sessionTestCols = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "started_at", "completed_at", "token_usage",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -159,6 +161,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "", now, now, now, nil,
+		false,
 	}
 }
 
@@ -174,7 +177,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 	return []any{
 		sessionID, issueID, orgID, "claude-code", "running", "supervised", "low",
 		nil, nil, nil, nil,
-		containerID, &now, nil, nil,
+		containerID, false, &now, nil, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
@@ -998,7 +1001,8 @@ func TestCheckConcurrencyCaps_UserExceeded(t *testing.T) {
 
 	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "you have reached your limit")
+	require.ErrorIs(t, err, ErrPreviewCapacity)
+	require.Contains(t, err.Error(), "you already have")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1026,7 +1030,8 @@ func TestCheckConcurrencyCaps_OrgExceeded(t *testing.T) {
 
 	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "org has reached its limit")
+	require.ErrorIs(t, err, ErrPreviewCapacity)
+	require.Contains(t, err.Error(), "your team has")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1059,7 +1064,8 @@ func TestCheckConcurrencyCaps_WorkerExceeded(t *testing.T) {
 
 	err = mgr.checkConcurrencyCaps(context.Background(), orgID, userID)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "worker node has reached its limit")
+	require.ErrorIs(t, err, ErrPreviewCapacity)
+	require.Contains(t, err.Error(), "all preview slots are in use")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1236,6 +1242,1317 @@ func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *t
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.NoError(t, err, "RecyclePreview should rebuild legacy restart inputs when recycle state is missing")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// =============================================================================
+// StopActivePreviewForSession tests
+// =============================================================================
+
+func TestStopActivePreviewForSession_NoPreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// GetActivePreviewForSession returns no rows — treated as "no preview".
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	stopped, err := mgr.StopActivePreviewForSession(context.Background(), orgID, sessionID)
+	require.NoError(t, err)
+	require.False(t, stopped, "no active preview must yield stopped=false")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStopActivePreviewForSession_StopsActivePreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	// 1. GetActivePreviewForSession returns one active preview.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	// 2. StopPreview → GetPreviewInstance.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	// 3. StopPreviewWithRevocation.
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	// 4. ReleasePreviewHold: no container to destroy, so destroyNow=false.
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "", false),
+		)
+
+	stopped, err := mgr.StopActivePreviewForSession(context.Background(), orgID, sessionID)
+	require.NoError(t, err)
+	require.True(t, stopped, "an active preview must report stopped=true")
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "no container means nothing to destroy")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// =============================================================================
+// StopPreview hold-aware destroy tests
+// =============================================================================
+
+func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	// ReleasePreviewHold: container-1 is live, turn does NOT hold, so destroy.
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+
+	// FinalizeContainerDestroy CAS: clears container_id + snapshotted state
+	// atomically. Matches one row since no new holder is present.
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL, sandbox_state = 'snapshotted'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 1, sandboxProvider.GetDestroyCalls(), "final hold release must destroy the container")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStopPreview_LeavesSandboxWhenNewHolderAcquiredAfterRelease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	// ReleasePreviewHold reports destroyNow=true based on its snapshot...
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+	// ...but the FinalizeContainerDestroy CAS matches zero rows because a new
+	// holder acquired in the gap. We must NOT destroy the container.
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), "container-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "must not destroy when a new holder acquired in the release gap")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStopPreview_LeavesSandboxWhenTurnStillHolds(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	// ReleasePreviewHold: turn still holds → do NOT destroy.
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", true),
+		)
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "turn still holds the container; must not destroy")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestStopPreview_FinalizeErrorLeavesContainerForReconciler covers the
+// FinalizeContainerDestroy error branch: on a DB failure we must skip Destroy
+// so the reconciler can revisit the container on next startup rather than
+// risk ripping it out from under a still-attached holder.
+func TestStopPreview_FinalizeErrorLeavesContainerForReconciler(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("db down"))
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "finalize error must skip destroy so the reconciler can revisit")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// =============================================================================
+// ReservePreview / LaunchPreview / AbortReservation / StartPreview tests
+// =============================================================================
+
+// validPreviewConfig returns a PreviewConfig that passes ValidateConfig.
+func validPreviewConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Version: "3",
+		Name:    "my-preview",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {
+				Command: []string{"npm", "run", "dev"},
+				Port:    3000,
+				Ready:   models.ReadinessProbe{HTTPPath: "/"},
+			},
+		},
+		Credentials: models.CredentialConfig{Mode: "none"},
+		Network:     models.NetworkConfig{Mode: "managed"},
+	}
+}
+
+// expectCreatePreviewInstance mirrors PreviewStore.CreatePreviewInstance: it
+// inserts a row and returns the row back. Tests inject a known preview ID via
+// the returned row, and the caller reads p.ID from the model after the call.
+func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time) {
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(previewAnyArgs(19)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)...),
+		)
+}
+
+// previewAnyArgs matches the helper style in the db package tests.
+func previewAnyArgs(n int) []any {
+	args := make([]any, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
+}
+
+func TestReservePreview_NilProviderErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(mock),
+		Provider:     nil,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider is not configured")
+}
+
+func TestReservePreview_ExistingActivePreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	existingID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(existingID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already has an active preview")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReservePreview_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	// GetActivePreviewForSession: no rows.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	// Capacity checks (3 counts).
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	instance, err := mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Config:    validPreviewConfig(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, instance)
+	require.Equal(t, previewID, instance.ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestReservePreview_InvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	bad := &models.PreviewConfig{
+		Version:  "3",
+		Name:     "missing-primary",
+		Services: map[string]models.ServiceConfig{},
+	}
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		Config:    bad,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid preview config")
+}
+
+func TestReservePreview_HoldErrorMarksFailed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+
+	// AcquirePreviewHold fails on both retry attempts.
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("boom"))
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("boom"))
+
+	// UpdatePreviewStatus failed.
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "acquire preview hold")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_NilProviderErrors(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(ManagerConfig{
+		Provider:     nil,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	_, err := mgr.LaunchPreview(context.Background(), &models.PreviewInstance{}, StartPreviewInput{Config: validPreviewConfig()})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider is not configured")
+}
+
+func TestLaunchPreview_NilSandboxErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	_, err = mgr.LaunchPreview(context.Background(), &models.PreviewInstance{}, StartPreviewInput{
+		Config:  validPreviewConfig(),
+		Sandbox: nil,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sandbox must not be nil")
+}
+
+func TestLaunchPreview_InvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	_, err = mgr.LaunchPreview(context.Background(), &models.PreviewInstance{}, StartPreviewInput{
+		Config:  &models.PreviewConfig{Name: "bad"},
+		Sandbox: &agent.Sandbox{ID: "s-1", Provider: "docker"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid preview config")
+}
+
+func TestLaunchPreview_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{
+			Handle:      "handle-new",
+			PrimaryPort: 3000,
+		},
+		statusSnap: &PreviewStatusSnapshot{},
+	}
+	mgr := newTestManager(mock, provider)
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+
+	instance := &models.PreviewInstance{
+		ID:        previewID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.PreviewStatusStarting,
+		// ConfigDigest is empty and RecycleSandbox is nil so needsUpdate=true.
+	}
+
+	// UpdatePreviewReservationConfig.
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// CreatePreviewService for web.
+	svcID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(svcID, previewID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+
+	// UpdatePreviewHandle.
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// UpdatePreviewStatusIfActive → ready.
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	launched, err := mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    uuid.New(),
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, models.PreviewStatusReady, launched.Status)
+	require.Equal(t, "handle-new", launched.PreviewHandle)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_ReservationNoLongerPending(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+		Status:    models.PreviewStatusStarting,
+	}
+
+	// UpdatePreviewReservationConfig: rows affected = 0 (status flipped).
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: instance.SessionID,
+		OrgID:     instance.OrgID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reservation is no longer pending")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_UpdateConfigError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnError(fmt.Errorf("db down"))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: instance.SessionID,
+		OrgID:     instance.OrgID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update reserved preview config")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_HandlePersistError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3000},
+	}
+	mgr := newTestManager(mock, provider)
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// CreatePreviewService.
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), instance.ID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+
+	// UpdatePreviewHandle returns error.
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnError(fmt.Errorf("db down"))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: instance.SessionID,
+		OrgID:     instance.OrgID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "persist preview handle")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_ConcurrentStopDuringStartup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3000},
+	}
+	mgr := newTestManager(mock, provider)
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), instance.ID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// UpdatePreviewStatusIfActive returns updated=false (concurrent stop).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: instance.SessionID,
+		OrgID:     instance.OrgID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stopped concurrently")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestLaunchPreview_ProviderStartError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{startErr: fmt.Errorf("docker down")}
+	mgr := newTestManager(mock, provider)
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+		Status:    models.PreviewStatusStarting,
+	}
+
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), instance.ID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", time.Now()),
+		)
+
+	_, err = mgr.LaunchPreview(context.Background(), instance, StartPreviewInput{
+		SessionID: instance.SessionID,
+		OrgID:     instance.OrgID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider start preview")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}
+
+	// UpdatePreviewStatus(failed).
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// ReleasePreviewHold: destroyNow=true (container-1 and no turn).
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+
+	// FinalizeContainerDestroy CAS succeeds (cleared=true).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL, sandbox_state = 'snapshotted'`).
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	mgr.AbortReservation(context.Background(), instance, "container-1", "launch failed")
+
+	require.Equal(t, 1, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_NilInstanceIsNoop(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(ManagerConfig{Logger: zerolog.Nop()})
+	mgr.AbortReservation(context.Background(), nil, "", "")
+}
+
+func TestAbortReservation_LeavesContainerWhenNotHydrated(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+	}
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(instance.SessionID, "container-1", false),
+		)
+
+	// hydratedContainerID="" → skip destroy even though destroyNow=true.
+	mgr.AbortReservation(context.Background(), instance, "", "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_LeavesContainerWhenSessionTracksDifferent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+	}
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Session reports a different container_id than the one we hydrated.
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(instance.SessionID, "winning-container", false),
+		)
+
+	mgr.AbortReservation(context.Background(), instance, "losing-container", "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_FinalizeNotClearedSkipsDestroy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+	}
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(instance.SessionID, "container-1", false),
+		)
+	// FinalizeContainerDestroy: 0 rows (a new holder acquired in the gap).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	mgr.AbortReservation(context.Background(), instance, "container-1", "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_FinalizeErrorSkipsDestroy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+	}
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(instance.SessionID, "container-1", false),
+		)
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnError(fmt.Errorf("db down"))
+
+	mgr.AbortReservation(context.Background(), instance, "container-1", "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAbortReservation_ReleaseHoldErrorLeavesContainer(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        &mockProvider{},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	instance := &models.PreviewInstance{
+		ID:        uuid.New(),
+		OrgID:     uuid.New(),
+		SessionID: uuid.New(),
+	}
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnError(fmt.Errorf("db down"))
+
+	mgr.AbortReservation(context.Background(), instance, "container-1", "launch failed")
+
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStartPreview_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{
+		startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3000},
+		statusSnap:  &PreviewStatusSnapshot{},
+	}
+	mgr := newTestManager(mock, provider)
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	// Reserve phase.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	// Launch phase.
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), previewID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", now),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	got, err := mgr.StartPreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, models.PreviewStatusReady, got.Status)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStartPreview_ReserveFailurePropagates(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	_, err = mgr.StartPreview(context.Background(), StartPreviewInput{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		Config:    &models.PreviewConfig{Name: "bad"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid preview config")
+}
+
+func TestStartPreview_LaunchFailureAborts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{startErr: fmt.Errorf("docker down")}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	// Reserve OK.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	expectCreatePreviewInstance(mock, previewID, sessionID, orgID, userID, models.PreviewStatusStarting, now)
+	mock.ExpectQuery(`UPDATE preview_instances\s+SET preview_holding_container = TRUE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	// Launch: config update ok, service insert ok, provider errors.
+	mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO preview_services").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewServiceTestCols).
+				AddRow(uuid.New(), previewID, "web", "primary", "starting", []string{"npm", "run", "dev"}, "", 3000, (*int)(nil), "", now),
+		)
+
+	// AbortReservation: UpdatePreviewStatus(failed) + ReleasePreviewHold.
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`WITH released AS`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "", false),
+		)
+
+	_, err = mgr.StartPreview(context.Background(), StartPreviewInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
+		Config:    validPreviewConfig(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider start preview")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// =============================================================================
+// StopActivePreviewForSession error path
+// =============================================================================
+
+func TestStopActivePreviewForSession_LookupError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("db down"))
+
+	stopped, err := mgr.StopActivePreviewForSession(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err)
+	require.False(t, stopped)
+	require.Contains(t, err.Error(), "lookup active preview")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestBuildStoredRecycleInputRoundTrip(t *testing.T) {

@@ -73,7 +73,7 @@ const sessionCountsCap = 100
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, started_at, completed_at, token_usage,
+	container_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -85,7 +85,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, started_at, completed_at, token_usage,
+	container_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -675,6 +675,254 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 		"sandbox_state": state,
 	})
 	return err
+}
+
+// AcquireTurnHold marks the agent turn as a holder of the sandbox container.
+// It uses COALESCE so a concurrently-published container_id (e.g. from a
+// preview that hydrated first) is preserved rather than overwritten. The
+// returned actualContainerID is the ID that is now stored on the row:
+//   - Equal to proposedContainerID → we won the race; the caller's sandbox is
+//     the authoritative one.
+//   - Different from proposedContainerID → another caller published first; the
+//     caller should destroy their just-created sandbox and attach to
+//     actualContainerID instead.
+//
+// turn_holding_container only flips to TRUE when the caller also wins the
+// container_id write (row was NULL or already matches). A caller that loses
+// the COALESCE race leaves the flag unchanged, so the winning holder's state
+// isn't clobbered — and so the loser's subsequent ReleaseTurnHold can only
+// ever drop its own flag, never someone else's.
+//
+// Paired with ReleaseTurnHold, it forms half of the refcount that governs
+// container destruction (the other half is preview_holding_container on the
+// preview_instances row).
+//
+// Deliberately does NOT bump last_activity_at — the caller (orchestrator)
+// already writes status='running' via UpdateStatus on the same code path, and
+// double-bumping would waste writes.
+func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error) {
+	query := `UPDATE sessions
+		SET container_id = COALESCE(container_id, @container_id),
+		    turn_holding_container = CASE
+		        WHEN container_id IS NULL OR container_id = @container_id THEN TRUE
+		        ELSE turn_holding_container
+		    END
+		WHERE id = @id AND org_id = @org_id
+		RETURNING COALESCE(container_id, '')`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":           sessionID,
+		"org_id":       orgID,
+		"container_id": proposedContainerID,
+	}).Scan(&actualContainerID); err != nil {
+		return "", fmt.Errorf("acquire turn hold: %w", err)
+	}
+	return actualContainerID, nil
+}
+
+// ReleaseTurnHold flips turn_holding_container to false and returns the
+// sibling holder state so the caller can decide whether to destroy the
+// container. The RETURNING clause reads both the container_id and the active
+// preview hold in one round-trip, eliminating the TOCTOU gap between release
+// and destroy decision.
+//
+// destroyNow is true when, at the time of the release, no other holder was
+// active. Callers MUST NOT act on this signal directly: pass containerID into
+// FinalizeContainerDestroy, which atomically re-checks holders and clears
+// container_id only if still safe. destroyNow is false when the preview still
+// holds the container — the caller must leave both container_id and the
+// container itself alive.
+//
+// containerID is the ID that was recorded on the row (empty if the session
+// had no live container — a no-op release).
+func (s *SessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (destroyNow bool, containerID string, err error) {
+	query := `WITH released AS (
+			UPDATE sessions
+			SET turn_holding_container = FALSE
+			WHERE id = @id AND org_id = @org_id
+			RETURNING id, container_id
+		)
+		SELECT
+			COALESCE(released.container_id, '') AS container_id,
+			COALESCE((
+				SELECT TRUE
+				FROM preview_instances
+				WHERE session_id = released.id
+				  AND org_id = @org_id
+				  AND preview_holding_container = TRUE
+				LIMIT 1
+			), FALSE) AS preview_holds
+		FROM released`
+
+	var cid string
+	var previewHolds bool
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&cid, &previewHolds)
+	if err != nil {
+		return false, "", fmt.Errorf("release turn hold: %w", err)
+	}
+	return cid != "" && !previewHolds, cid, nil
+}
+
+// PublishHydratedContainerID is the preview-hydrate CAS: a preview has just
+// created a container from the session's snapshot and wants to publish its
+// ID so a concurrent ContinueSession can attach to the same container.
+//
+// The UPDATE only writes container_id when the row's current container_id IS
+// NULL, so a concurrent orchestrator that already published one wins the race
+// and the preview becomes the loser. The returned actualContainerID is the ID
+// now stored on the row:
+//   - Equal to proposedContainerID → we won; caller's sandbox is authoritative.
+//   - Different → the caller must destroy its just-created sandbox and attach
+//     to actualContainerID instead.
+//
+// Unlike AcquireTurnHold, this does NOT flip turn_holding_container — the
+// orchestrator owns that flag and the preview must not claim it. It also
+// marks sandbox_state=running so the reaper and the reuse path see the live
+// container.
+func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error) {
+	query := `UPDATE sessions
+		SET container_id = COALESCE(container_id, @container_id),
+		    sandbox_state = CASE WHEN container_id IS NULL THEN 'running' ELSE sandbox_state END
+		WHERE id = @id AND org_id = @org_id
+		RETURNING COALESCE(container_id, '')`
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":           sessionID,
+		"org_id":       orgID,
+		"container_id": proposedContainerID,
+	}).Scan(&actualContainerID); err != nil {
+		return "", fmt.Errorf("publish hydrated container id: %w", err)
+	}
+	return actualContainerID, nil
+}
+
+// ClearContainerID is the startup reconciler's CAS-safe orphan cleanup: it
+// clears container_id only when the expected ID still matches AND no preview
+// hold has appeared between the reconciler's scan and this call. Returns
+// cleared=true when the row was updated — the caller now owns the right to
+// destroy the container. cleared=false means the row was already retaken
+// (concurrent hydrate published a new container_id) or a preview claimed the
+// hold in the gap; the reconciler must leave the container alone.
+//
+// It deliberately clears turn_holding_container=FALSE as well. A crashed-turn
+// row can carry turn_holding_container=TRUE (the orchestrator never got to
+// release), and leaving that flag stuck would (a) permanently pin the session
+// out of ListIdlePreviews and (b) prevent any subsequent orphan pass from
+// picking the row up. The reconciler only calls this after IsAlive confirmed
+// the container is gone from the host, so the flag is definitively stale —
+// resetting it is both safe and necessary.
+//
+// It intentionally does not touch sandbox_state: the reconciler doesn't know
+// whether a valid snapshot exists, so deciding between 'snapshotted' and
+// 'destroyed' is the reaper's job (Phase 2 / Phase 4 in SessionReaper.reap).
+// Lifecycle code paths (orchestrator / preview manager) call
+// FinalizeContainerDestroy instead, which additionally flips sandbox_state
+// to 'snapshotted'.
+func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	query := `UPDATE sessions
+		SET container_id = NULL,
+		    turn_holding_container = FALSE
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND container_id = @expected
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("clear container id: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// FinalizeContainerDestroy atomically clears container_id and marks
+// sandbox_state='snapshotted', but only when the caller's view of the world
+// still holds: no holder is active and the container_id still matches
+// expectedContainerID. Returns true when the row was updated (the caller owns
+// the destroy), false when another holder has come back (the caller must
+// leave the container alone — someone else is using it).
+//
+// This is the TOCTOU-safe companion to ReleaseTurnHold / ReleasePreviewHold.
+// A release reports "destroyNow=true" based on a snapshot of state inside its
+// own SQL, but in the window between release and the Go-side destroy a new
+// holder can acquire. FinalizeContainerDestroy re-checks atomically: if the
+// new holder has set turn_holding_container=TRUE, or a preview has set
+// preview_holding_container=TRUE, the UPDATE matches zero rows and destroy
+// is skipped. Clearing container_id and destroying the container is the
+// ordering that prevents new reuse-path readers from attaching to a dying ID.
+func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
+	query := `UPDATE sessions
+		SET container_id = NULL, sandbox_state = 'snapshotted'
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND container_id = @expected
+		  AND turn_holding_container = FALSE
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":       sessionID,
+		"org_id":   orgID,
+		"expected": expectedContainerID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("finalize container destroy: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ListOrphanedContainers returns sessions whose container_id is set and no
+// preview currently holds the sandbox. Called on startup to clean up
+// containers that leaked from a crashed server — the reconciler probes each
+// row's container via IsAlive, then calls ClearContainerID (CAS-safe) and,
+// if that claimed the row, destroys the container.
+//
+// turn_holding_container is deliberately NOT filtered here: a worker crash
+// mid-turn leaves the flag stuck TRUE, and if we skipped those rows the
+// reconciler could never reclaim them. IsAlive (run by the caller) is the
+// ground-truth gate — live turns on the shared host show as alive and are
+// left alone; truly orphaned turn-held rows come back dead and get cleared.
+// Preview holds are still filtered out because a live preview owns its own
+// teardown path and the reaper's Phase-2 preview-stopper handles stuck
+// preview holds separately.
+//
+// Returns at most 100 rows per call, keyset-paginated by session id > afterID
+// and ordered by id ASC. The reconciler passes the last seen id as a cursor
+// so that rows it can't clear (e.g. transient destroy/inspect failures)
+// don't cause it to re-read the same 100 rows forever — it simply moves past
+// them and they'll be picked up again on the next startup.
+// lint:allow-no-orgid reason="startup reconciler scans across all orgs by design"
+func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE container_id IS NOT NULL
+		  AND id > @after_id
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		ORDER BY id ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"after_id": afterID})
+	if err != nil {
+		return nil, fmt.Errorf("list orphaned containers: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/testutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -359,6 +361,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -379,6 +382,86 @@ var handlerPreviewLogTestCols = []string{
 var handlerPreviewSnapshotTestCols = []string{
 	"id", "preview_instance_id", "trigger", "url_path", "blob_ref",
 	"viewport_width", "viewport_height", "console_errors", "file_changes", "created_at",
+}
+
+// newReservedPreviewRow builds the pgxmock row that CreatePreviewInstance
+// returns on a successful Reserve: 'starting' status, default Node config,
+// preview_holding_container still FALSE (AcquirePreviewHold flips it in a
+// separate UPDATE). Columns must match previewInstanceTestCols.
+func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
+	return []any{
+		previewID, sessionID, orgID, userID, "bootstrap", "default", "starting",
+		"docker", "test-worker", "", "app", 3000,
+		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
+		"/", 512, 500, json.RawMessage("{}"), json.RawMessage("{}"), "", now, now, nil, nil,
+		false,
+	}
+}
+
+// expectReserveSuccess emits the pgxmock sequence for a clean ReservePreview:
+// no existing active preview, all concurrency caps below their thresholds, a
+// successful INSERT, and AcquirePreviewHold. Returns the preview id seeded into
+// the INSERT's RETURNING row so tests can thread it into later expectations.
+//
+// Use this when a test's scenario requires Reserve to succeed so it can exercise
+// downstream branches (hydrate, autodetect, launch failure, etc.).
+func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uuid.UUID) uuid.UUID {
+	previewID := uuid.New()
+	now := time.Now()
+
+	// GetActivePreviewForSession — no active preview.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+
+	// checkConcurrencyCaps: user (2 args: org+user), org (1 arg), worker (1 arg).
+	// pgxmock treats a missing WithArgs as "expect 0 args", so the per-cap argc
+	// has to match exactly or the whole Reserve fails with a generic 422.
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	// CreatePreviewInstance: 19 bound args.
+	insertArgs := make([]any, 19)
+	for i := range insertArgs {
+		insertArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(insertArgs...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+	// AcquirePreviewHold RETURNS session_id (id + org_id).
+	mock.ExpectQuery("UPDATE preview_instances\\s+SET preview_holding_container = TRUE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+
+	return previewID
+}
+
+// expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
+// releases the hold without destroying a container (either the sandbox was
+// reused so hydratedContainerID is "", or the turn still holds it). Callers
+// that need the destroy path should build it inline.
+func expectAbortReservationNoDestroy(mock pgxmock.PgxPoolIface) {
+	// UpdatePreviewStatus: id, org_id, status, error (4 args).
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// ReleasePreviewHold returns destroyNow=false because turn_holds=true.
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(uuid.New(), "", false),
+		)
 }
 
 func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
@@ -410,6 +493,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, recycleConfig, recycleSandbox, "", now, now, now, nil,
+		false,
 	}
 }
 
@@ -428,7 +512,7 @@ func TestNewPreviewHandler(t *testing.T) {
 	})
 
 	sessionStore := db.NewSessionStore(mock)
-	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, zerolog.Nop())
+	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
@@ -552,7 +636,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 var sessionRowColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "started_at", "completed_at", "token_usage",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -567,17 +651,80 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, nil, nil, json.RawMessage(`{}`),
+		&containerID, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		0, time.Now(),
-		"none", nil, nil, nil,
+		// sandbox_state must be "running" for the reuse branch of
+		// acquireSandbox to attach to the lingering container_id; otherwise
+		// the stale-ID guard falls through to hydrate/expired.
+		"running", nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil, time.Now(),
 	}
 }
+
+// sessionRowReuseWithSnapshot builds a row that satisfies both the reuse
+// precondition (container_id set, sandbox_state='running') AND the hydrate
+// fallback precondition (snapshot_key set). Used by the zombie-reuse tests
+// where IsAlive decides which branch the handler takes.
+func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapshotKey *string) []interface{} {
+	return []interface{}{
+		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		nil, nil, nil, []string{},
+		&containerID, false, nil, nil, json.RawMessage(`{}`),
+		nil, nil, []string{}, false,
+		nil, json.RawMessage(`{}`), nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		0, time.Now(),
+		"running", snapshotKey, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, time.Now(),
+	}
+}
+
+// sessionRowForHydrate builds a session row with no live container but a
+// configurable snapshot key and sandbox state — used to exercise the three
+// acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
+func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState string) []interface{} {
+	return []interface{}{
+		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		nil, nil, nil, []string{},
+		nil, false, nil, nil, json.RawMessage(`{}`),
+		nil, nil, []string{}, false,
+		nil, json.RawMessage(`{}`), nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		0, time.Now(),
+		sandboxState, snapshotKey, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil, nil, time.Now(),
+	}
+}
+
+// fakeHydrateSnapshotStore is a minimal SnapshotStore that writes a canned
+// payload on Load.
+type fakeHydrateSnapshotStore struct {
+	payload []byte
+	loadErr error
+}
+
+func (f *fakeHydrateSnapshotStore) Save(context.Context, string, io.Reader) error {
+	return nil
+}
+
+func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer) error {
+	if f.loadErr != nil {
+		return f.loadErr
+	}
+	_, _ = w.Write(f.payload)
+	return nil
+}
+
+func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
 // TestPreviewHandler_StartPreview_AutoDetectInfraError exercises the auto-detect
 // branch of StartPreview when the workspace file reader returns a non-ENOENT
@@ -594,12 +741,21 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	userID := uuid.New()
 	sessionID := uuid.New()
 
+	// GetByID returns a session with a live container so acquireSandbox takes
+	// the reuse branch.
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionRowColumns).
 				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
 		)
+	// ReservePreview — the fix for bug #2: capacity / existing-preview checks
+	// now run BEFORE any sandbox interaction, so a pre-hydrate autodetect
+	// failure cannot leak a container.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// readWorkspacePreviewConfig fails → AbortReservation releases the hold.
+	// Reused container (hydratedContainerID == ""), so no FinalizeContainerDestroy.
+	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
@@ -616,6 +772,567 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.Equal(t, "PREVIEW_CONFIG_READ_FAILED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_SnapshotExpired_NoSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	// Session row with no container + no snapshot → acquireSandbox must return SNAPSHOT_EXPIRED.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "snapshotted")...),
+		)
+	// ReservePreview succeeds before we realize the session has no usable
+	// sandbox, so the preview row exists and must be cleaned up via Abort.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusGone, w.Code, "no container + no snapshot must return 410")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "SNAPSHOT_EXPIRED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_SnapshotExpired_SandboxDestroyed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "some-key"
+
+	// snapshot_key present but sandbox_state='destroyed' means we still treat
+	// the snapshot as gone — same SNAPSHOT_EXPIRED guard rails out the request.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "destroyed")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusGone, w.Code)
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "SNAPSHOT_EXPIRED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_NoSandbox_WhenHydrateNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	// Hydrate is viable (snapshot present, state != destroyed) but the handler
+	// was constructed without a sandbox provider / snapshot store — surface
+	// NO_SANDBOX (409) rather than a misleading 500 or SNAPSHOT_EXPIRED.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	// leave sandboxProvider / snapshots nil
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "hydrate not configured must return 409 NO_SANDBOX")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "NO_SANDBOX", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	// Session with a live container so acquireSandbox short-circuits to reuse,
+	// and readWorkspacePreviewConfig is a no-op (nil fileReader) → defaults.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
+		)
+	// StartPreview: check existing active preview — none.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	// checkConcurrencyCaps: per-user COUNT at the limit → ErrPreviewCapacity.
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(999))
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "capacity errors must map to 503")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "PREVIEW_CAPACITY_REACHED", resp.Error.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_HydrateReachesLaunch verifies that when
+// hydrate is configured and the session has a usable snapshot, the handler
+// reserves the preview, hydrates a fresh sandbox, and proceeds into
+// manager.LaunchPreview. We stop short of simulating the full launch DB dance
+// by failing UpdatePreviewReservationConfig — enough to prove the handler
+// crossed into Launch after acquireSandbox, and that Abort cleans up.
+func TestPreviewHandler_StartPreview_HydrateReachesLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	// Reserve runs BEFORE hydrate under the new flow — that ordering is the
+	// capacity-leak fix (bug #2) and the hold-race fix (bug #3).
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Hydrate publishes container_id (CAS) + transitions sandbox_state=running
+	// inside the same UPDATE. Echo the proposed id back (no lost race).
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
+	// Launch's first DB call is UpdatePreviewReservationConfig (needsUpdate is
+	// always true here because the reservation persisted an empty recycle
+	// sandbox). Failing it proves the handler reached Launch; Abort then
+	// releases the hold.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	// RestoreFn drains the io.Pipe reader so the Load goroutine's Write
+	// completes and HydrateSandboxFromSnapshot returns instead of deadlocking.
+	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure must surface as 422 PREVIEW_START_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_HydrateFails covers the error return from
+// HydrateSandboxFromSnapshot (preview.go: provider.Create → acquireSandbox
+// returns err, errCode="").
+func TestPreviewHandler_StartPreview_HydrateFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	// Reserve succeeds; acquireSandbox fails at provider.Create (no UPDATE
+	// sessions fires because PublishHydratedContainerID is never reached).
+	// The reservation must be aborted — hydratedID="" so no destroy.
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		return nil, errors.New("create boom")
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "PREVIEW_HYDRATE_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_PublishContainerIDFails covers the
+// PublishHydratedContainerID error branch that destroys the just-created
+// sandbox (preview.go: CAS failure in hydrate path).
+func TestPreviewHandler_StartPreview_PublishContainerIDFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+	// acquireSandbox destroyed the local container before returning, so the
+	// handler passes hydratedID="" to AbortReservation — no finalize/destroy
+	// on the manager side.
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "PREVIEW_HYDRATE_FAILED")
+	require.Equal(t, 1, sp.GetDestroyCalls(), "acquireSandbox must destroy the local container when publish fails")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_PublishLosesRace covers the CAS-loss branch
+// of PublishHydratedContainerID: a concurrent orchestrator already published
+// a different container_id, so the preview must destroy its local sandbox and
+// surface a NO_SANDBOX error instructing the caller to retry.
+func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// COALESCE returns the orchestrator's pre-existing ID, proving our preview
+	// lost the race.
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
+	// Handler passes hydratedID="" to Abort because acquireSandbox already
+	// destroyed the local container on the race-loss branch.
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "NO_SANDBOX")
+	require.Equal(t, 1, sp.GetDestroyCalls(), "local container must be destroyed on race loss")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate covers the
+// case where the session row says "running with container_id=X" but the
+// container has been removed out-of-band (e.g. docker prune, host reboot).
+// IsAlive returns (false, nil); acquireSandbox must skip the reuse branch and
+// hydrate from snapshot instead of attaching to a dead ID.
+func TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowReuseWithSnapshot(sessionID, orgID, "zombie-id", &key)...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Hydrate is reached → publishes the provider's new ID via COALESCE CAS.
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
+	// Fail Launch at UpdatePreviewReservationConfig to prove the handler
+	// advanced past acquireSandbox into the manager's launch phase.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, "zombie-id", sb.ID)
+		return false, nil
+	}
+	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	// Reaching the manager's Launch-phase UpdateReservationConfig proves the
+	// zombie fallthrough landed in hydrate rather than attaching to "zombie-id".
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate covers
+// the transient-liveness-error branch: rather than attaching blindly to an ID
+// we can't verify, acquireSandbox logs and falls through to hydrate, which
+// will either succeed (bringing up a fresh, known-good container) or return
+// an actionable error to the caller.
+func TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	key := "snap-key"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowReuseWithSnapshot(sessionID, orgID, "maybe-dead", &key)...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("test-sandbox"))
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, _ *agent.Sandbox) (bool, error) {
+		return false, errors.New("docker daemon flaked")
+	}
+	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}
+	h.sandboxProvider = sp
+	h.snapshots = &fakeHydrateSnapshotStore{payload: []byte("snap")}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive covers the
+// happy reuse branch of acquireSandbox: with sandbox_state='running' and a
+// live container_id, and the sandbox provider confirming liveness, we attach
+// to the existing container rather than hydrating a duplicate.
+func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "live-container")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// Fail Launch at UpdatePreviewReservationConfig. Absence of a COALESCE CAS
+	// in the expectation list is what proves the reuse branch fired — the
+	// ExpectationsWereMet check at the bottom will reject an unexpected hydrate.
+	updateCfgArgs := make([]any, 9)
+	for i := range updateCfgArgs {
+		updateCfgArgs[i] = pgxmock.AnyArg()
+	}
+	mock.ExpectExec("UPDATE preview_instances\\s+SET name").
+		WithArgs(updateCfgArgs...).
+		WillReturnError(errors.New("db down"))
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, "live-container", sb.ID)
+		return true, nil
+	}
+	h.sandboxProvider = sp
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
+	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

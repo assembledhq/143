@@ -132,6 +132,16 @@ type SandboxProvider interface {
 	// Must be safe to call multiple times and must not panic.
 	Destroy(ctx context.Context, sb *Sandbox) error
 
+	// IsAlive reports whether the sandbox container still exists. Returns
+	// (false, nil) when the container is definitively gone (e.g., "no such
+	// container"), (true, nil) when it exists (regardless of running state —
+	// attaching to a stopped container will fail later with a more specific
+	// error), and (false, err) for transient failures the caller can't
+	// distinguish from a real absence. Used by callers that want to reuse a
+	// recorded container_id but need to guard against zombie rows left by
+	// out-of-band container removal.
+	IsAlive(ctx context.Context, sb *Sandbox) (bool, error)
+
 	// ConnectionInfo returns provider-specific connection details for local resume.
 	ConnectionInfo(ctx context.Context, sb *Sandbox) (*SandboxConnectionInfo, error)
 

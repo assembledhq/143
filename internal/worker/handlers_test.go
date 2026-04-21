@@ -1240,6 +1240,9 @@ func (s *stubSandboxProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, 
 func (s *stubSandboxProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 	return nil
 }
+func (s *stubSandboxProvider) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	return true, nil
+}
 func (s *stubSandboxProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	return nil, nil
 }
