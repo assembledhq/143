@@ -39,6 +39,12 @@ export interface AgentMeta {
   // credential UIs skip these agents because there is no key to save — they
   // reuse whatever the org has configured for the real provider agents.
   inheritsProviderKeys?: boolean;
+  // lacksHeadlessResume is true for agents whose CLI has no flag to resume a
+  // prior conversation by ID. Follow-up turns replay only the new user message
+  // against the restored filesystem; earlier chat context is not sent back to
+  // the CLI. The session UI shows a banner so users include any context they
+  // need the agent to remember.
+  lacksHeadlessResume?: boolean;
 }
 
 export const AGENTS: readonly AgentMeta[] = [
@@ -91,6 +97,7 @@ export const AGENTS: readonly AgentMeta[] = [
     description: "Sourcegraph Amp (mode-based agent)",
     providerKey: "amp",
     models: AVAILABLE_AMP_MODES,
+    lacksHeadlessResume: true,
     envVars: [
       { name: "AMP_API_KEY", label: "API Key", sensitive: true, placeholder: "amp_..." },
       { name: "AMP_MODE", label: "Default mode", options: [...AVAILABLE_AMP_MODES] },
@@ -105,6 +112,7 @@ export const AGENTS: readonly AgentMeta[] = [
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
     inheritsProviderKeys: true,
+    lacksHeadlessResume: true,
     note: "Pi reuses keys from your other configured agents by default. Set values here to override.",
     envVars: [
       { name: "PI_MODEL", label: "Default model", options: [...AVAILABLE_PI_MODELS] },

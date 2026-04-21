@@ -18,6 +18,7 @@ import { useDisconnectIntegration } from "@/hooks/use-disconnect-integration";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
 import { queryKeys } from "@/lib/query-keys";
 import { isAgentConnected } from "@/components/autopilot/autopilot-helpers";
+import { AGENTS_BY_KEY } from "@/lib/agents";
 import {
   Select,
   SelectContent,
@@ -76,49 +77,49 @@ function StepSection({
 function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (connected: boolean) => void }) {
   type AgentType = NonNullable<OrgSettings["default_agent_type"]>;
 
+  // Labels come from the shared AGENTS registry; the checklist layers on
+  // setup-specific copy (Codex has a dedicated sign-in CTA, the rest reuse
+  // the default "Configure" flow) and fine-tunes the description for the
+  // checklist context.
+  const checklistOverrides: Record<AgentType, { description: string; configureLabel: string; ctaLabel: string }> = {
+    codex: {
+      description: "Sign in with ChatGPT for instant access to gpt-5.3-codex. No API key needed.",
+      configureLabel: "Settings",
+      ctaLabel: "Sign in with ChatGPT",
+    },
+    claude_code: {
+      description: "Your own Anthropic API key is required for agent sessions. Platform keys are used for internal features only.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    gemini_cli: {
+      description: "Your own Google Gemini API key is required for agent sessions. Platform keys are used for internal features only.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    amp: {
+      description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush). Requires an AMP_API_KEY.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    pi: {
+      description: "Pi routes to many providers via one CLI. Reuses your other configured agent keys by default.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+  };
+
   const agentOptions: Array<{
     value: AgentType;
     label: string;
     description: string;
     configureLabel: string;
     ctaLabel: string;
-  }> = [
-    {
-      value: "codex",
-      label: "Codex",
-      description: "Sign in with ChatGPT for instant access to gpt-5.3-codex. No API key needed.",
-      configureLabel: "Settings",
-      ctaLabel: "Sign in with ChatGPT",
-    },
-    {
-      value: "claude_code",
-      label: "Claude Code",
-      description: "Your own Anthropic API key is required for agent sessions. Platform keys are used for internal features only.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
-    {
-      value: "gemini_cli",
-      label: "Gemini CLI",
-      description: "Your own Google Gemini API key is required for agent sessions. Platform keys are used for internal features only.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
-    {
-      value: "amp",
-      label: "Amp",
-      description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush). Requires an AMP_API_KEY.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
-    {
-      value: "pi",
-      label: "Pi",
-      description: "Pi routes to many providers via one CLI. Reuses your other configured agent keys by default.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
-  ];
+  }> = (Object.keys(checklistOverrides) as AgentType[]).map((value) => ({
+    value,
+    label: AGENTS_BY_KEY[value]?.label ?? value,
+    ...checklistOverrides[value],
+  }));
 
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);

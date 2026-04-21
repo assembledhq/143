@@ -74,7 +74,7 @@ var piStreamingConfig = streamingAgentConfig{
 		return fmt.Sprintf(
 			"pi -p \"$(cat '%s')\" --mode json --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\"",
 			escapedPromptPath,
-			models.PiModelClaudeSonnet46,
+			models.PiModelClaudeOpus47,
 		)
 	},
 	ParseConfig: streamParseConfig{

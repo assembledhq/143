@@ -409,6 +409,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	// Apply per-run model override before the auth pre-flight: for Pi the
+	// required provider key is derived from the resolved model, so checking
+	// auth against the agent_config default would let an OpenAI override
+	// past the gate on an Anthropic-only org.
+	if run.ModelOverride != nil && *run.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
+			sandboxCfg.Env[envVar] = *run.ModelOverride
+		}
+	}
 	if err := o.checkAgentAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -431,12 +440,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
 				sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
 			}
-		}
-	}
-	// Apply per-run model override if set.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
 		}
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
@@ -778,6 +781,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
+	// Apply the per-session model override before checkAgentAuth so the
+	// pre-flight evaluates the *effective* model — see the matching block in
+	// RunAgent for the Pi-specific reasoning.
+	if session.ModelOverride != nil && *session.ModelOverride != "" {
+		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
+			sandboxCfg.Env[envVar] = *session.ModelOverride
+		}
+	}
 	if authErr := o.checkAgentAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		log.Error().Err(authErr).Msg("agent auth pre-flight failed during continue_session")
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
@@ -796,11 +807,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 		}
 		return authErr
-	}
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
 	}
 	// Look up the session's repo to derive the same WorkDir used on the
 	// initial run (see RunAgent). This must match the original: the container
@@ -1644,7 +1650,7 @@ func checkPiProviderKey(env map[string]string) error {
 	}
 	if model == "" {
 		// Matches the hardcoded fallback in piStreamingConfig.BuildCmd.
-		model = models.PiModelClaudeSonnet46
+		model = models.PiModelClaudeOpus47
 	}
 	prefix, _, _ := strings.Cut(model, "/")
 	switch strings.ToLower(prefix) {

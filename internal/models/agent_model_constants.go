@@ -38,18 +38,20 @@ const (
 var AvailableAmpModes = []string{AmpModeSmart, AmpModeDeep, AmpModeLarge, AmpModeRush}
 
 // Pi accepts provider/model patterns. Curated short list; users with niche needs
-// can override per-session via PI_MODEL_CUSTOM in agent_config.
+// can override per-session via PI_MODEL_CUSTOM in agent_config. Opus 4.7 is
+// listed first because it's the current top model and doubles as the hardcoded
+// default in piStreamingConfig.BuildCmd when no PI_MODEL is set.
 const (
+	PiModelClaudeOpus47   = "anthropic/claude-opus-4-7"
 	PiModelClaudeSonnet46 = "anthropic/claude-sonnet-4-6"
-	PiModelClaudeOpus46   = "anthropic/claude-opus-4-6"
 	PiModelClaudeHaiku45  = "anthropic/claude-haiku-4-5"
 	PiModelGPT54          = "openai/gpt-5.4"
 	PiModelGemini25Pro    = "google/gemini-2.5-pro"
 )
 
 var AvailablePiModels = []string{
+	PiModelClaudeOpus47,
 	PiModelClaudeSonnet46,
-	PiModelClaudeOpus46,
 	PiModelClaudeHaiku45,
 	PiModelGPT54,
 	PiModelGemini25Pro,
@@ -224,7 +226,7 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypePi)
 		}
 		if !strings.Contains(model, "/") {
-			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeSonnet46)
+			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeOpus47)
 		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)

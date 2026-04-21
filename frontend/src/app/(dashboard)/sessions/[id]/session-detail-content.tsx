@@ -42,7 +42,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
-import { AGENTS } from "@/lib/agents";
+import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
@@ -734,11 +734,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isClaudeCode = session.agent_type === "claude_code";
-  // Amp and Pi have no headless resume flag, so a follow-up run replays only the
-  // new user message against the restored filesystem — the prior conversation
-  // context is not sent back to the CLI. See runStreamingAgent in
-  // internal/services/agent/adapters/stream_parser.go.
-  const lacksHeadlessResume = session.agent_type === "amp" || session.agent_type === "pi";
+  // Sourced from the AGENTS registry so the per-agent flag lives in one place
+  // (see lacksHeadlessResume on AgentMeta). When true, follow-up runs replay
+  // only the new user message against the restored filesystem — prior
+  // conversation context is not sent back to the CLI. See runStreamingAgent
+  // in internal/services/agent/adapters/stream_parser.go.
+  const lacksHeadlessResume = AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false;
 
   const isRunning = session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
@@ -1128,12 +1129,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         </div>
       )}
 
-      {/* Amp/Pi: no headless resume — warn users that follow-ups don't carry prior context. */}
+      {/* No-headless-resume agents: warn users that follow-ups don't carry prior context. */}
       {lacksHeadlessResume && canSendMessage && !isSnapshotExpired && (
         <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           <span>
-            {session.agent_type === "amp" ? "Amp" : "Pi"} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
+            {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
           </span>
         </div>
       )}

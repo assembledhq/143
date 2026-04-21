@@ -60,16 +60,17 @@ export const AVAILABLE_AMP_MODES = [
 ] as const;
 
 // Pi accepts provider/model patterns. Curated short list; PI_MODEL_CUSTOM
-// lets users opt into Pi's full multi-provider catalog.
+// lets users opt into Pi's full multi-provider catalog. Opus 4.7 leads the
+// list as the current top model and matches the adapter's hardcoded fallback.
+export const PI_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
 export const PI_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
-export const PI_MODEL_CLAUDE_OPUS_46 = "anthropic/claude-opus-4-6";
 export const PI_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
 export const PI_MODEL_GPT_5_4 = "openai/gpt-5.4";
 export const PI_MODEL_GEMINI_2_5_PRO = "google/gemini-2.5-pro";
 
 export const AVAILABLE_PI_MODELS = [
+  PI_MODEL_CLAUDE_OPUS_47,
   PI_MODEL_CLAUDE_SONNET_46,
-  PI_MODEL_CLAUDE_OPUS_46,
   PI_MODEL_CLAUDE_HAIKU_45,
   PI_MODEL_GPT_5_4,
   PI_MODEL_GEMINI_2_5_PRO,
