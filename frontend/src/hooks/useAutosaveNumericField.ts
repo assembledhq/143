@@ -62,19 +62,22 @@ export function useAutosaveNumericField<TVars>({
   // debounces, keystrokes wait out BOTH windows before hitting the network,
   // which is almost never what the caller wants. Warn once per hook instance
   // in dev; production silently tolerates it to avoid noisy console warnings
-  // on live traffic.
+  // on live traffic. The check lives in an effect because `react-hooks/refs`
+  // forbids reading `ref.current` during render.
   const hasWarnedRef = useRef(false);
-  if (
-    process.env.NODE_ENV !== "production" &&
-    !hasWarnedRef.current &&
-    autosave.debounceMs > 0
-  ) {
-    hasWarnedRef.current = true;
-    console.warn(
-      `useAutosaveNumericField: the passed useAutosave hook is configured with debounceMs=${autosave.debounceMs}. ` +
-        `The field already self-debounces (${debounceMs}ms); set the outer useAutosave to debounceMs: 0 to avoid compounding both windows.`,
-    );
-  }
+  useEffect(() => {
+    if (
+      process.env.NODE_ENV !== "production" &&
+      !hasWarnedRef.current &&
+      autosave.debounceMs > 0
+    ) {
+      hasWarnedRef.current = true;
+      console.warn(
+        `useAutosaveNumericField: the passed useAutosave hook is configured with debounceMs=${autosave.debounceMs}. ` +
+          `The field already self-debounces (${debounceMs}ms); set the outer useAutosave to debounceMs: 0 to avoid compounding both windows.`,
+      );
+    }
+  }, [autosave.debounceMs, debounceMs]);
 
   // Hold `toPatch` and `clamp` in refs so the debounce timer reads the
   // latest closures at fire time. Without this, a timer armed during
