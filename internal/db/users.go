@@ -171,6 +171,11 @@ func (s *UserStore) UpsertFromGoogle(ctx context.Context, user *models.User) err
 }
 
 // LinkGitHubAccount attaches a GitHub identity to an existing user.
+//
+// TODO(2026-04-25): drop the orgID parameter and the `AND org_id = @org_id`
+// filter once users.org_id is removed. The org scope is a legacy
+// single-org-per-user safety belt; with multi-org, the (id) predicate alone
+// is sufficient because user IDs are globally unique.
 func (s *UserStore) LinkGitHubAccount(ctx context.Context, userID, orgID uuid.UUID, githubID int64, githubLogin string, avatarURL string) error {
 	query := `
 		UPDATE users
@@ -209,10 +214,11 @@ func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Us
 // at user-creation time. The legacy users.org_id column does not reflect
 // non-primary memberships, so a plain ListByOrg dedup misses members whose
 // only membership in this org is non-primary.
+//
+// Callers must pass a non-empty, already-validated login. The handler layer
+// rejects empty / malformed input via isValidGitHubUsername before calling,
+// so a silent short-circuit here would only mask an upstream bug.
 func (s *UserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error) {
-	if githubLogin == "" {
-		return false, nil
-	}
 	query := `
 		SELECT EXISTS (
 			SELECT 1
@@ -292,6 +298,9 @@ func (s *UserStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, erro
 }
 
 // LinkGoogleAccount attaches a Google identity to an existing user.
+//
+// TODO(2026-04-25): drop the orgID parameter and the `AND org_id = @org_id`
+// filter once users.org_id is removed — see LinkGitHubAccount for rationale.
 func (s *UserStore) LinkGoogleAccount(ctx context.Context, userID, orgID uuid.UUID, googleID string, avatarURL string) error {
 	query := `
 		UPDATE users

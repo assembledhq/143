@@ -21,34 +21,36 @@ import (
 // UpsertFromGitHub / UpsertFromGoogle) against the tx-scoped store.
 type signupUserCreateFunc func(ctx context.Context, userStore *db.UserStore, user *models.User) error
 
-// createSignupOrg atomically creates a fresh org, creates the signup user, and
-// grants them an admin membership in one transaction. This is the primitive
-// used by every "brand new user, no invitation" path (email register, GitHub
-// first login, Google first login).
+// createSignupOrg atomically creates a fresh org, creates the signup user,
+// grants them an admin membership, and issues their initial session token —
+// all in one transaction. This is the primitive used by every "brand new
+// user, no invitation" path (email register, GitHub first login, Google
+// first login).
 //
-// Either all three rows are inserted or none are: if user creation fails, the
-// org row rolls back rather than leaving an orphan. The caller provides the
-// user-creation step as a closure so the same helper serves all three flows
-// without branching on provider inside.
+// Either all four rows are inserted or none are: if user or session creation
+// fails, the org row rolls back rather than leaving an orphan or a user with
+// no way to log in. The caller provides the user-creation step as a closure
+// so the same helper serves all three flows without branching on provider.
+// The returned sessionToken should be installed into the response cookies.
 func (h *AuthHandler) createSignupOrg(
 	ctx context.Context,
 	orgName string,
 	user *models.User,
 	createUser signupUserCreateFunc,
-) error {
+) (string, error) {
 	if h.pool == nil {
-		return fmt.Errorf("auth handler pool is not configured")
+		return "", fmt.Errorf("auth handler pool is not configured")
 	}
 	if user == nil {
-		return fmt.Errorf("user is required")
+		return "", fmt.Errorf("user is required")
 	}
 	if createUser == nil {
-		return fmt.Errorf("createUser callback is required")
+		return "", fmt.Errorf("createUser callback is required")
 	}
 
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin signup transaction: %w", err)
+		return "", fmt.Errorf("begin signup transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -57,23 +59,33 @@ func (h *AuthHandler) createSignupOrg(
 		Settings: json.RawMessage(`{}`),
 	}
 	if err := db.NewOrganizationStore(tx).Create(ctx, org); err != nil {
-		return fmt.Errorf("create organization: %w", err)
+		return "", fmt.Errorf("create organization: %w", err)
 	}
 
+	// TODO(2026-04-25): drop user.OrgID / user.Role assignments once the
+	// legacy single-org columns are removed from the users table. The
+	// GrantAtLeast call below is the authoritative record of this user's
+	// membership; the users.org_id / users.role fields are only set here to
+	// keep code that still reads them during the sunset period working.
 	user.OrgID = org.ID
 	user.Role = models.RoleAdmin
 	if err := createUser(ctx, db.NewUserStore(tx), user); err != nil {
-		return fmt.Errorf("create signup user: %w", err)
+		return "", fmt.Errorf("create signup user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).Upsert(ctx, user.ID, org.ID, models.RoleAdmin); err != nil {
-		return fmt.Errorf("grant admin membership: %w", err)
+	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, org.ID, models.RoleAdmin); err != nil {
+		return "", fmt.Errorf("grant admin membership: %w", err)
+	}
+
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return "", fmt.Errorf("create signup session: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit signup transaction: %w", err)
+		return "", fmt.Errorf("commit signup transaction: %w", err)
 	}
-	return nil
+	return sessionToken, nil
 }
 
 // claimInvitationForExistingUser validates a pending invitation and grants the
@@ -111,24 +123,6 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	}
 
 	txMemberships := db.NewOrganizationMembershipStore(tx)
-	if h.cfg != nil && !h.cfg.MultiOrgMembershipsEnabled {
-		_, getErr := txMemberships.Get(ctx, userID, inv.OrgID)
-		if errors.Is(getErr, pgx.ErrNoRows) {
-			count, countErr := txMemberships.CountForUser(ctx, userID)
-			if countErr != nil {
-				return &inv, nil, fmt.Errorf("count user memberships: %w", countErr)
-			}
-			if count > 0 {
-				return &inv, &invitationError{
-					status:  http.StatusConflict,
-					code:    "ALREADY_IN_ORG",
-					message: "you are already a member of another organization",
-				}, nil
-			}
-		} else if getErr != nil {
-			return &inv, nil, fmt.Errorf("look up existing membership: %w", getErr)
-		}
-	}
 
 	if err := txInvitations.Accept(ctx, inv.ID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -141,7 +135,7 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 		return &inv, nil, fmt.Errorf("accept invitation: %w", err)
 	}
 
-	if err := txMemberships.Upsert(ctx, userID, inv.OrgID, role); err != nil {
+	if err := txMemberships.GrantAtLeast(ctx, userID, inv.OrgID, role); err != nil {
 		return &inv, nil, fmt.Errorf("grant membership: %w", err)
 	}
 
@@ -223,6 +217,34 @@ func (h *AuthHandler) emitInvitationClaimFailed(
 		ResourceID:   &invIDStr,
 		Details:      details,
 	})
+}
+
+// logInvitationClaimUnknownToken records an attempt by an authenticated user
+// to redeem a token that does not match any invitation row. Unlike
+// emitInvitationClaimFailed, there is no invitation ID to anchor an audit
+// entry to, so the signal goes to structured logs instead — alerting on a
+// sustained rate of these events is the primary way to catch someone hammering
+// the claim endpoint to guess valid tokens.
+//
+// The token itself is never logged. A 12-character prefix is included so ops
+// can correlate bursts (all the same prefix = scripted enumeration, varied
+// prefixes = reused credential stuffing list) without persisting material
+// that could let a log reader redeem a leaked-but-not-yet-claimed token.
+func logInvitationClaimUnknownToken(r *http.Request, userID uuid.UUID, token, code string) {
+	prefix := token
+	if len(prefix) > 12 {
+		prefix = prefix[:12]
+	}
+	ip := ""
+	if p := parseClientIP(r); p != nil {
+		ip = p.Addr().String()
+	}
+	zerolog.Ctx(r.Context()).Warn().
+		Str("user_id", userID.String()).
+		Str("ip", ip).
+		Str("token_prefix", prefix).
+		Str("code", code).
+		Msg("invitation claim attempted with unknown token")
 }
 
 // emitInvitationAccepted records a successful invitation claim. Mirrors the

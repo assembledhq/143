@@ -429,7 +429,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
 		// Available to any authenticated user (no RequireRole) — an invited
 		// user may not yet have a role in the target org when they claim.
-		r.Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
+		// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
+		// natural brute-force target because each request names an opaque
+		// token the server looks up, so tightening beyond the default 20 rps
+		// IP limit forces any enumeration attempt into detectable territory.
+		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {

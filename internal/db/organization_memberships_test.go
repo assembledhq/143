@@ -107,7 +107,7 @@ func TestOrganizationMembershipStore_Get_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestOrganizationMembershipStore_Upsert(t *testing.T) {
+func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -133,14 +133,14 @@ func TestOrganizationMembershipStore_Upsert(t *testing.T) {
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
-			err = store.Upsert(context.Background(), uuid.New(), uuid.New(), tt.role)
+			err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), tt.role)
 			require.NoError(t, err)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
 }
 
-func TestOrganizationMembershipStore_Upsert_InvalidRole(t *testing.T) {
+func TestOrganizationMembershipStore_GrantAtLeast_InvalidRole(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -149,7 +149,7 @@ func TestOrganizationMembershipStore_Upsert_InvalidRole(t *testing.T) {
 
 	store := NewOrganizationMembershipStore(mock)
 
-	err = store.Upsert(context.Background(), uuid.New(), uuid.New(), "owner")
+	err = store.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "owner")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid role")
 }
@@ -215,6 +215,55 @@ func TestOrganizationMembershipStore_Remove(t *testing.T) {
 	store := NewOrganizationMembershipStore(mock)
 
 	mock.ExpectQuery("(?s)DELETE FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Remove(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestOrganizationMembershipStore_Remove_OnlyRevokesPendingInvitations asserts
+// the invitation cleanup side-effect in Remove() targets only pending
+// invitations via UPDATE ... SET status = 'revoked'. Historical accepted or
+// previously-revoked invitations are preserved so the audit trail of "who
+// invited this person" survives the inviter being removed from the org.
+func TestOrganizationMembershipStore_Remove_OnlyRevokesPendingInvitations(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectQuery(`(?s)UPDATE invitations\s+SET status = 'revoked'.+status = 'pending'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Remove(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestOrganizationMembershipStore_Remove_ClearsSessionHint asserts that the
+// Remove CTE also nulls out last_org_id on any of the removed user's sessions
+// that were pinned to the org they were just removed from. Without this, the
+// user's next request would resolve via the stale session hint, bounce off
+// the now-revoked membership, and then the middleware would fall through to
+// the oldest-membership path anyway — an avoidable round-trip that also
+// exposes the revoked orgID in the X-Org-Membership-Revoked response header
+// on every request until the client does its own cleanup.
+func TestOrganizationMembershipStore_Remove_ClearsSessionHint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectQuery(`(?s)UPDATE auth_sessions\s+SET last_org_id = NULL.+user_id = @user_id\s+AND last_org_id = @org_id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
@@ -433,7 +482,7 @@ func TestOrganizationMembershipStore_RejectInvalidRole(t *testing.T) {
 	err = s.UpdateRole(context.Background(), uuid.New(), uuid.New(), "superadmin")
 	require.Error(t, err)
 
-	err = s.Upsert(context.Background(), uuid.New(), uuid.New(), "guest")
+	err = s.GrantAtLeast(context.Background(), uuid.New(), uuid.New(), "guest")
 	require.Error(t, err)
 }
 
@@ -738,4 +787,92 @@ func TestOrganizationMembershipStore_RemoveGuarded_NoMembership(t *testing.T) {
 	)
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemovals
+// covers the race that motivates the FOR UPDATE lock in RemoveGuarded: two
+// concurrent requests to remove one of the last two admins must not both
+// observe adminCount == 2 and proceed. pgxmock cannot run real concurrent
+// transactions, so we assert the expected tx ordering — BEGIN, lock-admins,
+// SELECT-role-FOR-UPDATE, DELETE, COMMIT — across two representative cases:
+// the winning tx sees count above threshold and commits, the losing tx sees
+// the decremented count and refuses with ErrLastAdmin.
+//
+// The DB-level enforce_last_admin trigger (migration 000079) is the
+// belt-and-suspenders safety net for cases that bypass this path entirely
+// (ad-hoc SQL, a new handler that forgets to use RemoveGuarded, etc.). The
+// final subtest simulates the trigger firing on a DELETE and asserts the
+// store surfaces the constraint violation as a plain error, rather than
+// masquerading it as ErrLastAdmin or silently succeeding.
+func TestOrganizationMembershipStore_RemoveGuarded_SerializesConcurrentAdminRemovals(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first-writer sees count above threshold and succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1).AddRow(1))
+		mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+		mock.ExpectQuery("(?s)WITH deleted_membership").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+		mock.ExpectCommit()
+
+		prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+			context.Background(), uuid.New(), uuid.New(),
+		)
+		require.NoError(t, err)
+		require.Equal(t, "admin", prev)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("second-writer sees decremented count and refuses", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("(?s)SELECT 1.+FROM organization_memberships.+FOR UPDATE").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"?column?"}).AddRow(1))
+		mock.ExpectQuery("(?s)SELECT role FROM organization_memberships.+FOR UPDATE").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+		mock.ExpectRollback()
+
+		prev, err := NewOrganizationMembershipStore(mock).RemoveGuarded(
+			context.Background(), uuid.New(), uuid.New(),
+		)
+		require.ErrorIs(t, err, ErrLastAdmin)
+		require.Equal(t, "admin", prev)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("plain Remove surfaces DB trigger constraint violation", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewOrganizationMembershipStore(mock)
+
+		mock.ExpectQuery("(?s)DELETE FROM organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("ERROR: organization <uuid> would be left with no admins (SQLSTATE 23514)"))
+
+		err = store.Remove(context.Background(), uuid.New(), uuid.New())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no admins", "trigger message should propagate in the returned error")
+	})
 }

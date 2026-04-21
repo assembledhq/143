@@ -1,0 +1,54 @@
+-- DB-level "every organization must have at least one admin" invariant.
+--
+-- We already enforce this at the Go layer via OrganizationMembershipStore's
+-- UpdateRoleGuarded / RemoveGuarded, which open a transaction and take a
+-- FOR UPDATE lock on the admin rows before checking the count. That handles
+-- the normal concurrent-demotion race correctly.
+--
+-- This trigger is the belt-and-suspenders layer: any code path that reaches
+-- organization_memberships directly (backfills, ad-hoc SQL, a future handler
+-- that forgets to call the Guarded variants, replication tooling, etc.) is
+-- still prevented from orphaning an org. The application-level guard stays
+-- the ergonomic check and returns a useful error; the trigger is the
+-- catch-all that makes the invariant a schema-level property.
+--
+-- DEFERRABLE INITIALLY DEFERRED so multi-statement transactions that legit
+-- reshuffle admins (e.g. promote-then-demote in one tx) see the final state
+-- at commit time rather than tripping mid-flight. Apps that need the check
+-- to fire earlier in a tx can `SET CONSTRAINTS enforce_last_admin IMMEDIATE`.
+
+CREATE OR REPLACE FUNCTION enforce_last_admin_invariant()
+RETURNS TRIGGER AS $$
+DECLARE
+    target_org_id uuid;
+    admin_count integer;
+BEGIN
+    -- org_id is part of the primary key so it cannot change via UPDATE;
+    -- OLD.org_id is the right key for both DELETE and UPDATE.
+    target_org_id := OLD.org_id;
+
+    -- If the org was cascade-deleted, the invariant does not apply: there is
+    -- no org left to protect. Checking existence avoids false positives when
+    -- DROP ORG cascades through memberships.
+    IF NOT EXISTS (SELECT 1 FROM organizations WHERE id = target_org_id) THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT COUNT(*) INTO admin_count
+    FROM organization_memberships
+    WHERE org_id = target_org_id AND role = 'admin';
+
+    IF admin_count = 0 THEN
+        RAISE EXCEPTION 'organization % would be left with no admins', target_org_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER enforce_last_admin
+AFTER DELETE OR UPDATE ON organization_memberships
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION enforce_last_admin_invariant();

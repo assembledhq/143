@@ -80,14 +80,20 @@ func (s *OrganizationMembershipStore) Get(ctx context.Context, userID, orgID uui
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrganizationMembership])
 }
 
-// Upsert inserts a membership or updates the role if one already exists for
-// the (user, org) pair. This is the correct primitive for invitation
-// acceptance: an idempotent re-accept (e.g. a double-clicked link) must not
-// downgrade an admin back to the invite's original role, but a pending invite
-// that legitimately upgrades an existing member should apply. We resolve this
-// by only overwriting the role when the new role has *higher* privilege —
-// admin > member > viewer. Lower-or-equal roles are ignored.
-func (s *OrganizationMembershipStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, role string) error {
+// GrantAtLeast inserts a membership or, if one already exists, upgrades the
+// role to the requested level — never downgrades. The name reflects the
+// semantics: after this call the user has *at least* the requested role.
+//
+// This is the correct primitive for invitation acceptance: an idempotent
+// re-accept (e.g. a double-clicked link) must not downgrade an admin back to
+// the invite's original role, but a pending invite that legitimately upgrades
+// an existing member should apply. Privilege ordering is admin > member >
+// viewer; a request for a lower-or-equal role is a no-op.
+//
+// Use UpdateRole / UpdateRoleGuarded for explicit role changes (including
+// demotions) — those paths enforce the last-admin invariant, GrantAtLeast
+// does not because it can never demote.
+func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, orgID uuid.UUID, role string) error {
 	if !models.IsValidRole(role) {
 		return fmt.Errorf("invalid role %q", role)
 	}
@@ -139,17 +145,17 @@ func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, or
 //
 // Remove also clears org-scoped references to the user so removing a member
 // cannot leave orphaned rows that mention a no-longer-member: pending
-// invitations they sent in the org are deleted, and session_questions they
-// answered have answered_by nulled. These are the same two cleanups the
-// legacy users.Delete does; keeping them here means "remove member from org"
-// has one atomic operation that does the right thing whether or not the
-// user still has other memberships.
+// invitations they sent in the org are revoked, session_questions they
+// answered have answered_by nulled, and any auth_sessions hint pointing at
+// the now-revoked org is cleared so the user's next request re-resolves to
+// an org they're still in rather than bouncing off stale state. Accepted/
+// historical invitations are preserved as an audit trail of real actions —
+// the invited_by link survives so "who invited this person" is still
+// answerable after the inviter leaves.
 func (s *OrganizationMembershipStore) Remove(ctx context.Context, userID, orgID uuid.UUID) error {
 	// Order matters: deleted_membership runs first and returns whether the
-	// membership existed. cleared_answers / deleted_invitations gate their
-	// WHERE clauses on that result, so when the user has no membership in the
-	// org we skip the side effects instead of clearing answered_by / deleting
-	// invitations for someone who isn't actually being removed.
+	// membership existed. The follow-on CTEs gate their WHERE clauses on that
+	// result so we skip the side effects when nothing was actually removed.
 	query := `
 		WITH deleted_membership AS (
 			DELETE FROM organization_memberships
@@ -163,10 +169,19 @@ func (s *OrganizationMembershipStore) Remove(ctx context.Context, userID, orgID 
 			  AND answered_by = @user_id
 			  AND EXISTS (SELECT 1 FROM deleted_membership)
 		),
-		deleted_invitations AS (
-			DELETE FROM invitations
+		revoked_invitations AS (
+			UPDATE invitations
+			SET status = 'revoked'
 			WHERE org_id = @org_id
 			  AND invited_by = @user_id
+			  AND status = 'pending'
+			  AND EXISTS (SELECT 1 FROM deleted_membership)
+		),
+		cleared_session_hints AS (
+			UPDATE auth_sessions
+			SET last_org_id = NULL
+			WHERE user_id = @user_id
+			  AND last_org_id = @org_id
 			  AND EXISTS (SELECT 1 FROM deleted_membership)
 		)
 		SELECT EXISTS (SELECT 1 FROM deleted_membership)`

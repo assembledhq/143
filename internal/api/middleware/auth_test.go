@@ -247,7 +247,13 @@ func TestAuth_HeaderSelectsMembership(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAuth_HeaderForUnrelatedOrg_Forbidden(t *testing.T) {
+// TestAuth_HeaderForUnrelatedOrg_FallsThrough covers the graceful-degrade
+// path: an explicit X-Active-Org-ID for an org the user is not a member of
+// (e.g. the client still has a cached orgID after the user was removed)
+// falls through to the session hint and then the user's oldest membership.
+// Returning 403 here would hard-lock a user out of every other org they
+// belong to until they found some way to clear the stale client state.
+func TestAuth_HeaderForUnrelatedOrg_FallsThrough(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -268,10 +274,17 @@ func TestAuth_HeaderForUnrelatedOrg_Forbidden(t *testing.T) {
 			pgxmock.NewRows(userCols).
 				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
 		)
-	// Empty result — user has no membership in the requested org.
+	// Header lookup: user has no membership in OrgB (the header target).
 	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(memberCols))
+	// Session hint lookup: falls through to OrgA, which the user is in.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgA, "admin", now),
+		)
 
 	stores := AuthStores{
 		Sessions:    db.NewAuthSessionStore(mock),
@@ -279,8 +292,11 @@ func TestAuth_HeaderForUnrelatedOrg_Forbidden(t *testing.T) {
 		Memberships: db.NewOrganizationMembershipStore(mock),
 	}
 
+	nextCalled := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("next should not be invoked for forbidden membership")
+		nextCalled = true
+		require.Equal(t, testOrgA, OrgIDFromContext(r.Context()), "fall-through should resolve to session hint org")
+		w.WriteHeader(http.StatusOK)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -290,7 +306,8 @@ func TestAuth_HeaderForUnrelatedOrg_Forbidden(t *testing.T) {
 
 	Auth(stores, nil, zerolog.Nop())(next).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusForbidden, w.Code)
+	require.True(t, nextCalled, "fall-through should let the handler run")
+	require.Equal(t, http.StatusOK, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -823,7 +840,12 @@ func TestAuth_UserLookupFails(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAuth_InvalidHeaderValue(t *testing.T) {
+// TestAuth_HeaderForUnrelatedOrg_EmitsRevokedHeader covers the signaling
+// side of graceful-degrade: when the X-Active-Org-ID header names an org the
+// user no longer belongs to, the middleware sets the X-Org-Membership-Revoked
+// response header so the client can refresh its cached active-org state
+// instead of sending the stale header on every subsequent request.
+func TestAuth_HeaderForUnrelatedOrg_EmitsRevokedHeader(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -844,6 +866,17 @@ func TestAuth_InvalidHeaderValue(t *testing.T) {
 			pgxmock.NewRows(userCols).
 				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
 		)
+	// Header lookup returns no rows — user isn't in OrgB.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(memberCols))
+	// Fall-through to session hint succeeds for OrgA.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgA, "admin", now),
+		)
 
 	stores := AuthStores{
 		Sessions:    db.NewAuthSessionStore(mock),
@@ -853,13 +886,71 @@ func TestAuth_InvalidHeaderValue(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set(ActiveOrgHeader, testOrgB.String())
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, testOrgB.String(), w.Header().Get(RevokedOrgHeader), "should advertise the revoked org so client can refresh state")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAuth_MalformedHeaderValue_FallsThrough covers the graceful-degrade
+// path for an unparseable X-Active-Org-ID — instead of 400/403, we log the
+// malformed value and fall through to the session hint and then the user's
+// oldest membership. A client with corrupted local state would otherwise be
+// hard-locked out of every request until it discovered its own bad header.
+func TestAuth_MalformedHeaderValue_FallsThrough(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	// Session-hint lookup succeeds: user is in OrgA.
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships WHERE user_id .+ AND org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgA, "admin", now),
+		)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	nextCalled := false
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
 	req.Header.Set(ActiveOrgHeader, "not-a-uuid")
 	w := httptest.NewRecorder()
 
 	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("next should not be called")
+		nextCalled = true
+		require.Equal(t, testOrgA, OrgIDFromContext(r.Context()), "malformed header should fall through to session hint")
+		w.WriteHeader(http.StatusOK)
 	})).ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusForbidden, w.Code)
+	require.True(t, nextCalled, "malformed header should not block the request")
+	require.Equal(t, http.StatusOK, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

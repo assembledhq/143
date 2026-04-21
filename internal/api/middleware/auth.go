@@ -38,6 +38,22 @@ const (
 // then the user's oldest membership.
 const ActiveOrgHeader = "X-Active-Org-ID"
 
+// RevokedOrgHeader is emitted on responses when the request's X-Active-Org-ID
+// header or the session's last_org_id hint pointed at an org the user is no
+// longer a member of (typically because they were removed from that org) and
+// the middleware fell through to a different membership. Clients should read
+// this header and refresh their cached active-org state — otherwise every
+// subsequent request keeps sending the stale header and getting silently
+// re-resolved. The header's value is the revoked org's UUID.
+const RevokedOrgHeader = "X-Org-Membership-Revoked"
+
+// RevokedMembershipCode is the error code body responses use to signal the
+// same condition RevokedOrgHeader advertises for requests that also need a
+// 4xx surface (e.g. a future explicit "am I still a member of this org?"
+// endpoint). The header is the hot-path signal; this code is a reservation
+// so handlers and tests agree on the vocabulary.
+const RevokedMembershipCode = "ORG_MEMBERSHIP_REVOKED"
+
 func UserFromContext(ctx context.Context) *models.User {
 	u, _ := ctx.Value(userContextKey).(*models.User)
 	return u
@@ -147,10 +163,22 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		return
 	}
 
-	activeOrgID, activeRole, fromHeader, err := resolveActiveMembership(r, stores, user.ID, session)
+	resolution, err := resolveActiveMembership(r, stores, user.ID, session)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "NO_MEMBERSHIP", err.Error())
 		return
+	}
+	activeOrgID := resolution.orgID
+	activeRole := resolution.role
+
+	// Surface a revocation signal to the client so it knows its cached active
+	// org drifted (user was removed from that org, or the org was deleted).
+	// This is a best-effort hint: the request still succeeds against whatever
+	// membership we resolved to, but the client should refresh its cached
+	// active-org state on seeing this header rather than keep sending the
+	// stale X-Active-Org-ID every request.
+	if resolution.revokedOrgID != nil {
+		w.Header().Set(RevokedOrgHeader, resolution.revokedOrgID.String())
 	}
 
 	// Persist the resolution as the session's last_org_id if it changed, so
@@ -164,16 +192,17 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	// tab is sticky" symptom on cold load. The header is the client's
 	// authoritative declaration; the session hint should only track the
 	// session-level fallback (no header in flight).
-	if !fromHeader && activeOrgID != uuid.Nil && (session.LastOrgID == nil || *session.LastOrgID != activeOrgID) {
+	if !resolution.fromHeader && activeOrgID != uuid.Nil && (session.LastOrgID == nil || *session.LastOrgID != activeOrgID) {
 		if updateErr := stores.Sessions.UpdateLastOrgID(r.Context(), token, &activeOrgID); updateErr != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(updateErr).Msg("failed to persist last_org_id")
 		}
 	}
 
-	// Keep the legacy User.Role field in sync with the active-role so
-	// handlers written against the single-org model continue to behave
-	// correctly during the compatibility window. New code should read
-	// ActiveRoleFromContext directly.
+	// TODO(2026-04-25): drop this legacy sync once user.OrgID / user.Role
+	// are removed. Keep the legacy User.Role field in sync with the
+	// active-role so handlers written against the single-org model continue
+	// to behave correctly during the compatibility window. New code should
+	// read ActiveRoleFromContext and OrgIDFromContext directly.
 	if activeRole != "" {
 		user.Role = activeRole
 		user.OrgID = activeOrgID
@@ -193,6 +222,21 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// membershipResolution is the outcome of resolveActiveMembership. orgID/role
+// are the resolved active membership (orgID may be uuid.Nil when the user has
+// zero memberships — handlers render an empty state in that case). fromHeader
+// is true when X-Active-Org-ID drove the choice; the caller uses that to skip
+// the last_org_id write so two tabs pinned to different orgs don't trample
+// each other's session hint. revokedOrgID is non-nil when the request's
+// header or session hint named an org the user is no longer in — the caller
+// emits RevokedOrgHeader so the client can refresh its cached active org.
+type membershipResolution struct {
+	orgID        uuid.UUID
+	role         string
+	fromHeader   bool
+	revokedOrgID *uuid.UUID
+}
+
 // resolveActiveMembership chooses which org's membership should scope this
 // request. Resolution order:
 //
@@ -206,54 +250,67 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 //     stable for users with a single membership (they always get it) and
 //     avoids surprising "random org" behavior for users with many.
 //
-// Returns uuid.Nil with a nil error when the user has zero memberships —
-// allowing the user through to see the empty state. A non-nil error means
-// the client explicitly requested an org the user does not belong to, which
-// is a 403 (the client should re-resolve via /auth/me).
-//
-// The fromHeader return is true when the X-Active-Org-ID header drove the
-// choice; the caller uses that to skip the last_org_id write so two tabs
-// pinned to different orgs don't trample each other's session hint.
-func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUID, session models.AuthSession) (uuid.UUID, string, bool, error) {
-	// 1. Explicit header.
+// Returns orgID=uuid.Nil with a nil error when the user has zero memberships —
+// allowing the user through to see the empty state. A non-nil error means an
+// unexpected database failure; requests for an org the user does not belong
+// to graceful-degrade through to the next resolution step and advertise the
+// stale orgID via revokedOrgID so the caller can emit RevokedOrgHeader.
+func resolveActiveMembership(r *http.Request, stores AuthStores, userID uuid.UUID, session models.AuthSession) (membershipResolution, error) {
+	var revokedOrgID *uuid.UUID
+
+	// 1. Explicit header. We graceful-degrade a malformed or stale header
+	// (falling through to the session hint and then oldest membership) rather
+	// than 400/403-ing the request: a client with a corrupted or stale
+	// X-Active-Org-ID (for example, after being removed from an org) would
+	// otherwise be hard-locked out of every request until it hears about its
+	// own removal from some other channel. The stale orgID is surfaced via
+	// revokedOrgID so the caller can advertise it to the client; DB errors
+	// still propagate because those indicate real infrastructure problems.
 	if raw := strings.TrimSpace(r.Header.Get(ActiveOrgHeader)); raw != "" {
+		log := zerolog.Ctx(r.Context())
 		requested, parseErr := uuid.Parse(raw)
 		if parseErr != nil {
-			return uuid.Nil, "", false, errors.New("invalid active org header")
+			log.Info().Str("user_id", userID.String()).Str("header", raw).Msg("active org header malformed; falling through to session hint")
+		} else {
+			m, err := stores.Memberships.Get(r.Context(), userID, requested)
+			if err == nil {
+				return membershipResolution{orgID: m.OrgID, role: m.Role, fromHeader: true}, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return membershipResolution{}, err
+			}
+			log.Info().Str("user_id", userID.String()).Str("requested_org_id", requested.String()).Msg("active org header names an org the user is not a member of; falling through")
+			revokedOrgID = &requested
 		}
-		m, err := stores.Memberships.Get(r.Context(), userID, requested)
-		if err == nil {
-			return m.OrgID, m.Role, true, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", false, err
-		}
-		// Explicit request for an org the user does not belong to — refuse.
-		return uuid.Nil, "", false, errors.New("not a member of requested org")
 	}
 
 	// 2. Session hint.
 	if session.LastOrgID != nil {
 		m, err := stores.Memberships.Get(r.Context(), userID, *session.LastOrgID)
 		if err == nil {
-			return m.OrgID, m.Role, false, nil
+			return membershipResolution{orgID: m.OrgID, role: m.Role, revokedOrgID: revokedOrgID}, nil
 		}
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", false, err
+			return membershipResolution{}, err
 		}
-		// Session hint is stale (membership revoked or org deleted) — fall
-		// through to oldest membership.
+		// Session hint is stale (membership revoked or org deleted). If the
+		// client didn't already get a revocation signal from the header path,
+		// surface this one so the client knows its cached state drifted.
+		if revokedOrgID == nil {
+			staleHint := *session.LastOrgID
+			revokedOrgID = &staleHint
+		}
 	}
 
 	// 3. Oldest membership (or zero-membership empty-state).
 	m, err := stores.Memberships.OldestForUser(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, "", false, nil
+			return membershipResolution{revokedOrgID: revokedOrgID}, nil
 		}
-		return uuid.Nil, "", false, err
+		return membershipResolution{}, err
 	}
-	return m.OrgID, m.Role, false, nil
+	return membershipResolution{orgID: m.OrgID, role: m.Role, revokedOrgID: revokedOrgID}, nil
 }
 
 func maybeRefreshSession(w http.ResponseWriter, r *http.Request, store *db.AuthSessionStore, csrfKey []byte, logger zerolog.Logger, session models.AuthSession) {

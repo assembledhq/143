@@ -167,6 +167,67 @@ func RateLimit(config RateLimitConfig) func(http.Handler) http.Handler {
 	}
 }
 
+// ClaimRateLimit returns a dedicated rate limiter for the invitation claim
+// endpoint. The general RateLimit middleware (20 req/s per IP = 1200/min)
+// is permissive by design because most authenticated endpoints are called
+// repeatedly during normal navigation; a token-guessing attacker needs far
+// fewer attempts per minute than that to remain under the threshold.
+//
+// The claim endpoint is special because each request names an opaque token
+// the server looks up against the invitations table — a brute-force attempt
+// to find a valid token reduces to hammering this single endpoint. Keeping
+// it at 10 attempts/minute per IP and per user forces any attacker into
+// detectable territory quickly. Legitimate users click the email link once;
+// a human retrying a copy-paste failure ten times in a minute is already an
+// outlier.
+//
+// The limit is keyed jointly on IP *and* authenticated user: a logged-in
+// attacker cycling through tokens from one workstation trips both. The
+// per-user bucket means a shared NAT doesn't accidentally rate-limit
+// concurrent legitimate users on the same IP below their own quota.
+func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
+	ipBuckets := &sync.Map{}
+	userBuckets := &sync.Map{}
+	refillPerSecond := float64(perMinute) / 60.0
+
+	getBucket := func(m *sync.Map, key string) *tokenBucket {
+		if existing, ok := m.Load(key); ok {
+			return existing.(*tokenBucket)
+		}
+		fresh := &tokenBucket{
+			tokens:     float64(perMinute),
+			maxTokens:  float64(perMinute),
+			refillRate: refillPerSecond,
+			lastRefill: time.Now(),
+		}
+		actual, _ := m.LoadOrStore(key, fresh)
+		return actual.(*tokenBucket)
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := extractIP(r)
+			if !getBucket(ipBuckets, ip).allow() {
+				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("invitation claim rate limit exceeded (IP)")
+				w.Header().Set("Retry-After", "60")
+				http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+				return
+			}
+
+			if user := UserFromContext(r.Context()); user != nil {
+				if !getBucket(userBuckets, user.ID.String()).allow() {
+					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("invitation claim rate limit exceeded (user)")
+					w.Header().Set("Retry-After", "60")
+					http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func extractIP(r *http.Request) string {
 	// Check X-Forwarded-For header first (for reverse proxy setups)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

@@ -147,7 +147,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		// Clear any stale pending_invitation cookie from a prior OAuth attempt.
 		http.SetCookie(w, &http.Cookie{Name: "pending_invitation", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 
-		user, invErr, registerErr := h.createInvitedUserWithPassword(r.Context(), body.Invitation, body.Email, body.Name, hashStr)
+		user, sessionToken, invErr, registerErr := h.createInvitedUserWithPassword(r.Context(), body.Invitation, body.Email, body.Name, hashStr)
 		if invErr != nil {
 			writeError(w, r, invErr.status, invErr.code, invErr.message)
 			return
@@ -157,25 +157,26 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
-		h.createSessionAndRespond(w, r, user)
+		h.respondWithSession(w, r, user, sessionToken)
 		return
 	}
 
-	// No invitation — atomically create a new org, user, and admin membership.
+	// No invitation — atomically create a new org, user, admin membership, and session.
 	user := &models.User{
 		Email:        body.Email,
 		Name:         body.Name,
 		PasswordHash: &hashStr,
 	}
-	if err := h.createSignupOrg(r.Context(), body.Name+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
+	sessionToken, err := h.createSignupOrg(r.Context(), body.Name+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.CreateWithPassword(ctx, u)
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", err)
 		return
 	}
 
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
-	h.createSessionAndRespond(w, r, user)
+	h.respondWithSession(w, r, user, sessionToken)
 }
 
 // EmailLogin handles email/password sign-in.
@@ -338,7 +339,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 				GitHubLogin: &ghUser.Login,
 				AvatarURL:   &ghUser.AvatarURL,
 			}
-			createdUser, claimErr, createErr := h.acceptInvitationAndUpsertUser(
+			createdUser, sessionToken, claimErr, createErr := h.acceptInvitationAndUpsertUser(
 				r.Context(),
 				inv.ID,
 				user,
@@ -356,7 +357,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			}
 			h.storeGitHubToken(r, createdUser, tokenResp)
 			h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
-			h.createSessionAndRedirect(w, r, createdUser)
+			h.redirectWithSession(w, r, sessionToken)
 			return
 		}
 		// Invalid invitation (wrong email, expired, etc.) — fall through to
@@ -370,16 +371,17 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		GitHubLogin: &ghUser.Login,
 		AvatarURL:   &ghUser.AvatarURL,
 	}
-	if err := h.createSignupOrg(r.Context(), ghUser.Login+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
+	sessionToken, err := h.createSignupOrg(r.Context(), ghUser.Login+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.UpsertFromGitHub(ctx, u)
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", err)
 		return
 	}
 
 	h.storeGitHubToken(r, user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
-	h.createSessionAndRedirect(w, r, user)
+	h.redirectWithSession(w, r, sessionToken)
 }
 
 // GoogleLogin redirects to Google OAuth.
@@ -483,7 +485,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 				GoogleID:  &gUser.Sub,
 				AvatarURL: &gUser.Picture,
 			}
-			createdUser, claimErr, createErr := h.acceptInvitationAndUpsertUser(
+			createdUser, sessionToken, claimErr, createErr := h.acceptInvitationAndUpsertUser(
 				r.Context(),
 				inv.ID,
 				user,
@@ -500,7 +502,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
-			h.createSessionAndRedirect(w, r, createdUser)
+			h.redirectWithSession(w, r, sessionToken)
 			return
 		}
 		// Invalid invitation — fall through to default signup.
@@ -512,15 +514,16 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		GoogleID:  &gUser.Sub,
 		AvatarURL: &gUser.Picture,
 	}
-	if err := h.createSignupOrg(r.Context(), name+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
+	sessionToken, err := h.createSignupOrg(r.Context(), name+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.UpsertFromGoogle(ctx, u)
-	}); err != nil {
+	})
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_CREATE_FAILED", "failed to create account", err)
 		return
 	}
 
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
-	h.createSessionAndRedirect(w, r, user)
+	h.redirectWithSession(w, r, sessionToken)
 }
 
 // ClaimInvitation accepts an invitation on behalf of the currently signed-in
@@ -560,7 +563,17 @@ func (h *AuthHandler) ClaimInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if invErr != nil {
-		h.emitInvitationClaimFailed(r, user.ID, inv, invErr.code, invErr.message)
+		// inv is nil when GetByToken failed to find any invitation — we have
+		// no org context to attach an audit row to. Log at Warn so the
+		// "unknown token submitted by authenticated user" signal is still
+		// visible to security monitoring, with a token prefix (not the full
+		// token) so ops can correlate bursts without the log becoming a
+		// secret store.
+		if inv == nil {
+			logInvitationClaimUnknownToken(r, user.ID, body.Token, invErr.code)
+		} else {
+			h.emitInvitationClaimFailed(r, user.ID, inv, invErr.code, invErr.message)
+		}
 		writeError(w, r, invErr.status, invErr.code, invErr.message)
 		return
 	}
@@ -614,23 +627,37 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // --- shared helpers ---
 
-func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, user *models.User) {
+// persistSessionTx inserts a session row for the user via the given DBTX and
+// returns the opaque token. Callers pass a pgx.Tx for signup flows (so the
+// session lives or dies with the transaction that created the user row) or
+// h.pool for login flows (where the user already exists and there is no
+// surrounding transaction).
+func (h *AuthHandler) persistSessionTx(ctx context.Context, dbtx db.DBTX, user *models.User) (string, error) {
 	sessionToken, err := generateRandomString(32)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token", err)
-		return
+		return "", fmt.Errorf("generate session token: %w", err)
 	}
+	// TODO(2026-04-25): drop OrgID from AuthSession once the legacy column
+	// is removed. Session->org resolution now flows through the middleware
+	// (X-Active-Org-ID header → session.last_org_id → oldest membership);
+	// auth_sessions.org_id is only kept in sync so pre-migration readers
+	// don't regress during the sunset window.
 	session := &models.AuthSession{
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
 		Token:     sessionToken,
 		ExpiresAt: time.Now().Add(middleware.SessionTTL),
 	}
-	if err := h.sessionStore.Create(r.Context(), session); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
-		return
+	if err := db.NewAuthSessionStore(dbtx).Create(ctx, session); err != nil {
+		return "", fmt.Errorf("create session: %w", err)
 	}
+	return sessionToken, nil
+}
 
+// writeSessionAndCSRFCookies installs the session and CSRF cookies for the
+// given token. Returns false and writes an error response if the CSRF cookie
+// cannot be signed; callers should stop processing in that case.
+func (h *AuthHandler) writeSessionAndCSRFCookies(w http.ResponseWriter, r *http.Request, sessionToken string) bool {
 	http.SetCookie(w, &http.Cookie{
 		Name:     middleware.SessionCookieName,
 		Value:    sessionToken,
@@ -640,58 +667,60 @@ func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Re
 		SameSite: http.SameSiteLaxMode,
 		Secure:   middleware.IsRequestSecure(r),
 	})
-
 	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token", err)
+		return false
+	}
+	return true
+}
+
+// respondWithSession writes the session+CSRF cookies and returns the user as
+// JSON. Used by the email register/login paths that expect a JSON response.
+func (h *AuthHandler) respondWithSession(w http.ResponseWriter, r *http.Request, user *models.User, sessionToken string) {
+	if !h.writeSessionAndCSRFCookies(w, r, sessionToken) {
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+}
 
+// redirectWithSession writes the session+CSRF cookies and issues the OAuth
+// post-login redirect. Honors the oauth_return_to cookie for same-origin
+// relative paths only.
+func (h *AuthHandler) redirectWithSession(w http.ResponseWriter, r *http.Request, sessionToken string) {
+	if !h.writeSessionAndCSRFCookies(w, r, sessionToken) {
+		return
+	}
 	redirectURL := h.cfg.FrontendURL
 	if returnCookie, err := r.Cookie("oauth_return_to"); err == nil && returnCookie.Value != "" {
-		// Clear the cookie.
 		http.SetCookie(w, &http.Cookie{Name: "oauth_return_to", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-		// Only allow relative paths to prevent open redirect.
 		if len(returnCookie.Value) > 0 && returnCookie.Value[0] == '/' {
 			redirectURL = h.cfg.FrontendURL + returnCookie.Value
 		}
 	}
-
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
-func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *models.User) {
-	sessionToken, err := generateRandomString(32)
+// createSessionAndRedirect is the non-signup redirect path: the user already
+// exists (login) so the session is created via the pool, not inside a tx.
+// Signup flows use the Tx-variant that co-commits with user/org/membership.
+func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, user *models.User) {
+	token, err := h.persistSessionTx(r.Context(), h.pool, user)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate session token", err)
-		return
-	}
-	session := &models.AuthSession{
-		UserID:    user.ID,
-		OrgID:     user.OrgID,
-		Token:     sessionToken,
-		ExpiresAt: time.Now().Add(middleware.SessionTTL),
-	}
-	if err := h.sessionStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
 		return
 	}
+	h.redirectWithSession(w, r, token)
+}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     middleware.SessionCookieName,
-		Value:    sessionToken,
-		Path:     "/",
-		MaxAge:   int(middleware.SessionTTL.Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   middleware.IsRequestSecure(r),
-	})
-
-	if err := middleware.SetCSRFCookie(w, r, []byte(h.cfg.CSRFSigningKey)); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to generate CSRF token", err)
+// createSessionAndRespond is the non-signup JSON path (email login): the user
+// already exists so the session is created via the pool.
+func (h *AuthHandler) createSessionAndRespond(w http.ResponseWriter, r *http.Request, user *models.User) {
+	token, err := h.persistSessionTx(r.Context(), h.pool, user)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+	h.respondWithSession(w, r, user, token)
 }
 
 // storeGitHubToken persists the user's GitHub OAuth token for PR creation.
@@ -864,74 +893,85 @@ type invitationError struct {
 type oauthUserUpsertFunc func(ctx context.Context, userStore *db.UserStore, user *models.User) error
 
 // acceptInvitationAndUpsertUser atomically accepts an invitation, upserts the
-// invited OAuth user, and grants the user a membership in the inviting org.
-// The three writes share a transaction so membership is never granted without
-// a successful claim (and the claim is never left stranded if the user row or
-// membership row fails to insert).
+// invited OAuth user, grants them a membership, and issues their initial
+// session token — all in one transaction so membership is never granted
+// without a successful claim (and a successfully-claimed user is never left
+// without a way to log in). The returned sessionToken should be installed
+// into the response cookies.
 func (h *AuthHandler) acceptInvitationAndUpsertUser(
 	ctx context.Context,
 	invitationID uuid.UUID,
 	user *models.User,
 	upsert oauthUserUpsertFunc,
-) (*models.User, *invitationError, error) {
+) (*models.User, string, *invitationError, error) {
 	if h.pool == nil {
-		return nil, nil, fmt.Errorf("auth handler pool is not configured")
+		return nil, "", nil, fmt.Errorf("auth handler pool is not configured")
 	}
 	if user == nil {
-		return nil, nil, fmt.Errorf("user is required")
+		return nil, "", nil, fmt.Errorf("user is required")
 	}
 	if upsert == nil {
-		return nil, nil, fmt.Errorf("oauth user upsert function is required")
+		return nil, "", nil, fmt.Errorf("oauth user upsert function is required")
 	}
 
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin invitation transaction: %w", err)
+		return nil, "", nil, fmt.Errorf("begin invitation transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	txInvitationStore := db.NewInvitationStore(tx)
 	if err := txInvitationStore.Accept(ctx, invitationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, &invitationError{
+			return nil, "", &invitationError{
 				status:  http.StatusGone,
 				code:    "INVITE_INVALID",
 				message: "this invitation is no longer valid",
 			}, nil
 		}
-		return nil, nil, fmt.Errorf("accept invitation: %w", err)
+		return nil, "", nil, fmt.Errorf("accept invitation: %w", err)
 	}
 
 	txUserStore := db.NewUserStore(tx)
+	// TODO(2026-04-25): the oauth upsert still writes user.OrgID / user.Role
+	// onto the legacy users row; after sunset, drop those columns and derive
+	// the caller's role from the GrantAtLeast below instead.
 	if err := upsert(ctx, txUserStore, user); err != nil {
-		return nil, nil, fmt.Errorf("upsert invited oauth user: %w", err)
+		return nil, "", nil, fmt.Errorf("upsert invited oauth user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).Upsert(ctx, user.ID, user.OrgID, user.Role); err != nil {
-		return nil, nil, fmt.Errorf("grant invited membership: %w", err)
+	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role); err != nil {
+		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
+	}
+
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("create invitation session: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, fmt.Errorf("commit invitation transaction: %w", err)
+		return nil, "", nil, fmt.Errorf("commit invitation transaction: %w", err)
 	}
 
-	return user, nil, nil
+	return user, sessionToken, nil, nil
 }
 
 // createInvitedUserWithPassword validates and claims an invitation, creates
-// the user, and grants a membership — all in one transaction so membership is
-// never granted without a successful claim.
-func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, email, name, hash string) (*models.User, *invitationError, error) {
+// the user, grants a membership, and issues the initial session token — all
+// in one transaction so membership is never granted without a successful
+// claim and a created user is never left without a way to log in. The
+// returned sessionToken should be installed into the response cookies.
+func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, email, name, hash string) (*models.User, string, *invitationError, error) {
 	if h.pool == nil {
-		return nil, nil, fmt.Errorf("auth handler pool is not configured")
+		return nil, "", nil, fmt.Errorf("auth handler pool is not configured")
 	}
 	if h.userStore == nil {
-		return nil, nil, fmt.Errorf("user store is not configured")
+		return nil, "", nil, fmt.Errorf("user store is not configured")
 	}
 
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("begin invitation transaction: %w", err)
+		return nil, "", nil, fmt.Errorf("begin invitation transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -940,20 +980,25 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 
 	inv, orgID, role, invErr := h.validateInvitationWithStore(ctx, txInvitationStore, token, email, "")
 	if invErr != nil {
-		return nil, invErr, nil
+		return nil, "", invErr, nil
 	}
 
 	if err := txInvitationStore.Accept(ctx, inv.ID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, &invitationError{
+			return nil, "", &invitationError{
 				status:  http.StatusGone,
 				code:    "INVITE_INVALID",
 				message: "this invitation is no longer valid",
 			}, nil
 		}
-		return nil, nil, fmt.Errorf("accept invitation: %w", err)
+		return nil, "", nil, fmt.Errorf("accept invitation: %w", err)
 	}
 
+	// TODO(2026-04-25): drop OrgID / Role from the User literal once
+	// users.org_id and users.role are removed. The GrantAtLeast call below
+	// is the authoritative membership write; the legacy fields are populated
+	// here only so read paths that still touch users.org_id keep working
+	// through the sunset window.
 	user := &models.User{
 		OrgID:        orgID,
 		Email:        email,
@@ -962,18 +1007,23 @@ func (h *AuthHandler) createInvitedUserWithPassword(ctx context.Context, token, 
 		PasswordHash: &hash,
 	}
 	if err := txUserStore.CreateWithPassword(ctx, user); err != nil {
-		return nil, nil, fmt.Errorf("create invited user: %w", err)
+		return nil, "", nil, fmt.Errorf("create invited user: %w", err)
 	}
 
-	if err := db.NewOrganizationMembershipStore(tx).Upsert(ctx, user.ID, orgID, role); err != nil {
-		return nil, nil, fmt.Errorf("grant invited membership: %w", err)
+	if err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, orgID, role); err != nil {
+		return nil, "", nil, fmt.Errorf("grant invited membership: %w", err)
+	}
+
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("create invitation session: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, fmt.Errorf("commit invitation transaction: %w", err)
+		return nil, "", nil, fmt.Errorf("commit invitation transaction: %w", err)
 	}
 
-	return user, nil, nil
+	return user, sessionToken, nil, nil
 }
 
 // validateInvitation looks up and validates an invitation token.
