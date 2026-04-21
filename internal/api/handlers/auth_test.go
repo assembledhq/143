@@ -268,7 +268,7 @@ func TestAuthHandler_Providers_OmitsDemoCredentialsWhenOff(t *testing.T) {
 		DemoEmail:    "dogfood@143.dev",
 		DemoPassword: "preview-dogfood",
 	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil)
+	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
 	w := httptest.NewRecorder()
 

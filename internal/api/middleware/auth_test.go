@@ -964,3 +964,90 @@ func TestAuth_MalformedHeaderValue_FallsThrough(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestAuth_SessionLookupTransientError_Returns503 pins the 503 path for a
+// non-ErrNoRows failure from the session store. Clearing the cookie on every
+// transient DB blip (pool exhaustion, connection reset during rolling deploy)
+// would drop the browser session and trigger a logout in the frontend; 503
+// lets the client retry without losing its login.
+func TestAuth_SessionLookupTransientError_Returns503(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: "t"})
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run when session lookup fails transiently")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName && c.MaxAge < 0 {
+			t.Fatalf("transient session-lookup error must not clear the cookie, got %+v", c)
+		}
+	}
+	require.Contains(t, w.Body.String(), "SERVICE_UNAVAILABLE")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAuth_UserLookupTransientError_Returns503 pins the same 503 behavior for
+// a non-ErrNoRows failure from the user store, after the session row was
+// fetched successfully. Mirrors the session-lookup case so ops can
+// distinguish real outages from invalid-session 401s.
+func TestAuth_UserLookupTransientError_Returns503(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(uuid.New(), testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errDBDown)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: "t"})
+	w := httptest.NewRecorder()
+
+	Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next should not run when user lookup fails transiently")
+	})).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName && c.MaxAge < 0 {
+			t.Fatalf("transient user-lookup error must not clear the cookie, got %+v", c)
+		}
+	}
+	require.Contains(t, w.Body.String(), "SERVICE_UNAVAILABLE")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
