@@ -7,6 +7,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/rs/zerolog"
 )
 
 type SettingsHandler struct {
@@ -14,6 +15,7 @@ type SettingsHandler struct {
 	llmDefaults   map[string]string // provider name → masked key (from server env)
 	platformModel string            // cheap model used for internal features (e.g. "gpt-5.4-nano")
 	audit         *db.AuditEmitter
+	logger        zerolog.Logger
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -21,8 +23,20 @@ func (h *SettingsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
+// SetLogger wires a logger used by marshalAuditDetails so a failure to
+// JSON-encode the settings diff surfaces in logs instead of silently
+// dropping the audit payload.
+func (h *SettingsHandler) SetLogger(logger zerolog.Logger) {
+	h.logger = logger
+}
+
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string, platformModel string) *SettingsHandler {
-	return &SettingsHandler{orgStore: orgStore, llmDefaults: llmDefaults, platformModel: platformModel}
+	return &SettingsHandler{
+		orgStore:      orgStore,
+		llmDefaults:   llmDefaults,
+		platformModel: platformModel,
+		logger:        zerolog.Nop(),
+	}
 }
 
 func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +95,12 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Snapshot the pre-update values so the audit entry can record a precise
+	// before/after diff. The mutations below replace these in place, so the
+	// capture has to happen up front.
+	beforeName := org.Name
+	beforeSettings := append(json.RawMessage(nil), org.Settings...)
+
 	if req.Name != nil {
 		org.Name = *req.Name
 	}
@@ -98,8 +118,23 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgIDStr := orgID.String()
-	emitUserAudit(h.audit, r, models.AuditActionSettingsUpdated, models.AuditResourceSettings, &orgIDStr, nil)
+	// Build the audit diff from what actually changed. Skip the emit entirely
+	// when nothing changed so a no-op PATCH (client re-saving the current
+	// values) doesn't pollute the timeline with empty "updated settings" rows.
+	changes := map[string]any{}
+	if req.Name != nil && org.Name != beforeName {
+		changes["name"] = map[string]any{"before": beforeName, "after": org.Name}
+	}
+	if req.Settings != nil {
+		for k, v := range settingsAuditDiff(beforeSettings, org.Settings) {
+			changes[k] = v
+		}
+	}
+	if len(changes) > 0 {
+		orgIDStr := orgID.String()
+		emitUserAudit(h.audit, r, models.AuditActionSettingsUpdated, models.AuditResourceSettings, &orgIDStr,
+			marshalAuditDetails(h.logger, map[string]any{"changes": changes}))
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
 }
 
