@@ -15,14 +15,15 @@ func TestJobStore_Enqueue(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		queue     string
-		jobType   string
-		payload   any
-		priority  int
-		dedupeKey *string
-		setupMock func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID)
-		expectErr bool
+		name        string
+		queue       string
+		jobType     string
+		payload     any
+		priority    int
+		dedupeKey   *string
+		setupMock   func(mock pgxmock.PgxPoolIface, generatedID uuid.UUID)
+		expectErr   bool
+		expectNilID bool
 	}{
 		{
 			name:      "enqueues job without dedupe key",
@@ -70,6 +71,21 @@ func TestJobStore_Enqueue(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name:      "treats dedupe conflict as a no-op success",
+			queue:     "agent",
+			jobType:   "open_pr",
+			payload:   map[string]string{"session_id": "abc-123"},
+			priority:  5,
+			dedupeKey: jobDedupeKeyPtr("open_pr:abc-123"),
+			setupMock: func(mock pgxmock.PgxPoolIface, _ uuid.UUID) {
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			expectNilID: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -92,7 +108,11 @@ func TestJobStore_Enqueue(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "Enqueue should not return an error")
-			require.Equal(t, generatedID, id, "should return the generated job ID")
+			if tt.expectNilID {
+				require.Equal(t, uuid.Nil, id, "dedupe conflict should return nil UUID with no error")
+			} else {
+				require.Equal(t, generatedID, id, "should return the generated job ID")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
