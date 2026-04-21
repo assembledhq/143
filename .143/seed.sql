@@ -4,6 +4,12 @@
 -- placeholder integration and a couple of repositories/projects so the
 -- logged-in UI shows populated screens instead of empty states.
 --
+-- IMPORTANT: the seeded admin email + password below must match the
+-- DEMO_EMAIL / DEMO_PASSWORD defaults in internal/config/config.go, since
+-- the login-page banner renders those values and a reviewer copy-pastes
+-- them into the sign-in form. If you change either side, regenerate the
+-- bcrypt hash below (cost 10) and update the config defaults in lockstep.
+--
 -- Password: "preview-dogfood" (bcrypt hash below).
 --
 -- All rows use fixed UUIDs + ON CONFLICT DO NOTHING so the seed is
@@ -136,3 +142,267 @@ VALUES
     now()
   )
 ON CONFLICT (id) DO NOTHING;
+
+-- =============================================================================
+-- Illusory session + preview rows.
+--
+-- The dogfood preview runs as OS processes inside a sandbox container and has
+-- no access to a Docker socket, so it cannot actually spawn sessions or
+-- previews. These rows exist so that the sessions list, session detail, and
+-- preview panels render populated state for a reviewer clicking around.
+--
+-- preview_instances.worker_node_id is set to the sentinel 'seeded' so the
+-- real RecycleWorker (which scans WHERE worker_node_id = <this worker>) never
+-- touches these rows. expires_at is far in the future for the same reason.
+--
+-- Idempotency: rows with fixed PKs use ON CONFLICT (id) DO NOTHING. Rows in
+-- tables where we don't own an id (session_messages, session_logs) have no
+-- unique constraint on the seeded columns, so ON CONFLICT alone cannot
+-- deduplicate them. To stay idempotent across repeated seed runs (e.g. a
+-- sandbox restart against a persistent Postgres volume) we DELETE the seed
+-- rows by their fixed session_ids before re-INSERTing. The session_ids
+-- 00000000-0000-4000-a000-00000000030x are owned by this seed and cannot
+-- collide with real sessions, which use gen_random_uuid().
+-- =============================================================================
+
+-- Three sessions: one "active PR", one "completed", one "idle" -- spread
+-- across the two seeded repos and ordered by last_activity_at DESC so the
+-- sessions list has a natural MRU shape.
+INSERT INTO sessions (
+  id, org_id, repository_id, triggered_by_user_id, title, working_branch,
+  target_branch, agent_type, status, autonomy_level, token_mode,
+  sandbox_state, current_turn, last_activity_at, started_at, completed_at,
+  created_at
+)
+VALUES
+  (
+    '00000000-0000-4000-a000-000000000300'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000100'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    'Ship PR preview auto-teardown',
+    'feat/preview-teardown',
+    'main',
+    'codex',
+    'pr_created',
+    'semi',
+    'low',
+    'snapshotted',
+    4,
+    now() - interval '2 minutes',
+    now() - interval '35 minutes',
+    now() - interval '3 minutes',
+    now() - interval '35 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000301'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000101'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    'Retry webhook signature on transient GitHub 5xx',
+    'fix/webhook-retry',
+    'main',
+    'codex',
+    'completed',
+    'semi',
+    'low',
+    'snapshotted',
+    3,
+    now() - interval '1 hour',
+    now() - interval '2 hours',
+    now() - interval '1 hour' - interval '5 minutes',
+    now() - interval '2 hours'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000302'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000100'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    'Investigate preview cold-start latency',
+    NULL,
+    'main',
+    'codex',
+    'idle',
+    'semi',
+    'low',
+    'none',
+    1,
+    now() - interval '3 days',
+    now() - interval '3 days' - interval '10 minutes',
+    NULL,
+    now() - interval '3 days' - interval '10 minutes'
+  )
+ON CONFLICT (id) DO NOTHING;
+
+-- A few chat messages per session so the detail pages render a conversation.
+-- DELETE first to keep reseeds idempotent (see note at top of the illusory
+-- section — session_messages has no unique constraint on the seeded cols).
+DELETE FROM session_messages WHERE session_id IN (
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000301'::uuid,
+  '00000000-0000-4000-a000-000000000302'::uuid
+);
+INSERT INTO session_messages (session_id, org_id, user_id, turn_number, role, content, created_at)
+VALUES
+  (
+    '00000000-0000-4000-a000-000000000300'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    1, 'user',
+    'Please wire the preview recycler up to pull_request.closed so we stop paying for previews after a merge.',
+    now() - interval '35 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000300'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    NULL,
+    1, 'assistant',
+    'Plan: inject preview manager into PRService, call StopPreview from the closed branch, mark pr_preview_state.status = ''closed''. Opened PR with a regression test.',
+    now() - interval '34 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000300'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    2, 'user',
+    'Looks good. Can you also make sure we do not blow up if the preview manager is not wired (self-hosted path)?',
+    now() - interval '6 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000301'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    1, 'user',
+    'Webhook deliveries are failing intermittently when GitHub returns a 502. Add a retry with backoff.',
+    now() - interval '2 hours'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000301'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    NULL,
+    1, 'assistant',
+    'Added exponential backoff retry (3 attempts, 500ms/1s/2s) around the signature verification call. Tests cover 502, 503, and network timeouts.',
+    now() - interval '1 hour' - interval '10 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000302'::uuid,
+    '00000000-0000-4000-a000-000000000001'::uuid,
+    '00000000-0000-4000-a000-000000000002'::uuid,
+    1, 'user',
+    'Preview cold start is 90s+ on the dogfood env. Where is the time actually going?',
+    now() - interval '3 days'
+  )
+ON CONFLICT DO NOTHING;
+
+-- A few log lines per session so the log stream UI has something to show.
+-- DELETE first for the same idempotency reason as session_messages above.
+DELETE FROM session_logs WHERE session_id IN (
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000301'::uuid,
+  '00000000-0000-4000-a000-000000000302'::uuid
+);
+INSERT INTO session_logs (session_id, org_id, timestamp, level, message, turn_number)
+VALUES
+  ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, now() - interval '34 minutes', 'info', 'sandbox provisioned', 1),
+  ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, now() - interval '30 minutes', 'info', 'pushed branch feat/preview-teardown', 1),
+  ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, now() - interval '28 minutes', 'info', 'opened pull request #42', 1),
+  ('00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000001'::uuid, now() - interval '1 hour' - interval '5 minutes', 'info', 'session completed successfully', 1)
+ON CONFLICT DO NOTHING;
+
+-- A seeded "ready" preview instance pointing at session 300.
+-- worker_node_id = 'seeded' keeps the real recycler from touching this row.
+INSERT INTO preview_instances (
+  id, session_id, org_id, user_id, profile_name, name, status, provider,
+  worker_node_id, preview_handle, primary_service, port, expires_at, created_at, updated_at
+)
+VALUES (
+  '00000000-0000-4000-a000-000000000400'::uuid,
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000001'::uuid,
+  '00000000-0000-4000-a000-000000000002'::uuid,
+  'manado',
+  'Ship PR preview auto-teardown',
+  'ready',
+  'seeded',
+  'seeded',
+  '',
+  'frontend',
+  3000,
+  now() + interval '24 hours',
+  now() - interval '30 minutes',
+  now() - interval '2 minutes'
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO preview_services (
+  id, preview_instance_id, service_name, role, status, port, created_at
+)
+VALUES
+  (
+    '00000000-0000-4000-a000-000000000410'::uuid,
+    '00000000-0000-4000-a000-000000000400'::uuid,
+    'frontend', 'primary', 'ready', 3000,
+    now() - interval '30 minutes'
+  ),
+  (
+    '00000000-0000-4000-a000-000000000411'::uuid,
+    '00000000-0000-4000-a000-000000000400'::uuid,
+    'server', 'support', 'ready', 8080,
+    now() - interval '30 minutes'
+  )
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO preview_infrastructure (
+  id, preview_instance_id, infra_name, template, status, created_at
+)
+VALUES (
+  '00000000-0000-4000-a000-000000000420'::uuid,
+  '00000000-0000-4000-a000-000000000400'::uuid,
+  'db', 'postgres-17', 'healthy',
+  now() - interval '30 minutes'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- Pull request row backing the pr_preview_state below. Any UI that joins
+-- pr_preview_state to pull_requests (by org_id + github_repo + pr_number)
+-- needs a pull_requests row to render a working link — without this, the
+-- PR preview panel renders a broken "PR #42" link in the dogfood.
+-- Note: github_pr_url points at a real PR on the public repo so the link
+-- resolves; nothing in the dogfood actually calls the GitHub API.
+INSERT INTO pull_requests (
+  id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
+  title, body, status, review_status, authored_by, created_at, updated_at
+)
+VALUES (
+  '00000000-0000-4000-a000-000000000501'::uuid,
+  '00000000-0000-4000-a000-000000000300'::uuid,
+  '00000000-0000-4000-a000-000000000001'::uuid,
+  42,
+  'https://github.com/assembledhq/143/pull/42',
+  'assembledhq/143',
+  'Ship PR preview auto-teardown',
+  'Wire preview teardown into pull_request.closed / merged.',
+  'open',
+  'pending',
+  'app',
+  now() - interval '30 minutes',
+  now() - interval '2 minutes'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- PR-preview tracking for the "pr_created" session, backed by the seeded
+-- pull_requests row above.
+INSERT INTO pr_preview_state (
+  id, org_id, repo_id, pr_number, last_preview_instance_id, status, created_at, updated_at
+)
+VALUES (
+  '00000000-0000-4000-a000-000000000500'::uuid,
+  '00000000-0000-4000-a000-000000000001'::uuid,
+  '00000000-0000-4000-a000-000000000100'::uuid,
+  42,
+  '00000000-0000-4000-a000-000000000400'::uuid,
+  'running',
+  now() - interval '30 minutes',
+  now() - interval '2 minutes'
+)
+ON CONFLICT DO NOTHING;
