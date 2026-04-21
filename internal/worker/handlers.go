@@ -1998,12 +1998,7 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	// Wrap the prompt in single quotes so the shell does not interpret
-	// backticks, $, or backslashes that appear in the template (e.g. the
-	// triple-backtick JSON fence). Any literal single quote is closed,
-	// escaped, and reopened.
-	escapedPrompt := strings.ReplaceAll(bootstrapPrompt, "'", `'\''`)
-	cmd := fmt.Sprintf("claude --print '%s' 2>&1", escapedPrompt)
+	cmd := bootstrapAgentCommand(bootstrapPrompt)
 	exitCode, execErr := services.SandboxProvider.ExecStream(ctx, sb, cmd, func(line []byte) {
 		trimmed := strings.TrimSpace(string(line))
 		if trimmed == "" {
@@ -2050,4 +2045,19 @@ func executeBootstrapScan(ctx context.Context, stores *Stores, services *Service
 	}
 
 	return candidates, nil
+}
+
+// shellSingleQuote wraps s in single quotes so the shell treats it as a
+// literal. Embedded single quotes are closed, escaped, and reopened
+// ('\”). This is safe for strings containing backticks, $, backslashes,
+// or other shell metacharacters.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// bootstrapAgentCommand builds the sh command that runs Claude Code with
+// the bootstrap prompt. The prompt is single-quoted so the triple-backtick
+// JSON fence in the template is not interpreted as command substitution.
+func bootstrapAgentCommand(prompt string) string {
+	return fmt.Sprintf("claude --print %s 2>&1", shellSingleQuote(prompt))
 }
