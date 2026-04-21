@@ -39,6 +39,43 @@ export function groupByLocalDay(buckets: UsageTimeseriesBucket[]): DailyBucket[]
   }));
 }
 
+// Fill any missing local-days between start and end (inclusive) with a
+// zero-value bucket so the chart renders a continuous x-axis even when
+// no activity was recorded on some days.
+export function fillMissingDays(
+  buckets: DailyBucket[],
+  start: string,
+  end: string,
+): DailyBucket[] {
+  const byDay = new Map(buckets.map((b) => [b.day, b]));
+  const startLocal = startOfLocalDay(new Date(start));
+  const endLocal = startOfLocalDay(new Date(end));
+
+  const result: DailyBucket[] = [];
+  const cursor = new Date(startLocal);
+  while (cursor <= endLocal) {
+    const dayKey = cursor.toLocaleDateString("en-CA");
+    result.push(
+      byDay.get(dayKey) ?? {
+        day: dayKey,
+        total_container_minutes: 0,
+        total_sessions: 0,
+        total_container_starts: 0,
+        peak_concurrent: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_llm_cost_usd: 0,
+      },
+    );
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return result;
+}
+
+function startOfLocalDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
 function sum(items: UsageTimeseriesBucket[], key: keyof UsageTimeseriesBucket): number {
   return items.reduce((acc, item) => acc + (Number(item[key]) || 0), 0);
 }
@@ -85,7 +122,7 @@ export type MetricKey =
   | "total_llm_cost_usd";
 
 export const metricOptions: { value: MetricKey; label: string }[] = [
-  { value: "total_container_minutes", label: "Container Minutes" },
+  { value: "total_container_minutes", label: "Container Hours" },
   { value: "total_sessions", label: "Peak Hourly Sessions" },
   { value: "total_container_starts", label: "Container Starts" },
   { value: "peak_concurrent", label: "Peak Concurrent" },

@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import {
   groupByLocalDay,
+  fillMissingDays,
   formatDayLabel,
   formatMinutes,
   formatTokenCount,
@@ -117,12 +118,13 @@ export function UsageTimeseriesChart({
   });
 
   const dailyData = useMemo(() => {
-    if (!data?.data?.buckets) return [];
-    return groupByLocalDay(data.data.buckets).map((d) => ({
+    const grouped = data?.data?.buckets ? groupByLocalDay(data.data.buckets) : [];
+    if (grouped.length === 0) return [];
+    return fillMissingDays(grouped, start, end).map((d) => ({
       ...d,
       label: formatDayLabel(d.day),
     }));
-  }, [data]);
+  }, [data, start, end]);
 
   const metricLabel = metricOptions.find((o) => o.value === metric)?.label ?? metric;
 
@@ -193,7 +195,7 @@ export function UsageTimeseriesChart({
                     metric={metric}
                   />
                 )}
-                cursor={{ fill: "hsl(var(--muted))", opacity: 0.3 }}
+                cursor={false}
               />
               <Bar
                 dataKey={metric}
@@ -201,6 +203,7 @@ export function UsageTimeseriesChart({
                 radius={[3, 3, 0, 0]}
                 maxBarSize={40}
                 name={metricLabel}
+                activeBar={{ fill: getBarColor(metric), fillOpacity: 0.75 }}
                 style={{ cursor: onDayClick ? "pointer" : "default" }}
               />
             </BarChart>
