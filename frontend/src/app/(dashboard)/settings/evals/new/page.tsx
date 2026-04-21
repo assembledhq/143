@@ -128,7 +128,7 @@ export default function CreateEvalTaskPage() {
               Back to evals
             </Link>
           </Button>
-          <PageHeader title="Create eval task" description="Define a reproducible challenge to measure agent quality." />
+          <PageHeader title="Create eval task" description="Pin a base commit and task to benchmark how well a coding agent handles real work from your repo." />
         </div>
 
         {/* Step indicator */}
