@@ -543,6 +543,12 @@ The server exposes:
 - `GET /healthz` — basic liveness check (returns 200)
 - `GET /readyz` — readiness check (verifies DB connection, sandbox provider connectivity, gVisor availability, secret validation)
 
+The production frontend image runs Next.js standalone on port 3000 and sets
+`HOSTNAME=0.0.0.0`. Docker injects `HOSTNAME` as the container ID by default;
+overriding it keeps the Next server bound to all interfaces so both Docker
+health checks on `127.0.0.1:3000/healthz` and other compose services can reach
+the process.
+
 ## Logging: Mezmo
 
 All application logs are structured JSON via zerolog. Mezmo is the primary log aggregation platform.
