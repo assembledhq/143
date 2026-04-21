@@ -82,12 +82,13 @@ const (
 	AuditActionPMDocumentSetPinned  AuditAction = "pm_document_set.pinned"
 
 	// Team & settings actions
-	AuditActionSettingsUpdated        AuditAction = "settings.updated"
-	AuditActionTeamMemberInvited      AuditAction = "team.member_invited"
-	AuditActionTeamMemberRoleChanged  AuditAction = "team.member_role_changed"
-	AuditActionTeamMemberRemoved      AuditAction = "team.member_removed"
-	AuditActionTeamInvitationRevoked  AuditAction = "team.invitation_revoked"
-	AuditActionTeamInvitationAccepted AuditAction = "team.invitation_accepted"
+	AuditActionSettingsUpdated           AuditAction = "settings.updated"
+	AuditActionTeamMemberInvited         AuditAction = "team.member_invited"
+	AuditActionTeamMemberRoleChanged     AuditAction = "team.member_role_changed"
+	AuditActionTeamMemberRemoved         AuditAction = "team.member_removed"
+	AuditActionTeamInvitationRevoked     AuditAction = "team.invitation_revoked"
+	AuditActionTeamInvitationAccepted    AuditAction = "team.invitation_accepted"
+	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"
@@ -130,6 +131,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPMDocumentUpdated, AuditActionPMDocumentRestored, AuditActionPMDocumentSetPinned,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
+		AuditActionTeamInvitationClaimFailed,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,

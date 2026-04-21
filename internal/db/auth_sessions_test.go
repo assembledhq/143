@@ -25,7 +25,7 @@ func TestAuthSessionStore_Create(t *testing.T) {
 	generatedID := uuid.New()
 
 	mock.ExpectQuery("INSERT INTO auth_sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at"}).
 				AddRow(generatedID, now),
@@ -42,6 +42,72 @@ func TestAuthSessionStore_Create(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, generatedID, session.ID)
 	require.Equal(t, now, session.CreatedAt)
+	// last_org_id stays nil unless the caller supplied one — the auth
+	// middleware is responsible for resolving and persisting it on first
+	// use. See the comment on AuthSessionStore.Create for why we no longer
+	// seed it from session.OrgID.
+	require.Nil(t, session.LastOrgID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAuthSessionStore_Create_UsesExplicitLastOrgID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	otherOrg := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(generatedID, now),
+		)
+
+	session := &models.AuthSession{
+		UserID:    uuid.New(),
+		OrgID:     uuid.New(),
+		LastOrgID: &otherOrg,
+		Token:     "test-token",
+		ExpiresAt: now.Add(24 * time.Hour),
+	}
+
+	err = store.Create(context.Background(), session)
+	require.NoError(t, err)
+	require.NotNil(t, session.LastOrgID)
+	require.Equal(t, otherOrg, *session.LastOrgID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Create surfaces the Scan error when the INSERT...RETURNING query fails,
+// so the caller can distinguish a DB failure from a successful insert.
+func TestAuthSessionStore_Create_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+	now := time.Now()
+
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("insert failed"))
+
+	session := &models.AuthSession{
+		UserID:    uuid.New(),
+		OrgID:     uuid.New(),
+		Token:     "tok",
+		ExpiresAt: now.Add(24 * time.Hour),
+	}
+	err = store.Create(context.Background(), session)
+	require.Error(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -61,8 +127,8 @@ func TestAuthSessionStore_GetByToken(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM auth_sessions WHERE token").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "user_id", "org_id", "token", "expires_at", "created_at"}).
-				AddRow(sessionID, userID, orgID, "test-token", now.Add(24*time.Hour), now),
+			pgxmock.NewRows([]string{"id", "user_id", "org_id", "last_org_id", "token", "expires_at", "created_at"}).
+				AddRow(sessionID, userID, orgID, &orgID, "test-token", now.Add(24*time.Hour), now),
 		)
 
 	session, err := store.GetByToken(context.Background(), "test-token")
@@ -70,6 +136,45 @@ func TestAuthSessionStore_GetByToken(t *testing.T) {
 	require.Equal(t, sessionID, session.ID)
 	require.Equal(t, userID, session.UserID)
 	require.Equal(t, "test-token", session.Token)
+	require.NotNil(t, session.LastOrgID)
+	require.Equal(t, orgID, *session.LastOrgID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAuthSessionStore_UpdateLastOrgID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectExec("UPDATE auth_sessions SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateLastOrgID(context.Background(), "test-token", &orgID)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAuthSessionStore_UpdateLastOrgID_Clear(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAuthSessionStore(mock)
+
+	mock.ExpectExec("UPDATE auth_sessions SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateLastOrgID(context.Background(), "test-token", nil)
+	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -16,31 +16,30 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
 // --- mock stores ---
 
 type mockTeamUserStore struct {
-	listByOrgFn   func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
-	getByIDFn     func(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
-	getByEmailFn  func(ctx context.Context, email string) (models.User, error)
-	updateRoleFn  func(ctx context.Context, orgID, userID uuid.UUID, role string) error
-	deleteFn      func(ctx context.Context, orgID, userID uuid.UUID) error
-	countAdminsFn func(ctx context.Context, orgID uuid.UUID) (int, error)
+	listByOrgViaMembershipsFn  func(ctx context.Context, orgID uuid.UUID, filters db.MembershipPageFilters) ([]models.User, time.Time, error)
+	getByIDGlobalFn            func(ctx context.Context, userID uuid.UUID) (models.User, error)
+	getByEmailFn               func(ctx context.Context, email string) (models.User, error)
+	isGitHubLoginMemberOfOrgFn func(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
 }
 
-func (m *mockTeamUserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
-	if m.listByOrgFn != nil {
-		return m.listByOrgFn(ctx, orgID)
+func (m *mockTeamUserStore) ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID, filters db.MembershipPageFilters) ([]models.User, time.Time, error) {
+	if m.listByOrgViaMembershipsFn != nil {
+		return m.listByOrgViaMembershipsFn(ctx, orgID, filters)
 	}
-	return nil, nil
+	return nil, time.Time{}, nil
 }
-func (m *mockTeamUserStore) GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error) {
-	if m.getByIDFn != nil {
-		return m.getByIDFn(ctx, orgID, userID)
+func (m *mockTeamUserStore) GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error) {
+	if m.getByIDGlobalFn != nil {
+		return m.getByIDGlobalFn(ctx, userID)
 	}
-	return models.User{}, pgx.ErrNoRows
+	return models.User{ID: userID}, nil
 }
 func (m *mockTeamUserStore) GetByEmail(ctx context.Context, email string) (models.User, error) {
 	if m.getByEmailFn != nil {
@@ -48,23 +47,43 @@ func (m *mockTeamUserStore) GetByEmail(ctx context.Context, email string) (model
 	}
 	return models.User{}, pgx.ErrNoRows
 }
-func (m *mockTeamUserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error {
-	if m.updateRoleFn != nil {
-		return m.updateRoleFn(ctx, orgID, userID, role)
+func (m *mockTeamUserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error) {
+	if m.isGitHubLoginMemberOfOrgFn != nil {
+		return m.isGitHubLoginMemberOfOrgFn(ctx, githubLogin, orgID)
 	}
-	return nil
+	return false, nil
 }
-func (m *mockTeamUserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
-	if m.deleteFn != nil {
-		return m.deleteFn(ctx, orgID, userID)
-	}
-	return nil
+
+type mockTeamMembershipStore struct {
+	getFn               func(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	updateRoleGuardedFn func(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error)
+	removeGuardedFn     func(ctx context.Context, userID, orgID uuid.UUID) (string, int, error)
+	countForUserFn      func(ctx context.Context, userID uuid.UUID) (int, error)
 }
-func (m *mockTeamUserStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
-	if m.countAdminsFn != nil {
-		return m.countAdminsFn(ctx, orgID)
+
+func (m *mockTeamMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, userID, orgID)
 	}
-	return 2, nil
+	return models.OrganizationMembership{}, pgx.ErrNoRows
+}
+func (m *mockTeamMembershipStore) UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, role string) (string, error) {
+	if m.updateRoleGuardedFn != nil {
+		return m.updateRoleGuardedFn(ctx, userID, orgID, role)
+	}
+	return "member", nil
+}
+func (m *mockTeamMembershipStore) RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (string, int, error) {
+	if m.removeGuardedFn != nil {
+		return m.removeGuardedFn(ctx, userID, orgID)
+	}
+	return "member", 0, nil
+}
+func (m *mockTeamMembershipStore) CountForUser(ctx context.Context, userID uuid.UUID) (int, error) {
+	if m.countForUserFn != nil {
+		return m.countForUserFn(ctx, userID)
+	}
+	return 0, nil
 }
 
 type mockTeamSessionStore struct {
@@ -133,9 +152,12 @@ func (m *mockTeamOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Or
 
 // --- helpers ---
 
-func newTeamHandler(users *mockTeamUserStore, sessions *mockTeamSessionStore, invitations *mockTeamInvitationStore, orgs *mockTeamOrgStore) *TeamHandler {
+func newTeamHandler(users *mockTeamUserStore, memberships *mockTeamMembershipStore, sessions *mockTeamSessionStore, invitations *mockTeamInvitationStore, orgs *mockTeamOrgStore) *TeamHandler {
 	if users == nil {
 		users = &mockTeamUserStore{}
+	}
+	if memberships == nil {
+		memberships = &mockTeamMembershipStore{}
 	}
 	if sessions == nil {
 		sessions = &mockTeamSessionStore{}
@@ -146,7 +168,7 @@ func newTeamHandler(users *mockTeamUserStore, sessions *mockTeamSessionStore, in
 	if orgs == nil {
 		orgs = &mockTeamOrgStore{}
 	}
-	return NewTeamHandler(users, sessions, invitations, orgs, "http://localhost:3000", nil)
+	return NewTeamHandler(users, memberships, sessions, invitations, orgs, "http://localhost:3000", nil)
 }
 
 func teamCtx(orgID uuid.UUID, user *models.User) context.Context {
@@ -180,11 +202,11 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "returns members",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID, _ db.MembershipPageFilters) ([]models.User, time.Time, error) {
 					return []models.User{
 						{ID: uuid.New(), Email: "a@b.com", Name: "Alice", Role: "admin"},
 						{ID: uuid.New(), Email: "c@d.com", Name: "Bob", Role: "member"},
-					}, nil
+					}, time.Now(), nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -193,8 +215,8 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "returns empty array when no members",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
-					return nil, nil
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID, _ db.MembershipPageFilters) ([]models.User, time.Time, error) {
+					return nil, time.Time{}, nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -203,8 +225,8 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "store error returns 500",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
-					return nil, fmt.Errorf("db error")
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID, _ db.MembershipPageFilters) ([]models.User, time.Time, error) {
+					return nil, time.Time{}, fmt.Errorf("db error")
 				},
 			},
 			expectedCode: http.StatusInternalServerError,
@@ -215,7 +237,7 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/team/members", nil)
 			req = req.WithContext(teamCtx(orgID, nil))
 			w := httptest.NewRecorder()
@@ -247,6 +269,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 		body         map[string]string
 		currentUser  *models.User
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		expectedCode int
 		expectedBody string
 	}{
@@ -275,16 +298,26 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			expectedBody: "CANNOT_CHANGE_OWN_ROLE",
 		},
 		{
+			name:        "member not found returns 404",
+			memberID:    memberID.String(),
+			body:        map[string]string{"role": "member"},
+			currentUser: adminUser,
+			memberships: &mockTeamMembershipStore{
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "", pgx.ErrNoRows
+				},
+			},
+			expectedCode: http.StatusNotFound,
+			expectedBody: "MEMBER_NOT_FOUND",
+		},
+		{
 			name:        "cannot demote last admin",
 			memberID:    memberID.String(),
 			body:        map[string]string{"role": "member"},
 			currentUser: adminUser,
-			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "admin"}, nil
-				},
-				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
-					return 1, nil
+			memberships: &mockTeamMembershipStore{
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "admin", db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -296,8 +329,13 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 			body:        map[string]string{"role": "viewer"},
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "member", Email: "b@c.com", Name: "Bob"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com", Name: "Bob"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+					return "member", nil
 				},
 			},
 			expectedCode: http.StatusOK,
@@ -308,7 +346,7 @@ func TestTeamHandler_ChangeRole(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, nil, nil)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+tt.memberID+"/role", bytes.NewReader(body))
 			ctx := teamCtx(orgID, tt.currentUser)
@@ -339,6 +377,7 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 		memberID     string
 		currentUser  *models.User
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		expectedCode int
 		expectedBody string
 	}{
@@ -361,11 +400,13 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "admin"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com"}, nil
 				},
-				countAdminsFn: func(_ context.Context, _ uuid.UUID) (int, error) {
-					return 1, nil
+			},
+			memberships: &mockTeamMembershipStore{
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+					return "admin", 0, db.ErrLastAdmin
 				},
 			},
 			expectedCode: http.StatusBadRequest,
@@ -376,8 +417,13 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 			memberID:    memberID.String(),
 			currentUser: adminUser,
 			users: &mockTeamUserStore{
-				getByIDFn: func(_ context.Context, _, _ uuid.UUID) (models.User, error) {
-					return models.User{ID: memberID, Role: "member"}, nil
+				getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+					return models.User{ID: memberID, Email: "b@c.com"}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+					return "member", 0, nil
 				},
 			},
 			expectedCode: http.StatusNoContent,
@@ -388,7 +434,7 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, nil, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+tt.memberID, nil)
 			ctx := teamCtx(orgID, tt.currentUser)
 			ctx = withChiParam(ctx, "id", tt.memberID)
@@ -404,6 +450,454 @@ func TestTeamHandler_RemoveMember(t *testing.T) {
 	}
 }
 
+// ChangeRole surfaces an internal error when the guarded update fails with a
+// non-ErrNoRows / non-ErrLastAdmin error (e.g. DB down), distinct from the
+// 404 not-found path and the LAST_ADMIN guard.
+func TestTeamHandler_ChangeRole_LookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(nil, &mockTeamMembershipStore{
+		updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+			return "", fmt.Errorf("boom")
+		},
+	}, nil, nil, nil)
+
+	body, _ := json.Marshal(map[string]string{"role": "member"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+memberID.String()+"/role", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ChangeRole(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "UPDATE_FAILED")
+}
+
+// ChangeRole returns 200 with a minimal {id, role} payload when the response-
+// shaping user lookup fails after the role has already been updated. The
+// mutation succeeded at the DB level, so the client should treat it as
+// successful and re-fetch /team/members to hydrate display fields — surfacing
+// 500 would incorrectly suggest the role change failed and invite retries.
+func TestTeamHandler_ChangeRole_PostUpdateLookupFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, fmt.Errorf("boom")
+			},
+		},
+		&mockTeamMembershipStore{
+			updateRoleGuardedFn: func(_ context.Context, _, _ uuid.UUID, _ string) (string, error) {
+				return "member", nil
+			},
+		},
+		nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{"role": "viewer"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/members/"+memberID.String()+"/role", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ChangeRole(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp models.SingleResponse[models.User]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, memberID, resp.Data.ID)
+	require.Equal(t, "viewer", resp.Data.Role)
+}
+
+// RemoveMember succeeds even when CountForUser fails afterward — the removal
+// has already happened, so the CountForUser error is logged and the response
+// is still 204. The caller's session cleanup is best-effort.
+func TestTeamHandler_RemoveMember_CountForUserErrorIsLogged(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) { return "member", 0, nil },
+			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, fmt.Errorf("count down") },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error { return nil },
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// RemoveMember still returns 204 when DeleteByUserID fails — the removal
+// succeeded; stale session cleanup is best-effort and will be caught the
+// next time the session's membership lookup returns ErrNoRows.
+func TestTeamHandler_RemoveMember_DeleteSessionsErrorIsLogged(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) { return "member", 0, nil },
+			countForUserFn:  func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error { return fmt.Errorf("del err") },
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// CreateInvitation rejects with 409 when the GitHub-username branch finds
+// an existing member: the dedup join across organization_memberships
+// catches users whose only membership in this org is non-primary.
+func TestTeamHandler_CreateInvitation_GitHubAlreadyMember(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+				return true, nil
+			},
+		},
+		nil, nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{
+		"email":           "octocat@example.com",
+		"github_username": "octocat",
+		"role":            "member",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusConflict, w.Code)
+	require.Contains(t, w.Body.String(), "ALREADY_MEMBER")
+}
+
+// CreateInvitation surfaces a 500 when the GitHub-username dedup lookup
+// fails with a DB error — we cannot safely invite if dedup is unreliable.
+func TestTeamHandler_CreateInvitation_GitHubDedupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			isGitHubLoginMemberOfOrgFn: func(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+				return false, fmt.Errorf("db down")
+			},
+		},
+		nil, nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{
+		"email":           "octocat@example.com",
+		"github_username": "octocat",
+		"role":            "member",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	req = req.WithContext(teamCtx(orgID, adminUser))
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// CreateInvitation surfaces a 500 when the email-dedup membership lookup
+// fails with a non-ErrNoRows error — we don't invite into an org we can't
+// reliably check dedup against.
+func TestTeamHandler_CreateInvitation_DedupLookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	existingID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+				return models.User{ID: existingID}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+				return models.OrganizationMembership{}, fmt.Errorf("db down")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	body, _ := json.Marshal(map[string]string{"email": "invite@example.com", "role": "member"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
+	ctx := teamCtx(orgID, adminUser)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.CreateInvitation(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// RemoveMember deletes the user's sessions only when the user has no other
+// remaining memberships — otherwise they would be logged out of orgs they
+// still belong to.
+func TestTeamHandler_RemoveMember_DeletesSessionsWhenLastMembership(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	deletedForUser := uuid.Nil
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id, Email: "m@c.com"}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 0, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, id uuid.UUID) error {
+				deletedForUser = id
+				return nil
+			},
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, memberID, deletedForUser, "session store should be called with the removed member's id")
+}
+
+// RemoveMember keeps the user logged in when they have remaining memberships
+// elsewhere.
+func TestTeamHandler_RemoveMember_KeepsSessionsWhenOtherMembershipsRemain(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	sessionDeleted := false
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id, Email: "m@c.com"}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			countForUserFn: func(_ context.Context, _ uuid.UUID) (int, error) { return 2, nil },
+		},
+		&mockTeamSessionStore{
+			deleteByUserIDFn: func(_ context.Context, _ uuid.UUID) error {
+				sessionDeleted = true
+				return nil
+			},
+		},
+		nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.False(t, sessionDeleted, "sessions should not be deleted while other memberships remain")
+}
+
+// RemoveMember returns 404 when the user identity row does not exist
+// (pgx.ErrNoRows). The membership store is not consulted in this case.
+func TestTeamHandler_RemoveMember_UserLookupNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, pgx.ErrNoRows
+			},
+		},
+		&mockTeamMembershipStore{},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
+// RemoveMember returns 500 (not 404) when the user identity lookup fails
+// with a non-ErrNoRows error like a DB outage — masking these as 404 hides
+// real failures from operators.
+func TestTeamHandler_RemoveMember_UserLookupError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, _ uuid.UUID) (models.User, error) {
+				return models.User{}, fmt.Errorf("db down")
+			},
+		},
+		&mockTeamMembershipStore{},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+}
+
+// RemoveMember returns 404 when the guarded removal reports ErrNoRows.
+// This is the "user exists but isn't a member of this org" path.
+func TestTeamHandler_RemoveMember_MembershipNotFound(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+				return "", 0, pgx.ErrNoRows
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "MEMBER_NOT_FOUND")
+}
+
+// RemoveMember surfaces an internal error when the guarded removal fails for
+// any reason other than ErrNoRows or the LAST_ADMIN guard.
+func TestTeamHandler_RemoveMember_DeleteError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Role: "admin"}
+	memberID := uuid.New()
+
+	h := newTeamHandler(
+		&mockTeamUserStore{
+			getByIDGlobalFn: func(_ context.Context, id uuid.UUID) (models.User, error) {
+				return models.User{ID: id}, nil
+			},
+		},
+		&mockTeamMembershipStore{
+			removeGuardedFn: func(_ context.Context, _, _ uuid.UUID) (string, int, error) {
+				return "", 0, fmt.Errorf("boom")
+			},
+		},
+		nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/members/"+memberID.String(), nil)
+	ctx := teamCtx(orgID, adminUser)
+	ctx = withChiParam(ctx, "id", memberID.String())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.RemoveMember(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "DELETE_FAILED")
+}
+
 // --- CreateInvitation tests ---
 
 func TestTeamHandler_CreateInvitation(t *testing.T) {
@@ -412,10 +906,13 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 	orgID := uuid.New()
 	adminUser := &models.User{ID: uuid.New(), OrgID: orgID, Name: "Admin", Role: "admin"}
 
+	existingUserID := uuid.New()
+
 	tests := []struct {
 		name         string
 		body         map[string]string
 		users        *mockTeamUserStore
+		memberships  *mockTeamMembershipStore
 		invitations  *mockTeamInvitationStore
 		expectedCode int
 		expectedBody string
@@ -437,11 +934,31 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 			body: map[string]string{"email": "existing@b.com", "role": "member"},
 			users: &mockTeamUserStore{
 				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
-					return models.User{OrgID: orgID}, nil
+					return models.User{ID: existingUserID}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, userID, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
 				},
 			},
 			expectedCode: http.StatusConflict,
 			expectedBody: "ALREADY_MEMBER",
+		},
+		{
+			name: "existing user in another org does not block invite",
+			body: map[string]string{"email": "elsewhere@b.com", "role": "member"},
+			users: &mockTeamUserStore{
+				getByEmailFn: func(_ context.Context, _ string) (models.User, error) {
+					return models.User{ID: existingUserID}, nil
+				},
+			},
+			memberships: &mockTeamMembershipStore{
+				getFn: func(_ context.Context, _, _ uuid.UUID) (models.OrganizationMembership, error) {
+					return models.OrganizationMembership{}, pgx.ErrNoRows
+				},
+			},
+			expectedCode: http.StatusCreated,
 		},
 		{
 			name: "successfully creates invitation",
@@ -469,7 +986,7 @@ func TestTeamHandler_CreateInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, tt.invitations, nil)
+			h := newTeamHandler(tt.users, tt.memberships, nil, tt.invitations, nil)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations", bytes.NewReader(body))
 			req = req.WithContext(teamCtx(orgID, adminUser))
@@ -532,7 +1049,7 @@ func TestTeamHandler_RevokeInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(nil, nil, tt.invitations, nil)
+			h := newTeamHandler(nil, nil, nil, tt.invitations, nil)
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/team/invitations/"+tt.invitationID, nil)
 			ctx := teamCtx(orgID, nil)
 			ctx = withChiParam(ctx, "id", tt.invitationID)
@@ -641,7 +1158,7 @@ func TestTeamHandler_AcceptInvitation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			h := newTeamHandler(tt.users, nil, tt.invitations, tt.orgs)
+			h := newTeamHandler(tt.users, nil, nil, tt.invitations, tt.orgs)
 			body, _ := json.Marshal(tt.body)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/team/invitations/accept", bytes.NewReader(body))
 			w := httptest.NewRecorder()
