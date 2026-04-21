@@ -48,15 +48,15 @@ type MembershipSummary struct {
 	Role    string    `db:"role"     json:"role"`
 }
 
-// AuthMeResponse is the shape returned by GET /api/v1/auth/me.
+// MembershipsResponse is the body of GET /api/v1/auth/memberships. It carries
+// the active-org resolution that /auth/me cannot emit during the compat
+// window (changing the /auth/me shape is the sunset step, not this PR) plus
+// the full membership set so the org switcher renders in one round-trip.
 //
-// `User` retains the legacy `org_id` and `role` fields so existing single-org
-// UI keeps working during the compatibility window. `ActiveOrgID` and
-// `ActiveRole` are the authoritative values for the current request and will
-// equal `User.OrgID` / `User.Role` for users with a single membership.
-type AuthMeResponse struct {
-	User        User                `json:"user"`
-	OrgID       uuid.UUID           `json:"org_id"`
+// ActiveOrgID is uuid.Nil when the user has zero memberships — the frontend
+// renders the empty state rather than forcing the user to pick a nonexistent
+// org. ActiveRole is empty in the same case.
+type MembershipsResponse struct {
 	ActiveOrgID uuid.UUID           `json:"active_org_id"`
 	ActiveRole  string              `json:"active_role"`
 	Memberships []MembershipSummary `json:"memberships"`

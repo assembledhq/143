@@ -34,7 +34,8 @@ func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSessi
 	// (header → hint → OldestForUser) and persist the result back once on
 	// first use, so the hint always points at a live membership.
 	args := pgx.NamedArgs{
-		"user_id":     session.UserID,
+		"user_id": session.UserID,
+		// lint:allow-auth-session-orgid reason="Create writes org_id on INSERT during the sunset window; removed when the column is dropped"
 		"org_id":      session.OrgID,
 		"last_org_id": session.LastOrgID,
 		"token":       session.Token,

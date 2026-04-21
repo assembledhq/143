@@ -98,6 +98,45 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
 }
 
+// Memberships returns the authenticated user's full membership set together
+// with the active-org resolution the middleware picked for this request.
+//
+// This is a separate endpoint rather than a field on /auth/me because the
+// /auth/me response shape is pinned by the frontend wire contract during the
+// compat window (see legacy_user_fields_lint_test.go — the 2026-04-25 sunset
+// is where that shape change lands). Returning memberships here lets the org
+// switcher render in one round-trip without waiting for the sunset step.
+//
+// Zero-membership users (user was removed from their last org) still get 200
+// with an empty list and uuid.Nil active_org_id so the frontend can render
+// the empty state rather than bouncing on a 403.
+//
+// lint:allow-no-orgid reason="user-scoped; returns the full membership set, not an org-scoped query"
+func (h *AuthHandler) Memberships(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		return
+	}
+
+	memberships, err := h.memberships.ListByUser(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "MEMBERSHIPS_LOOKUP_FAILED", "failed to list memberships", err)
+		return
+	}
+	if memberships == nil {
+		memberships = []models.MembershipSummary{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": models.MembershipsResponse{
+			ActiveOrgID: middleware.OrgIDFromContext(r.Context()),
+			ActiveRole:  middleware.ActiveRoleFromContext(r.Context()),
+			Memberships: memberships,
+		},
+	})
+}
+
 // Register handles email/password sign-up.
 // If an invitation token is provided, the user joins the inviting org instead of creating a new one.
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -659,6 +698,17 @@ func (h *AuthHandler) persistSessionTx(ctx context.Context, dbtx db.DBTX, user *
 	// (X-Active-Org-ID header → session.last_org_id → oldest membership);
 	// auth_sessions.org_id is only kept in sync so pre-migration readers
 	// don't regress during the sunset window.
+	//
+	// The AuthSession.OrgID readers that must be audited before the column
+	// drop (enforced by auth_session_orgid_lint_test.go):
+	//   - internal/db/auth_sessions.go:Create — writes the NOT NULL column on
+	//     INSERT. This read goes away the same day the migration drops the
+	//     column; the lint test's allowlist entry disappears alongside it.
+	//   - internal/db/auth_sessions_test.go — test fixtures that seed the
+	//     column, no production readers.
+	// Anything else that grows a .OrgID read against an AuthSession during
+	// the sunset window is a bug: those call sites want the active-org
+	// resolution (OrgIDFromContext), not the session's frozen legacy value.
 	session := &models.AuthSession{
 		UserID:    user.ID,
 		OrgID:     user.OrgID,

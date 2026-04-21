@@ -488,12 +488,18 @@ func (s *OrganizationMembershipStore) RemoveGuarded(ctx context.Context, userID,
 // render the member directory. We return raw IDs rather than a joined row
 // shape so this store stays focused on the membership graph — user display
 // fields belong to the user store.
+//
+// user_id is the deterministic tiebreak: the backfill migration inserts every
+// pre-existing row at now(), so a large org's member list would otherwise flip
+// order between requests for any rows sharing a created_at. The resulting page
+// flicker on the team page is user-visible, and tests that assert a stable
+// order would fail intermittently.
 func (s *OrganizationMembershipStore) ListUserIDsByOrg(ctx context.Context, orgID uuid.UUID) ([]uuid.UUID, error) {
 	query := `
 		SELECT user_id
 		FROM organization_memberships
 		WHERE org_id = @org_id
-		ORDER BY created_at ASC`
+		ORDER BY created_at ASC, user_id ASC`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("query org member ids: %w", err)

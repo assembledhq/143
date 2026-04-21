@@ -3,12 +3,24 @@ package db
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// MembershipPageFilters parameterizes a cursor-paginated read of the org
+// member directory. CursorCreatedAt / CursorUserID must be supplied together
+// or both left nil; they are the (m.created_at, u.id) tuple from the previous
+// page's last row. Limit caps the page size — callers should clamp it to a
+// sane range before passing it in (see handlers.clampListLimit).
+type MembershipPageFilters struct {
+	CursorCreatedAt *time.Time
+	CursorUserID    *uuid.UUID
+	Limit           int
+}
 
 type UserStore struct {
 	db DBTX
@@ -220,28 +232,91 @@ func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Us
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
 }
 
-// ListByOrgViaMemberships returns every user who currently holds a membership
-// in the given org, joined through organization_memberships. Each row's Role
-// is populated from the membership (not users.role) so a user who is admin in
-// their primary org but member here is reported as `member`.
+// ListByOrgViaMemberships returns a cursor-paginated page of users who
+// currently hold a membership in the given org, joined through
+// organization_memberships. Each row's Role is populated from the membership
+// (not users.role) so a user who is admin in their primary org but member
+// here is reported as `member`.
 //
-// Ordered by membership created_at so the admin/member directory stays stable
-// and matches the order members joined this specific org.
-func (s *UserStore) ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
+// org_id on the returned User is the *queried* org, not u.org_id. In the
+// multi-org world a user listed via a non-primary membership has a legacy
+// u.org_id that points at a different org; callers rendering User.OrgID
+// expect "this user's membership in the queried scope", not "whatever org
+// happens to be their legacy primary". We remap at the SQL layer so every
+// caller (team directory, audit attribution, response DTOs) sees a
+// consistent org_id that matches the request scope.
+//
+// Ordered by (m.created_at, u.id) so the admin/member directory stays stable
+// and matches the order members joined this specific org. u.id is a
+// deterministic tiebreak for rows sharing a created_at (the backfill
+// migration stamps every pre-existing membership at now(), so without the
+// tiebreak large orgs' directories would reorder between requests).
+//
+// Returns the users page plus the last row's membership created_at. When
+// the page is full the caller builds the next_cursor from
+// (lastMembershipCreatedAt, users[len-1].ID); when it is short, no next
+// cursor should be emitted. We return the membership created_at separately
+// rather than embedding it in User because User is a cross-org identity
+// shape — its CreatedAt is the user row's own created_at, not the org
+// join time, and we don't want to overload the meaning.
+func (s *UserStore) ListByOrgViaMemberships(
+	ctx context.Context,
+	orgID uuid.UUID,
+	filters MembershipPageFilters,
+) ([]models.User, time.Time, error) {
 	query := `
-		SELECT u.id, u.org_id, u.email, u.name, m.role,
+		SELECT u.id, m.org_id, u.email, u.name, m.role,
 		       u.github_id, u.github_login, u.avatar_url,
-		       u.password_hash, u.google_id, u.created_at
+		       u.password_hash, u.google_id, u.created_at,
+		       m.created_at AS membership_created_at
 		FROM users u
 		JOIN organization_memberships m ON m.user_id = u.id
 		WHERE m.org_id = @org_id
-		ORDER BY m.created_at ASC`
+		  AND (
+		      @cursor_created_at::timestamptz IS NULL
+		      OR m.created_at > @cursor_created_at::timestamptz
+		      OR (m.created_at = @cursor_created_at::timestamptz AND u.id > @cursor_user_id::uuid)
+		  )
+		ORDER BY m.created_at ASC, u.id ASC
+		LIMIT @limit`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
-	if err != nil {
-		return nil, fmt.Errorf("query users via memberships: %w", err)
+	args := pgx.NamedArgs{
+		"org_id":            orgID,
+		"cursor_created_at": filters.CursorCreatedAt,
+		"cursor_user_id":    filters.CursorUserID,
+		"limit":             filters.Limit,
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
+
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("query users via memberships: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		users              []models.User
+		lastMembershipTime time.Time
+	)
+	for rows.Next() {
+		var (
+			u       models.User
+			memTime time.Time
+		)
+		if err := rows.Scan(
+			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
+			&u.GitHubID, &u.GitHubLogin, &u.AvatarURL,
+			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
+			&memTime,
+		); err != nil {
+			return nil, time.Time{}, fmt.Errorf("scan user via memberships: %w", err)
+		}
+		users = append(users, u)
+		lastMembershipTime = memTime
+	}
+	if err := rows.Err(); err != nil {
+		return nil, time.Time{}, fmt.Errorf("iterate users via memberships: %w", err)
+	}
+	return users, lastMembershipTime, nil
 }
 
 // IsGitHubLoginMemberOfOrg reports whether any user whose github_login
@@ -273,72 +348,6 @@ func (s *UserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin st
 		return false, fmt.Errorf("check github login membership: %w", err)
 	}
 	return exists, nil
-}
-
-// UpdateRole changes a user's role within their org.
-func (s *UserStore) UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error {
-	query := `UPDATE users SET role = @role WHERE id = @id AND org_id = @org_id`
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"role":   role,
-		"id":     userID,
-		"org_id": orgID,
-	})
-	if err != nil {
-		return err
-	}
-	if ct.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return nil
-}
-
-// Delete removes a user from their org.
-//
-// The DELETE FROM users cascades through organization_memberships, so if the
-// user is the last admin of *any* org (not just orgID — a multi-membership
-// user could be sole admin elsewhere) the enforce_last_admin trigger rejects
-// the cascade at commit. We map that into ErrLastAdmin so the operator-facing
-// caller gets the same sentinel as the membership store's guarded paths
-// rather than a raw pgconn.PgError.
-func (s *UserStore) Delete(ctx context.Context, orgID, userID uuid.UUID) error {
-	// Clear known user references before deletion to avoid FK failures for active users.
-	query := `
-		WITH cleared_agent_answers AS (
-			UPDATE session_questions
-			SET answered_by = NULL
-			WHERE org_id = @org_id AND answered_by = @id
-		),
-		deleted_invitations AS (
-			DELETE FROM invitations
-			WHERE org_id = @org_id AND invited_by = @id
-		),
-		deleted_user AS (
-			DELETE FROM users
-			WHERE id = @id AND org_id = @org_id
-			RETURNING id
-		)
-		SELECT EXISTS (SELECT 1 FROM deleted_user)`
-
-	var deleted bool
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"id":     userID,
-		"org_id": orgID,
-	}).Scan(&deleted)
-	if err != nil {
-		return mapLastAdminViolation(err)
-	}
-	if !deleted {
-		return pgx.ErrNoRows
-	}
-	return nil
-}
-
-// CountAdmins returns the number of admin users in the given org.
-func (s *UserStore) CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error) {
-	query := `SELECT COUNT(*) FROM users WHERE org_id = @org_id AND role = 'admin'`
-	var count int
-	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID}).Scan(&count)
-	return count, err
 }
 
 // LinkGoogleAccount attaches a Google identity to an existing user.

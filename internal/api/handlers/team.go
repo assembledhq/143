@@ -28,7 +28,7 @@ import (
 // Membership-scoped operations (role updates, removal, admin counts) live on
 // teamMembershipStore instead — users own identity, memberships own access.
 type teamUserStore interface {
-	ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
+	ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID, filters db.MembershipPageFilters) ([]models.User, time.Time, error)
 	GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error)
 	GetByEmail(ctx context.Context, email string) (models.User, error)
 	IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
@@ -133,15 +133,39 @@ func NewTeamHandler(
 	}
 }
 
-// ListMembers returns every user holding a membership in the active org,
-// regardless of whether the org is their legacy primary. The directory is
-// keyed on organization_memberships (joined with users for display fields)
-// rather than users.org_id, so multi-org members (e.g. someone who joined via
-// ClaimInvitation) appear exactly where the admin expects to manage them.
+// ListMembers returns a cursor-paginated page of users holding a membership
+// in the active org, regardless of whether the org is their legacy primary.
+// The directory is keyed on organization_memberships (joined with users for
+// display fields) rather than users.org_id, so multi-org members (e.g.
+// someone who joined via ClaimInvitation) appear exactly where the admin
+// expects to manage them.
+//
+// Accepts ?limit (1..500, default 100) and ?cursor (opaque, from prior
+// page's meta.next_cursor). Without pagination a large org's member list
+// would produce an unbounded response and a single slow query; with cursor
+// pagination the frontend pages as the admin scrolls.
 func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	users, err := h.users.ListByOrgViaMemberships(r.Context(), orgID)
+	limit := clampListLimit(queryInt(r, "limit", 100), 100, 500)
+	filters := db.MembershipPageFilters{Limit: limit}
+
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		cursorTime, rawID, err := decodeCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		cursorUserID, err := uuid.Parse(rawID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.CursorCreatedAt = &cursorTime
+		filters.CursorUserID = &cursorUserID
+	}
+
+	users, lastMembershipTime, err := h.users.ListByOrgViaMemberships(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list members", err)
 		return
@@ -149,7 +173,16 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	if users == nil {
 		users = []models.User{}
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.User]{Data: users})
+
+	var nextCursor string
+	if len(users) == limit {
+		nextCursor = encodeCursor(lastMembershipTime, users[len(users)-1].ID.String())
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.User]{
+		Data: users,
+		Meta: models.PaginationMeta{NextCursor: nextCursor},
+	})
 }
 
 // ChangeRole updates a member's role.

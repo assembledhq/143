@@ -498,127 +498,6 @@ func TestUserStore_ListByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestUserStore_UpdateRole(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		rowsAffected int64
-		expectErr    bool
-	}{
-		{name: "success", rowsAffected: 1, expectErr: false},
-		{name: "user not found", rowsAffected: 0, expectErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
-			defer mock.Close()
-
-			store := NewUserStore(mock)
-
-			mock.ExpectExec("UPDATE users SET role").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
-
-			err = store.UpdateRole(context.Background(), uuid.New(), uuid.New(), "admin")
-			if tt.expectErr {
-				require.Error(t, err)
-				require.True(t, errors.Is(err, pgx.ErrNoRows))
-			} else {
-				require.NoError(t, err)
-			}
-			require.NoError(t, mock.ExpectationsWereMet())
-		})
-	}
-}
-
-func TestUserStore_CountAdmins(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
-
-	store := NewUserStore(mock)
-
-	mock.ExpectQuery("SELECT COUNT").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
-
-	count, err := store.CountAdmins(context.Background(), uuid.New())
-	require.NoError(t, err, "CountAdmins should not return an error")
-	require.Equal(t, 3, count, "should return the correct admin count")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestUserStore_Delete(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		setupMock    func(mock pgxmock.PgxPoolIface)
-		expectErr    bool
-		expectNoRows bool
-	}{
-		{
-			name: "clears dependent references and deletes user",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"deleted"}).AddRow(true))
-			},
-		},
-		{
-			name: "returns no rows when user does not exist in org",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"deleted"}).AddRow(false))
-			},
-			expectErr:    true,
-			expectNoRows: true,
-		},
-		{
-			name: "returns error when delete query fails",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("WITH cleared_agent_answers AS \\(").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnError(errors.New("delete failed"))
-			},
-			expectErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "should create mock pool")
-			defer mock.Close()
-
-			store := NewUserStore(mock)
-			tt.setupMock(mock)
-
-			err = store.Delete(context.Background(), uuid.New(), uuid.New())
-			if tt.expectErr {
-				require.Error(t, err, "Delete should return an error for failing cases")
-				if tt.expectNoRows {
-					require.True(t, errors.Is(err, pgx.ErrNoRows), "Delete should return pgx.ErrNoRows when no user is deleted")
-				}
-			} else {
-				require.NoError(t, err, "Delete should remove the member without errors")
-			}
-
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
-}
-
 func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	t.Parallel()
 
@@ -631,22 +510,26 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	userID1 := uuid.New()
 	userID2 := uuid.New()
 	now := time.Now()
+	membershipTime1 := now.Add(-2 * time.Hour)
+	membershipTime2 := now.Add(-time.Hour)
 
+	cols := append(append([]string{}, userColumns...), "membership_created_at")
 	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(userColumns).
-				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, now).
-				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, now),
+			pgxmock.NewRows(cols).
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, now, membershipTime1).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, now, membershipTime2),
 		)
 
-	users, err := store.ListByOrgViaMemberships(context.Background(), orgID)
+	users, lastMembershipTime, err := store.ListByOrgViaMemberships(context.Background(), orgID, MembershipPageFilters{Limit: 100})
 	require.NoError(t, err)
 	require.Len(t, users, 2)
 	require.Equal(t, "Alice", users[0].Name)
 	require.Equal(t, "admin", users[0].Role)
 	require.Equal(t, "Bob", users[1].Name)
 	require.Equal(t, "member", users[1].Role)
+	require.Equal(t, membershipTime2.UTC(), lastMembershipTime.UTC())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -658,10 +541,10 @@ func TestUserStore_ListByOrgViaMemberships_QueryError(t *testing.T) {
 	defer mock.Close()
 
 	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	_, err = NewUserStore(mock).ListByOrgViaMemberships(context.Background(), uuid.New())
+	_, _, err = NewUserStore(mock).ListByOrgViaMemberships(context.Background(), uuid.New(), MembershipPageFilters{Limit: 100})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "query users via memberships")
 	require.NoError(t, mock.ExpectationsWereMet())

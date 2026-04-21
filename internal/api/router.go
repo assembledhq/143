@@ -402,8 +402,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/projects/propose", internalProjectHandler.Propose)
 	})
 
-	// Public team routes (token-based, no auth)
-	r.Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
+	// Public team routes (token-based, no auth). AcceptInvitation looks the
+	// token up server-side, so it's the same brute-force shape as the
+	// authenticated ClaimInvitation endpoint: rate-limit it on the same
+	// 10/min-per-IP budget. ClaimRateLimit's user-bucket branch is skipped
+	// for anonymous callers (no user in context), so it degrades to the IP
+	// bucket only — exactly the guarantee this public route needs.
+	r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
 	// Auth routes (no auth)
 	r.Get("/api/v1/auth/providers", authHandler.Providers)
@@ -431,6 +436,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
 		// empty active role).
 		r.Get("/api/v1/auth/me", authHandler.Me)
+		// Memberships is zero-membership-safe for the same reason /auth/me
+		// is: a user whose only org was just revoked still needs to see the
+		// empty list so the switcher can render an invite-me state rather
+		// than a 403 spinner.
+		r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
 		// Available to any authenticated user (no RequireRole) — an invited
 		// user may not yet have a role in the target org when they claim.

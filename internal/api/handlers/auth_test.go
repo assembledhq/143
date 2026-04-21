@@ -331,6 +331,125 @@ func TestAuthHandler_Me(t *testing.T) {
 	}
 }
 
+func TestAuthHandler_Memberships(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns 401 when not authenticated", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/memberships", nil)
+		w := httptest.NewRecorder()
+
+		handler.Memberships(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code)
+	})
+
+	t.Run("returns memberships and active resolution for authenticated user", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		userID := uuid.New()
+		activeOrgID := uuid.New()
+		otherOrgID := uuid.New()
+
+		mock.ExpectQuery("(?s)FROM organization_memberships m.+JOIN organizations").
+			WithArgs(userID).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"org_id", "org_name", "role"}).
+					AddRow(activeOrgID, "Acme", "admin").
+					AddRow(otherOrgID, "Beta", "member"),
+			)
+
+		handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, db.NewOrganizationMembershipStore(mock))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/memberships", nil)
+		ctx := middleware.WithUser(req.Context(), &models.User{ID: userID})
+		ctx = middleware.WithOrgID(ctx, activeOrgID)
+		ctx = middleware.WithActiveRole(ctx, "admin")
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.Memberships(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data models.MembershipsResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Equal(t, activeOrgID, resp.Data.ActiveOrgID)
+		require.Equal(t, "admin", resp.Data.ActiveRole)
+		require.Len(t, resp.Data.Memberships, 2)
+		require.Equal(t, activeOrgID, resp.Data.Memberships[0].OrgID)
+		require.Equal(t, "Acme", resp.Data.Memberships[0].OrgName)
+		require.Equal(t, "admin", resp.Data.Memberships[0].Role)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("zero-membership user gets empty list with nil active org", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		userID := uuid.New()
+		mock.ExpectQuery("(?s)FROM organization_memberships m.+JOIN organizations").
+			WithArgs(userID).
+			WillReturnRows(pgxmock.NewRows([]string{"org_id", "org_name", "role"}))
+
+		handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, db.NewOrganizationMembershipStore(mock))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/memberships", nil)
+		ctx := middleware.WithUser(req.Context(), &models.User{ID: userID})
+		// No OrgID or ActiveRole on context: uuid.Nil / "" is the expected
+		// zero-membership shape.
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.Memberships(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data models.MembershipsResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Equal(t, uuid.Nil, resp.Data.ActiveOrgID)
+		require.Empty(t, resp.Data.ActiveRole)
+		require.NotNil(t, resp.Data.Memberships, "empty array must not serialize as null")
+		require.Len(t, resp.Data.Memberships, 0)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("lookup failure returns 500", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		userID := uuid.New()
+		mock.ExpectQuery("(?s)FROM organization_memberships m.+JOIN organizations").
+			WithArgs(userID).
+			WillReturnError(errors.New("db down"))
+
+		handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, db.NewOrganizationMembershipStore(mock))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/memberships", nil)
+		ctx := middleware.WithUser(req.Context(), &models.User{ID: userID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.Memberships(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "MEMBERSHIPS_LOOKUP_FAILED")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
 func TestAuthHandler_Register(t *testing.T) {
 	t.Parallel()
 

@@ -298,6 +298,68 @@ func TestOrganizationMembershipStore_Remove_OnlyRevokesPendingInvitations(t *tes
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestOrganizationMembershipStore_Remove_ClearsAnsweredBy asserts the Remove
+// CTE nulls session_questions.answered_by for the removed user in the scope
+// org. Without this, the audit display would keep showing "answered by
+// $removedUser" even after the user lost access — confusing when the user
+// can no longer be clicked through to, and a privacy leak in orgs that
+// periodically rotate access.
+//
+// Historical answers are preserved (the row isn't deleted) so downstream
+// consumers of session_questions still see the answer text; only the
+// attribution is cleared. Per-row preservation is deliberate: deleting the
+// answer would silently change the agent's decision trail.
+func TestOrganizationMembershipStore_Remove_ClearsAnsweredBy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectQuery(`(?s)UPDATE session_questions\s+SET answered_by = NULL.+org_id = @org_id\s+AND answered_by = @user_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Remove(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestOrganizationMembershipStore_Remove_AllSideEffectsInOneStatement asserts
+// the Remove query contains every documented CTE in a single statement so
+// the side-effects run under the same transaction semantics as the delete.
+// Splitting the work across multiple statements would mean a mid-operation
+// failure could leave the org in a half-cleaned state (membership gone but
+// invitations still pending). The one-statement guarantee is load-bearing
+// for the "remove is atomic" contract in the handler.
+//
+// pgxmock cannot verify real execution — it matches on query text — so this
+// test is a structural check on the SQL. Integration coverage of the actual
+// side-effects firing against a live Postgres would belong in a separate
+// TestMain-gated integration suite once one exists.
+func TestOrganizationMembershipStore_Remove_AllSideEffectsInOneStatement(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	// Require all four CTEs (deleted_membership + three side-effects) to appear
+	// in order in a single WITH statement. Any future refactor that splits one
+	// out into a separate Exec call trips this regex.
+	mock.ExpectQuery(`(?s)WITH deleted_membership AS \(.+cleared_answers AS \(.+revoked_invitations AS \(.+cleared_session_hints AS \(`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Remove(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // TestOrganizationMembershipStore_Remove_ClearsSessionHint asserts that the
 // Remove CTE also nulls out last_org_id on any of the removed user's sessions
 // that were pinned to the org they were just removed from. Without this, the
