@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Search, FileText, Check } from "lucide-react";
+import { ChevronDown, ChevronRight, Search, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { DiffFile } from "@/lib/diff-parser";
 
@@ -9,8 +9,6 @@ interface FileTreeProps {
   files: DiffFile[];
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
-  reviewedFiles?: Set<string>;
-  onToggleReviewed?: (filePath: string) => void;
 }
 
 interface TreeNode {
@@ -85,15 +83,11 @@ const TreeDirectory = memo(function TreeDirectory({
   node,
   activeFileIndex,
   onFileSelect,
-  reviewedFiles,
-  onToggleReviewed,
   depth = 0,
 }: {
   node: TreeNode;
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
-  reviewedFiles?: Set<string>;
-  onToggleReviewed?: (filePath: string) => void;
   depth?: number;
 }) {
   const [expanded, setExpanded] = useState(true);
@@ -126,63 +120,32 @@ const TreeDirectory = memo(function TreeDirectory({
               node={dir}
               activeFileIndex={activeFileIndex}
               onFileSelect={onFileSelect}
-              reviewedFiles={reviewedFiles}
-              onToggleReviewed={onToggleReviewed}
               depth={node.name ? depth + 1 : depth}
             />
           ))}
-          {files.map((fileNode) => {
-            const isReviewed = reviewedFiles?.has(fileNode.file!.newPath);
-            return (
-              <div
-                key={fileNode.fullPath}
-                className={cn(
-                  "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors",
-                  fileNode.fileIndex === activeFileIndex
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "text-foreground hover:bg-muted/50"
-                )}
-                style={{ paddingLeft: `${(node.name ? depth + 1 : depth) * 12 + 8}px` }}
-              >
-                {/* Review checkmark */}
-                {onToggleReviewed ? (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onToggleReviewed(fileNode.file!.newPath);
-                    }}
-                    className={cn(
-                      "h-3.5 w-3.5 shrink-0 rounded-sm border flex items-center justify-center transition-colors",
-                      isReviewed
-                        ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
-                        : "border-border text-transparent hover:border-muted-foreground/40"
-                    )}
-                    title={isReviewed ? "Mark as not reviewed" : "Mark as reviewed"}
-                    aria-label={`${isReviewed ? "Unmark" : "Mark"} ${fileNode.name} as reviewed`}
-                    role="checkbox"
-                    aria-checked={isReviewed}
-                  >
-                    <Check className="h-2.5 w-2.5" />
-                  </button>
-                ) : (
-                  <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-                )}
-                <button
-                  onClick={() => onFileSelect(fileNode.fileIndex!)}
-                  className="truncate flex-1 text-left"
-                >
-                  {fileNode.name}
-                </button>
-                {fileNode.file && (
-                  <span className="shrink-0 text-xs font-mono text-muted-foreground">
-                    <span className="text-green-600 dark:text-green-400">+{fileNode.file.stats.added}</span>
-                    {" "}
-                    <span className="text-red-600 dark:text-red-400">-{fileNode.file.stats.removed}</span>
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          {files.map((fileNode) => (
+            <button
+              key={fileNode.fullPath}
+              onClick={() => onFileSelect(fileNode.fileIndex!)}
+              className={cn(
+                "flex items-center gap-1.5 w-full px-2 py-1 text-xs rounded transition-colors text-left",
+                fileNode.fileIndex === activeFileIndex
+                  ? "bg-primary/10 text-primary font-medium"
+                  : "text-foreground hover:bg-muted/50"
+              )}
+              style={{ paddingLeft: `${(node.name ? depth + 1 : depth) * 12 + 8}px` }}
+            >
+              <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <span className="truncate flex-1">{fileNode.name}</span>
+              {fileNode.file && (
+                <span className="shrink-0 text-xs font-mono text-muted-foreground">
+                  <span className="text-green-600 dark:text-green-400">+{fileNode.file.stats.added}</span>
+                  {" "}
+                  <span className="text-red-600 dark:text-red-400">-{fileNode.file.stats.removed}</span>
+                </span>
+              )}
+            </button>
+          ))}
         </>
       )}
     </div>
@@ -193,8 +156,6 @@ export function FileTree({
   files,
   activeFileIndex,
   onFileSelect,
-  reviewedFiles,
-  onToggleReviewed,
 }: FileTreeProps) {
   const [filter, setFilter] = useState("");
 
@@ -262,8 +223,6 @@ export function FileTree({
           node={tree}
           activeFileIndex={sortedActiveIndex}
           onFileSelect={handleFileSelect}
-          reviewedFiles={reviewedFiles}
-          onToggleReviewed={onToggleReviewed}
         />
       </div>
     </div>
