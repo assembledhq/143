@@ -1513,3 +1513,67 @@ func TestPreviewStore_ReleasePreviewHold_QueryError(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "release preview hold")
 }
+
+func TestPreviewStore_UpdatePreviewReservationConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		rows   int64
+		wantOk bool
+	}{
+		{"updates reserved row", 1, true},
+		{"no-op when status already changed", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+
+			mock.ExpectExec(`UPDATE preview_instances\s+SET name = @name`).
+				WithArgs(previewAnyArgs(9)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			ok, err := store.UpdatePreviewReservationConfig(
+				context.Background(),
+				uuid.New(), uuid.New(),
+				"my-preview", "web", "sha256:abc",
+				512, 500,
+				[]byte(`{"version":"3"}`), []byte(`{"id":"sandbox-1"}`),
+			)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantOk, ok)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPreviewStore_UpdatePreviewReservationConfig_ExecError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec(`UPDATE preview_instances`).
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnError(errors.New("db down"))
+
+	_, err = store.UpdatePreviewReservationConfig(
+		context.Background(),
+		uuid.New(), uuid.New(),
+		"my-preview", "web", "sha256:abc",
+		512, 500,
+		nil, nil,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update preview reservation config")
+}
