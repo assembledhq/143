@@ -1516,6 +1516,67 @@ func TestStopPreview_LeavesSandboxWhenTurnStillHolds(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestStopPreview_FinalizeErrorLeavesContainerForReconciler covers the
+// FinalizeContainerDestroy error branch: on a DB failure we must skip Destroy
+// so the reconciler can revisit the container on next startup rather than
+// risk ripping it out from under a still-attached holder.
+func TestStopPreview_FinalizeErrorLeavesContainerForReconciler(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	provider := &mockProvider{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		SessionStore:    db.NewSessionStore(mock),
+		Provider:        provider,
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery("WITH released AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
+				AddRow(sessionID, "container-1", false),
+		)
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("db down"))
+
+	err = mgr.StopPreview(context.Background(), orgID, previewID)
+	require.NoError(t, err)
+	require.Equal(t, 0, sandboxProvider.GetDestroyCalls(), "finalize error must skip destroy so the reconciler can revisit")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestBuildStoredRecycleInputRoundTrip(t *testing.T) {
 	t.Parallel()
 

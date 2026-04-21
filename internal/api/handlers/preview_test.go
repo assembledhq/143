@@ -1168,6 +1168,58 @@ func TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate(t *t
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive covers the
+// happy reuse branch of acquireSandbox: with sandbox_state='running' and a
+// live container_id, and the sandbox provider confirming liveness, we attach
+// to the existing container rather than hydrating a duplicate.
+func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "live-container")...),
+		)
+	// Manager short-circuits with an existing active preview; we only need to
+	// prove the handler took the reuse branch (no COALESCE CAS, no hydrate).
+	existing := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(existing, sessionID, orgID, userID, now)...),
+		)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, "live-container", sb.ID)
+		return true, nil
+	}
+	h.sandboxProvider = sp
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "reuse branch should reach manager's already-active-preview guard")
+	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {
 	t.Parallel()
 
