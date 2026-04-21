@@ -9,6 +9,7 @@ import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PI_MODELS,
+  PI_MODEL_CLAUDE_OPUS_47,
 } from "@/lib/model-constants";
 
 export interface AgentEnvVar {
@@ -109,6 +110,13 @@ export const AGENTS: readonly AgentMeta[] = [
     short: "PI",
     color: "#7c3aed",
     description: "Pi — meta-agent that routes to many providers",
+    // Sentinel value: Pi has no dedicated credential store, but AgentMeta
+    // requires providerKey. We use "pi" (not a real backend provider, so it
+    // never matches a credential row) rather than making the field optional
+    // because optionality ripples into every `c.provider === agent.providerKey`
+    // call site across settings/agent and settings/account. Call sites that
+    // save/remove keys must guard on inheritsProviderKeys before dereferencing
+    // this field — see renderPersonalCredentialCard for the pattern.
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
     inheritsProviderKeys: true,
@@ -143,4 +151,73 @@ export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {
   return AGENTS.find((a) => a.models.includes(model))?.key;
+}
+
+// Upstream providers Pi can route to. Mirrors the curated-provider switch in
+// checkPiProviderKey (internal/services/agent/orchestrator.go); keep these in
+// sync so the UI's "any inherited key" fallback matches the backend's.
+export const PI_INHERITED_PROVIDERS: readonly string[] = ["anthropic", "openai", "gemini"];
+
+// piRequiredProviderForModel returns the provider key whose credential Pi will
+// actually need for `model`, or undefined for unknown prefixes (e.g. moonshot
+// reached via PI_MODEL_CUSTOM). Mirrors the curated-provider switch in
+// checkPiProviderKey — callers should fall back to the "any inherited key"
+// rule when this returns undefined.
+export function piRequiredProviderForModel(model: string): string | undefined {
+  const prefix = model.split("/")[0]?.toLowerCase() ?? "";
+  switch (prefix) {
+    case "anthropic":
+      return "anthropic";
+    case "openai":
+      return "openai";
+    case "google":
+    case "gemini":
+      return "gemini";
+    default:
+      return undefined;
+  }
+}
+
+// hasPiCredentials reports whether the resolved credential set satisfies Pi's
+// per-model provider requirement. When no model is selected we mirror
+// piResolvedModel's hardcoded default (PI_MODEL_CLAUDE_OPUS_47 → Anthropic)
+// rather than the looser "any inherited key" rule, so the UI matches what the
+// backend will actually enforce.
+export function hasPiCredentials(
+  resolvedCredentials: readonly { provider: string }[],
+  selectedModel: string | undefined,
+): boolean {
+  const effectiveModel = selectedModel ?? PI_MODEL_CLAUDE_OPUS_47;
+  const required = piRequiredProviderForModel(effectiveModel);
+  if (required) {
+    return resolvedCredentials.some((c) => c.provider === required);
+  }
+  // Unknown prefix (PI_MODEL_CUSTOM pointing at an uncurated provider): the
+  // backend falls back to "at least one inherited key", so we do too.
+  return PI_INHERITED_PROVIDERS.some((p) =>
+    resolvedCredentials.some((c) => c.provider === p),
+  );
+}
+
+// countInheritedProvidersConfigured returns how many of Pi's upstream providers
+// have a resolved credential (personal/team/org). The account page renders this
+// as "N of 3 configured" so the badge doesn't falsely claim "Ready to run" when
+// a user has only OpenAI configured and picks an Anthropic model on
+// /sessions/new — the per-model strict check in hasPiCredentials would reject.
+export function countInheritedProvidersConfigured(
+  resolvedCredentials: readonly { provider: string; source?: string }[],
+): number {
+  return PI_INHERITED_PROVIDERS.reduce((count, p) => {
+    const source = resolvedCredentials.find((c) => c.provider === p)?.source ?? "none";
+    return source !== "none" ? count + 1 : count;
+  }, 0);
+}
+
+// hasAnyInheritedProviderConfigured reports whether any of Pi's upstream
+// providers has a resolved credential (personal/team/org). Used by the
+// radio-card check mark to signal "you have something Pi can use".
+export function hasAnyInheritedProviderConfigured(
+  resolvedCredentials: readonly { provider: string; source?: string }[],
+): boolean {
+  return countInheritedProvidersConfigured(resolvedCredentials) > 0;
 }
