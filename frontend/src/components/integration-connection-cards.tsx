@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
@@ -23,9 +23,21 @@ type IntegrationCallbacks = {
   disconnectError?: string | null;
 };
 
-type SourceControlIntegrationCardProps = IntegrationCallbacks & {
+export type GithubRepoChip = {
+  id: string;
+  full_name: string;
+  status: string;
+};
+
+type RepoCallbacks = {
+  onDisconnectRepo?: (repoID: string) => void;
+  onReconnectRepo?: (repoID: string) => void;
+  pendingRepoID?: string | null;
+};
+
+type SourceControlIntegrationCardProps = IntegrationCallbacks & RepoCallbacks & {
   githubConnected: boolean;
-  githubRepoNames?: string[];
+  githubRepos?: GithubRepoChip[];
   onConnectGitHub: () => void;
   onSyncRepos?: () => void;
   isSyncing?: boolean;
@@ -46,18 +58,132 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
 
 type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
 
-function ConnectedReposList({ repoNames }: { repoNames: string[] }) {
-  if (repoNames.length === 0) return null;
+// ActiveRepoChip renders one active repo with a trailing × button that opens a
+// confirmation dialog before disconnecting. The × is only shown when a handler
+// is provided so read-only callers (e.g. the GitHub card rendered before the
+// user has the disconnect wiring) still display cleanly.
+function ActiveRepoChip({
+  repo,
+  onDisconnect,
+  pending,
+}: {
+  repo: GithubRepoChip;
+  onDisconnect?: (id: string) => void;
+  pending: boolean;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1.5">
-      {repoNames.map((name) => (
-        <span
-          key={name}
-          className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+    <>
+      <span
+        className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+      >
+        {repo.full_name}
+        {onDisconnect && (
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            disabled={pending}
+            aria-label={`Disconnect ${repo.full_name}`}
+            className="ml-0.5 rounded-sm p-0.5 text-muted-foreground/70 transition hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </span>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disconnect {repo.full_name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Existing sessions and runs for this repo will remain visible, but
+              you won&rsquo;t be able to start new ones. You can reconnect at
+              any time from this page.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmOpen(false);
+                onDisconnect?.(repo.id);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Disconnect
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+function DisconnectedRepoChip({
+  repo,
+  onReconnect,
+  pending,
+}: {
+  repo: GithubRepoChip;
+  onReconnect?: (id: string) => void;
+  pending: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-muted-foreground/30 bg-transparent px-2 py-0.5 text-xs font-medium text-muted-foreground/70 line-through">
+      {repo.full_name}
+      {onReconnect && (
+        <button
+          type="button"
+          onClick={() => onReconnect(repo.id)}
+          disabled={pending}
+          aria-label={`Reconnect ${repo.full_name}`}
+          className="ml-0.5 rounded-sm px-1 py-0 text-xs font-semibold uppercase tracking-wide text-primary no-underline hover:bg-primary/10 disabled:opacity-50"
         >
-          {name}
-        </span>
-      ))}
+          Reconnect
+        </button>
+      )}
+    </span>
+  );
+}
+
+function ConnectedReposList({
+  repos,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
+}: {
+  repos: GithubRepoChip[];
+} & RepoCallbacks) {
+  if (repos.length === 0) return null;
+  const active = repos.filter((r) => r.status === "active");
+  const disconnected = repos.filter((r) => r.status !== "active");
+
+  return (
+    <div className="mt-1.5 space-y-1.5">
+      {active.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {active.map((repo) => (
+            <ActiveRepoChip
+              key={repo.id}
+              repo={repo}
+              onDisconnect={onDisconnectRepo}
+              pending={pendingRepoID === repo.id}
+            />
+          ))}
+        </div>
+      )}
+      {disconnected.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {disconnected.map((repo) => (
+            <DisconnectedRepoChip
+              key={repo.id}
+              repo={repo}
+              onReconnect={onReconnectRepo}
+              pending={pendingRepoID === repo.id}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -166,7 +292,7 @@ function IntegrationAction({
 
 export function SourceControlIntegrationCard({
   githubConnected,
-  githubRepoNames = [],
+  githubRepos = [],
   onConnectGitHub,
   onDisconnect,
   disconnectingProvider,
@@ -174,6 +300,9 @@ export function SourceControlIntegrationCard({
   disconnectError,
   onSyncRepos,
   isSyncing,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
 }: SourceControlIntegrationCardProps) {
   const github = getIntegrationByKey("github");
 
@@ -186,7 +315,14 @@ export function SourceControlIntegrationCard({
           description: github.description,
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
-          extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
+          extra: githubConnected ? (
+            <ConnectedReposList
+              repos={githubRepos}
+              onDisconnectRepo={onDisconnectRepo}
+              onReconnectRepo={onReconnectRepo}
+              pendingRepoID={pendingRepoID}
+            />
+          ) : undefined,
           action: (
             <div className="flex items-center gap-1.5">
               {githubConnected && onSyncRepos && (
@@ -332,13 +468,16 @@ export function AllIntegrationCards({
   disconnectErrorProvider,
   disconnectError,
   githubConnected,
-  githubRepoNames = [],
+  githubRepos = [],
   sentryConnected,
   linearConnected,
   linearLoading,
   slackConnected,
   notionConnected,
   notionLoading,
+  onDisconnectRepo,
+  onReconnectRepo,
+  pendingRepoID,
 }: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const sentry = getIntegrationByKey("sentry");
@@ -355,7 +494,14 @@ export function AllIntegrationCards({
           description: github.description,
           logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
           badge: <Badge variant="outline" className="text-xs">Required</Badge>,
-          extra: githubConnected ? <ConnectedReposList repoNames={githubRepoNames} /> : undefined,
+          extra: githubConnected ? (
+            <ConnectedReposList
+              repos={githubRepos}
+              onDisconnectRepo={onDisconnectRepo}
+              onReconnectRepo={onReconnectRepo}
+              pendingRepoID={pendingRepoID}
+            />
+          ) : undefined,
           action: (
             <IntegrationAction
               connected={githubConnected}

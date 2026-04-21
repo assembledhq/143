@@ -16,6 +16,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -411,6 +412,209 @@ func TestRepositoryHandler_ListBranches_RepoNotFound(t *testing.T) {
 	handler.ListBranches(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code, "should return 404 when repo is not found")
 	require.Contains(t, w.Body.String(), "NOT_FOUND", "error code should indicate not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryHandler_Disconnect_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "disconnected",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/disconnect", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Disconnect(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "disconnect should return 200")
+	require.Contains(t, w.Body.String(), "disconnected", "response should echo new status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryHandler_Reconnect_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/reconnect", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Reconnect(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "reconnect should return 200")
+	require.Contains(t, w.Body.String(), "active", "response should echo new status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryHandler_Disconnect_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/not-a-uuid/disconnect", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "not-a-uuid")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, uuid.New())
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Disconnect(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "invalid UUID should 400")
+	require.Contains(t, w.Body.String(), "INVALID_ID", "error code should flag invalid ID")
+}
+
+func TestRepositoryHandler_Disconnect_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/disconnect", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Disconnect(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code, "missing repo should 404")
+	require.Contains(t, w.Body.String(), "NOT_FOUND", "error code should flag not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryHandler_Disconnect_UpdateFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("connection refused"))
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/disconnect", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Disconnect(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code, "db error should 500")
+	require.Contains(t, w.Body.String(), "UPDATE_FAILED", "error code should flag update failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryHandler_ListBranches_RejectsDisconnected(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+				false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "disconnected",
+				nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	store := db.NewRepositoryStore(mock)
+	handler := NewRepositoryHandler(store)
+	handler.prService = &ghservice.PRService{}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/"+repoID.String()+"/branches", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.ListBranches(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code, "branches on a disconnected repo should 400")
+	require.Contains(t, w.Body.String(), "REPO_DISCONNECTED", "error code should flag disconnected state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

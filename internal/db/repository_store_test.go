@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,12 +51,35 @@ func TestRepositoryStore_ListByOrg(t *testing.T) {
 				AddRow(newRepoRow(repoID2, orgID, integrationID, now)...),
 		)
 
-	repos, err := store.ListByOrg(context.Background(), orgID)
+	repos, err := store.ListByOrg(context.Background(), orgID, RepositoryFilters{IncludeDisconnected: true})
 	require.NoError(t, err, "ListByOrg should not return an error")
 	require.Len(t, repos, 2, "should return both repositories for the org")
 	require.Equal(t, repoID1, repos[0].ID, "should return the first repository ID")
 	require.Equal(t, repoID2, repos[1].ID, "should return the second repository ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_ListByOrg_DefaultFiltersDisconnected(t *testing.T) {
+	// Default filter path: the SQL picked up by pgxmock must restrict to
+	// status = 'active'. Regression guard against a refactor that drops the
+	// WHERE clause and silently surfaces disconnected repos in pickers.
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectQuery(`status = 'active'`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoColumns))
+
+	repos, err := store.ListByOrg(context.Background(), orgID, RepositoryFilters{})
+	require.NoError(t, err, "ListByOrg should not return an error with default filters")
+	require.Empty(t, repos, "no repos expected")
+	require.NoError(t, mock.ExpectationsWereMet(), "default filter must emit the status = 'active' predicate")
 }
 
 func TestRepositoryStore_GetByID(t *testing.T) {
@@ -113,6 +139,125 @@ func TestRepositoryStore_GetByID(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestRepositoryStore_SetStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	row := newRepoRow(repoID, orgID, integrationID, now)
+	// Override the status column (index 11) to reflect the new value.
+	row[11] = "disconnected"
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoColumns).AddRow(row...))
+
+	repo, err := store.SetStatus(context.Background(), orgID, repoID, models.RepositoryStatusDisconnected)
+	require.NoError(t, err, "SetStatus should not error on happy path")
+	require.Equal(t, "disconnected", repo.Status, "should return the refreshed row with new status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_SetStatus_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+
+	mock.ExpectQuery("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	_, err = store.SetStatus(context.Background(), uuid.New(), uuid.New(), models.RepositoryStatusActive)
+	require.Error(t, err, "SetStatus should propagate query errors")
+	require.Contains(t, err.Error(), "update repository status", "error should be wrapped with context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_UpsertFromGitHub_OmitsStatusFromSetClause(t *testing.T) {
+	// Regression guard: a GitHub sync must never silently re-activate a
+	// user-disconnected repo. UpsertFromGitHub deliberately omits `status`
+	// from the ON CONFLICT ... DO UPDATE SET clause; if it ever gets added,
+	// this test catches it at the source level.
+	//
+	// The check parses the SET clause's column names rather than substring-
+	// matching the word "status", so reformatting the SQL (lowercasing
+	// keywords, reordering columns, changing whitespace) won't trip it.
+	t.Parallel()
+
+	src, err := os.ReadFile("repositories.go")
+	require.NoError(t, err, "reading repositories.go source should succeed")
+
+	setClause := extractUpsertFromGitHubSetClause(t, string(src))
+	cols := setClauseColumns(setClause)
+	require.NotContains(t, cols, "status",
+		"UpsertFromGitHub's DO UPDATE SET clause must not include status — would silently revive user-disconnected repos on sync (SET columns: %v)", cols)
+}
+
+// extractUpsertFromGitHubSetClause returns the contents of the DO UPDATE SET
+// clause from the UpsertFromGitHub function in repositories.go. Case-insensitive
+// keyword matching keeps the test robust to SQL reformatting.
+func extractUpsertFromGitHubSetClause(t *testing.T, src string) string {
+	t.Helper()
+	fnIdx := strings.Index(src, "UpsertFromGitHub")
+	require.NotEqual(t, -1, fnIdx, "UpsertFromGitHub must exist in repositories.go")
+	tail := src[fnIdx:]
+
+	// (?is) = case-insensitive + dotall so we can match across newlines.
+	re := regexp.MustCompile(`(?is)do\s+update\s+set\s+(.*?)\s+returning\b`)
+	matches := re.FindStringSubmatch(tail)
+	require.Len(t, matches, 2, "expected DO UPDATE SET ... RETURNING block in UpsertFromGitHub")
+	return matches[1]
+}
+
+// setClauseColumns returns the lowercased LHS column names from a SET clause's
+// `col = expr, col = expr` list. Splits at the top level only, so commas inside
+// function calls (e.g., COALESCE(a, b)) don't fool the parser.
+func setClauseColumns(clause string) []string {
+	var (
+		cols  []string
+		depth int
+		buf   strings.Builder
+	)
+	flush := func() {
+		assignment := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if assignment == "" {
+			return
+		}
+		if eq := strings.Index(assignment, "="); eq >= 0 {
+			cols = append(cols, strings.ToLower(strings.TrimSpace(assignment[:eq])))
+		}
+	}
+	for _, ch := range clause {
+		switch {
+		case ch == '(':
+			depth++
+			buf.WriteRune(ch)
+		case ch == ')':
+			depth--
+			buf.WriteRune(ch)
+		case ch == ',' && depth == 0:
+			flush()
+		default:
+			buf.WriteRune(ch)
+		}
+	}
+	flush()
+	return cols
 }
 
 func TestRepositoryStore_GetByFullName(t *testing.T) {

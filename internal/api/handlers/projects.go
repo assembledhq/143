@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -20,6 +21,7 @@ type ProjectHandler struct {
 	attachmentStore   *db.ProjectAttachmentStore
 	specStore         *db.ProjectSpecStore
 	jobStore          *db.JobStore
+	repoStore         *db.RepositoryStore
 	audit             *db.AuditEmitter
 }
 
@@ -47,6 +49,13 @@ func NewProjectHandler(
 // SetJobStore injects the job store for enqueuing project_cycle jobs.
 func (h *ProjectHandler) SetJobStore(jobStore *db.JobStore) {
 	h.jobStore = jobStore
+}
+
+// SetRepositoryStore injects the repository store so create flows can reject
+// disconnected repos. Missing store is treated as a wiring bug — handlers that
+// need it will fail closed with a clear error.
+func (h *ProjectHandler) SetRepositoryStore(repoStore *db.RepositoryStore) {
+	h.repoStore = repoStore
 }
 
 // ProjectDetailResponse combines a project with its tasks, cycles, attachments, and specs.
@@ -216,6 +225,18 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	repoID, err := uuid.Parse(req.RepositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+		return
+	}
+
+	if _, err := requireActiveRepo(r.Context(), h.repoStore, orgID, repoID); err != nil {
+		switch {
+		case errors.Is(err, errRepoDisconnected):
+			writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to create projects")
+		case errors.Is(err, errRepoStoreUnconfigured):
+			writeError(w, r, http.StatusInternalServerError, "REPO_STORE_UNCONFIGURED", "repository lookup not configured")
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "repository not found in this org")
+		}
 		return
 	}
 
