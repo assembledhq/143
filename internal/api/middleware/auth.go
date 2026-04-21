@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -74,19 +76,35 @@ func Auth(sessionStore *db.AuthSessionStore, userStore *db.UserStore, csrfKey []
 func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, sessionStore *db.AuthSessionStore, userStore *db.UserStore, csrfKey []byte, logger zerolog.Logger, token string, cookieBased bool) {
 	session, err := sessionStore.GetByToken(r.Context(), token)
 	if err != nil {
-		if cookieBased {
-			clearSessionCookie(w, r)
+		// Only treat ErrNoRows as a genuinely invalid session. Other errors
+		// (pool exhaustion, connection reset, query timeout during a rolling
+		// deploy) must NOT clear the cookie or return 401, otherwise the
+		// browser loses its session and the frontend — which treats 401 as
+		// terminal — logs the user out. Surface transient errors as 503 so
+		// the useAuth retry path handles them.
+		if errors.Is(err, pgx.ErrNoRows) {
+			if cookieBased {
+				clearSessionCookie(w, r)
+			}
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid session")
+			return
 		}
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid session")
+		logger.Warn().Err(err).Msg("auth: session lookup failed")
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "session lookup failed")
 		return
 	}
 
 	user, err := userStore.GetByID(r.Context(), session.OrgID, session.UserID)
 	if err != nil {
-		if cookieBased {
-			clearSessionCookie(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if cookieBased {
+				clearSessionCookie(w, r)
+			}
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+			return
 		}
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+		logger.Warn().Err(err).Msg("auth: user lookup failed")
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "user lookup failed")
 		return
 	}
 
