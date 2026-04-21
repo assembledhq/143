@@ -1155,3 +1155,24 @@ func TestWithSandboxProvider(t *testing.T) {
 	require.NotNil(t, retrieved)
 	require.Equal(t, provider, retrieved)
 }
+
+func TestShellEscapeSingle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"simple", "simple"},
+		{"it's", "it'\\''s"},
+		{"/path/to/file", "/path/to/file"},
+		{"don't stop", "don'\\''t stop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, shellEscapeSingle(tt.input))
+		})
+	}
+}

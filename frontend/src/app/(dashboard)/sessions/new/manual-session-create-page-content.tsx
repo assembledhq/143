@@ -28,7 +28,7 @@ import { api } from "@/lib/api";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
+import { AGENTS, agentTypeForModel } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
@@ -155,10 +155,10 @@ export function ManualSessionCreatePageContent() {
 
   const modelGroups = useMemo(() => {
     // Sort so the default agent type appears first, preserve original order otherwise.
-    return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
+    return [...AGENTS].sort((a, b) => {
       if (a.key === defaultAgentType) return -1;
       if (b.key === defaultAgentType) return 1;
-      return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
+      return AGENTS.indexOf(a) - AGENTS.indexOf(b);
     });
   }, [defaultAgentType]);
 

@@ -533,7 +533,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		}
 		s.logger.Info().
 			Str("automation_id", a.ID.String()).
-			Str("automation_run_id", run.ID.String()).
+			Str("run_id", run.ID.String()).
 			Msg("enqueued automation run")
 	}
 

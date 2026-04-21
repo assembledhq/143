@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Sandbox image for running coding agents (Claude Code, Codex CLI, Gemini CLI).
+# Sandbox image for running coding agents (Claude Code, Codex CLI, Gemini CLI, Amp, Pi).
 # Tagged as 143-sandbox:latest by default.
 #
 # Build:  docker build -t 143-sandbox:latest -f sandbox/Dockerfile .
@@ -74,10 +74,14 @@ RUN --mount=type=cache,target=/root/.npm \
     CLAUDE_CODE_VERSION=$(jq -r '.claude_code' /tmp/versions.json) && \
     CODEX_CLI_VERSION=$(jq -r '.codex_cli' /tmp/versions.json) && \
     GEMINI_CLI_VERSION=$(jq -r '.gemini_cli' /tmp/versions.json) && \
+    AMP_CLI_VERSION=$(jq -r '.amp_cli' /tmp/versions.json) && \
+    PI_CLI_VERSION=$(jq -r '.pi_cli' /tmp/versions.json) && \
     npm install -g \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_CLI_VERSION}" \
-      "@google/gemini-cli@${GEMINI_CLI_VERSION}" && \
+      "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+      "@sourcegraph/amp@${AMP_CLI_VERSION}" \
+      "@mariozechner/pi-coding-agent@${PI_CLI_VERSION}" && \
     rm /tmp/versions.json
 
 # Copy 143-tools binary from Go builder.

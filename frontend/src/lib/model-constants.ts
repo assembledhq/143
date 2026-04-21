@@ -45,6 +45,37 @@ export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_5_3_CODEX_SPARK,
 ] as const;
 
+// Amp uses agent "modes" instead of model names; each mode bundles a model,
+// system prompt, and tool set on Sourcegraph's side.
+export const AMP_MODE_SMART = "smart";
+export const AMP_MODE_DEEP = "deep";
+export const AMP_MODE_LARGE = "large";
+export const AMP_MODE_RUSH = "rush";
+
+export const AVAILABLE_AMP_MODES = [
+  AMP_MODE_SMART,
+  AMP_MODE_DEEP,
+  AMP_MODE_LARGE,
+  AMP_MODE_RUSH,
+] as const;
+
+// Pi accepts provider/model patterns. Curated short list; PI_MODEL_CUSTOM
+// lets users opt into Pi's full multi-provider catalog. Opus 4.7 leads the
+// list as the current top model and matches the adapter's hardcoded fallback.
+export const PI_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
+export const PI_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
+export const PI_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
+export const PI_MODEL_GPT_5_4 = "openai/gpt-5.4";
+export const PI_MODEL_GEMINI_2_5_PRO = "google/gemini-2.5-pro";
+
+export const AVAILABLE_PI_MODELS = [
+  PI_MODEL_CLAUDE_OPUS_47,
+  PI_MODEL_CLAUDE_SONNET_46,
+  PI_MODEL_CLAUDE_HAIKU_45,
+  PI_MODEL_GPT_5_4,
+  PI_MODEL_GEMINI_2_5_PRO,
+] as const;
+
 // PM model configuration: maps each provider to its available models and API key env var.
 export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[]; apiKeyVar: string }> = {
   claude_code: { label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS, apiKeyVar: "ANTHROPIC_API_KEY" },
@@ -54,17 +85,9 @@ export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: read
 
 export const DEFAULT_PM_MODEL = CLAUDE_CODE_MODEL_SONNET;
 
-// Agent types with their labels and available models, for use in session/project creation forms.
-export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly string[] }[] = [
-  { key: "codex", label: "Codex", models: AVAILABLE_CODEX_MODELS },
-  { key: "claude_code", label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS },
-  { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
-];
-
-// Resolve the agent type key for a given model string.
-export function agentTypeForModel(model: string): string | undefined {
-  return AGENT_TYPE_OPTIONS.find((a) => (a.models as readonly string[]).includes(model))?.key;
-}
+// Agent type options for session/project creation forms live on the AGENTS
+// registry in @/lib/agents. Import AGENTS (and agentTypeForModel) from there —
+// keeping a second list here would drift.
 
 // All PM models across every provider (for validation / backward compat).
 export const AVAILABLE_PM_MODELS = [

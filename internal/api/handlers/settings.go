@@ -4,17 +4,28 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/rs/zerolog"
 )
 
+// OrgSettingsInvalidator drops cached org settings so that a write here is
+// observed by the orchestrator's Amp/Pi config lookup immediately, rather
+// than waiting for the cache TTL to expire. Declared locally (not imported
+// from services/agent) so this handler doesn't pull in the agent package.
+type OrgSettingsInvalidator interface {
+	InvalidateOrg(orgID uuid.UUID)
+}
+
 type SettingsHandler struct {
 	orgStore    *db.OrganizationStore
 	llmDefaults map[string]string // provider name → masked key (from server env)
 	audit       *db.AuditEmitter
 	logger      zerolog.Logger
+	invalidator OrgSettingsInvalidator
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -27,6 +38,14 @@ func (h *SettingsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // dropping the audit payload.
 func (h *SettingsHandler) SetLogger(logger zerolog.Logger) {
 	h.logger = logger
+}
+
+// SetOrgSettingsInvalidator injects the cache invalidator. When set, the
+// Update handler will call InvalidateOrg after a successful write so the
+// orchestrator's Amp/Pi env lookup picks up the new config on the next
+// session start without waiting for the cache TTL.
+func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInvalidator) {
+	h.invalidator = invalidator
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -113,6 +132,13 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if err := h.orgStore.Update(r.Context(), &org); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization", err)
 		return
+	}
+
+	// Drop any cached agent_config for this org so the next Amp/Pi session
+	// start observes the write. Skipping invalidation would leave stale env
+	// overrides in place until the cache TTL expires.
+	if h.invalidator != nil {
+		h.invalidator.InvalidateOrg(orgID)
 	}
 
 	// Build the audit diff from what actually changed. Skip the emit entirely
