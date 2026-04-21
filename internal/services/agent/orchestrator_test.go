@@ -738,9 +738,11 @@ func TestRunAgent_ReleaseHoldErrorFallsBackToDestroy(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
-// TestRunAgent_AcquireHoldErrorDoesNotFailRun covers the log-and-continue
-// branch when AcquireTurnHold errors (orchestrator.go:462-464).
-func TestRunAgent_AcquireHoldErrorDoesNotFailRun(t *testing.T) {
+// TestRunAgent_AcquireHoldErrorFailsRun covers the branch where
+// AcquireTurnHold errors: we must destroy the locally-created sandbox and
+// fail the run, because the DB has no container_id reference so the
+// reconciler can't clean it up.
+func TestRunAgent_AcquireHoldErrorFailsRun(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -749,21 +751,45 @@ func TestRunAgent_AcquireHoldErrorDoesNotFailRun(t *testing.T) {
 
 	d := defaultDeps()
 	d.sessions.acquireHoldErr = errors.New("write failed")
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{
-			Summary:             "ok",
-			ConfidenceScore:     0.9,
-			ConfidenceReasoning: "ok",
-			ExitCode:            0,
-		}, nil
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "acquire turn hold")
+
+	require.Equal(t, 1, d.sessions.acquireHoldCalls)
+	// Must destroy the sandbox we created so it does not leak.
+	require.Equal(t, 1, d.provider.GetDestroyCalls())
+	// Must not fall through to ReleaseTurnHold/Finalize — we never acquired.
+	require.Equal(t, 0, d.sessions.releaseHoldCalls)
+	require.Equal(t, 0, d.sessions.finalizeCalls)
+}
+
+// TestRunAgent_AcquireHoldLosesRaceFailsRun covers the branch where
+// AcquireTurnHold succeeds but returns a different container_id (another
+// holder published first). We must destroy our local sandbox and fail the
+// run so the retry picks up the winning container via the reuse path.
+func TestRunAgent_AcquireHoldLosesRaceFailsRun(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
 	}
 
 	orch := buildOrchestrator(d)
-	require.NoError(t, orch.RunAgent(context.Background(), run))
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sandbox race")
 
 	require.Equal(t, 1, d.sessions.acquireHoldCalls)
-	// Sandbox still destroys on turn end.
-	require.Equal(t, 1, d.provider.GetDestroyCalls())
+	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must destroy the losing sandbox")
+	require.Equal(t, 0, d.sessions.releaseHoldCalls, "no release — we never held")
+	require.Equal(t, 0, d.sessions.finalizeCalls)
 }
 
 // TestRunAgent_FinalizeDestroyErrorSkipsDestroy covers the log-and-continue
@@ -1669,6 +1695,40 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
+}
+
+// TestContinueSession_AcquireHoldErrorFailsTurn covers the branch where
+// AcquireTurnHold errors after fresh sandbox creation: we must destroy the
+// local sandbox and fail the turn rather than leaking a container that
+// has no container_id row reference for the reconciler.
+func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// No ContainerID and no SnapshotKey — forces the Create path, which is
+	// the leak-prone branch: on hold error we must tear the new container down.
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	d.sessions.acquireHoldErr = errors.New("db write failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "acquire turn hold")
+
+	require.Equal(t, 1, d.sessions.acquireHoldCalls)
+	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must destroy the fresh sandbox to avoid a leak")
+	require.Equal(t, 0, d.sessions.releaseHoldCalls)
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "must revert to idle on hold error")
 }
 
 // TestContinueSession_SessionRepoSlug exercises every branch of

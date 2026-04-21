@@ -694,3 +694,72 @@ func TestNewSessionReaper_KeepsMaxRunningAgeAboveFloor(t *testing.T) {
 	assert.Equal(t, configured, reaper.maxRunningAge,
 		"configured value above the floor should be preserved verbatim")
 }
+
+// reaperMockPreviewStopper records StopActivePreviewForSession calls so tests
+// can verify the reaper drives preview teardown before expiring snapshots.
+type reaperMockPreviewStopper struct {
+	mu      sync.Mutex
+	calls   []uuid.UUID
+	stopped bool
+	err     error
+}
+
+func (m *reaperMockPreviewStopper) StopActivePreviewForSession(_ context.Context, _ uuid.UUID, sessionID uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, sessionID)
+	return m.stopped, m.err
+}
+
+func TestReapPhase2_StopsActivePreviewBeforeDeletingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotKey := "snap-with-preview"
+
+	mock := &reaperMockSessionLister{
+		expiredSnapshots: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+	stopper := &reaperMockPreviewStopper{stopped: true}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithPreviewStopper(stopper),
+	)
+	reaper.reap(context.Background())
+
+	require.Len(t, stopper.calls, 1, "reaper must ask the preview stopper about the expired-snapshot session")
+	assert.Equal(t, sessionID, stopper.calls[0])
+	require.Len(t, snapStore.deletedKeys, 1)
+	assert.Equal(t, snapshotKey, snapStore.deletedKeys[0])
+	require.Len(t, mock.updatedSandboxes, 1)
+	assert.Equal(t, string(models.SandboxStateDestroyed), mock.updatedSandboxes[0].state)
+}
+
+func TestReapPhase2_ProceedsWhenPreviewStopperErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotKey := "snap-key"
+
+	mock := &reaperMockSessionLister{
+		expiredSnapshots: []models.Session{
+			{ID: sessionID, OrgID: orgID, Status: string(models.SessionStatusCompleted), SnapshotKey: &snapshotKey},
+		},
+	}
+	snapStore := &reaperMockSnapshotStore{}
+	stopper := &reaperMockPreviewStopper{err: errors.New("stop failed")}
+
+	reaper := NewSessionReaper(mock, snapStore, 30*time.Minute, 24*time.Hour, time.Minute, zerolog.Nop(),
+		WithPreviewStopper(stopper),
+	)
+	reaper.reap(context.Background())
+
+	require.Len(t, stopper.calls, 1)
+	require.Len(t, snapStore.deletedKeys, 1, "snapshot cleanup must continue even if preview stop errors")
+	require.Len(t, mock.updatedSandboxes, 1)
+}

@@ -240,13 +240,26 @@ func (m *Manager) StartPreview(ctx context.Context, input StartPreviewInput) (*m
 
 	// Claim the preview's half of the sandbox refcount. This pairs with the
 	// orchestrator's turn hold: only when both are released does the container
-	// get destroyed. Log-and-continue on DB error — losing the hold degrades
-	// to "reconciler will clean up on next startup", which is safer than
-	// failing the preview start after the row is already written.
-	if _, err := m.store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); err != nil {
-		m.logger.Warn().Err(err).
+	// get destroyed. If this write fails we retry once (it's idempotent); if
+	// still failing we fail StartPreview — the preview row exists but has no
+	// hold, so without a hold the caller's hydrated container could be torn
+	// down by a later FinalizeContainerDestroy.
+	var holdErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, holdErr = m.store.AcquirePreviewHold(ctx, input.OrgID, instance.ID); holdErr == nil {
+			break
+		}
+		m.logger.Warn().Err(holdErr).
 			Str("preview_id", instance.ID.String()).
-			Msg("failed to acquire preview hold on sandbox; turn coexistence disabled for this preview")
+			Int("attempt", attempt+1).
+			Msg("acquire preview hold failed; retrying")
+	}
+	if holdErr != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, input.OrgID, instance.ID, models.PreviewStatusFailed,
+			fmt.Sprintf("acquire preview hold: %v", holdErr)); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Str("preview_id", instance.ID.String()).Msg("failed to mark preview failed after hold error")
+		}
+		return nil, fmt.Errorf("acquire preview hold: %w", holdErr)
 	}
 
 	m.logger.Info().

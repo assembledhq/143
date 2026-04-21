@@ -687,6 +687,12 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 //     caller should destroy their just-created sandbox and attach to
 //     actualContainerID instead.
 //
+// turn_holding_container only flips to TRUE when the caller also wins the
+// container_id write (row was NULL or already matches). A caller that loses
+// the COALESCE race leaves the flag unchanged, so the winning holder's state
+// isn't clobbered — and so the loser's subsequent ReleaseTurnHold can only
+// ever drop its own flag, never someone else's.
+//
 // Paired with ReleaseTurnHold, it forms half of the refcount that governs
 // container destruction (the other half is preview_holding_container on the
 // preview_instances row).
@@ -697,7 +703,10 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error) {
 	query := `UPDATE sessions
 		SET container_id = COALESCE(container_id, @container_id),
-		    turn_holding_container = TRUE
+		    turn_holding_container = CASE
+		        WHEN container_id IS NULL OR container_id = @container_id THEN TRUE
+		        ELSE turn_holding_container
+		    END
 		WHERE id = @id AND org_id = @org_id
 		RETURNING COALESCE(container_id, '')`
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{

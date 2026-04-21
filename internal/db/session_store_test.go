@@ -919,7 +919,7 @@ func TestSessionStore_AcquireTurnHold(t *testing.T) {
 		defer mock.Close()
 
 		store := NewSessionStore(mock)
-		mock.ExpectQuery(`UPDATE sessions\s+SET container_id = COALESCE\(container_id, @container_id\),\s+turn_holding_container = TRUE`).
+		mock.ExpectQuery(`UPDATE sessions\s+SET container_id = COALESCE\(container_id, @container_id\),\s+turn_holding_container = CASE`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("container-xyz"))
 

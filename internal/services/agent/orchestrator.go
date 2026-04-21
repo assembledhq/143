@@ -490,12 +490,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
 	// if a concurrent preview hydrate won, actualID will differ from our
 	// sandbox.ID and we must drop the local container we just created.
-	// On DB error we degrade to a safe "reconciler will clean up" state rather
-	// than failing the run.
+	// On DB error we destroy the local container and fail the run — if we
+	// left it alive the reconciler couldn't find it (no container_id row
+	// reference) and it would leak until server restart.
 	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
 	if holdErr != nil {
-		log.Warn().Err(holdErr).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
-	} else if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+			log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
+		}
+		o.failRun(ctx, run, fmt.Sprintf("acquire turn hold: %s", holdErr))
+		return fmt.Errorf("acquire turn hold: %w", holdErr)
+	}
+	if actualContainerID != "" && actualContainerID != sandbox.ID {
 		destroyCtx := context.Background()
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
@@ -991,12 +998,29 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// have published first — in that case actualContainerID differs from
 	// sandbox.ID and we must destroy our local container and abort so the
 	// user's retry picks up the winner via the reuse path.
-	// Log-and-continue on DB error so losing the hold degrades to a safe
-	// "reconciler will clean up" state rather than failing the turn.
+	// On DB error we destroy any locally-created sandbox and fail the turn —
+	// if we left it alive the reconciler couldn't find it (no container_id
+	// row reference) and it would leak.
 	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
 	if holdErr != nil {
-		log.Warn().Err(holdErr).Msg("failed to persist turn hold on sandbox; preview coexistence disabled for this turn")
-	} else if actualContainerID != "" && actualContainerID != sandbox.ID {
+		destroyCtx := context.Background()
+		if !reusedExisting {
+			if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
+				log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
+			}
+		}
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
+		}
+		o.registerSandboxFailureMessage(
+			ctx,
+			session,
+			fmt.Sprintf("Failed to acquire sandbox lease: %s\n\nPlease try again in a moment.", holdErr),
+			"turn hold",
+		)
+		return fmt.Errorf("acquire turn hold: %w", holdErr)
+	}
+	if actualContainerID != "" && actualContainerID != sandbox.ID {
 		destroyCtx := context.Background()
 		// Only destroy the locally-created container — reused containers came
 		// from the row's existing container_id and should never be torn down
