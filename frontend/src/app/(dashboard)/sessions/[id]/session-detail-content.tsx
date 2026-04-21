@@ -209,7 +209,7 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             </div>
           </CardHeader>
           <CardContent className="pt-0 space-y-3">
-            <p className="text-xs">{session.failure_explanation || session.error}</p>
+            <p className="text-xs break-words">{session.failure_explanation || session.error}</p>
             {/* Show next steps only for non-codex-auth failures (codex auth has the reauth button instead) */}
             {!isCodexAuthFailure && session.failure_next_steps && session.failure_next_steps.length > 0 && (
               <div>
@@ -316,13 +316,13 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
             {session.pm_reasoning && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground">Why this was prioritized</p>
-                <p>{session.pm_reasoning}</p>
+                <p className="break-words">{session.pm_reasoning}</p>
               </div>
             )}
             {session.pm_approach && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground">Suggested approach</p>
-                <p>{session.pm_approach}</p>
+                <p className="break-words">{session.pm_approach}</p>
               </div>
             )}
           </CardContent>
