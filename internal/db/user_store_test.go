@@ -619,6 +619,54 @@ func TestUserStore_Delete(t *testing.T) {
 	}
 }
 
+func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	orgID := uuid.New()
+	userID1 := uuid.New()
+	userID2 := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userColumns).
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, now).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, now),
+		)
+
+	users, err := store.ListByOrgViaMemberships(context.Background(), orgID)
+	require.NoError(t, err)
+	require.Len(t, users, 2)
+	require.Equal(t, "Alice", users[0].Name)
+	require.Equal(t, "admin", users[0].Role)
+	require.Equal(t, "Bob", users[1].Name)
+	require.Equal(t, "member", users[1].Role)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_ListByOrgViaMemberships_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, err = NewUserStore(mock).ListByOrgViaMemberships(context.Background(), uuid.New())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "query users via memberships")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUserStore_IsGitHubLoginMemberOfOrg_True(t *testing.T) {
 	t.Parallel()
 

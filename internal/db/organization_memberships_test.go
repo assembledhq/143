@@ -141,6 +141,57 @@ func TestOrganizationMembershipStore_GrantAtLeast(t *testing.T) {
 	}
 }
 
+func TestOrganizationMembershipStore_Insert(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "admin")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOrganizationMembershipStore_Insert_InvalidRole(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "owner")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid role")
+}
+
+func TestOrganizationMembershipStore_Insert_ConflictFailsLoudly(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("duplicate key value"))
+
+	err = store.Insert(context.Background(), uuid.New(), uuid.New(), "admin")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "duplicate")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestOrganizationMembershipStore_GrantAtLeast_InvalidRole(t *testing.T) {
 	t.Parallel()
 
