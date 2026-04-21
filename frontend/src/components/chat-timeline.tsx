@@ -17,6 +17,10 @@ import type { SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 
+// Shared max-width for chat bubbles (user, assistant, plan) so they line up
+// consistently across the timeline.
+const BUBBLE_MAX_WIDTH = "max-w-[92%]";
+
 function safeDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
   return isNaN(d.getTime()) ? null : d;
@@ -359,7 +363,7 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-[92%] min-w-0 rounded-lg px-3 py-2 text-sm bg-muted break-words">
+      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-muted break-words`}>
         {children}
       </div>
     </div>
@@ -376,7 +380,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[92%] min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words">
+        <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
@@ -425,7 +429,7 @@ function PlanOutputBubble({
 }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-[92%] min-w-0 rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50 break-words">
+      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50 break-words`}>
         <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
           <ClipboardList className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
           <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Implementation Plan</span>
