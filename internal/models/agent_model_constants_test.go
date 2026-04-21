@@ -55,6 +55,7 @@ func TestLLMModelConstants(t *testing.T) {
 	require.Equal(t, []string{
 		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
+		"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -62,12 +63,29 @@ func TestLLMModelsByProvider(t *testing.T) {
 	t.Parallel()
 
 	byProvider := LLMModelsByProvider()
-	require.Len(t, byProvider, 3, "should have 3 providers")
+	require.Len(t, byProvider, 4, "should have 4 LLM providers (anthropic, openai, gemini, openrouter)")
 	require.Contains(t, byProvider, "anthropic")
 	require.Contains(t, byProvider, "openai")
+	require.Contains(t, byProvider, "gemini")
 	require.Contains(t, byProvider, "openrouter")
 	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
+	require.Equal(t, []string{"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"}, byProvider["gemini"])
+	require.Contains(t, byProvider["openrouter"], "gemini-2.5-pro", "openrouter should proxy gemini models too")
+}
+
+// TestLLMProvidersHaveModels guards against drift between the LLMProviders
+// slice and LLMModelsByProvider: every LLM provider must have at least one
+// general-purpose model available in the dropdown.
+func TestLLMProvidersHaveModels(t *testing.T) {
+	t.Parallel()
+
+	byProvider := LLMModelsByProvider()
+	for _, p := range LLMProviders {
+		models, ok := byProvider[string(p)]
+		require.Truef(t, ok, "LLM provider %q must be present in LLMModelsByProvider", p)
+		require.NotEmptyf(t, models, "LLM provider %q must have at least one model", p)
+	}
 }
 
 func TestIsSupportedLLMModel(t *testing.T) {

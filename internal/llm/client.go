@@ -88,10 +88,14 @@ type Config struct {
 
 	// OpenRouter API credentials. OpenRouter proxies requests to many LLM
 	// providers through a single key, making it a good universal fallback.
-	OpenRouterAPIKey string
-	OpenRouterBaseURL string  // Optional, defaults to https://openrouter.ai/api
-	OpenRouterAppName string  // Optional, sent as X-Title header
-	OpenRouterSiteURL string  // Optional, sent as HTTP-Referer header
+	OpenRouterAPIKey  string
+	OpenRouterBaseURL string // Optional, defaults to https://openrouter.ai/api
+	OpenRouterAppName string // Optional, sent as X-Title header
+	OpenRouterSiteURL string // Optional, sent as HTTP-Referer header
+
+	// Gemini (Google Generative Language) API credentials.
+	GeminiAPIKey  string
+	GeminiBaseURL string // Optional, defaults to https://generativelanguage.googleapis.com
 
 	// Timeout is the per-provider HTTP timeout. Defaults to 60s.
 	Timeout time.Duration
@@ -155,6 +159,15 @@ func NewClient(cfg Config, logger zerolog.Logger) (Client, error) {
 		}
 		opts = append(opts, WithOpenRouterHTTPClient(httpClient))
 		providers["openrouter"] = NewOpenRouterProvider(cfg.OpenRouterAPIKey, opts...)
+	}
+
+	if cfg.GeminiAPIKey != "" {
+		var opts []GeminiOption
+		if cfg.GeminiBaseURL != "" {
+			opts = append(opts, WithGeminiBaseURL(cfg.GeminiBaseURL))
+		}
+		opts = append(opts, WithGeminiHTTPClient(httpClient))
+		providers["gemini"] = NewGeminiProvider(cfg.GeminiAPIKey, opts...)
 	}
 
 	if len(providers) == 0 {

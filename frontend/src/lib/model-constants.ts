@@ -81,7 +81,8 @@ export const AVAILABLE_PM_MODELS = [
 export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: readonly string[] }> = {
   anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
+  gemini: { label: "Gemini", models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] },
+  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"] },
 };
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
@@ -92,5 +93,22 @@ export const OPENAI_API_TYPE_CHAT = "chat";
 export const LLM_PROVIDER_INFO: Record<string, { name: string; description: string; keyPlaceholder: string }> = {
   anthropic: { name: "Anthropic", description: "Claude models (Opus, Sonnet, Haiku)", keyPlaceholder: "sk-ant-..." },
   openai: { name: "OpenAI", description: "OpenAI models (GPT series)", keyPlaceholder: "sk-..." },
+  gemini: { name: "Gemini", description: "Google Gemini models", keyPlaceholder: "AIza..." },
   openrouter: { name: "OpenRouter", description: "Access all models with a single key", keyPlaceholder: "sk-or-..." },
 };
+
+// ownerProviderForModel returns the native provider that owns a model, skipping
+// OpenRouter unless no native provider offers the model. Returns null if the
+// model isn't present in any provider's list.
+export function ownerProviderForModel(
+  model: string,
+  modelsByProvider: Record<string, { label: string; models: readonly string[] }>,
+): string | null {
+  for (const [provider, group] of Object.entries(modelsByProvider)) {
+    if (provider === "openrouter") continue;
+    if (group.models.includes(model)) return provider;
+  }
+  const openrouter = modelsByProvider["openrouter"];
+  if (openrouter?.models.includes(model)) return "openrouter";
+  return null;
+}

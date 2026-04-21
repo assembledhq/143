@@ -62,6 +62,29 @@ var defaultChains = map[ModelName][]providerModel{
 		{ProviderName: "openai_responses", ModelID: "gpt-5.4-nano"},
 		{ProviderName: "openrouter", ModelID: "openai/gpt-5.4-nano"},
 	},
+
+	// Gemini models — primary: Gemini API, cross-provider fallback, then OpenRouter.
+	"gemini-2.5-pro": {
+		{ProviderName: "gemini", ModelID: "gemini-2.5-pro"},
+		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+		{ProviderName: "openrouter", ModelID: "google/gemini-2.5-pro"},
+	},
+	"gemini-2.5-flash": {
+		{ProviderName: "gemini", ModelID: "gemini-2.5-flash"},
+		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openrouter", ModelID: "google/gemini-2.5-flash"},
+	},
+	"gemini-2.0-flash": {
+		{ProviderName: "gemini", ModelID: "gemini-2.0-flash"},
+		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openrouter", ModelID: "google/gemini-2.0-flash"},
+	},
 }
 
 // buildChain constructs an ordered fallback chain for the requested model,

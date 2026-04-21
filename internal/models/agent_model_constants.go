@@ -160,6 +160,9 @@ var AvailableLLMModels = []string{
 	"gpt-5.4",
 	"gpt-5.4-mini",
 	"gpt-5.4-nano",
+	"gemini-2.5-pro",
+	"gemini-2.5-flash",
+	"gemini-2.0-flash",
 }
 
 // LLMModelsByProvider returns general-purpose LLM models grouped by provider.
@@ -169,7 +172,8 @@ func LLMModelsByProvider() map[string][]string {
 	return map[string][]string{
 		"anthropic":  {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
 		"openai":     {"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
-		"openrouter": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"},
+		"gemini":     {"gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"},
+		"openrouter": {"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"},
 	}
 }
 

@@ -4,20 +4,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,13 +17,14 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
-import { AlertTriangle, Check, Eye, EyeOff } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import {
   LLM_MODELS_BY_PROVIDER,
   LLM_PROVIDER_INFO,
   DEFAULT_LLM_MODEL,
   OPENAI_API_TYPE_CHAT,
+  ownerProviderForModel,
 } from "@/lib/model-constants";
 import type {
   Organization,
@@ -45,27 +33,27 @@ import type {
   CredentialSummary,
   ListResponse,
 } from "@/lib/types";
+import { DefaultModelCard } from "./_components/DefaultModelCard";
+import { ProviderKeyDialog, type SaveStatus } from "./_components/ProviderKeyDialog";
+import { ProviderKeyRow } from "./_components/ProviderKeyRow";
 
 const LLM_PROVIDERS = Object.keys(LLM_PROVIDER_INFO) as (keyof typeof LLM_PROVIDER_INFO)[];
 
 export default function LLMPage() {
   const queryClient = useQueryClient();
 
-  // Fetch org settings (for llm_model)
   const { data: settings } = useQuery<SingleResponse<Organization>>({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
   });
   const orgSettings = (settings?.data?.settings ?? {}) as OrgSettings;
 
-  // Fetch credential summaries (to show what the org has configured)
   const { data: credentialsResp } = useQuery<ListResponse<CredentialSummary>>({
     queryKey: ["credentials"],
     queryFn: () => api.credentials.list(),
   });
   const credentials = useMemo(() => credentialsResp?.data ?? [], [credentialsResp?.data]);
 
-  // Fetch platform-level LLM defaults (to show fallback availability)
   const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string>; platform_model?: string }>({
     queryKey: ["llm-defaults"],
     queryFn: () => api.settings.getLLMDefaults(),
@@ -73,13 +61,11 @@ export default function LLMPage() {
   const platformProviders = useMemo(() => llmDefaultsResp?.data ?? {}, [llmDefaultsResp?.data]);
   const hasPlatformLLM = Object.keys(platformProviders).length > 0;
 
-  // Fetch available models from backend (source of truth)
   const { data: llmModelsResp } = useQuery<{ data: Record<string, string[]> }>({
     queryKey: ["llm-models"],
     queryFn: () => api.settings.getLLMModels(),
   });
 
-  // Use backend models if available, fall back to static constants
   const modelsByProvider = useMemo(() => {
     const backendModels = llmModelsResp?.data;
     if (backendModels && Object.keys(backendModels).length > 0) {
@@ -96,16 +82,13 @@ export default function LLMPage() {
     return LLM_MODELS_BY_PROVIDER;
   }, [llmModelsResp?.data]);
 
-  // Form state
   const [llmModel, setLlmModel] = useState(DEFAULT_LLM_MODEL);
   const [reasoningEffort, setReasoningEffort] = useState<string>("");
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
-  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
-  const [keySaveStatus, setKeySaveStatus] = useState<Record<string, "idle" | "saving" | "success" | "error">>({});
+  const [keySaveStatus, setKeySaveStatus] = useState<Record<string, SaveStatus>>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
+  const [editingProvider, setEditingProvider] = useState<string | null>(null);
 
-  // Sync server data into form state.
   const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
   const settingsData = settings?.data?.settings;
   if (settingsData && settingsData !== prevSettingsRef) {
@@ -114,7 +97,6 @@ export default function LLMPage() {
     setReasoningEffort(orgSettings.llm_reasoning_effort || "");
   }
 
-  // Determine which providers are configured (org-level or platform-level)
   const providerStatus = useMemo(() => {
     const status: Record<string, { orgConfigured: boolean; platformAvailable: boolean; maskedKey?: string }> = {};
     for (const provider of LLM_PROVIDERS) {
@@ -128,7 +110,6 @@ export default function LLMPage() {
     return status;
   }, [credentials, platformProviders]);
 
-  // Filter model groups to providers that are configured (org or platform)
   const enabledModelGroups = useMemo(() => {
     return Object.entries(modelsByProvider)
       .filter(([provider]) => {
@@ -138,7 +119,16 @@ export default function LLMPage() {
       .map(([, group]) => group);
   }, [modelsByProvider, providerStatus]);
 
-  // Save model selection mutation
+  const ownerProvider = useMemo(
+    () => ownerProviderForModel(llmModel, modelsByProvider),
+    [llmModel, modelsByProvider],
+  );
+  const ownerProviderInfo = ownerProvider ? LLM_PROVIDER_INFO[ownerProvider] : null;
+  const ownerConfigured = Boolean(
+    ownerProvider &&
+      (providerStatus[ownerProvider]?.orgConfigured || providerStatus[ownerProvider]?.platformAvailable),
+  );
+
   const modelMutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => api.settings.update(data),
     onSuccess: () => {
@@ -153,14 +143,12 @@ export default function LLMPage() {
     },
   });
 
-  // Save API key mutation
   const keyMutation = useMutation({
     mutationFn: ({ provider, config }: { provider: string; config: Record<string, unknown> }) =>
       api.credentials.update(provider, config),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "success" }));
-      setApiKeys((prev) => ({ ...prev, [variables.provider]: "" }));
       setTimeout(() => {
         setKeySaveStatus((prev) => ({ ...prev, [variables.provider]: "idle" }));
       }, 2000);
@@ -174,12 +162,12 @@ export default function LLMPage() {
     },
   });
 
-  // Delete credential mutation
   const deleteMutation = useMutation({
     mutationFn: (provider: string) => api.credentials.delete(provider),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       setRemovingProvider(null);
+      setEditingProvider(null);
     },
     onError: (error) => {
       captureError(error, { feature: "llm-key-delete" });
@@ -195,10 +183,8 @@ export default function LLMPage() {
     });
   }
 
-  function handleSaveKey(provider: string) {
-    const key = apiKeys[provider]?.trim();
+  function handleSaveKey(provider: string, key: string) {
     if (!key) return;
-
     const config: Record<string, unknown> = { api_key: key };
     if (provider === "openai") {
       config.api_type = OPENAI_API_TYPE_CHAT;
@@ -206,6 +192,10 @@ export default function LLMPage() {
     setKeySaveStatus((prev) => ({ ...prev, [provider]: "saving" }));
     keyMutation.mutate({ provider, config });
   }
+
+  const editingInfo = editingProvider ? LLM_PROVIDER_INFO[editingProvider] : null;
+  const editingStatus = editingProvider ? providerStatus[editingProvider] : undefined;
+  const editingSaveStatus = editingProvider ? keySaveStatus[editingProvider] ?? "idle" : "idle";
 
   return (
     <PageContainer size="default">
@@ -238,174 +228,61 @@ export default function LLMPage() {
           </Card>
         )}
 
-        {/* Agent Credentials */}
         <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">Agent credentials</h2>
+          <h2 className="text-xs font-medium text-foreground">Default model</h2>
+          <DefaultModelCard
+            value={llmModel}
+            reasoningEffort={reasoningEffort}
+            modelGroups={enabledModelGroups}
+            ownerProvider={ownerProvider}
+            ownerProviderInfo={ownerProviderInfo}
+            ownerConfigured={ownerConfigured}
+            saving={modelMutation.isPending}
+            saveStatus={saveStatus}
+            onChange={setLlmModel}
+            onReasoningChange={setReasoningEffort}
+            onSave={handleSaveModel}
+          />
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xs font-medium text-foreground">Provider keys</h2>
           <p className="text-xs text-muted-foreground">
-            Add API keys for running coding agent sessions (Claude Code, Codex, Gemini CLI).
-            These keys are separate from the platform&apos;s built-in intelligence.
+            Add API keys for this org. Keys flow to coding agent sessions and can power the default
+            model above when the matching provider is selected.
           </p>
-          <div className="space-y-3">
-            {LLM_PROVIDERS.map((provider) => {
-              const info = LLM_PROVIDER_INFO[provider];
-              const ps = providerStatus[provider];
-              const status = keySaveStatus[provider] ?? "idle";
-
-              return (
-                <Card key={provider}>
-                  <CardContent>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium">{info.name}</span>
-                            {ps?.orgConfigured && (
-                              <Badge variant="success" className="text-xs px-1.5 py-0">
-                                <Check className="mr-0.5 h-3 w-3" />
-                                Configured
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-                        {ps?.orgConfigured && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-xs text-muted-foreground"
-                            onClick={() => setRemovingProvider(provider)}
-                            disabled={deleteMutation.isPending}
-                          >
-                            Remove
-                          </Button>
-                        )}
-                      </div>
-
-                      {ps?.orgConfigured && ps.maskedKey && (
-                        <p className="text-xs text-muted-foreground font-mono">
-                          Key: {ps.maskedKey}
-                        </p>
-                      )}
-
-                      <div className="flex gap-2">
-                        <div className="relative flex-1">
-                          <Input
-                            type={showKeys[provider] ? "text" : "password"}
-                            placeholder={ps?.orgConfigured ? "Replace existing key..." : info.keyPlaceholder}
-                            value={apiKeys[provider] ?? ""}
-                            onChange={(e) =>
-                              setApiKeys((prev) => ({ ...prev, [provider]: e.target.value }))
-                            }
-                            className="h-8 pr-9 font-mono text-xs"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setShowKeys((prev) => ({ ...prev, [provider]: !prev[provider] }))
-                            }
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                          >
-                            {showKeys[provider] ? (
-                              <EyeOff className="h-3.5 w-3.5" />
-                            ) : (
-                              <Eye className="h-3.5 w-3.5" />
-                            )}
-                          </button>
-                        </div>
-                        <Button
-                          onClick={() => handleSaveKey(provider)}
-                          disabled={!apiKeys[provider]?.trim() || status === "saving"}
-                        >
-                          {status === "saving" ? "Saving..." : "Save key"}
-                        </Button>
-                      </div>
-                      <p className="text-xs text-muted-foreground">{info.description}</p>
-                      {status === "success" && (
-                        <p className="text-xs text-emerald-600 dark:text-emerald-400">Key saved successfully.</p>
-                      )}
-                      {status === "error" && (
-                        <p className="text-xs text-destructive">Failed to save key.</p>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+          <div className="space-y-2">
+            {LLM_PROVIDERS.map((provider) => (
+              <ProviderKeyRow
+                key={provider}
+                provider={provider}
+                info={LLM_PROVIDER_INFO[provider]}
+                status={providerStatus[provider] ?? { orgConfigured: false, platformAvailable: false }}
+                isDefaultOwner={provider === ownerProvider}
+                onEdit={() => setEditingProvider(provider)}
+              />
+            ))}
           </div>
         </section>
-
-        {/* Model Selection */}
-        <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">Model</h2>
-          <Card>
-            <CardContent>
-              <div className="space-y-3">
-                <div className="space-y-2">
-                  <Label htmlFor="llm-model">Default LLM model</Label>
-                  <Select value={llmModel} onValueChange={setLlmModel}>
-                    <SelectTrigger id="llm-model" aria-label="LLM Model">
-                      <SelectValue placeholder="Select a model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {enabledModelGroups.length === 0 ? (
-                        <SelectItem value={DEFAULT_LLM_MODEL} disabled>
-                          No providers configured
-                        </SelectItem>
-                      ) : (
-                        enabledModelGroups.map((group) => (
-                          <SelectGroup key={group.label}>
-                            <SelectLabel>{group.label}</SelectLabel>
-                            {group.models.map((model) => (
-                              <SelectItem key={model} value={model}>
-                                {model}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    The model used for validation, prioritization, and other general LLM tasks.
-                    Only models from configured providers are shown.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="reasoning-effort">Reasoning effort</Label>
-                  <Select value={reasoningEffort || "none"} onValueChange={(v) => setReasoningEffort(v === "none" ? "" : v)}>
-                    <SelectTrigger id="reasoning-effort" aria-label="Reasoning effort">
-                      <SelectValue placeholder="Default (none)" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">Default (none)</SelectItem>
-                      <SelectItem value="low">Low</SelectItem>
-                      <SelectItem value="medium">Medium</SelectItem>
-                      <SelectItem value="high">High</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Controls how much reasoning the model uses. Lower values reduce latency and cost.
-                    Only applies to models that support reasoning.
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
-
-        <div className="flex items-center justify-end gap-3">
-          {saveStatus === "success" && (
-            <span className="text-sm text-emerald-600 dark:text-emerald-400">Model saved.</span>
-          )}
-          {saveStatus === "error" && (
-            <span className="text-sm text-destructive">Failed to save model.</span>
-          )}
-          <Button onClick={handleSaveModel} disabled={modelMutation.isPending}>
-            {modelMutation.isPending ? "Saving..." : "Save model"}
-          </Button>
-        </div>
       </div>
 
-      {/* Remove Credential Confirmation Dialog */}
+      {editingProvider && editingInfo && (
+        <ProviderKeyDialog
+          open={!!editingProvider}
+          onOpenChange={(open) => {
+            if (!open) setEditingProvider(null);
+          }}
+          provider={editingProvider}
+          info={editingInfo}
+          existingMaskedKey={editingStatus?.maskedKey}
+          saveStatus={editingSaveStatus}
+          onSave={(key) => handleSaveKey(editingProvider, key)}
+          onRemove={
+            editingStatus?.orgConfigured ? () => setRemovingProvider(editingProvider) : undefined
+          }
+        />
+      )}
+
       <AlertDialog open={!!removingProvider} onOpenChange={(open) => !open && setRemovingProvider(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

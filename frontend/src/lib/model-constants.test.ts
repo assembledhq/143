@@ -9,8 +9,10 @@ import {
   DEFAULT_LLM_MODEL,
   CLAUDE_CODE_MODEL_SONNET,
   LEGACY_PM_ALIASES,
+  LLM_PROVIDER_INFO,
   PM_MODELS_BY_PROVIDER,
   LLM_MODELS_BY_PROVIDER,
+  ownerProviderForModel,
 } from "./model-constants";
 
 describe("model constants", () => {
@@ -73,8 +75,52 @@ describe("model constants", () => {
   });
 
   it("LLM_MODELS_BY_PROVIDER maps providers to their models", () => {
-    expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "openrouter"]);
+    expect(Object.keys(LLM_MODELS_BY_PROVIDER)).toEqual(["anthropic", "openai", "gemini", "openrouter"]);
     expect(LLM_MODELS_BY_PROVIDER.anthropic.models).toEqual(["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]);
     expect(LLM_MODELS_BY_PROVIDER.openai.models).toEqual(["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]);
+    expect(LLM_MODELS_BY_PROVIDER.gemini.models).toEqual(["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]);
+  });
+
+  it("LLM_PROVIDER_INFO includes Gemini with an AIza placeholder", () => {
+    expect(LLM_PROVIDER_INFO.gemini).toMatchObject({
+      name: "Gemini",
+      keyPlaceholder: "AIza...",
+    });
+  });
+});
+
+describe("ownerProviderForModel", () => {
+  const groups = {
+    anthropic: { label: "Anthropic", models: ["claude-opus-4-6"] as readonly string[] },
+    openai: { label: "OpenAI", models: ["gpt-4o", "gpt-5.4-mini"] as readonly string[] },
+    gemini: { label: "Gemini", models: ["gemini-2.5-pro"] as readonly string[] },
+    openrouter: {
+      label: "OpenRouter",
+      models: [
+        "claude-opus-4-6",
+        "gpt-4o",
+        "gpt-5.4-mini",
+        "gemini-2.5-pro",
+        "meta-only-model",
+      ] as readonly string[],
+    },
+  };
+
+  it("returns the native provider when the model is offered natively", () => {
+    expect(ownerProviderForModel("claude-opus-4-6", groups)).toBe("anthropic");
+    expect(ownerProviderForModel("gpt-5.4-mini", groups)).toBe("openai");
+    expect(ownerProviderForModel("gemini-2.5-pro", groups)).toBe("gemini");
+  });
+
+  it("falls back to openrouter when only openrouter offers the model", () => {
+    expect(ownerProviderForModel("meta-only-model", groups)).toBe("openrouter");
+  });
+
+  it("returns null when no provider offers the model", () => {
+    expect(ownerProviderForModel("unknown-model", groups)).toBeNull();
+  });
+
+  it("returns null when the providers map is empty", () => {
+    expect(ownerProviderForModel("anything", {})).toBeNull();
   });
 });
