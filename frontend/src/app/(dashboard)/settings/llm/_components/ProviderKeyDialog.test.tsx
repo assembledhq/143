@@ -37,7 +37,6 @@ function Harness({
         setOpen(next);
         onOpenChange?.(next);
       }}
-      provider="openai"
       info={info}
       existingMaskedKey={existingMaskedKey}
       saveStatus={saveStatus}
@@ -110,7 +109,6 @@ describe("ProviderKeyDialog", () => {
       <ProviderKeyDialog
         open
         onOpenChange={onOpenChange}
-        provider="openai"
         info={info}
         saveStatus="saving"
         onSave={() => {}}
@@ -121,7 +119,6 @@ describe("ProviderKeyDialog", () => {
       <ProviderKeyDialog
         open
         onOpenChange={onOpenChange}
-        provider="openai"
         info={info}
         saveStatus="success"
         onSave={() => {}}

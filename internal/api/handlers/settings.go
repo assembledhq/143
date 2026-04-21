@@ -11,11 +11,10 @@ import (
 )
 
 type SettingsHandler struct {
-	orgStore      *db.OrganizationStore
-	llmDefaults   map[string]string // provider name → masked key (from server env)
-	platformModel string            // cheap model used for internal features (e.g. "gpt-5.4-nano")
-	audit         *db.AuditEmitter
-	logger        zerolog.Logger
+	orgStore    *db.OrganizationStore
+	llmDefaults map[string]string // provider name → masked key (from server env)
+	audit       *db.AuditEmitter
+	logger      zerolog.Logger
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -30,12 +29,11 @@ func (h *SettingsHandler) SetLogger(logger zerolog.Logger) {
 	h.logger = logger
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string, platformModel string) *SettingsHandler {
+func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
 	return &SettingsHandler{
-		orgStore:      orgStore,
-		llmDefaults:   llmDefaults,
-		platformModel: platformModel,
-		logger:        zerolog.Nop(),
+		orgStore:    orgStore,
+		llmDefaults: llmDefaults,
+		logger:      zerolog.Nop(),
 	}
 }
 
@@ -54,8 +52,7 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // fallback is available when the org hasn't configured their own key.
 func (h *SettingsHandler) GetLLMDefaults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"data":           h.llmDefaults,
-		"platform_model": h.platformModel,
+		"data": h.llmDefaults,
 	})
 }
 

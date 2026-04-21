@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +17,6 @@ export type SaveStatus = "idle" | "saving" | "success" | "error";
 export interface ProviderKeyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  provider: string;
   info: { name: string; description: string; keyPlaceholder: string };
   existingMaskedKey?: string;
   saveStatus: SaveStatus;
@@ -38,13 +37,21 @@ export function ProviderKeyDialog({
 }: ProviderKeyDialogProps) {
   const [draftKey, setDraftKey] = useState("");
 
+  // Keep onOpenChange in a ref so the close-on-success effect depends only on
+  // saveStatus. Parents pass a fresh arrow function each render, which would
+  // otherwise re-fire the effect on every render while saveStatus is "success".
+  const onOpenChangeRef = useRef(onOpenChange);
+  useLayoutEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
   // Close on successful save. The draft resets naturally because the parent
   // conditionally renders this dialog (it unmounts when editingProvider is null).
   useEffect(() => {
-    if (open && saveStatus === "success") {
-      onOpenChange(false);
+    if (saveStatus === "success") {
+      onOpenChangeRef.current(false);
     }
-  }, [open, saveStatus, onOpenChange]);
+  }, [saveStatus]);
 
   const saving = saveStatus === "saving";
   const configured = Boolean(existingMaskedKey);

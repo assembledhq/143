@@ -60,7 +60,7 @@ describe("DefaultModelCard", () => {
         onSave={() => {}}
       />,
     );
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save default model" })).toBeDisabled();
   });
 
   it("invokes onSave when the Save button is clicked", async () => {
@@ -81,7 +81,7 @@ describe("DefaultModelCard", () => {
         onSave={onSave}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Save default model" }));
     expect(onSave).toHaveBeenCalledTimes(1);
   });
 

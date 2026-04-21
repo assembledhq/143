@@ -299,7 +299,6 @@ export default function LLMPage() {
           onOpenChange={(open) => {
             if (!open) setEditingProvider(null);
           }}
-          provider={editingProvider}
           info={editingInfo}
           existingMaskedKey={editingStatus?.maskedKey}
           saveStatus={editingSaveStatus}

@@ -321,21 +321,13 @@ describe("LLMPage", () => {
     const user = userEvent.setup();
     renderWithProviders(<LLMPage />);
 
-    // Wait for the default model card to render (there's both an h2 and a label
-    // with "Default model" — scope to the heading).
-    await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Default model" })).toBeInTheDocument();
-    });
-
     // The default model is gpt-5.4-mini which is owned by OpenAI, and OpenAI is
     // present as a platform provider, so the Save button is enabled.
     await waitFor(() => {
-      const saveBtns = screen.getAllByRole("button", { name: "Save" });
-      expect(saveBtns.some((b) => !b.hasAttribute("disabled"))).toBe(true);
+      expect(screen.getByRole("button", { name: "Save default model" })).toBeEnabled();
     });
 
-    const saveBtn = screen.getAllByRole("button", { name: "Save" }).find((b) => !b.hasAttribute("disabled"))!;
-    await user.click(saveBtn);
+    await user.click(screen.getByRole("button", { name: "Save default model" }));
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalled();

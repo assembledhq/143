@@ -32,8 +32,8 @@ type GeminiProvider struct {
 
 type GeminiOption func(*GeminiProvider)
 
-func WithGeminiBaseURL(url string) GeminiOption {
-	return func(p *GeminiProvider) { p.baseURL = url }
+func WithGeminiBaseURL(baseURL string) GeminiOption {
+	return func(p *GeminiProvider) { p.baseURL = baseURL }
 }
 
 func WithGeminiHTTPClient(c *http.Client) GeminiOption {

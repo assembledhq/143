@@ -112,7 +112,11 @@ export function DefaultModelCard({
             {saveStatus === "error" && (
               <span className="text-xs text-destructive">Failed to save model.</span>
             )}
-            <Button onClick={onSave} disabled={saving || !ownerConfigured}>
+            <Button
+              onClick={onSave}
+              disabled={saving || !ownerConfigured}
+              aria-label="Save default model"
+            >
               {saving ? "Saving..." : "Save"}
             </Button>
           </div>
