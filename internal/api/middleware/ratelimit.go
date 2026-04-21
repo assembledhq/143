@@ -276,6 +276,14 @@ func CreateOrgRateLimit(perHour int) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Order matters: IP first, user second. A request that passes IP
+			// but fails the user check still consumes an IP token. That is
+			// deliberate — we want scripted abuse from a single host to count
+			// against the host even when the per-user cap already rejected
+			// it, so rotating fresh user IDs on the same IP cannot dodge the
+			// IP backstop. The practical cost is that legitimate users
+			// sharing a NAT with a flooder may see IP rejections sooner; at
+			// 5/hour across any shared egress, that tradeoff favors the cap.
 			ip := remoteAddrIP(r)
 			if !getBucket(ipBuckets, ip).allow() {
 				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("create-org rate limit exceeded (IP)")

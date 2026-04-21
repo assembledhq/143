@@ -43,8 +43,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers['X-CSRF-Token'] = getCSRFToken();
   }
 
+  // Only attach the active-org header on org-scoped routes. Auth endpoints
+  // (login, register, logout, me, memberships) are user-scoped — they operate
+  // on session/user state regardless of the selected workspace, so sending a
+  // stale org id here would only give the server a way to misattribute the
+  // request or echo back an irrelevant header.
   const activeOrgId = getActiveOrgId();
-  if (activeOrgId) {
+  if (activeOrgId && !path.startsWith('/api/v1/auth/')) {
     headers['X-Active-Org-ID'] = activeOrgId;
   }
 

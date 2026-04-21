@@ -83,6 +83,11 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   useEffect(() => {
     const handler = () => {
       const previousLabel = activeMembershipRef.current?.org_name;
+      // Drop the stale tab selection so the next request doesn't resend the
+      // revoked org id and trip the same response header in a loop. Falling
+      // back to null lets effectiveActiveOrgId pick up whatever org the
+      // server resolves for this user on the refetch below.
+      setActiveOrgId(null);
       void queryClient.invalidateQueries();
       toast.info(
         previousLabel

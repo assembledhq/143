@@ -19,7 +19,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { setActiveOrgId } from "@/lib/active-org";
-import { queryKeys } from "@/lib/query-keys";
 
 const MAX_NAME_LEN = 120;
 
@@ -71,11 +70,9 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
     onSuccess: async (response) => {
       const created = response.data;
       setActiveOrgId(created.id);
-      // Refresh the memberships list immediately so the switcher renders the
-      // new org without waiting for the next focus/interval refetch.
-      await queryClient.invalidateQueries({ queryKey: queryKeys.auth.memberships });
-      // Everything else is scoped to the previous org; nuke the cache so the
-      // next render fetches fresh data for the new workspace.
+      // Everything (including memberships) is scoped to the previous org; nuke
+      // the whole cache so the next render fetches fresh data for the new
+      // workspace. The unqualified invalidate subsumes the memberships key.
       await queryClient.invalidateQueries();
       toast.success(`Created ${created.name}`);
       handleOpenChange(false);

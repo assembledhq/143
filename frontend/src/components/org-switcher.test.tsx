@@ -151,6 +151,23 @@ describe("OrgSwitcher", () => {
     });
   });
 
+  it("clears the stale tab-local org id on revocation so the next request cannot re-trigger it", async () => {
+    setActiveOrgId("org-revoked");
+
+    mockMemberships(
+      [{ org_id: "org-1", org_name: "Acme", role: "admin" }],
+      "org-1",
+    );
+
+    renderWithProviders(<OrgSwitcher />);
+
+    window.dispatchEvent(new CustomEvent(ORG_MEMBERSHIP_REVOKED_EVENT));
+
+    await waitFor(() => {
+      expect(getActiveOrgId()).toBeNull();
+    });
+  });
+
   it("syncs with active-org-changed events from elsewhere in the tab", async () => {
     mockMemberships(
       [
