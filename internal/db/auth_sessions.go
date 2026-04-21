@@ -21,15 +21,25 @@ func NewAuthSessionStore(db DBTX) *AuthSessionStore {
 
 func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSession) error {
 	query := `
-		INSERT INTO auth_sessions (user_id, org_id, token, expires_at)
-		VALUES (@user_id, @org_id, @token, @expires_at)
+		INSERT INTO auth_sessions (user_id, org_id, last_org_id, token, expires_at)
+		VALUES (@user_id, @org_id, @last_org_id, @token, @expires_at)
 		RETURNING id, created_at`
 
+	// last_org_id is left NULL unless the caller explicitly supplies it.
+	// During the multi-org compat window session.OrgID tracks the user's
+	// legacy primary org, which may already point at an org the user has
+	// since been removed from. Prepopulating last_org_id from it would
+	// mean fresh logins fire the revoked-org header on their very first
+	// request. Instead we rely on the auth middleware's normal resolution
+	// (header → hint → OldestForUser) and persist the result back once on
+	// first use, so the hint always points at a live membership.
 	args := pgx.NamedArgs{
-		"user_id":    session.UserID,
-		"org_id":     session.OrgID,
-		"token":      session.Token,
-		"expires_at": session.ExpiresAt,
+		"user_id": session.UserID,
+		// lint:allow-auth-session-orgid reason="Create writes org_id on INSERT during the sunset window; removed when the column is dropped"
+		"org_id":      session.OrgID,
+		"last_org_id": session.LastOrgID,
+		"token":       session.Token,
+		"expires_at":  session.ExpiresAt,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -40,7 +50,7 @@ func (s *AuthSessionStore) Create(ctx context.Context, session *models.AuthSessi
 // lint:allow-no-orgid reason="pre-auth session lookup; token is opaque and identifies the org"
 func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models.AuthSession, error) {
 	query := `
-		SELECT id, user_id, org_id, token, expires_at, created_at
+		SELECT id, user_id, org_id, last_org_id, token, expires_at, created_at
 		FROM auth_sessions
 		WHERE token = @token AND expires_at > now()`
 
@@ -58,6 +68,19 @@ func (s *AuthSessionStore) GetByToken(ctx context.Context, token string) (models
 func (s *AuthSessionStore) Touch(ctx context.Context, token string, expiresAt time.Time) error {
 	query := `UPDATE auth_sessions SET expires_at = @expires_at WHERE token = @token`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{"token": token, "expires_at": expiresAt})
+	return err
+}
+
+// UpdateLastOrgID persists the server-side hint for which membership should be
+// activated when a session is next used without an X-Active-Org-ID header.
+// Passing nil clears the hint (e.g. user's last org was deleted).
+// lint:allow-no-orgid reason="identifies session by opaque token; org scoping enforced upstream"
+func (s *AuthSessionStore) UpdateLastOrgID(ctx context.Context, token string, lastOrgID *uuid.UUID) error {
+	query := `UPDATE auth_sessions SET last_org_id = @last_org_id WHERE token = @token`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"token":       token,
+		"last_org_id": lastOrgID,
+	})
 	return err
 }
 

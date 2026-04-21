@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -25,14 +24,31 @@ import (
 	"github.com/assembledhq/143/internal/services/email"
 )
 
-// teamUserStore is the interface the team handler depends on for user operations.
+// teamUserStore is the interface the team handler depends on for user lookups.
+// Membership-scoped operations (role updates, removal, admin counts) live on
+// teamMembershipStore instead — users own identity, memberships own access.
 type teamUserStore interface {
-	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
-	GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
+	ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID, filters db.MembershipPageFilters) ([]models.User, time.Time, error)
+	GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error)
 	GetByEmail(ctx context.Context, email string) (models.User, error)
-	UpdateRole(ctx context.Context, orgID, userID uuid.UUID, role string) error
-	Delete(ctx context.Context, orgID, userID uuid.UUID) error
-	CountAdmins(ctx context.Context, orgID uuid.UUID) (int, error)
+	IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
+}
+
+// teamMembershipStore is the authoritative source for per-org role and access.
+// Every decision that was "does this user belong to this org, and at what
+// level" routes through here — the users table is only consulted for display
+// fields (name, email, avatar, github login).
+//
+// UpdateRoleGuarded / RemoveGuarded are the atomic variants used by mutating
+// handlers so the last-admin invariant cannot be violated by two concurrent
+// admin demotions. The non-guarded Get / CountForUser remain for read-only
+// lookups that don't participate in the invariant (member directory, post-
+// removal session cleanup decision).
+type teamMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	UpdateRoleGuarded(ctx context.Context, userID, orgID uuid.UUID, newRole string) (string, error)
+	RemoveGuarded(ctx context.Context, userID, orgID uuid.UUID) (prevRole string, revokedInvitations int, err error)
+	CountForUser(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
 // teamSessionStore is the interface for session invalidation on member removal.
@@ -64,11 +80,10 @@ type teamGitHubService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
-var validRoles = []string{"admin", "member", "viewer"}
-
 // TeamHandler serves the /api/v1/team/* endpoints.
 type TeamHandler struct {
 	users        teamUserStore
+	memberships  teamMembershipStore
 	sessions     teamSessionStore
 	invitations  teamInvitationStore
 	orgs         teamOrgStore
@@ -96,6 +111,7 @@ func (h *TeamHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // NewTeamHandler creates a new team management handler.
 func NewTeamHandler(
 	users teamUserStore,
+	memberships teamMembershipStore,
 	sessions teamSessionStore,
 	invitations teamInvitationStore,
 	orgs teamOrgStore,
@@ -107,6 +123,7 @@ func NewTeamHandler(
 	}
 	return &TeamHandler{
 		users:       users,
+		memberships: memberships,
 		sessions:    sessions,
 		invitations: invitations,
 		orgs:        orgs,
@@ -116,11 +133,39 @@ func NewTeamHandler(
 	}
 }
 
-// ListMembers returns all users in the org.
+// ListMembers returns a cursor-paginated page of users holding a membership
+// in the active org, regardless of whether the org is their legacy primary.
+// The directory is keyed on organization_memberships (joined with users for
+// display fields) rather than users.org_id, so multi-org members (e.g.
+// someone who joined via ClaimInvitation) appear exactly where the admin
+// expects to manage them.
+//
+// Accepts ?limit (1..500, default 100) and ?cursor (opaque, from prior
+// page's meta.next_cursor). Without pagination a large org's member list
+// would produce an unbounded response and a single slow query; with cursor
+// pagination the frontend pages as the admin scrolls.
 func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	users, err := h.users.ListByOrg(r.Context(), orgID)
+	limit := clampListLimit(queryInt(r, "limit", 100), 100, 500)
+	filters := db.MembershipPageFilters{Limit: limit}
+
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		cursorTime, rawID, err := decodeCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		cursorUserID, err := uuid.Parse(rawID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		filters.CursorCreatedAt = &cursorTime
+		filters.CursorUserID = &cursorUserID
+	}
+
+	users, lastMembershipTime, err := h.users.ListByOrgViaMemberships(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list members", err)
 		return
@@ -128,7 +173,16 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	if users == nil {
 		users = []models.User{}
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.User]{Data: users})
+
+	var nextCursor string
+	if len(users) == limit {
+		nextCursor = encodeCursor(lastMembershipTime, users[len(users)-1].ID.String())
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.User]{
+		Data: users,
+		Meta: models.PaginationMeta{NextCursor: nextCursor},
+	})
 }
 
 // ChangeRole updates a member's role.
@@ -150,7 +204,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !slices.Contains(validRoles, body.Role) {
+	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}
@@ -160,36 +214,40 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If demoting from admin, ensure they're not the last admin.
-	member, err := h.users.GetByID(r.Context(), orgID, memberID)
+	// UpdateRoleGuarded is atomic: it locks the org's admin rows for the
+	// duration of the tx so two concurrent demotions can't both pass the
+	// "more than one admin" check and leave the org with zero admins.
+	prevRole, err := h.memberships.UpdateRoleGuarded(r.Context(), memberID, orgID, body.Role)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
-		return
-	}
-
-	if member.Role == "admin" && body.Role != "admin" {
-		count, err := h.users.CountAdmins(r.Context(), orgID)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
 			return
 		}
-		if count <= 1 {
+		if errors.Is(err, db.ErrLastAdmin) {
 			writeError(w, r, http.StatusBadRequest, "LAST_ADMIN", "cannot demote the last admin")
 			return
 		}
-	}
-
-	if err := h.users.UpdateRole(r.Context(), orgID, memberID, body.Role); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update role", err)
 		return
 	}
 
 	memberIDStr := memberID.String()
-	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": member.Role})
+	details, marshalErr := json.Marshal(map[string]string{"new_role": body.Role, "previous_role": prevRole})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for role change")
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRoleChanged, models.AuditResourceTeamMember, &memberIDStr, details)
+
+	// Role has already been updated in the DB. The follow-up display-row
+	// lookup is best-effort: if it fails, we still return 200 with a minimal
+	// payload so the client treats the mutation as succeeded (because it did).
+	// Returning 500 would suggest the role change failed and mislead retries.
+	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("member_id", memberIDStr).Msg("team: role updated but display lookup failed; returning minimal payload")
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: models.User{ID: memberID, Role: body.Role}})
+		return
+	}
 
 	member.Role = body.Role
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.User]{Data: member})
@@ -211,40 +269,65 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check that the member exists and isn't the last admin.
-	member, err := h.users.GetByID(r.Context(), orgID, memberID)
+	// Fetch identity for audit details. A missing user row is a true 404
+	// (the requested member ID doesn't exist at all); any other error is a
+	// lookup failure and should surface as 500 rather than be hidden as 404.
+	member, err := h.users.GetByIDGlobal(r.Context(), memberID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to look up member", err)
 		return
 	}
 
-	if member.Role == "admin" {
-		count, err := h.users.CountAdmins(r.Context(), orgID)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "COUNT_FAILED", "failed to check admin count", err)
+	// RemoveGuarded does the membership lookup, last-admin check, and the
+	// delete (plus the org-scoped cleanups in the underlying Remove CTE) all
+	// inside a transaction that locks the org's admin rows. Two concurrent
+	// admin removals can't both pass the count > 1 check.
+	prevRole, revokedInvitations, err := h.memberships.RemoveGuarded(r.Context(), memberID, orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "MEMBER_NOT_FOUND", "member not found in this organization")
 			return
 		}
-		if count <= 1 {
+		if errors.Is(err, db.ErrLastAdmin) {
 			writeError(w, r, http.StatusBadRequest, "LAST_ADMIN", "cannot remove the last admin")
 			return
 		}
-	}
-
-	if err := h.users.Delete(r.Context(), orgID, memberID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DELETE_FAILED", "failed to remove member", err)
 		return
 	}
-
 	removedIDStr := memberID.String()
-	details, marshalErr := json.Marshal(map[string]string{"removed_email": member.Email})
+	// revoked_invitations is the number of pending invitations this member
+	// authored in this org that Remove flipped to 'revoked' as part of
+	// cleanup. Including it keeps the member-removed audit row self-
+	// describing — an operator reading only audit history can reconcile
+	// invitation status flips to this removal without cross-referencing
+	// timestamps.
+	details, marshalErr := json.Marshal(map[string]any{
+		"removed_email":       member.Email,
+		"previous_role":       prevRole,
+		"revoked_invitations": revokedInvitations,
+	})
 	if marshalErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(marshalErr).Msg("failed to marshal audit details for member removal")
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberRemoved, models.AuditResourceTeamMember, &removedIDStr, details)
 
-	// Invalidate all sessions for the removed user.
-	if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
-		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+	// Only invalidate the user's sessions if they have no remaining memberships
+	// — otherwise they'd be logged out of orgs they still belong to. A failure
+	// here is non-fatal: the removal itself succeeded and stale sessions will
+	// fail their next middleware check (membership lookup returns ErrNoRows)
+	// and get rejected there.
+	remaining, countErr := h.memberships.CountForUser(r.Context(), memberID)
+	if countErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(countErr).Msg("failed to count remaining memberships after removal")
+	} else if remaining == 0 {
+		if err := h.sessions.DeleteByUserID(r.Context(), memberID); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to delete sessions for removed user")
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -290,29 +373,42 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Role == "" {
-		body.Role = "member"
+		body.Role = models.RoleMember
 	}
-	if !slices.Contains(validRoles, body.Role) {
+	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}
 
-	// Check if the invitee is already a member of this org.
+	// Check if the invitee is already a member of this org. With multi-org
+	// memberships the users row alone no longer tells us — a user may exist
+	// globally and be a member of *other* orgs without being a member here.
+	// The authoritative check is memberships.Get(userID, orgID).
 	if body.Email != "" {
-		if existing, err := h.users.GetByEmail(r.Context(), body.Email); err == nil && existing.OrgID == orgID {
-			writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
-			return
+		if existing, err := h.users.GetByEmail(r.Context(), body.Email); err == nil {
+			if _, memErr := h.memberships.Get(r.Context(), existing.ID, orgID); memErr == nil {
+				writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this email is already a member of the organization")
+				return
+			} else if !errors.Is(memErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check existing membership", memErr)
+				return
+			}
 		}
 	}
 	if body.GitHubUsername != "" {
-		members, err := h.users.ListByOrg(r.Context(), orgID)
-		if err == nil {
-			for _, m := range members {
-				if m.GitHubLogin != nil && strings.EqualFold(*m.GitHubLogin, body.GitHubUsername) {
-					writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this github user is already a member of the organization")
-					return
-				}
-			}
+		// IsGitHubLoginMemberOfOrg joins users to organization_memberships so
+		// the dedup catches members of this org regardless of which org's
+		// row is their legacy primary. The previous ListByOrg approach
+		// missed users whose only membership in this org was non-primary,
+		// allowing duplicate invitations against actual members.
+		isMember, err := h.users.IsGitHubLoginMemberOfOrg(r.Context(), body.GitHubUsername, orgID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check existing membership", err)
+			return
+		}
+		if isMember {
+			writeError(w, r, http.StatusConflict, "ALREADY_MEMBER", "this github user is already a member of the organization")
+			return
 		}
 	}
 
@@ -362,6 +458,12 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 	emitUserAudit(h.audit, r, models.AuditActionTeamMemberInvited, models.AuditResourceInvitation, &invIDStr, invDetails)
 
+	// generateRandomString returns a hex-encoded string, so `token` is always
+	// in [0-9a-f] and safe to concatenate into the query string without
+	// url.QueryEscape. If the generator ever moves to base64 (or any
+	// encoding that can produce `+`, `/`, `=`, or reserved URL chars) this
+	// concat must be swapped for url.Values / url.QueryEscape to avoid
+	// producing malformed accept links.
 	acceptURL := h.frontendURL + "/invite/accept?token=" + token
 
 	// Look up org name for the email.

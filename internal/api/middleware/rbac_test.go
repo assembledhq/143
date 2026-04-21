@@ -14,11 +14,11 @@ func TestRequireRole(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		allowedRoles   []string
-		user           *models.User
-		requestMethod  string
-		expectedCode   int
+		name          string
+		allowedRoles  []string
+		user          *models.User
+		requestMethod string
+		expectedCode  int
 	}{
 		{
 			name:          "returns 401 when no user is in context",
@@ -84,6 +84,7 @@ func TestRequireRole(t *testing.T) {
 			req := httptest.NewRequest(tt.requestMethod, "/", nil)
 			if tt.user != nil {
 				ctx := WithUser(req.Context(), tt.user)
+				ctx = WithActiveRole(ctx, tt.user.Role)
 				req = req.WithContext(ctx)
 			}
 			w := httptest.NewRecorder()

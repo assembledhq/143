@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -168,10 +170,10 @@ func TestExtractIP(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		remoteAddr     string
-		xForwardedFor  string
-		expectedIP     string
+		name          string
+		remoteAddr    string
+		xForwardedFor string
+		expectedIP    string
 	}{
 		{
 			name:       "extracts IP from RemoteAddr",
@@ -205,6 +207,94 @@ func TestExtractIP(t *testing.T) {
 			require.Equal(t, tt.expectedIP, extractIP(req), "should extract expected IP address")
 		})
 	}
+}
+
+// ClaimRateLimit is tuned tighter than the general rate limiter because the
+// invitation claim endpoint is a brute-force target. The tests cover the
+// three-key behavior the middleware promises: per-IP blocking, per-user
+// blocking (so shared NATs don't false-positive each other), and a clean
+// pass-through when neither bucket is exhausted.
+func TestClaimRateLimit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allows traffic within the per-IP bucket", func(t *testing.T) {
+		t.Parallel()
+		handler := ClaimRateLimit(5)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+		req.RemoteAddr = "10.0.1.1:1234"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("blocks the IP after the bucket empties with 429 and Retry-After 60", func(t *testing.T) {
+		t.Parallel()
+		handler := ClaimRateLimit(2)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+			req.RemoteAddr = "10.0.2.1:1234"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+		req.RemoteAddr = "10.0.2.1:1234"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		require.Equal(t, "60", w.Header().Get("Retry-After"))
+		require.Contains(t, w.Body.String(), "CLAIM_RATE_LIMITED")
+	})
+
+	t.Run("ignores X-Forwarded-For so rotating it cannot bypass the IP bucket", func(t *testing.T) {
+		t.Parallel()
+		handler := ClaimRateLimit(2)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		// Same peer address; attacker cycles XFF each request.
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+			req.RemoteAddr = "10.0.4.1:1234"
+			req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i+1))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+		}
+		// A fresh XFF must not reset the bucket — peer address is what counts.
+		req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+		req.RemoteAddr = "10.0.4.1:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113.99")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+	})
+
+	t.Run("blocks the user across IPs once their per-user bucket empties", func(t *testing.T) {
+		t.Parallel()
+		handler := ClaimRateLimit(2)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		user := &models.User{ID: uuid.New()}
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+			req.RemoteAddr = fmt.Sprintf("10.0.3.%d:1234", i+1)
+			req = req.WithContext(WithUser(req.Context(), user))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+		req.RemoteAddr = "10.0.3.99:1234"
+		req = req.WithContext(WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		require.Contains(t, w.Body.String(), "CLAIM_RATE_LIMITED")
+	})
 }
 
 func TestDefaultRateLimitConfig(t *testing.T) {

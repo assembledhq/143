@@ -5,8 +5,12 @@ import (
 	"slices"
 )
 
-// RequireRole returns middleware that restricts access to users with one of the given roles.
-// Must be applied AFTER Auth middleware (which sets user in context).
+// RequireRole returns middleware that restricts access to users whose role in
+// the active org is one of the given roles. Must be applied AFTER Auth
+// middleware (which resolves the active membership and sets the active role
+// in context). Reads ActiveRoleFromContext rather than user.Role so that a
+// user who is admin in org A but viewer in org B is correctly gated when
+// operating as a viewer of B.
 func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -16,7 +20,8 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 
-			if !slices.Contains(roles, user.Role) {
+			role := ActiveRoleFromContext(r.Context())
+			if !slices.Contains(roles, role) {
 				writeError(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
 				return
 			}

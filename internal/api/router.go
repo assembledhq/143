@@ -40,6 +40,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
 	authSessionStore := db.NewAuthSessionStore(pool)
+	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
@@ -89,33 +90,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
 
-	// Build the GitHub App service once and reuse it across PRService, the
-	// integration handler, and the team handler. Left nil when the app is
-	// disabled or its credentials fail to parse — downstream sites nil-check
-	// before using it.
-	var ghSvc *ghservice.Service
-	if cfg.GitHubAppEnabled() {
-		svc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+	// Create PRService if GitHub App credentials are configured.
+	var prService *ghservice.PRService
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
-			ghSvc = svc
+			prService = ghservice.NewPRService(
+				ghSvc, pullRequestStore, sessionStore, issueStore,
+				deployStore, validationStore, repoStore, jobStore, logger,
+			)
+			prService.SetReviewCommentStore(reviewCommentStore)
 		}
-	}
-
-	// Create PRService if the GitHub App service is available.
-	var prService *ghservice.PRService
-	if ghSvc != nil {
-		prService = ghservice.NewPRService(
-			ghSvc, pullRequestStore, sessionStore, issueStore,
-			deployStore, validationStore, repoStore, jobStore, logger,
-		)
-		prService.SetReviewCommentStore(reviewCommentStore)
 	}
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
-	authHandler := handlers.NewAuthHandler(cfg, orgStore, userStore, authSessionStore, invitationStore)
+	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	if prService != nil {
 		repoHandler.SetPRService(prService)
@@ -128,8 +120,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	// If the GitHub App service is available, let the integration handler
 	// fetch repos directly from the API during the install redirect.
-	if ghSvc != nil {
-		integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+		}
 	}
 	integrationOpts = append(integrationOpts, handlers.WithPMContextAutoTrigger(jobStore, pmDocumentStore, logger))
 	integrationHandler := handlers.NewIntegrationHandler(
@@ -192,9 +187,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		})
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
-	teamHandler := handlers.NewTeamHandler(userStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
-	if ghSvc != nil {
-		teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
+	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
+		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
+		if err == nil {
+			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
+		}
 	}
 
 	projectHandler := handlers.NewProjectHandler(projectStore, projectTaskStore, projectCycleStore, projectAttachmentStore, projectSpecStore)
@@ -327,12 +325,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	})
 	recycleWorker.Start()
 
-	// Wire preview teardown into the PR service so closing a PR stops any
-	// active preview for it. No-op when PRService is nil (no GitHub App).
-	if prService != nil {
-		prService.SetPreviewTeardown(previewStore, previewManager)
-	}
-
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.
 	var gwSrv *http.Server
@@ -415,8 +407,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		r.Post("/projects/propose", internalProjectHandler.Propose)
 	})
 
-	// Public team routes (token-based, no auth)
-	r.Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
+	// Public team routes (token-based, no auth). AcceptInvitation looks the
+	// token up server-side, so it's the same brute-force shape as the
+	// authenticated ClaimInvitation endpoint: rate-limit it on the same
+	// 10/min-per-IP budget. ClaimRateLimit's user-bucket branch is skipped
+	// for anonymous callers (no user in context), so it degrades to the IP
+	// bucket only — exactly the guarantee this public route needs.
+	r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
 	// Auth routes (no auth)
 	r.Get("/api/v1/auth/providers", authHandler.Providers)
@@ -429,16 +426,38 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 	// Protected routes (authenticated)
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.Auth(authSessionStore, userStore, []byte(cfg.CSRFSigningKey), logger))
-		r.Use(middleware.OrgContext)
+		r.Use(middleware.Auth(middleware.AuthStores{
+			Sessions:    authSessionStore,
+			Users:       userStore,
+			Memberships: membershipStore,
+		}, []byte(cfg.CSRFSigningKey), logger))
 		r.Use(middleware.LogContext(logger))
 		r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
+		// Zero-membership-safe endpoints: a user whose only membership was
+		// just revoked still needs to load /auth/me to see the empty state,
+		// Logout to drop the session, and POST /invitations/claim to redeem
+		// a fresh invite. These routes intentionally do NOT go through
+		// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
+		// empty active role).
 		r.Get("/api/v1/auth/me", authHandler.Me)
+		// Memberships is zero-membership-safe for the same reason /auth/me
+		// is: a user whose only org was just revoked still needs to see the
+		// empty list so the switcher can render an invite-me state rather
+		// than a 403 spinner.
+		r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 		r.Post("/api/v1/auth/logout", authHandler.Logout)
+		// Available to any authenticated user (no RequireRole) — an invited
+		// user may not yet have a role in the target org when they claim.
+		// Rate-limited per-IP and per-user at 10/minute: the endpoint is a
+		// natural brute-force target because each request names an opaque
+		// token the server looks up, so tightening beyond the default 20 rps
+		// IP limit forces any enumeration attempt into detectable territory.
+		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
 
 		// Read-only routes (all roles: admin, member, viewer)
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin", "member", "viewer"))
 
 			r.Get("/api/v1/version", healthHandler.Version)
@@ -531,6 +550,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 		// Write routes (admin and member only)
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin", "member"))
 
 			r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
@@ -644,6 +664,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 
 		// Admin-only routes
 		r.Group(func(r chi.Router) {
+			r.Use(middleware.OrgContext)
 			r.Use(middleware.RequireRole("admin"))
 
 			r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
