@@ -110,10 +110,13 @@ export const AGENTS: readonly AgentMeta[] = [
     short: "PI",
     color: "#7c3aed",
     description: "Pi — meta-agent that routes to many providers",
-    // providerKey is unused for inherited agents (Pi has no dedicated
-    // credential store). Callers must branch on inheritsProviderKeys before
-    // treating this as a lookup key; the placeholder here keeps the type
-    // shape intact but should never reach a provider-name comparison.
+    // Sentinel value: Pi has no dedicated credential store, but AgentMeta
+    // requires providerKey. We use "pi" (not a real backend provider, so it
+    // never matches a credential row) rather than making the field optional
+    // because optionality ripples into every `c.provider === agent.providerKey`
+    // call site across settings/agent and settings/account. Call sites that
+    // save/remove keys must guard on inheritsProviderKeys before dereferencing
+    // this field — see renderPersonalCredentialCard for the pattern.
     providerKey: "pi",
     models: AVAILABLE_PI_MODELS,
     inheritsProviderKeys: true,
@@ -196,14 +199,25 @@ export function hasPiCredentials(
   );
 }
 
+// countInheritedProvidersConfigured returns how many of Pi's upstream providers
+// have a resolved credential (personal/team/org). The account page renders this
+// as "N of 3 configured" so the badge doesn't falsely claim "Ready to run" when
+// a user has only OpenAI configured and picks an Anthropic model on
+// /sessions/new — the per-model strict check in hasPiCredentials would reject.
+export function countInheritedProvidersConfigured(
+  resolvedCredentials: readonly { provider: string; source?: string }[],
+): number {
+  return PI_INHERITED_PROVIDERS.reduce((count, p) => {
+    const source = resolvedCredentials.find((c) => c.provider === p)?.source ?? "none";
+    return source !== "none" ? count + 1 : count;
+  }, 0);
+}
+
 // hasAnyInheritedProviderConfigured reports whether any of Pi's upstream
 // providers has a resolved credential (personal/team/org). Used by the
-// account page to decide the "Ready to run" badge.
+// radio-card check mark to signal "you have something Pi can use".
 export function hasAnyInheritedProviderConfigured(
   resolvedCredentials: readonly { provider: string; source?: string }[],
 ): boolean {
-  return PI_INHERITED_PROVIDERS.some((p) => {
-    const source = resolvedCredentials.find((c) => c.provider === p)?.source ?? "none";
-    return source !== "none";
-  });
+  return countInheritedProvidersConfigured(resolvedCredentials) > 0;
 }

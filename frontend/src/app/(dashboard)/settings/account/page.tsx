@@ -7,7 +7,11 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AGENT_TYPES, KEY_PLACEHOLDERS, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
-import { PI_INHERITED_PROVIDERS, hasAnyInheritedProviderConfigured } from "@/lib/agents";
+import {
+  PI_INHERITED_PROVIDERS,
+  countInheritedProvidersConfigured,
+  hasAnyInheritedProviderConfigured,
+} from "@/lib/agents";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -383,32 +387,41 @@ export default function AccountPage() {
   }
 
   function renderPersonalInheritedCard(agent: (typeof AGENT_TYPES)[number]): ReactNode {
-    const anyConfigured = hasAnyInheritedProviderConfigured(resolved);
+    const configuredCount = countInheritedProvidersConfigured(resolved);
+    const total = PI_INHERITED_PROVIDERS.length;
+    // Show a count rather than a binary "Ready to run" — a user with only
+    // OpenAI configured would see "Ready to run" on this card but still hit
+    // the missing-key banner on /sessions/new when they pick an Anthropic
+    // model, because the banner runs the strict per-model check. The count
+    // keeps this screen honest without asserting model-specific readiness.
+    const badgeVariant: "success" | "secondary" | "outline" =
+      configuredCount === total ? "success" : configuredCount > 0 ? "secondary" : "outline";
+    const badgeBody =
+      configuredCount === 0 ? (
+        "Add a key to run"
+      ) : configuredCount === total ? (
+        <>
+          <Check className="mr-0.5 h-3 w-3" />
+          Ready to run
+        </>
+      ) : (
+        `${configuredCount} of ${total} configured`
+      );
 
     return (
       <div className="space-y-3 border-t pt-3 mt-1">
         {renderAgentConfigHeader({
           title: agent.label,
           badges: (
-            <Badge
-              variant={anyConfigured ? "success" : "outline"}
-              className="text-xs px-1.5 py-0"
-            >
-              {anyConfigured ? (
-                <>
-                  <Check className="mr-0.5 h-3 w-3" />
-                  Ready to run
-                </>
-              ) : (
-                "Add a key to run"
-              )}
+            <Badge variant={badgeVariant} className="text-xs px-1.5 py-0">
+              {badgeBody}
             </Badge>
           ),
         })}
 
         <p className="text-xs text-muted-foreground">
           {agent.label} routes to Anthropic, OpenAI, or Gemini depending on the model.
-          Add at least one key below and {agent.label} will use it automatically.
+          Add a key for each provider whose models you plan to use.
         </p>
 
         <div className="space-y-2">

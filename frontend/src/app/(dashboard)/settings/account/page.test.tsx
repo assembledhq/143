@@ -280,7 +280,9 @@ describe('AccountPage', () => {
     expect(screen.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeInTheDocument();
   });
 
-  it('shows Pi card with Ready-to-run badge when an inherited provider is configured', async () => {
+  it('shows Pi card with "N of 3 configured" when some inherited providers are set', async () => {
+    // Default mockResolved has anthropic (personal) + openai (team_default),
+    // gemini none — 2 of 3 configured.
     const user = userEvent.setup();
     renderWithProviders(<AccountPage />);
 
@@ -289,12 +291,29 @@ describe('AccountPage', () => {
 
     await user.click(piLabels[0]);
 
-    expect(await screen.findByText('Ready to run')).toBeInTheDocument();
+    expect(await screen.findByText('2 of 3 configured')).toBeInTheDocument();
     // Anthropic row shows the masked key from mockPersonalCreds with its own Remove.
     expect(screen.getByText('sk-ant-...abc')).toBeInTheDocument();
     // OpenAI and Gemini rows render inline API key inputs (Codex has no
     // personal key in the default fixture, so a Save button is present).
     expect(screen.getAllByRole('button', { name: /^Save$/i }).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows Pi card with Ready-to-run badge only when all three providers are configured', async () => {
+    setupHandlers({
+      resolved: [
+        { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
+        { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
+        { provider: 'gemini', source: 'org', masked_key: 'AIza...xyz' },
+      ],
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AccountPage />);
+
+    const piLabels = await screen.findAllByText('Pi');
+    await user.click(piLabels[0]);
+
+    expect(await screen.findByText('Ready to run')).toBeInTheDocument();
   });
 
   it('lets the user save an inherited provider key inline from the Pi card', async () => {
