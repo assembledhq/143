@@ -40,6 +40,10 @@ type PreviewInstance struct {
 	UpdatedAt          time.Time       `db:"updated_at" json:"updated_at"`
 	RecycledAt         time.Time       `db:"recycled_at" json:"recycled_at"`
 	RecycleScheduledAt *time.Time      `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
+	// PreviewHoldingContainer marks this preview as a holder of the session's
+	// sandbox container. It pairs with Session.TurnHoldingContainer as the
+	// durable refcount that keeps the container alive between turns.
+	PreviewHoldingContainer bool `db:"preview_holding_container" json:"preview_holding_container"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.

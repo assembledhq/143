@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -40,6 +42,9 @@ func (s *FileSnapshotStore) Save(ctx context.Context, key string, reader io.Read
 func (s *FileSnapshotStore) Load(ctx context.Context, key string, writer io.Writer) error {
 	file, err := os.Open(filepath.Clean(s.fullPath(key))) // #nosec G304 -- path is sanitized via filepath.Clean
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("open snapshot file %s: %w", key, ErrSnapshotNotFound)
+		}
 		return fmt.Errorf("open snapshot file: %w", err)
 	}
 	defer file.Close()

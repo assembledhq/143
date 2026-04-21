@@ -103,24 +103,32 @@ type Issue struct {
 
 // Session represents an attempt to fix an issue via a coding agent.
 type Session struct {
-	ID                  uuid.UUID       `db:"id" json:"id"`
-	IssueID             uuid.UUID       `db:"issue_id" json:"issue_id"`
-	OrgID               uuid.UUID       `db:"org_id" json:"org_id"`
-	AgentType           AgentType       `db:"agent_type" json:"agent_type"`
-	Status              string          `db:"status" json:"status"`
-	AutonomyLevel       string          `db:"autonomy_level" json:"autonomy_level"`
-	TokenMode           string          `db:"token_mode" json:"token_mode"`
-	ComplexityTier      *int            `db:"complexity_tier" json:"complexity_tier,omitempty"`
-	ConfidenceScore     *float64        `db:"confidence_score" json:"confidence_score,omitempty"`
-	ConfidenceReasoning *string         `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
-	RiskFactors         []string        `db:"risk_factors" json:"risk_factors,omitempty"`
-	ContainerID         *string         `db:"container_id" json:"container_id,omitempty"`
-	StartedAt           *time.Time      `db:"started_at" json:"started_at,omitempty"`
-	CompletedAt         *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
-	TokenUsage          json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
-	FailureExplanation  *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
-	FailureCategory     *string         `db:"failure_category" json:"failure_category,omitempty"`
-	FailureNextSteps    []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
+	ID                  uuid.UUID `db:"id" json:"id"`
+	IssueID             uuid.UUID `db:"issue_id" json:"issue_id"`
+	OrgID               uuid.UUID `db:"org_id" json:"org_id"`
+	AgentType           AgentType `db:"agent_type" json:"agent_type"`
+	Status              string    `db:"status" json:"status"`
+	AutonomyLevel       string    `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode           string    `db:"token_mode" json:"token_mode"`
+	ComplexityTier      *int      `db:"complexity_tier" json:"complexity_tier,omitempty"`
+	ConfidenceScore     *float64  `db:"confidence_score" json:"confidence_score,omitempty"`
+	ConfidenceReasoning *string   `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
+	RiskFactors         []string  `db:"risk_factors" json:"risk_factors,omitempty"`
+	// ContainerID is the Docker container hosting the session's sandbox when
+	// one is live. Non-null only while at least one holder
+	// (TurnHoldingContainer or an active preview) is keeping it alive — see
+	// SessionStore.AcquireTurnHold / ReleaseTurnHold for the state machine.
+	ContainerID *string `db:"container_id" json:"container_id,omitempty"`
+	// TurnHoldingContainer marks the agent turn as a holder of the session's
+	// sandbox container. Combined with PreviewInstance.PreviewHoldingContainer,
+	// it is the durable refcount that decides when the container is destroyed.
+	TurnHoldingContainer bool            `db:"turn_holding_container" json:"turn_holding_container"`
+	StartedAt            *time.Time      `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt          *time.Time      `db:"completed_at" json:"completed_at,omitempty"`
+	TokenUsage           json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
+	FailureExplanation   *string         `db:"failure_explanation" json:"failure_explanation,omitempty"`
+	FailureCategory      *string         `db:"failure_category" json:"failure_category,omitempty"`
+	FailureNextSteps     []string        `db:"failure_next_steps" json:"failure_next_steps,omitempty"`
 	// FailureRetryAdvised uses plain bool (not *bool) because false is the
 	// meaningful default — a session that hasn't failed never advises retry.
 	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.

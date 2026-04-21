@@ -572,6 +572,22 @@ func (d *DockerProvider) Destroy(ctx context.Context, sb *agent.Sandbox) error {
 	return nil
 }
 
+// IsAlive reports whether the container still exists on the daemon. A
+// definitive "not found" from Docker maps to (false, nil) so callers can
+// distinguish a gone container from a transient lookup failure. Running
+// state is not checked — the goal is only to catch zombie rows pointing at
+// a container that's been removed out-of-band.
+func (d *DockerProvider) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	_, err := d.client.ContainerInspect(ctx, sb.ID)
+	if err == nil {
+		return true, nil
+	}
+	if cerrdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect container %s: %w", sb.ID, err)
+}
+
 // ConnectionInfo returns Docker-specific connection details for local resume.
 func (d *DockerProvider) ConnectionInfo(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
 	inspect, err := d.client.ContainerInspect(ctx, sb.ID)

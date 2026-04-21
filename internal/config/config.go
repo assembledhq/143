@@ -149,6 +149,21 @@ type Config struct {
 	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
 	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
 
+	// Concurrency caps for the preview subsystem. Each StartPreview checks
+	// these before hydrating a sandbox, so an overloaded worker returns a
+	// clear "capacity reached" 503 rather than thrashing. Defaults are
+	// tuned for an 8GB single-worker deployment (most-restrictive of user
+	// and org, then a per-worker safety net).
+	//
+	// Semantics of 0: fall back to the compile-time default in
+	// internal/services/preview/manager.go (currently 2 per user, 5 per
+	// org, 3 per worker). 0 does NOT mean "unlimited" — if you genuinely
+	// want to disable a cap, raise it to a large sentinel like 1_000_000.
+	// Any value > 0 is used verbatim.
+	PreviewMaxPerUser   int `env:"PREVIEW_MAX_PER_USER"   envDefault:"0"`
+	PreviewMaxPerOrg    int `env:"PREVIEW_MAX_PER_ORG"    envDefault:"0"`
+	PreviewMaxPerWorker int `env:"PREVIEW_MAX_PER_WORKER" envDefault:"0"`
+
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
