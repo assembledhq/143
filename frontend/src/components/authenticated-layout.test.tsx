@@ -191,14 +191,14 @@ describe("AuthenticatedLayout", () => {
 
   // --- New nav header tests ---
 
-  it("displays the organization name from settings", async () => {
+  it("displays the active organization name from memberships", async () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
       </AuthenticatedLayout>
     );
 
-    // The default mock returns "Test Org" from /api/v1/settings
+    // Default mock: /api/v1/auth/memberships returns "Test Org"
     await waitFor(() => {
       expect(screen.getByText("Test Org")).toBeInTheDocument();
     });
@@ -214,29 +214,6 @@ describe("AuthenticatedLayout", () => {
     await waitFor(() => {
       expect(screen.getByText("T")).toBeInTheDocument();
     });
-  });
-
-  it("falls back to 143.dev when org name is not available", async () => {
-    server.use(
-      http.get("/api/v1/settings", () => {
-        return HttpResponse.json({
-          data: {
-            id: "org-1",
-            name: "",
-            settings: {},
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(
-      <AuthenticatedLayout>
-        <div>content</div>
-      </AuthenticatedLayout>
-    );
-
-    // Should initially show "143.dev" as the fallback before API responds
-    expect(screen.getByText("143.dev")).toBeInTheDocument();
   });
 
   it("has a search button that opens the command palette", async () => {
@@ -276,7 +253,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  it("org name links to /sessions", async () => {
+  it("org name is an org-switcher dropdown trigger", async () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -284,8 +261,9 @@ describe("AuthenticatedLayout", () => {
     );
 
     await waitFor(() => {
-      const orgLink = screen.getByText("Test Org").closest("a");
-      expect(orgLink).toHaveAttribute("href", "/sessions");
+      const trigger = screen.getByTestId("org-switcher");
+      expect(trigger).toHaveTextContent("Test Org");
+      expect(trigger.getAttribute("aria-haspopup")).not.toBeNull();
     });
   });
 });

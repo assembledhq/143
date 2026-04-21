@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -218,16 +219,14 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 			ip := remoteAddrIP(r)
 			if !getBucket(ipBuckets, ip).allow() {
 				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("invitation claim rate limit exceeded (IP)")
-				w.Header().Set("Retry-After", "60")
-				http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+				writeRateLimited(w, "CLAIM_RATE_LIMITED", "too many invitation claim attempts; try again in a minute", "60")
 				return
 			}
 
 			if user := UserFromContext(r.Context()); user != nil {
 				if !getBucket(userBuckets, user.ID.String()).allow() {
 					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("invitation claim rate limit exceeded (user)")
-					w.Header().Set("Retry-After", "60")
-					http.Error(w, `{"error":{"code":"CLAIM_RATE_LIMITED","message":"too many invitation claim attempts; try again in a minute"}}`, http.StatusTooManyRequests)
+					writeRateLimited(w, "CLAIM_RATE_LIMITED", "too many invitation claim attempts; try again in a minute", "60")
 					return
 				}
 			}
@@ -235,6 +234,126 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// CreateOrgRateLimit returns a per-hour rate limiter for POST /organizations.
+// Sized much tighter than ClaimRateLimit: a legitimate user creates an org
+// maybe once per onboarding and then never again, so any bucket that refills
+// faster than once every few minutes is room for spam. 5/hour per user and
+// per IP keeps the door open for the rare genuine multi-org case (a user
+// creating two workspaces in the same session) while closing it on scripted
+// creation from a single credential or host.
+//
+// Requires authentication: the user bucket is the primary defense and
+// anonymous callers should already have been rejected by the auth middleware
+// upstream; the IP bucket is a backstop for any future unauthenticated path.
+//
+// Bucket maps are pruned in the background to prevent unbounded memory growth
+// over process lifetime — entries idle for more than 2h (twice the refill
+// window) are discarded because a bucket that's been untouched that long is
+// indistinguishable from a fresh one anyway. The prune goroutine exits when
+// ctx is cancelled; in production this is the server lifetime, in tests it
+// should be t.Context() so each test does not leak a goroutine for the life
+// of the test binary.
+func CreateOrgRateLimit(ctx context.Context, perHour int) func(http.Handler) http.Handler {
+	ipBuckets := &sync.Map{}
+	userBuckets := &sync.Map{}
+	refillPerSecond := float64(perHour) / 3600.0
+
+	getBucket := func(m *sync.Map, key string) *tokenBucket {
+		if existing, ok := m.Load(key); ok {
+			return existing.(*tokenBucket)
+		}
+		fresh := &tokenBucket{
+			tokens:     float64(perHour),
+			maxTokens:  float64(perHour),
+			refillRate: refillPerSecond,
+			lastRefill: time.Now(),
+		}
+		actual, _ := m.LoadOrStore(key, fresh)
+		return actual.(*tokenBucket)
+	}
+
+	startPruneLoop(ctx, ipBuckets, userBuckets, 10*time.Minute, 2*time.Hour)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Order matters: IP first, user second. A request that passes IP
+			// but fails the user check still consumes an IP token. That is
+			// deliberate — we want scripted abuse from a single host to count
+			// against the host even when the per-user cap already rejected
+			// it, so rotating fresh user IDs on the same IP cannot dodge the
+			// IP backstop. The practical cost is that legitimate users
+			// sharing a NAT with a flooder may see IP rejections sooner; at
+			// 5/hour across any shared egress, that tradeoff favors the cap.
+			ip := remoteAddrIP(r)
+			if !getBucket(ipBuckets, ip).allow() {
+				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("create-org rate limit exceeded (IP)")
+				writeRateLimited(w, "CREATE_ORG_RATE_LIMITED", "too many organization-creation attempts; try again later", "3600")
+				return
+			}
+
+			if user := UserFromContext(r.Context()); user != nil {
+				if !getBucket(userBuckets, user.ID.String()).allow() {
+					zerolog.Ctx(r.Context()).Warn().Str("user_id", user.ID.String()).Msg("create-org rate limit exceeded (user)")
+					writeRateLimited(w, "CREATE_ORG_RATE_LIMITED", "too many organization-creation attempts; try again later", "3600")
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// startPruneLoop runs a background goroutine that evicts bucket-map entries
+// whose lastRefill is older than staleAfter. Exits when ctx is cancelled.
+// Exported as an internal helper so tests can drive pruning synchronously
+// via pruneStaleBuckets.
+func startPruneLoop(ctx context.Context, ipBuckets, userBuckets *sync.Map, interval, staleAfter time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pruneStaleBuckets(ipBuckets, staleAfter)
+				pruneStaleBuckets(userBuckets, staleAfter)
+			}
+		}
+	}()
+}
+
+// writeRateLimited writes a 429 response with a JSON error body and a
+// Retry-After header. Use instead of http.Error for rate-limit rejections so
+// the Content-Type is application/json (http.Error would set text/plain and
+// append a trailing newline, leaving a body that looks like JSON but is
+// served as text).
+func writeRateLimited(w http.ResponseWriter, code, message, retryAfterSeconds string) {
+	w.Header().Set("Retry-After", retryAfterSeconds)
+	writeError(w, http.StatusTooManyRequests, code, message)
+}
+
+// pruneStaleBuckets removes entries whose bucket has not refilled within the
+// last staleAfter window. Safe to call concurrently with allow() because the
+// bucket's own mutex guards lastRefill.
+func pruneStaleBuckets(m *sync.Map, staleAfter time.Duration) {
+	cutoff := time.Now().Add(-staleAfter)
+	m.Range(func(key, value any) bool {
+		bucket, ok := value.(*tokenBucket)
+		if !ok {
+			return true
+		}
+		bucket.mu.Lock()
+		stale := bucket.lastRefill.Before(cutoff)
+		bucket.mu.Unlock()
+		if stale {
+			m.Delete(key)
+		}
+		return true
+	})
 }
 
 // extractIP returns the client's IP for rate-limit bucketing. Prefers the

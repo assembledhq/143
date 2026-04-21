@@ -35,12 +35,11 @@ import { useAuth } from "@/hooks/use-auth";
 import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { queryKeys } from "@/lib/query-keys";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
+import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
 import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 import { CreateSessionDialog } from "@/components/create-session-dialog";
-import type { Organization, SingleResponse } from "@/lib/types";
 
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
@@ -107,13 +106,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     enabled: isAuthenticated,
   });
   const proposalCount = proposalSummary?.data?.count ?? 0;
-
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-    enabled: isAuthenticated,
-  });
-  const orgName = settingsResponse?.data?.name ?? "143.dev";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -225,20 +217,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   return (
     <div className="flex h-screen">
       <aside className="w-[260px] border-r border-border/50 bg-sidebar flex flex-col relative">
-        {/* Header: org name + actions */}
+        {/* Header: org switcher + actions */}
         <div className="relative flex items-center justify-between px-4 py-3.5">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <Link
-              href="/sessions"
-              className="flex items-center gap-1.5 min-w-0 rounded-md px-1.5 py-1 -ml-1.5 hover:bg-sidebar-accent transition-colors"
-            >
-              <div className="flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-xs font-semibold shrink-0">
-                {orgName[0]?.toUpperCase() ?? "1"}
-              </div>
-              <span className="text-sm font-semibold text-sidebar-foreground truncate">
-                {orgName}
-              </span>
-            </Link>
+          <div className="flex items-center min-w-0 flex-1">
+            <OrgSwitcher userEmail={user?.email} />
           </div>
           <TooltipProvider>
             <div className="flex items-center gap-0.5">
