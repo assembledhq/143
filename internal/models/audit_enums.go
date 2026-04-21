@@ -90,6 +90,9 @@ const (
 	AuditActionTeamInvitationAccepted    AuditAction = "team.invitation_accepted"
 	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
+	// Organization actions
+	AuditActionOrganizationCreated AuditAction = "organization.created"
+
 	// Integration & credential actions
 	AuditActionIntegrationConnected AuditAction = "integration.connected"
 	AuditActionCredentialUpdated    AuditAction = "credential.updated" // #nosec G101 -- not a credential
@@ -132,6 +135,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionTeamInvitationClaimFailed,
+		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
@@ -165,6 +169,7 @@ const (
 	AuditResourceEvalRun              AuditResourceType = "eval_run"
 	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
 	AuditResourceAutomation           AuditResourceType = "automation"
+	AuditResourceOrganization         AuditResourceType = "organization"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -175,7 +180,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation:
+		AuditResourceAutomation, AuditResourceOrganization:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

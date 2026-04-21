@@ -430,6 +430,18 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/auth/memberships', () => {
+    return HttpResponse.json({
+      data: {
+        active_org_id: 'org-1',
+        active_role: 'admin',
+        memberships: [
+          { org_id: 'org-1', org_name: 'Test Org', role: 'admin' },
+        ],
+      },
+    });
+  }),
+
   http.patch('/api/v1/settings', () => {
     return HttpResponse.json({
       data: {

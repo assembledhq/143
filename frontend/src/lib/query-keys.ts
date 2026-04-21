@@ -52,6 +52,9 @@ export const queryKeys = {
   team: {
     members: ["team", "members"] as const,
   },
+  auth: {
+    memberships: ["auth", "memberships"] as const,
+  },
   usage: {
     summary: (params: { start: string; end: string }) =>
       ["usage", "summary", params] as const,

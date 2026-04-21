@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -295,6 +297,88 @@ func TestClaimRateLimit(t *testing.T) {
 		require.Equal(t, http.StatusTooManyRequests, w.Code)
 		require.Contains(t, w.Body.String(), "CLAIM_RATE_LIMITED")
 	})
+}
+
+func TestCreateOrgRateLimit(t *testing.T) {
+	t.Parallel()
+
+	// Silent "OK" handler that the middleware wraps; we only care about whether
+	// the middleware admits or rejects the request.
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("allows the first N requests and blocks the N+1th with 429 + Retry-After", func(t *testing.T) {
+		t.Parallel()
+
+		const perHour = 3
+		handler := CreateOrgRateLimit(t.Context(), perHour)(okHandler)
+		user := &models.User{ID: uuid.New()}
+
+		for i := 0; i < perHour; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/organizations", nil)
+			req.RemoteAddr = "10.0.4.1:1234"
+			req = req.WithContext(WithUser(req.Context(), user))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equalf(t, http.StatusOK, w.Code, "request %d/%d inside the bucket should pass", i+1, perHour)
+		}
+
+		// First over-budget request.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/organizations", nil)
+		req.RemoteAddr = "10.0.4.1:1234"
+		req = req.WithContext(WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		require.Equal(t, "3600", w.Header().Get("Retry-After"))
+		require.Contains(t, w.Body.String(), "CREATE_ORG_RATE_LIMITED")
+	})
+
+	t.Run("per-user bucket trips even when IP bucket is fresh", func(t *testing.T) {
+		t.Parallel()
+
+		const perHour = 2
+		handler := CreateOrgRateLimit(t.Context(), perHour)(okHandler)
+		user := &models.User{ID: uuid.New()}
+
+		// Exhaust the user bucket by cycling IP addresses, so the IP bucket
+		// never becomes the blocker.
+		for i := 0; i < perHour; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/organizations", nil)
+			req.RemoteAddr = fmt.Sprintf("10.0.5.%d:1234", i+1)
+			req = req.WithContext(WithUser(req.Context(), user))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+		}
+
+		// Fresh IP, same user → user bucket should still reject.
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/organizations", nil)
+		req.RemoteAddr = "10.0.5.99:1234"
+		req = req.WithContext(WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+		require.Contains(t, w.Body.String(), "CREATE_ORG_RATE_LIMITED")
+	})
+}
+
+func TestPruneStaleBuckets(t *testing.T) {
+	t.Parallel()
+
+	m := &sync.Map{}
+	fresh := &tokenBucket{lastRefill: time.Now()}
+	stale := &tokenBucket{lastRefill: time.Now().Add(-3 * time.Hour)}
+	m.Store("fresh", fresh)
+	m.Store("stale", stale)
+
+	pruneStaleBuckets(m, 2*time.Hour)
+
+	_, freshOK := m.Load("fresh")
+	_, staleOK := m.Load("stale")
+	require.True(t, freshOK, "fresh bucket should survive pruning")
+	require.False(t, staleOK, "stale bucket should be evicted")
 }
 
 func TestDefaultRateLimitConfig(t *testing.T) {

@@ -51,6 +51,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AuthHandler.Me":                   "returns user from context only",
 		"AuthHandler.Logout":               "deletes session by cookie token only",
 		"AuthHandler.ClaimInvitation":      "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
+		"OrganizationsHandler.Create":      "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
 		"SettingsHandler.GetLLMDefaults":   "returns static server config",
 		"SettingsHandler.GetLLMModels":     "returns static server config",
 		"ProjectGenerateHandler.Generate":  "calls LLM only, no org-scoped data",
