@@ -107,9 +107,15 @@ type ManagerConfig struct {
 	HMRWatcher      *HMRWatcher // optional; enables HMR screenshot capture
 	Logger          zerolog.Logger
 	WorkerNodeID    string
-	MaxPerUser      int
-	MaxPerOrg       int
-	MaxPerWorker    int
+
+	// MaxPerUser / MaxPerOrg / MaxPerWorker cap concurrent active previews.
+	// Zero (the default) is NOT "unlimited" — it means "fall back to the
+	// compile-time default" (DefaultMaxPreviewsPerUser / PerOrg / PerWorker
+	// above). Any value > 0 is applied verbatim. To effectively disable a
+	// cap, set it to a very large number.
+	MaxPerUser   int
+	MaxPerOrg    int
+	MaxPerWorker int
 
 	// PreviewOriginTemplate is the URL template used to compute the public
 	// origin each preview is served from, with "{id}" replaced by the preview

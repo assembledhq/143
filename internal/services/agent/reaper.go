@@ -100,6 +100,15 @@ func WithPreviewStopper(ps PreviewStopper) SessionReaperOption {
 // before the reaper considers it stuck and marks it as failed.
 const defaultMaxPendingAge = 10 * time.Minute
 
+// reaperPreviewStopTimeout is the deadline the reaper gives
+// StopActivePreviewForSession before moving on to delete the snapshot blob.
+// Must be generous enough for the preview's hold-aware destroy path
+// (ReleasePreviewHold + FinalizeContainerDestroy + provider.Destroy) to
+// finish on a shared docker daemon that may be briefly busy with other
+// lifecycle calls, but short enough that a single wedged preview doesn't
+// stall Phase 2 and block every other snapshot expiry in the tick.
+const reaperPreviewStopTimeout = 60 * time.Second
+
 // defaultMaxRunningAge is the safety-net cutoff for sessions stuck in
 // "running". It must be at or above minRunningAgeFloor — otherwise an
 // admin who legitimately raises their org's session timeout to the
@@ -309,7 +318,7 @@ func (r *SessionReaper) reap(ctx context.Context) {
 		// hold-release + destroy sequence so we don't leak the container
 		// and leave preview_holding_container=TRUE stuck on the row.
 		if r.previewStopper != nil {
-			stopCtx, stopCancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+			stopCtx, stopCancel := context.WithTimeout(context.WithoutCancel(ctx), reaperPreviewStopTimeout)
 			if stopped, stopErr := r.previewStopper.StopActivePreviewForSession(stopCtx, s.OrgID, s.ID); stopErr != nil {
 				r.logger.Warn().Err(stopErr).
 					Str("session_id", s.ID.String()).

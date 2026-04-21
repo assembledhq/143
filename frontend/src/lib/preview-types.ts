@@ -9,6 +9,31 @@ export type PreviewStatus =
   | "failed"
   | "expired";
 
+// Preview error codes returned by the StartPreview endpoint. These map
+// verbatim to the backend's writeError code strings in
+// internal/api/handlers/preview.go and are a stable public contract:
+// changes require coordinating both sides. Renaming one of these is a
+// breaking change for any UI that switches on them.
+export const PREVIEW_ERROR_CODES = {
+  // 503 — per-user / per-org / per-worker concurrency cap hit. Server
+  // supplies a user-facing message describing which cap was exceeded.
+  CAPACITY_REACHED: "PREVIEW_CAPACITY_REACHED",
+  // 410 — no usable snapshot exists (no container, no snapshot key, or
+  // the snapshot blob is gone from the store). User needs to send a new
+  // message to rebuild the sandbox.
+  SNAPSHOT_EXPIRED: "SNAPSHOT_EXPIRED",
+  // 409 — this worker has no sandbox provider / snapshot store wired, or
+  // a concurrent hydrate won the publish race. A retry may resolve the
+  // race-loss case; configuration needs admin attention.
+  NO_SANDBOX: "NO_SANDBOX",
+  // 500 — internal failure while hydrating (restore error, provider
+  // outage, DB write failure). Generic; details in the underlying message.
+  HYDRATE_FAILED: "PREVIEW_HYDRATE_FAILED",
+} as const;
+
+export type PreviewErrorCode =
+  (typeof PREVIEW_ERROR_CODES)[keyof typeof PREVIEW_ERROR_CODES];
+
 export interface PreviewInstance {
   id: string;
   session_id: string;

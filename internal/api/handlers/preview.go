@@ -151,21 +151,34 @@ func (h *PreviewHandler) readWorkspacePreviewConfig(ctx context.Context, sb *age
 	return cfg, nil
 }
 
+// acquireSandboxResult is the structured return from acquireSandbox. Wrapping
+// the four logical outputs in a struct keeps the caller's error-handling
+// branches legible: you can name the fields at the call site instead of
+// re-reading a four-value signature every time.
+type acquireSandboxResult struct {
+	// Sandbox is the live sandbox handle the preview should run against.
+	// Only valid when Err == nil.
+	Sandbox *agent.Sandbox
+	// Hydrated is true when the sandbox was freshly created from a snapshot
+	// (we own it — teardown must destroy), false when we attached to an
+	// existing container (a turn still owns it — leave it alone on abort).
+	Hydrated bool
+	// ErrCode, when non-empty, is the HTTP error code to surface:
+	// "NO_SANDBOX" (409), "SNAPSHOT_EXPIRED" (410). Empty for infrastructure
+	// failures that should map to 500 PREVIEW_HYDRATE_FAILED.
+	ErrCode string
+	// Err is the underlying error for logging and user messaging. Always
+	// non-nil when acquisition failed; always nil when Sandbox is non-nil.
+	Err error
+}
+
 // acquireSandbox resolves a live sandbox for a preview start, picking between
 // three strategies:
 //   - Reuse: session.ContainerID is set; attach by ID.
 //   - Hydrate: session has a snapshot and the sandbox was torn down; create a
 //     new container, restore the snapshot, and publish the new container_id.
 //   - Expired: no container and no usable snapshot; caller should return 410.
-//
-// The hydrated return distinguishes a freshly-created container from a reused
-// one: it tells AbortReservation whether the caller's teardown path should
-// destroy the sandbox (hydrate — we own it) or leave it alone (reuse — a turn
-// still owns it).
-//
-// The returned error code steers the HTTP status: "NO_SANDBOX" (409),
-// "SNAPSHOT_EXPIRED" (410), or empty for infrastructure failures (500).
-func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) (sb *agent.Sandbox, hydrated bool, errCode string, err error) {
+func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) acquireSandboxResult {
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
 	// whose sandbox_state has since moved to 'snapshotted'/'destroyed' should
@@ -195,7 +208,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 					Str("container_id", candidate.ID).
 					Msg("preview reuse: liveness check failed; falling through to hydrate")
 			} else if alive {
-				return candidate, false, "", nil
+				return acquireSandboxResult{Sandbox: candidate}
 			} else {
 				h.logger.Info().
 					Str("session_id", session.ID.String()).
@@ -204,17 +217,23 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 			}
 		} else {
 			// No provider wired (e.g., cold handler): trust the row.
-			return candidate, false, "", nil
+			return acquireSandboxResult{Sandbox: candidate}
 		}
 	}
 
 	// No live container. Check whether we can hydrate one from a snapshot.
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" ||
 		session.SandboxState == string(models.SandboxStateDestroyed) {
-		return nil, false, "SNAPSHOT_EXPIRED", fmt.Errorf("session has no sandbox container and no usable snapshot; start a new turn to continue")
+		return acquireSandboxResult{
+			ErrCode: "SNAPSHOT_EXPIRED",
+			Err:     fmt.Errorf("session has no sandbox container and no usable snapshot; start a new turn to continue"),
+		}
 	}
 	if h.sandboxProvider == nil || h.snapshots == nil {
-		return nil, false, "NO_SANDBOX", fmt.Errorf("preview hydrate is not configured on this worker")
+		return acquireSandboxResult{
+			ErrCode: "NO_SANDBOX",
+			Err:     fmt.Errorf("preview hydrate is not configured on this worker"),
+		}
 	}
 
 	// Hydrate: build a SandboxConfig matching what the orchestrator uses so
@@ -231,7 +250,18 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, h.sandboxProvider, h.snapshots, *session.SnapshotKey, sandboxCfg)
 	if err != nil {
-		return nil, false, "", fmt.Errorf("hydrate sandbox: %w", err)
+		// The storage layer found no blob at the recorded snapshot key — the
+		// DB row is out of sync with the object store (reaped out-of-band,
+		// deleted manually, or never saved). Map to SNAPSHOT_EXPIRED so the
+		// user sees the same actionable message as the "no snapshot key"
+		// case above and the handler emits 410 instead of 500.
+		if errors.Is(err, agent.ErrSnapshotMissing) {
+			return acquireSandboxResult{
+				ErrCode: "SNAPSHOT_EXPIRED",
+				Err:     fmt.Errorf("session snapshot is no longer available; start a new turn to continue"),
+			}
+		}
+		return acquireSandboxResult{Err: fmt.Errorf("hydrate sandbox: %w", err)}
 	}
 
 	// Publish the new container_id on the session so a concurrent ContinueSession
@@ -246,7 +276,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		// down to avoid a hydrated orphan. This is rare (DB outage) and
 		// safer than leaving an untracked container behind.
 		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
-		return nil, false, "", fmt.Errorf("publish container id: %w", err)
+		return acquireSandboxResult{Err: fmt.Errorf("publish container id: %w", err)}
 	}
 	if actualID != sandbox.ID {
 		_ = h.sandboxProvider.Destroy(context.Background(), sandbox)
@@ -255,7 +285,10 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 			Str("winning_container_id", actualID).
 			Str("losing_container_id", sandbox.ID).
 			Msg("preview hydrate lost race to another holder; destroyed local container")
-		return nil, false, "NO_SANDBOX", fmt.Errorf("another process attached to this session's sandbox first; please retry")
+		return acquireSandboxResult{
+			ErrCode: "NO_SANDBOX",
+			Err:     fmt.Errorf("another process attached to this session's sandbox first; please retry"),
+		}
 	}
 
 	h.logger.Info().
@@ -263,7 +296,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 		Str("container_id", sandbox.ID).
 		Msg("preview hydrate: new sandbox container created from snapshot")
 
-	return sandbox, true, "", nil
+	return acquireSandboxResult{Sandbox: sandbox, Hydrated: true}
 }
 
 // requireInspector returns the PreviewInspector or writes a 501 error response.
@@ -372,31 +405,32 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	//   2. Hydrate — the container has been torn down but a snapshot exists;
 	//      create a new container and restore the snapshot.
 	//   3. SnapshotExpired — neither a container nor a usable snapshot exists.
-	sb, hydrated, hydrateErrCode, hydrateErr := h.acquireSandbox(r.Context(), orgID, &session)
-	if hydrateErr != nil {
-		h.logger.Warn().Err(hydrateErr).
+	acq := h.acquireSandbox(r.Context(), orgID, &session)
+	if acq.Err != nil {
+		h.logger.Warn().Err(acq.Err).
 			Str("session_id", sessionID.String()).
-			Str("error_code", hydrateErrCode).
+			Str("error_code", acq.ErrCode).
 			Msg("preview start: failed to acquire sandbox")
 		// hydratedContainerID is "" — either we never hydrated, or
 		// acquireSandbox's race-loss branch already destroyed the local
 		// container before returning.
-		h.manager.AbortReservation(r.Context(), reservation, "", fmt.Sprintf("acquire sandbox: %v", hydrateErr))
-		switch hydrateErrCode {
+		h.manager.AbortReservation(r.Context(), reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		switch acq.ErrCode {
 		case "SNAPSHOT_EXPIRED":
-			writeError(w, r, http.StatusGone, hydrateErrCode, hydrateErr.Error())
+			writeError(w, r, http.StatusGone, acq.ErrCode, acq.Err.Error())
 		case "NO_SANDBOX":
-			writeError(w, r, http.StatusConflict, hydrateErrCode, hydrateErr.Error())
+			writeError(w, r, http.StatusConflict, acq.ErrCode, acq.Err.Error())
 		default:
-			writeError(w, r, http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", hydrateErr)
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}
 		return
 	}
+	sb := acq.Sandbox
 
 	// Container id we'd need to tear down on later failures. Empty when we
 	// reused an existing container — the turn still owns it.
 	hydratedID := ""
-	if hydrated {
+	if acq.Hydrated {
 		hydratedID = sb.ID
 	}
 

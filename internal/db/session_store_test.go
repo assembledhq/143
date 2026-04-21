@@ -1144,9 +1144,10 @@ func TestSessionStore_ClearContainerID_CAS_Clears(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	// WHERE clause must pin container_id = @expected AND holders=false, else
-	// the CAS isn't safe against concurrent hold acquisition.
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL\s+WHERE id = @id\s+AND org_id = @org_id\s+AND container_id = @expected\s+AND turn_holding_container = FALSE`).
+	// WHERE clause must pin container_id = @expected AND no preview hold,
+	// and the SET must also reset turn_holding_container=FALSE so a
+	// crashed-turn flag doesn't get stranded.
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+turn_holding_container = FALSE\s+WHERE id = @id\s+AND org_id = @org_id\s+AND container_id = @expected\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1200,7 +1201,10 @@ func TestSessionStore_ListOrphanedContainers(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	now := time.Now()
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND turn_holding_container = FALSE\s+AND id > @after_id`).
+	// turn_holding_container is intentionally NOT part of the WHERE —
+	// crashed-turn rows (stuck with the flag TRUE) must be reachable so
+	// the reconciler can clear them via its IsAlive + CAS pipeline.
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND NOT EXISTS`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).

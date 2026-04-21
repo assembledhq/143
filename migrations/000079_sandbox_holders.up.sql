@@ -19,13 +19,17 @@ ALTER TABLE sessions
 ALTER TABLE preview_instances
     ADD COLUMN preview_holding_container BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Supports the startup reconciler's search for orphaned containers: rows with
--- container_id set but no active turn hold, paired with a no-preview-hold
--- check on preview_instances. Partial index keeps the index small since the
--- common case is container_id IS NULL.
+-- Supports the startup reconciler's search for orphaned containers: rows
+-- with container_id set, paired with a no-preview-hold check on
+-- preview_instances. turn_holding_container is deliberately NOT part of the
+-- predicate so crashed-turn rows (stuck with turn_holding_container=TRUE)
+-- are still reachable — the reconciler uses IsAlive as the ground-truth
+-- liveness gate and ClearContainerID resets the stale flag atomically.
+-- Partial index keeps the index small since the common case is
+-- container_id IS NULL (a session between turns).
 CREATE INDEX IF NOT EXISTS idx_sessions_orphaned_containers
     ON sessions (id)
-    WHERE container_id IS NOT NULL AND turn_holding_container = FALSE;
+    WHERE container_id IS NOT NULL;
 
 -- Supports the "does any preview still hold this session's sandbox?" probe
 -- issued by ReleaseTurnHold, FinalizeContainerDestroy, ListOrphanedContainers,

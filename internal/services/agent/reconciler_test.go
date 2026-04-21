@@ -132,11 +132,16 @@ func TestReconcileOrphanedContainers_DestroyFailureAfterClearLogsButContinues(t 
 
 func TestReconcileOrphanedContainers_IsAliveErrorSkipsRow(t *testing.T) {
 	t.Parallel()
+	// Drop the retry backoff so this test doesn't pay ~1 second waiting
+	// between IsAlive attempts. Production value unchanged.
+	agent.SetIsAliveBackoffForTesting(0)
 	store := &fakeOrphanStore{
 		batches: [][]models.Session{{newOrphanSession("c1")}},
 	}
 	provider := testutil.NewMockSandboxProvider()
+	var aliveCalls atomic.Int32
 	provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		aliveCalls.Add(1)
 		return false, errors.New("inspect failed")
 	}
 	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
@@ -146,6 +151,32 @@ func TestReconcileOrphanedContainers_IsAliveErrorSkipsRow(t *testing.T) {
 	require.Equal(t, 0, provider.GetDestroyCalls())
 	require.Equal(t, int32(0), store.cleared.Load())
 	require.Equal(t, int32(0), store.clearAttempts.Load())
+	// The probe must retry (reconcileIsAliveAttempts=3) before giving up —
+	// a single-attempt skip was the bug we fixed.
+	require.Equal(t, int32(3), aliveCalls.Load(), "reconciler must retry IsAlive before skipping the row")
+}
+
+func TestReconcileOrphanedContainers_IsAliveRetryRecovers(t *testing.T) {
+	t.Parallel()
+	agent.SetIsAliveBackoffForTesting(0)
+	store := &fakeOrphanStore{
+		batches: [][]models.Session{{newOrphanSession("c1")}},
+	}
+	provider := testutil.NewMockSandboxProvider()
+	var aliveCalls atomic.Int32
+	provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		// First attempt fails transiently; second says "container gone".
+		// Reconciler should proceed to CAS-clear without destroy.
+		if aliveCalls.Add(1) == 1 {
+			return false, errors.New("transient inspect failure")
+		}
+		return false, nil
+	}
+	err := agent.ReconcileOrphanedContainers(context.Background(), store, provider, zerolog.Nop())
+	require.NoError(t, err)
+	require.Equal(t, 0, provider.GetDestroyCalls())
+	require.Equal(t, int32(1), store.cleared.Load(), "retry success must clear the row")
+	require.Equal(t, int32(2), aliveCalls.Load(), "retry must succeed on the second attempt")
 }
 
 func TestReconcileOrphanedContainers_ContainerGoneClearsWithoutDestroy(t *testing.T) {

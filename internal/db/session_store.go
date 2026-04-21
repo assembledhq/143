@@ -798,12 +798,20 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 }
 
 // ClearContainerID is the startup reconciler's CAS-safe orphan cleanup: it
-// clears container_id only when the expected ID still matches AND no holder
-// (turn or preview) has acquired the row between the reconciler's scan and
-// this call. Returns cleared=true when the row was updated — the caller now
-// owns the right to destroy the container. cleared=false means another
-// holder slipped in between the List and this call; the reconciler must
-// leave the container alone.
+// clears container_id only when the expected ID still matches AND no preview
+// hold has appeared between the reconciler's scan and this call. Returns
+// cleared=true when the row was updated — the caller now owns the right to
+// destroy the container. cleared=false means the row was already retaken
+// (concurrent hydrate published a new container_id) or a preview claimed the
+// hold in the gap; the reconciler must leave the container alone.
+//
+// It deliberately clears turn_holding_container=FALSE as well. A crashed-turn
+// row can carry turn_holding_container=TRUE (the orchestrator never got to
+// release), and leaving that flag stuck would (a) permanently pin the session
+// out of ListIdlePreviews and (b) prevent any subsequent orphan pass from
+// picking the row up. The reconciler only calls this after IsAlive confirmed
+// the container is gone from the host, so the flag is definitively stale —
+// resetting it is both safe and necessary.
 //
 // It intentionally does not touch sandbox_state: the reconciler doesn't know
 // whether a valid snapshot exists, so deciding between 'snapshotted' and
@@ -813,11 +821,11 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 // to 'snapshotted'.
 func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
 	query := `UPDATE sessions
-		SET container_id = NULL
+		SET container_id = NULL,
+		    turn_holding_container = FALSE
 		WHERE id = @id
 		  AND org_id = @org_id
 		  AND container_id = @expected
-		  AND turn_holding_container = FALSE
 		  AND NOT EXISTS (
 		    SELECT 1 FROM preview_instances p
 		    WHERE p.session_id = sessions.id
@@ -874,11 +882,20 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 	return tag.RowsAffected() > 0, nil
 }
 
-// ListOrphanedContainers returns sessions whose container_id is set but no
-// holder (turn or preview) is marked true. Called on startup to clean up
-// containers that leaked from a crashed server — the reconciler first calls
-// ClearContainerID (CAS-safe) and, if that claimed the row, destroys the
-// container.
+// ListOrphanedContainers returns sessions whose container_id is set and no
+// preview currently holds the sandbox. Called on startup to clean up
+// containers that leaked from a crashed server — the reconciler probes each
+// row's container via IsAlive, then calls ClearContainerID (CAS-safe) and,
+// if that claimed the row, destroys the container.
+//
+// turn_holding_container is deliberately NOT filtered here: a worker crash
+// mid-turn leaves the flag stuck TRUE, and if we skipped those rows the
+// reconciler could never reclaim them. IsAlive (run by the caller) is the
+// ground-truth gate — live turns on the shared host show as alive and are
+// left alone; truly orphaned turn-held rows come back dead and get cleared.
+// Preview holds are still filtered out because a live preview owns its own
+// teardown path and the reaper's Phase-2 preview-stopper handles stuck
+// preview holds separately.
 //
 // Returns at most 100 rows per call, keyset-paginated by session id > afterID
 // and ordered by id ASC. The reconciler passes the last seen id as a cursor
@@ -891,7 +908,6 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
 		WHERE container_id IS NOT NULL
-		  AND turn_holding_container = FALSE
 		  AND id > @after_id
 		  AND NOT EXISTS (
 		    SELECT 1 FROM preview_instances p
