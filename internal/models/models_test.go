@@ -6,7 +6,7 @@ func TestRepository_IsActive(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		status string
+		status RepositoryStatus
 		want   bool
 	}{
 		{RepositoryStatusActive, true},
@@ -17,9 +17,9 @@ func TestRepository_IsActive(t *testing.T) {
 
 	for _, tc := range cases {
 		tc := tc
-		t.Run(tc.status, func(t *testing.T) {
+		t.Run(string(tc.status), func(t *testing.T) {
 			t.Parallel()
-			repo := Repository{Status: tc.status}
+			repo := Repository{Status: string(tc.status)}
 			if got := repo.IsActive(); got != tc.want {
 				t.Fatalf("IsActive() = %v, want %v (status %q)", got, tc.want, tc.status)
 			}

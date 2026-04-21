@@ -147,7 +147,7 @@ func (h *RepositoryHandler) Reconnect(w http.ResponseWriter, r *http.Request) {
 	h.setRepoStatus(w, r, models.RepositoryStatusActive)
 }
 
-func (h *RepositoryHandler) setRepoStatus(w http.ResponseWriter, r *http.Request, status string) {
+func (h *RepositoryHandler) setRepoStatus(w http.ResponseWriter, r *http.Request, status models.RepositoryStatus) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repoID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {

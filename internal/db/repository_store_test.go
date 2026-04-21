@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -191,24 +192,72 @@ func TestRepositoryStore_UpsertFromGitHub_OmitsStatusFromSetClause(t *testing.T)
 	// user-disconnected repo. UpsertFromGitHub deliberately omits `status`
 	// from the ON CONFLICT ... DO UPDATE SET clause; if it ever gets added,
 	// this test catches it at the source level.
+	//
+	// The check parses the SET clause's column names rather than substring-
+	// matching the word "status", so reformatting the SQL (lowercasing
+	// keywords, reordering columns, changing whitespace) won't trip it.
 	t.Parallel()
 
 	src, err := os.ReadFile("repositories.go")
 	require.NoError(t, err, "reading repositories.go source should succeed")
 
-	i := strings.Index(string(src), "UpsertFromGitHub")
-	require.NotEqual(t, -1, i, "UpsertFromGitHub must exist in repositories.go")
+	setClause := extractUpsertFromGitHubSetClause(t, string(src))
+	cols := setClauseColumns(setClause)
+	require.NotContains(t, cols, "status",
+		"UpsertFromGitHub's DO UPDATE SET clause must not include status — would silently revive user-disconnected repos on sync (SET columns: %v)", cols)
+}
 
-	// Scan the SET clause only — an INSERT line referencing `status` is fine.
-	tail := string(src)[i:]
-	setStart := strings.Index(tail, "DO UPDATE")
-	returnEnd := strings.Index(tail, "RETURNING")
-	require.NotEqual(t, -1, setStart, "expected DO UPDATE clause in UpsertFromGitHub")
-	require.NotEqual(t, -1, returnEnd, "expected RETURNING clause in UpsertFromGitHub")
-	setClause := tail[setStart:returnEnd]
+// extractUpsertFromGitHubSetClause returns the contents of the DO UPDATE SET
+// clause from the UpsertFromGitHub function in repositories.go. Case-insensitive
+// keyword matching keeps the test robust to SQL reformatting.
+func extractUpsertFromGitHubSetClause(t *testing.T, src string) string {
+	t.Helper()
+	fnIdx := strings.Index(src, "UpsertFromGitHub")
+	require.NotEqual(t, -1, fnIdx, "UpsertFromGitHub must exist in repositories.go")
+	tail := src[fnIdx:]
 
-	require.NotContains(t, setClause, "status",
-		"UpsertFromGitHub's DO UPDATE SET clause must not touch status — would silently revive user-disconnected repos on sync")
+	// (?is) = case-insensitive + dotall so we can match across newlines.
+	re := regexp.MustCompile(`(?is)do\s+update\s+set\s+(.*?)\s+returning\b`)
+	matches := re.FindStringSubmatch(tail)
+	require.Len(t, matches, 2, "expected DO UPDATE SET ... RETURNING block in UpsertFromGitHub")
+	return matches[1]
+}
+
+// setClauseColumns returns the lowercased LHS column names from a SET clause's
+// `col = expr, col = expr` list. Splits at the top level only, so commas inside
+// function calls (e.g., COALESCE(a, b)) don't fool the parser.
+func setClauseColumns(clause string) []string {
+	var (
+		cols  []string
+		depth int
+		buf   strings.Builder
+	)
+	flush := func() {
+		assignment := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if assignment == "" {
+			return
+		}
+		if eq := strings.Index(assignment, "="); eq >= 0 {
+			cols = append(cols, strings.ToLower(strings.TrimSpace(assignment[:eq])))
+		}
+	}
+	for _, ch := range clause {
+		switch {
+		case ch == '(':
+			depth++
+			buf.WriteRune(ch)
+		case ch == ')':
+			depth--
+			buf.WriteRune(ch)
+		case ch == ',' && depth == 0:
+			flush()
+		default:
+			buf.WriteRune(ch)
+		}
+	}
+	flush()
+	return cols
 }
 
 func TestRepositoryStore_GetByFullName(t *testing.T) {

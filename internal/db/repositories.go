@@ -105,9 +105,9 @@ func (s *RepositoryStore) Update(ctx context.Context, repo *models.Repository) e
 
 // SetStatus flips a repo's status within an org. Returns the refreshed row so
 // callers can echo it back to the client without an extra round-trip. The
-// caller is responsible for validating that status is one of the known values
-// via models.RepositoryStatus* constants.
-func (s *RepositoryStore) SetStatus(ctx context.Context, orgID, repoID uuid.UUID, status string) (models.Repository, error) {
+// status parameter is typed (models.RepositoryStatus) so callers must pass one
+// of the named constants — a stray string literal won't compile.
+func (s *RepositoryStore) SetStatus(ctx context.Context, orgID, repoID uuid.UUID, status models.RepositoryStatus) (models.Repository, error) {
 	query := `
 		UPDATE repositories
 		SET status = @status, updated_at = now()
@@ -117,7 +117,7 @@ func (s *RepositoryStore) SetStatus(ctx context.Context, orgID, repoID uuid.UUID
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     repoID,
 		"org_id": orgID,
-		"status": status,
+		"status": string(status),
 	})
 	if err != nil {
 		return models.Repository{}, fmt.Errorf("update repository status: %w", err)

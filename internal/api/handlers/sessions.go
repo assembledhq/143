@@ -1126,13 +1126,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
 			return
 		}
-		repo, err := h.repoStore.GetByID(r.Context(), orgID, parsed)
-		if err != nil {
-			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
-			return
-		}
-		if !repo.IsActive() {
-			writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to start new sessions")
+		if _, err := requireActiveRepo(r.Context(), h.repoStore, orgID, parsed); err != nil {
+			switch {
+			case errors.Is(err, errRepoDisconnected):
+				writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to start new sessions")
+			case errors.Is(err, errRepoStoreUnconfigured):
+				writeError(w, r, http.StatusInternalServerError, "REPO_STORE_UNCONFIGURED", "repository lookup not configured")
+			default:
+				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			}
 			return
 		}
 		repoID = &parsed

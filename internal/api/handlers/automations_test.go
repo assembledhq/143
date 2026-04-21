@@ -27,7 +27,7 @@ import (
 // exercise the happy path don't need to opt in.
 type stubRepoLookup struct {
 	err    error
-	status string
+	status models.RepositoryStatus
 }
 
 func (s *stubRepoLookup) GetByID(_ context.Context, _, repoID uuid.UUID) (models.Repository, error) {
@@ -38,7 +38,7 @@ func (s *stubRepoLookup) GetByID(_ context.Context, _, repoID uuid.UUID) (models
 	if status == "" {
 		status = models.RepositoryStatusActive
 	}
-	return models.Repository{ID: repoID, Status: status}, nil
+	return models.Repository{ID: repoID, Status: string(status)}, nil
 }
 
 func automationTestColumns() []string {
