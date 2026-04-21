@@ -239,6 +239,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	}
 	teamHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
+	settingsHandler.SetLogger(logger)
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
 	automationHandler.SetAuditEmitter(auditEmitter)
