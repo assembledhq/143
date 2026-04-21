@@ -22,21 +22,7 @@ import { AgentBadge } from "@/components/agent-badge";
 import { AGENTS } from "@/lib/agents";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
-// Local extension: hideInSetup is editor-specific and not part of the shared registry.
-// Falls back to the registry's AgentEnvVar shape for everything else.
-type AgentEnvVar = (typeof AGENTS)[number]["envVars"][number] & { hideInSetup?: boolean };
-
-const AGENT_TYPES: { key: string; label: string; envVars: AgentEnvVar[]; note?: string }[] = AGENTS.map((agent) => ({
-  key: agent.key,
-  label: agent.label,
-  note: agent.note,
-  envVars: agent.envVars.map((envVar) => {
-    if (agent.key === "claude_code" && envVar.name === "ANTHROPIC_BASE_URL") {
-      return { ...envVar, hideInSetup: true };
-    }
-    return { ...envVar };
-  }),
-}));
+const AGENT_TYPES = AGENTS;
 
 export function AgentSettingsEditor({
   title,

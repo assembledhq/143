@@ -42,7 +42,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
-import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { AGENTS } from "@/lib/agents";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
@@ -743,7 +743,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
 
   const availableModels = useMemo(() => {
-    const agentType = AGENT_TYPE_OPTIONS.find((a) => a.key === session.agent_type);
+    const agentType = AGENTS.find((a) => a.key === session.agent_type);
     return agentType?.models ?? [];
   }, [session.agent_type]);
 

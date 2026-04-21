@@ -140,7 +140,12 @@ func main() {
 	}
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
-	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec)
+	// Shared org-settings cache: the settings handler invalidates it on write,
+	// the orchestrator reads it when resolving Amp/Pi agent_config. Both the
+	// router and the worker orchestrator must see the same instance or
+	// invalidation breaks.
+	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
+	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, orgSettingsCache)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -206,7 +211,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
 		}
 		// Refuse to start an anemic worker. Without agent services (GitHub App,
 		// Docker, sandbox health), run_agent won't register, but the worker will
@@ -342,6 +347,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -430,6 +436,7 @@ func buildServices(
 		Snapshots:        snapshotStore,
 		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
+		OrgSettingsCache: orgSettingsCache,
 		Logger:           logger,
 	})
 

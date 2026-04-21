@@ -19,6 +19,9 @@ export interface AgentEnvVar {
   options?: string[];
   advanced?: boolean;
   helpText?: string;
+  // hideInSetup suppresses this var in the first-run setup flow.
+  // The full settings screen always shows it.
+  hideInSetup?: boolean;
 }
 
 export interface AgentMeta {
@@ -64,7 +67,7 @@ export const AGENTS: readonly AgentMeta[] = [
     envVars: [
       { name: "ANTHROPIC_API_KEY", label: "API Key", sensitive: true },
       { name: "ANTHROPIC_MODEL", label: "Default model", options: [...AVAILABLE_CLAUDE_CODE_MODELS] },
-      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
+      { name: "ANTHROPIC_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true, hideInSetup: true },
     ],
   },
   {

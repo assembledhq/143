@@ -34,7 +34,7 @@ import { api } from "@/lib/api";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
-import { AGENT_TYPE_OPTIONS, agentTypeForModel } from "@/lib/model-constants";
+import { AGENTS, agentTypeForModel } from "@/lib/agents";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
@@ -120,10 +120,10 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   };
 
   const modelGroups = useMemo(() => {
-    return [...AGENT_TYPE_OPTIONS].sort((a, b) => {
+    return [...AGENTS].sort((a, b) => {
       if (a.key === defaultAgentType) return -1;
       if (b.key === defaultAgentType) return 1;
-      return AGENT_TYPE_OPTIONS.indexOf(a) - AGENT_TYPE_OPTIONS.indexOf(b);
+      return AGENTS.indexOf(a) - AGENTS.indexOf(b);
     });
   }, [defaultAgentType]);
 

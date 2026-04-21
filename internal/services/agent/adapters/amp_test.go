@@ -289,11 +289,3 @@ func TestAmpAdapter_ShellModeResolution(t *testing.T) {
 		})
 	}
 }
-
-func drain(ch chan agent.LogEntry) []agent.LogEntry {
-	var out []agent.LogEntry
-	for entry := range ch {
-		out = append(out, entry)
-	}
-	return out
-}

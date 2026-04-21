@@ -26,7 +26,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
-import { AGENT_TYPE_OPTIONS } from "@/lib/model-constants";
+import { AGENTS } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { cn } from "@/lib/utils";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
@@ -86,7 +86,7 @@ export default function NewProjectPage() {
   const effectiveAgentType = agentType || defaultAgentType;
 
   const availableModels = useMemo(() => {
-    const agent = AGENT_TYPE_OPTIONS.find((a) => a.key === effectiveAgentType);
+    const agent = AGENTS.find((a) => a.key === effectiveAgentType);
     return agent?.models ?? [];
   }, [effectiveAgentType]);
 
@@ -323,11 +323,11 @@ export default function NewProjectPage() {
                   >
                     <SelectTrigger>
                       <SelectValue
-                        placeholder={`Default (${AGENT_TYPE_OPTIONS.find((a) => a.key === defaultAgentType)?.label ?? defaultAgentType})`}
+                        placeholder={`Default (${AGENTS.find((a) => a.key === defaultAgentType)?.label ?? defaultAgentType})`}
                       />
                     </SelectTrigger>
                     <SelectContent>
-                      {AGENT_TYPE_OPTIONS.map((agent) => (
+                      {AGENTS.map((agent) => (
                         <SelectItem key={agent.key} value={agent.key}>
                           {agent.label}
                         </SelectItem>

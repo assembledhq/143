@@ -182,6 +182,7 @@ type Orchestrator struct {
 	userCredentials   UserCredentialProvider // can be nil
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
 	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
+	orgSettingsCache  *OrgSettingsCache      // can be nil — disables Amp/Pi agent_config caching
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -210,6 +211,7 @@ type OrchestratorConfig struct {
 	Snapshots        storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
 	UsageTracker     UsageRecorder          // optional — enables billing observability
 	Cancels          *CancelRegistry        // optional — enables session cancellation from API
+	OrgSettingsCache *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
 	Logger           zerolog.Logger
 	MaxConcurrent    int
 }
@@ -242,6 +244,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		userCredentials:   cfg.UserCredentials,
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
+		orgSettingsCache:  cfg.OrgSettingsCache,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
@@ -1585,18 +1588,42 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 // credential store — for those, agent_config is the sole channel for auth
 // and routing. Non-empty values win over inherited provider creds.
 //
-// Cost: one orgs.GetByID per Amp/Pi session start. There is no cache today
-// and session starts are dominated by sandbox creation, so this hasn't
-// warranted one — revisit if we either scale Amp/Pi traffic significantly
-// or introduce a general org-settings cache that other hot paths can share.
+// Reads go through OrgSettingsCache when configured so a burst of Amp/Pi
+// session starts for the same org amortizes to one DB lookup per TTL window.
+// The settings update handler invalidates the cache after a write, so
+// configuration changes take effect immediately rather than waiting for
+// the TTL to expire.
 func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, merged map[string]string) {
+	agentConfig, ok := o.loadAgentConfig(ctx, orgID, agentType)
+	if !ok {
+		return
+	}
+	for k, v := range agentConfig[string(agentType)] {
+		if v != "" {
+			merged[k] = v
+		}
+	}
+}
+
+// loadAgentConfig returns the org's AgentEnvConfig, using the orchestrator's
+// OrgSettingsCache as a front when present. Returns (nil, false) and logs a
+// warning if the org can't be loaded; callers should treat that as "no
+// overrides available" rather than failing the session start.
+func (o *Orchestrator) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (models.AgentEnvConfig, bool) {
 	if o.orgs == nil {
 		o.logger.Warn().
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
 			Msg("orchestrator has no orgs store; skipping agent_config overrides (agent may run without auth)")
-		return
+		return nil, false
 	}
+
+	if o.orgSettingsCache != nil {
+		if cached, hit := o.orgSettingsCache.Get(orgID); hit {
+			return cached, true
+		}
+	}
+
 	org, err := o.orgs.GetByID(ctx, orgID)
 	if err != nil {
 		o.logger.Warn().
@@ -1604,7 +1631,7 @@ func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
 			Msg("failed to load org for agent_config overrides; agent may run without auth")
-		return
+		return nil, false
 	}
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
@@ -1613,14 +1640,16 @@ func (o *Orchestrator) applyAgentConfigOverrides(ctx context.Context, orgID uuid
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
 			Msg("failed to parse org settings for agent_config overrides; agent may run without auth")
-		return
+		return nil, false
 	}
-	envOverrides := orgSettings.AgentConfig[string(agentType)]
-	for k, v := range envOverrides {
-		if v != "" {
-			merged[k] = v
-		}
+
+	if o.orgSettingsCache != nil {
+		// Store the (possibly nil) AgentConfig so a second hit doesn't re-fetch
+		// just to discover the org has no agent_config.
+		o.orgSettingsCache.Set(orgID, orgSettings.AgentConfig)
 	}
+
+	return orgSettings.AgentConfig, true
 }
 
 // resolveProviderConfig returns the best ProviderConfig for a provider,

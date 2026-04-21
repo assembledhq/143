@@ -84,19 +84,9 @@ export const PM_MODELS_BY_PROVIDER: Record<string, { label: string; models: read
 
 export const DEFAULT_PM_MODEL = CLAUDE_CODE_MODEL_SONNET;
 
-// Agent types with their labels and available models, for use in session/project creation forms.
-export const AGENT_TYPE_OPTIONS: { key: string; label: string; models: readonly string[] }[] = [
-  { key: "codex", label: "Codex", models: AVAILABLE_CODEX_MODELS },
-  { key: "claude_code", label: "Claude Code", models: AVAILABLE_CLAUDE_CODE_MODELS },
-  { key: "gemini_cli", label: "Gemini CLI", models: AVAILABLE_GEMINI_CLI_MODELS },
-  { key: "amp", label: "Amp", models: AVAILABLE_AMP_MODES },
-  { key: "pi", label: "Pi", models: AVAILABLE_PI_MODELS },
-];
-
-// Resolve the agent type key for a given model string.
-export function agentTypeForModel(model: string): string | undefined {
-  return AGENT_TYPE_OPTIONS.find((a) => (a.models as readonly string[]).includes(model))?.key;
-}
+// Agent type options for session/project creation forms live on the AGENTS
+// registry in @/lib/agents. Import AGENTS (and agentTypeForModel) from there —
+// keeping a second list here would drift.
 
 // All PM models across every provider (for validation / backward compat).
 export const AVAILABLE_PM_MODELS = [

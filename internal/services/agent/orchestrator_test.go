@@ -418,13 +418,25 @@ func (m *mockRepositoryStore) GetByID(ctx context.Context, orgID, repoID uuid.UU
 type mockOrgStore struct {
 	org models.Organization
 	err error
+
+	mu    sync.Mutex
+	calls int
 }
 
 func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
 	if m.err != nil {
 		return models.Organization{}, m.err
 	}
 	return m.org, nil
+}
+
+func (m *mockOrgStore) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
 
 // mockJobStore implements agent.JobStore.
@@ -2405,4 +2417,93 @@ func TestRunAgent_AmpNoOrgsStore(t *testing.T) {
 		"Amp run should succeed even when the orgs store is not wired")
 	require.NotContains(t, capturedCfg.Env, "AMP_API_KEY",
 		"without an orgs store there is nowhere to source AMP_API_KEY from")
+}
+
+// TestRunAgent_AmpAgentConfigCached asserts the orchestrator's
+// OrgSettingsCache amortizes repeated Amp session starts for the same org
+// down to a single DB lookup. Without this, large-traffic bursts (many
+// sessions per second for a hot org) hit OrganizationStore.GetByID on every
+// RunAgent, which is the whole reason the cache exists.
+func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+
+	settings := models.OrgSettings{
+		AgentConfig: models.AgentEnvConfig{
+			"amp": {"AMP_API_KEY": "amp_live_key"},
+		},
+	}
+	settingsJSON, err := json.Marshal(settings)
+	require.NoError(t, err)
+	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
+
+	cache := agent.NewOrgSettingsCache(time.Minute)
+
+	run1 := testRun(orgID, issue.ID)
+	run1.AgentType = models.AgentTypeAmp
+	run2 := testRun(orgID, issue.ID)
+	run2.AgentType = models.AgentTypeAmp
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+
+	var captured []map[string]string
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		envCopy := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			envCopy[k] = v
+		}
+		captured = append(captured, envCopy)
+		return &agent.Sandbox{ID: "amp-sb", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Orgs:             orgs,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		Credentials:      d.creds,
+		OrgSettingsCache: cache,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    3,
+	})
+
+	require.NoError(t, orch.RunAgent(context.Background(), run1))
+	afterRun1 := orgs.callCount()
+	require.Greater(t, afterRun1, 0, "first run must hit the org store at least once")
+
+	require.NoError(t, orch.RunAgent(context.Background(), run2))
+	afterRun2 := orgs.callCount()
+
+	require.Len(t, captured, 2, "both sessions should have reached sandbox creation")
+	require.Equal(t, "amp_live_key", captured[0]["AMP_API_KEY"])
+	require.Equal(t, "amp_live_key", captured[1]["AMP_API_KEY"],
+		"second session must still see agent_config overrides from the cache")
+	// The orchestrator calls GetByID from multiple code paths (context limits,
+	// confidence thresholds, session-timeout resolution, agent_config). Only
+	// the agent_config path is cached, so the second run must hit the store
+	// for the other paths — but exactly one fewer time than the first run,
+	// since agent_config now resolves from the cache.
+	require.Equal(t, afterRun1-1, afterRun2-afterRun1,
+		"second Amp session must skip the agent_config GetByID — the cache is the whole reason for this test")
+
+	// Invalidation must force a fresh read on the next session start —
+	// otherwise settings updates would silently stall behind the TTL.
+	cache.InvalidateOrg(orgID)
+
+	run3 := testRun(orgID, issue.ID)
+	run3.AgentType = models.AgentTypeAmp
+	require.NoError(t, orch.RunAgent(context.Background(), run3))
+	afterRun3 := orgs.callCount()
+	require.Equal(t, afterRun1, afterRun3-afterRun2,
+		"after InvalidateOrg the next run must re-read agent_config, restoring the full call count")
 }
