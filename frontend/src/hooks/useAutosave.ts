@@ -36,16 +36,20 @@ const DEFAULT_ERROR_MESSAGE = "Couldn't save. Your change was reverted.";
  * that autosave against the same cache scope. Guarantees at most one in-flight
  * mutation per scope, with coalescing of queued calls.
  *
- * `coalesce` is captured on the first dispatch (rather than being taken from
- * whichever caller dispatches next) so two components that share a `queryKey`
- * merge pending writes deterministically. Subsequent dispatchers supplying a
- * different coalesce fn are ignored with a dev-only warning.
+ * `mutationFn`, `applyOptimistic`, and `errorMessage` are stored on the entry
+ * and refreshed on every dispatch, so a coalesced follow-up always uses the
+ * latest registered fns — not the closure from whichever caller started the
+ * chain. `coalesce` is registered on first dispatch and must match across all
+ * callers sharing a queryKey (see `dispatch` for the conflict check).
  */
 interface QueueEntry {
   inFlight: boolean;
   pendingVars: unknown;
   hasPending: boolean;
   coalesce?: (queued: unknown, incoming: unknown) => unknown;
+  mutationFn?: (vars: unknown) => Promise<unknown>;
+  applyOptimistic?: (previous: unknown, vars: unknown) => unknown;
+  errorMessage?: string;
   listeners: Set<(status: QueueStatus) => void>;
 }
 
@@ -88,20 +92,20 @@ function emit(entry: QueueEntry, status: QueueStatus): void {
   }
 }
 
-async function run<TVars>(
+async function run(
   queryClient: QueryClient,
   entry: QueueEntry,
-  vars: TVars,
+  vars: unknown,
   queryKey: QueryKey,
-  mutationFn: (v: TVars) => Promise<unknown>,
-  applyOptimistic: (previous: unknown, vars: TVars) => unknown,
-  errorMessage: string,
 ): Promise<void> {
   entry.inFlight = true;
   emit(entry, "saving");
 
   await queryClient.cancelQueries({ queryKey });
   const previous = queryClient.getQueryData(queryKey);
+  const applyOptimistic = entry.applyOptimistic!;
+  const mutationFn = entry.mutationFn!;
+  const errorMessage = entry.errorMessage ?? DEFAULT_ERROR_MESSAGE;
   queryClient.setQueryData(queryKey, (current: unknown) => applyOptimistic(current, vars));
 
   try {
@@ -119,24 +123,13 @@ async function run<TVars>(
     entry.inFlight = false;
     await queryClient.invalidateQueries({ queryKey });
     if (entry.hasPending) {
-      const next = entry.pendingVars as TVars;
+      const next = entry.pendingVars;
       entry.hasPending = false;
       entry.pendingVars = undefined;
-      // Fire the coalesced follow-up. Intentionally not awaited here — the
-      // original caller's promise chain is complete; follow-ups are driven
-      // by the shared queue.
-      //
-      // Closure capture: `mutationFn`, `applyOptimistic`, and `errorMessage`
-      // are the values from the *first* dispatch that kicked off this chain.
-      // Concretely: if caller A fires with its fns, then caller B queues a
-      // follow-up mid-flight, B's follow-up still runs through A's fns. The
-      // `dispatch` callback funnels every queue entry through refs that read
-      // each caller's latest values at dispatch time, so the captures here
-      // are always from a live `useAutosave` instance — but the instance is
-      // whichever one started the chain. All consumers of a shared queryKey
-      // currently pass equivalent `mutationFn`/`applyOptimistic`, so this is
-      // benign; revisit if divergent implementations ever share a key.
-      void run(queryClient, entry, next, queryKey, mutationFn, applyOptimistic, errorMessage);
+      // Fire the coalesced follow-up through the entry's currently-registered
+      // fns (refreshed on every dispatch), so a caller who queued mid-flight
+      // with updated mutationFn/applyOptimistic drives the next run.
+      void run(queryClient, entry, next, queryKey);
     } else {
       maybeEvictQueue(hashKey(queryKey), entry);
     }
@@ -156,8 +149,9 @@ async function run<TVars>(
  * - Status cycles idle → saving → saved (1.5s linger) → idle. On error:
  *   idle → saving → error (3s linger) → idle.
  * - `flush()` fires any pending debounced payload immediately (for onBlur).
- * - Unmount cancels the local debounce timer but allows any already-dispatched
- *   mutation to complete silently — the server has already been hit.
+ * - Unmount flushes any pending debounced payload before clearing the timer
+ *   so edits typed right before navigation aren't silently dropped. Already
+ *   in-flight mutations are left to complete against the shared queue.
  *
  * Callers MUST pass `applyOptimistic` because the cache shape varies per
  * resource (e.g. `settings.data.settings.<field>` vs `repositories.data`).
@@ -183,17 +177,23 @@ export function useAutosave<TVars>({
   const [status, setStatus] = useState<AutosaveStatus>("idle");
 
   // Keep latest options in refs so the stable callbacks below don't churn
-  // when callers re-render. The hook contract is that these may change freely.
+  // when callers re-render. Assignment lives in an effect — matching
+  // `useAutosaveNumericField` / `useDebouncedTextField` — so discarded
+  // concurrent-mode renders don't leak stale bindings into the ref. User
+  // events that trigger saves always fire AFTER effects commit, so the ref
+  // values are current by the time `dispatch` reads them.
   const mutationFnRef = useRef(mutationFn);
   const applyOptimisticRef = useRef(applyOptimistic);
   const coalesceRef = useRef(coalesce);
   const errorMessageRef = useRef(errorMessage);
   const debounceMsRef = useRef(debounceMs);
-  mutationFnRef.current = mutationFn;
-  applyOptimisticRef.current = applyOptimistic;
-  coalesceRef.current = coalesce;
-  errorMessageRef.current = errorMessage;
-  debounceMsRef.current = debounceMs;
+  useEffect(() => {
+    mutationFnRef.current = mutationFn;
+    applyOptimisticRef.current = applyOptimistic;
+    coalesceRef.current = coalesce;
+    errorMessageRef.current = errorMessage;
+    debounceMsRef.current = debounceMs;
+  });
 
   // Debounce state is local to each hook instance — two callers of the same
   // queryKey each debounce independently, then the shared queue serializes.
@@ -262,6 +262,13 @@ export function useAutosave<TVars>({
         console.warn(message);
       }
 
+      // Refresh the entry's fn bindings on every dispatch so a coalesced
+      // follow-up uses the latest caller's mutationFn/applyOptimistic/error
+      // message rather than whichever dispatcher started the in-flight chain.
+      entry.mutationFn = (v) => mutationFnRef.current(v as TVars);
+      entry.applyOptimistic = (prev, v) => applyOptimisticRef.current(prev, v as TVars);
+      entry.errorMessage = errorMessageRef.current;
+
       if (entry.inFlight) {
         if (entry.hasPending && entry.coalesce) {
           entry.pendingVars = entry.coalesce(entry.pendingVars, vars);
@@ -271,15 +278,7 @@ export function useAutosave<TVars>({
         entry.hasPending = true;
         return;
       }
-      void run(
-        queryClient,
-        entry,
-        vars,
-        queryKey,
-        (v) => mutationFnRef.current(v),
-        (prev, v) => applyOptimisticRef.current(prev, v),
-        errorMessageRef.current,
-      );
+      void run(queryClient, entry, vars, queryKey);
     },
     // queryKey identity can change per render; serializedKey is the actual dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -314,16 +313,21 @@ export function useAutosave<TVars>({
     if (pending !== undefined) dispatch(pending);
   }, [dispatch]);
 
-  // Cancel any pending debounce on unmount. In-flight mutations are left to
-  // complete; the server has already been contacted.
+  // On unmount, flush any pending debounced payload so an edit typed right
+  // before navigation isn't silently dropped. The dispatch lands in the shared
+  // module-level queue, so the server round-trip survives this component
+  // tearing down. In-flight mutations already started are left to complete.
   useEffect(() => {
     return () => {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
+      const pending = debouncedVarsRef.current;
+      debouncedVarsRef.current = undefined;
+      if (pending !== undefined) dispatch(pending);
     };
-  }, []);
+  }, [dispatch]);
 
   return { save, flush, status };
 }

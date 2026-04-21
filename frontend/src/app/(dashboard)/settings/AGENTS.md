@@ -69,25 +69,42 @@ For org-level settings, use the helpers in `@/lib/settings-autosave`:
 For other resources (per-repo, etc.) write a small `applyOptimistic` that
 patches the specific cache entry.
 
+> **`coalesce` must be referentially stable across all callers of a given
+> `queryKey`.** The hook compares `coalesce` by identity and throws in dev if
+> two components on the same `queryKey` pass different functions. Use a
+> module-level export (like `coalesceSettingsPatch`) or `useCallback` — never
+> an inline arrow.
+
 ### Nested objects
 
-The server's settings PATCH is a **shallow** merge at the top level. If you
-autosave a single field inside a nested object like `agent_config` or
-`product_context`, you must send the full merged nested object — otherwise the
-server will wipe sibling keys.
+The server's `mergeSettingsJSON` deep-merges — a sparse patch like
+`{ agent_config: { codex: { OPENAI_API_KEY: value } } }` preserves sibling
+providers and sibling env vars. The **client's** `coalesceSettingsPatch`,
+however, shallow-merges at the `settings` level: two queued patches that both
+touch `agent_config` will see the later payload replace the earlier one.
+
+The canonical pattern is therefore to send a fully merged nested object and
+**read the base from `queryClient.getQueryData`**, not from a render-time
+closure or a ref-mirrored snapshot. The cache entry is advanced synchronously
+by each `applyOptimistic`, so back-to-back saves within one tick always start
+from the freshest state.
 
 ```ts
-// WRONG — wipes other providers' env vars in agent_config.codex
-save({ settings: { agent_config: { codex: { OPENAI_API_KEY: value } } } });
+// WRONG — closure/ref can lag a render behind the optimistic cache, so two
+// saves in the same tick each build from a stale base.
+const merged = { ...agentConfig, codex: { ...agentConfig.codex, OPENAI_API_KEY: value } };
+save({ settings: { agent_config: merged } });
 
-// RIGHT — read current, patch one field, send the whole nested object
-const merged = { ...currentAgentConfig, codex: { ...currentAgentConfig.codex, OPENAI_API_KEY: value } };
+// RIGHT — read the latest optimistic cache at save time.
+const cached = queryClient.getQueryData<SingleResponse<Organization>>(queryKeys.settings.all);
+const latest = cached?.data?.settings?.agent_config ?? {};
+const merged = { ...latest, codex: { ...latest.codex, OPENAI_API_KEY: value } };
 save({ settings: { agent_config: merged } });
 ```
 
-See `settings/agent/page.tsx` (`saveAgentConfigField`) and
-`components/autopilot/autopilot-steering-sheet.tsx` (`saveProductContext`) for
-the canonical patterns.
+See `settings/agent/page.tsx` (`saveAgentConfigField` / `readLatestAgentConfig`)
+and `components/autopilot/autopilot-steering-sheet.tsx` (`saveProductContext`)
+for the canonical patterns.
 
 ## The indicator
 
@@ -188,6 +205,7 @@ When adding or changing an autosaved field, verify:
 - Killing the backend and editing the field shows the optimistic value, then
   rolls back, and a Sonner error toast appears.
 - The indicator shows `Saving…`, then `Saved ✓`, then clears after ~1.5s.
+  On error, it shows `Couldn't save` and clears after ~3s.
 - Navigating away from the page mid-save does not throw and does not leave a
   dangling optimistic update on return.
 - Autosaving one key inside a nested object (`agent_config`,

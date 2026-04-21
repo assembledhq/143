@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
-import type { OrgSettings } from "@/lib/types";
+import type { Organization, OrgSettings, ProductContext, SingleResponse } from "@/lib/types";
 
 const TEXT_DEBOUNCE_MS = 400;
 
@@ -58,6 +59,7 @@ function AutopilotSteeringSheetBody({
   onOpenChange: (open: boolean) => void;
   settings: OrgSettings;
 }) {
+  const queryClient = useQueryClient();
   const serverPhilosophy = settings.product_context?.philosophy ?? "";
   const serverDirection =
     settings.product_context?.direction ?? settings.product_direction ?? "";
@@ -84,19 +86,31 @@ function AutopilotSteeringSheetBody({
   }, [pendingClose, autosave.status, onOpenChange]);
 
   // Build a product_context patch by merging the proposed field change against
-  // the currently displayed values. The server shallow-merges at the top-level
-  // `product_context` key, so sending a partial object would wipe siblings.
+  // the latest cached values, not the closure snapshot. Fields debounced
+  // separately (Philosophy vs. Direction) can commit within the same tick; a
+  // closure read would seed save2's full object from the pre-save1 snapshot
+  // and clobber save1. `queryClient.getQueryData` returns the optimistic cache
+  // that each save's `applyOptimistic` advances synchronously.
   const saveProductContext = (patch: {
     philosophy?: string;
     direction?: string;
     focus_areas?: string[];
     avoid_areas?: string[];
   }) => {
+    const cached = queryClient.getQueryData<SingleResponse<Organization>>(queryKeys.settings.all);
+    const latest = (cached?.data?.settings ?? {}) as OrgSettings;
+    const latestContext: Partial<ProductContext> = latest.product_context ?? {};
     const next = {
-      philosophy: patch.philosophy ?? serverPhilosophy,
-      direction: patch.direction ?? serverDirection,
-      focus_areas: patch.focus_areas ?? parseTagList(serverFocusAreas),
-      avoid_areas: patch.avoid_areas ?? parseTagList(serverAvoidAreas),
+      philosophy: patch.philosophy ?? latestContext.philosophy ?? serverPhilosophy,
+      direction:
+        patch.direction ??
+        latestContext.direction ??
+        latest.product_direction ??
+        serverDirection,
+      focus_areas:
+        patch.focus_areas ?? latestContext.focus_areas ?? parseTagList(serverFocusAreas),
+      avoid_areas:
+        patch.avoid_areas ?? latestContext.avoid_areas ?? parseTagList(serverAvoidAreas),
     };
     const payload: SettingsPatch = {
       settings: {

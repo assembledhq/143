@@ -41,8 +41,6 @@ const coalesce = (
   b: { settings: Record<string, unknown> },
 ) => ({ settings: { ...a.settings, ...b.settings } });
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 describe("useAutosave", () => {
   let queryClient: QueryClient;
 
@@ -198,44 +196,51 @@ describe("useAutosave", () => {
   });
 
   it("transitions status idle → saving → saved → idle", async () => {
-    let resolveMutation: (() => void) | undefined;
-    const mutationFn = vi.fn().mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveMutation = resolve;
-        }),
-    );
+    // Fake timers let us jump past SAVED_LINGER_MS (1500ms) without burning
+    // real wall-clock time. `shouldAdvanceTime` keeps waitFor's polling alive
+    // by letting real time tick the fake clock forward automatically.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let resolveMutation: (() => void) | undefined;
+      const mutationFn = vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveMutation = resolve;
+          }),
+      );
 
-    const { result } = renderHook(
-      () =>
-        useAutosave<{ settings: { v: number } }>({
-          queryKey: ["settings", "test-status"],
-          mutationFn,
-          applyOptimistic,
-          debounceMs: 0,
-        }),
-      { wrapper: makeWrapper(queryClient) },
-    );
+      const { result } = renderHook(
+        () =>
+          useAutosave<{ settings: { v: number } }>({
+            queryKey: ["settings", "test-status"],
+            mutationFn,
+            applyOptimistic,
+            debounceMs: 0,
+          }),
+        { wrapper: makeWrapper(queryClient) },
+      );
 
-    expect(result.current.status).toBe("idle");
+      expect(result.current.status).toBe("idle");
 
-    act(() => {
-      result.current.save({ settings: { v: 1 } });
-    });
-    await waitFor(() => expect(result.current.status).toBe("saving"));
+      act(() => {
+        result.current.save({ settings: { v: 1 } });
+      });
+      await waitFor(() => expect(result.current.status).toBe("saving"));
 
-    await act(async () => {
-      resolveMutation?.();
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(result.current.status).toBe("saved"));
+      await act(async () => {
+        resolveMutation?.();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(result.current.status).toBe("saved"));
 
-    // Wait longer than SAVED_LINGER_MS (1500ms) using real timers.
-    await act(async () => {
-      await sleep(1700);
-    });
-    expect(result.current.status).toBe("idle");
-  }, 10_000);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1700);
+      });
+      expect(result.current.status).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("serializes across two hooks sharing the same queryKey", async () => {
     const callOrder: string[] = [];
@@ -340,7 +345,7 @@ describe("useAutosave", () => {
     expect(resultB.current.status).toBe("saved");
   });
 
-  it("cancels pending debounce on unmount without firing the mutation", async () => {
+  it("flushes pending debounced payload on unmount so the edit isn't dropped", async () => {
     const mutationFn = vi.fn().mockResolvedValue(undefined);
     const { result, unmount } = renderHook(
       () =>
@@ -356,10 +361,13 @@ describe("useAutosave", () => {
     act(() => {
       result.current.save({ settings: { x: 1 } });
     });
+    expect(mutationFn).not.toHaveBeenCalled();
+
     unmount();
 
-    await sleep(400);
-
-    expect(mutationFn).not.toHaveBeenCalled();
+    // Pending debounced payload is dispatched synchronously on unmount; the
+    // mutation promise resolves asynchronously through the shared queue.
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
+    expect(mutationFn).toHaveBeenCalledWith({ settings: { x: 1 } });
   });
 });

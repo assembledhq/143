@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, CheckCircle2, Eye, EyeOff, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -181,21 +181,24 @@ export default function AgentPage() {
     clamp: (v) => clamp(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
   });
 
-  // Read the latest `agent_config` from a ref rather than the render-time
-  // closure. Rapid successive edits (e.g. typing in two providers' keys
-  // back-to-back, or a debounced commit firing while a model select has
-  // already advanced the optimistic cache) would otherwise seed a merge
-  // from a stale snapshot and wipe the intervening optimistic writes.
-  const agentConfigRef = useRef(agentConfig);
-  useEffect(() => {
-    agentConfigRef.current = agentConfig;
-  });
+  // Read the latest `agent_config` from the React Query cache rather than a
+  // render-time closure. The cache entry is advanced synchronously by each
+  // autosave's `applyOptimistic`, so back-to-back saves (e.g. typing in two
+  // providers' keys, or a debounced commit firing while a model select has
+  // already advanced the cache) always start from the freshest snapshot —
+  // a ref-based mirror would lag by a render.
+  function readLatestAgentConfig(): Record<string, Record<string, string>> {
+    const cached = queryClient.getQueryData<SingleResponse<Organization>>(queryKeys.settings.all);
+    const latest = (cached?.data?.settings ?? {}) as OrgSettings;
+    return latest.agent_config ?? {};
+  }
 
-  // Write an env var into agent_config. Because the server's mergeSettingsJSON
-  // is shallow at the top level, we always send the FULL merged agent_config
-  // so sibling providers (claude_code, gemini_cli) aren't wiped out.
+  // Write an env var into agent_config. `mergeSettingsJSON` on the server now
+  // deep-merges, so a sparse patch would also be safe, but we keep the full
+  // merged object for clarity and to match `coalesceSettingsPatch`, which
+  // shallow-merges at the `settings` level.
   function saveAgentConfigField(agentKey: string, envVar: string, value: string) {
-    const current = { ...agentConfigRef.current };
+    const current = { ...readLatestAgentConfig() };
     const providerConfig = { ...(current[agentKey] ?? {}) };
     if (value) {
       providerConfig[envVar] = value;
@@ -227,7 +230,7 @@ export default function AgentPage() {
       envVar: string;
       value: string;
     }) => {
-      const current = { ...agentConfigRef.current };
+      const current = { ...readLatestAgentConfig() };
       const providerConfig = { ...(current[agentKey] ?? {}) };
       if (value) {
         providerConfig[envVar] = value;
