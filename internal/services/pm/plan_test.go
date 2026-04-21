@@ -159,6 +159,20 @@ func TestParsePlan_MissingTagsIncludesExcerpt(t *testing.T) {
 	require.Contains(t, err.Error(), "decided not to emit", "error should embed output excerpt")
 }
 
+func TestExcerpt_TruncatesAndCollapsesNewlines(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "hello world", excerpt("  hello\nworld  ", 100),
+		"excerpt should trim edges and collapse newlines into spaces")
+
+	long := "abcdefghijklmnop"
+	got := excerpt(long, 5)
+	require.Equal(t, "abcde…", got, "excerpt should cap at max runes and append ellipsis")
+
+	require.Equal(t, "fits", excerpt("fits", 10),
+		"excerpt should leave short input unchanged")
+}
+
 func TestParsePlan_InvalidEnums(t *testing.T) {
 	t.Parallel()
 
