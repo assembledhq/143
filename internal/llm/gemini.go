@@ -48,6 +48,9 @@ func NewGeminiProvider(apiKey string, opts ...GeminiOption) *GeminiProvider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	// Normalize after options: a GEMINI_BASE_URL with a trailing slash would
+	// otherwise produce "host//v1beta/...".
+	p.baseURL = strings.TrimRight(p.baseURL, "/")
 	return p
 }
 

@@ -94,6 +94,22 @@ var defaultChains = map[ModelName][]providerModel{
 		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
 		{ProviderName: "openrouter", ModelID: "google/gemini-2.5-flash"},
 	},
+
+	// Qwen open-weight models — served exclusively via OpenRouter (no native Qwen
+	// provider). Cross-provider fallbacks are picked for rough capability parity so
+	// orgs without an OpenRouter key can still get a completion.
+	"qwen3-235b-a22b": {
+		{ProviderName: "openrouter", ModelID: "qwen/qwen3-235b-a22b"},
+		{ProviderName: "anthropic", ModelID: "claude-sonnet-4-6"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4"},
+	},
+	"qwen3-32b": {
+		{ProviderName: "openrouter", ModelID: "qwen/qwen3-32b"},
+		{ProviderName: "anthropic", ModelID: "claude-haiku-4-5-20251001"},
+		{ProviderName: "openai_chat", ModelID: "gpt-5.4-mini"},
+		{ProviderName: "openai_responses", ModelID: "gpt-5.4-mini"},
+	},
 }
 
 // buildChain constructs an ordered fallback chain for the requested model,

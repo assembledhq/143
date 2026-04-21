@@ -106,10 +106,7 @@ describe("LLMPage", () => {
   });
 
   it("shows the platform-LLM alert when no platform provider is configured", async () => {
-    llmDefaultsMock.mockResolvedValueOnce({
-      data: {},
-      platform_model: "gpt-5.4-nano",
-    });
+    llmDefaultsMock.mockResolvedValueOnce({ data: {} });
 
     renderWithProviders(<LLMPage />);
 
@@ -123,10 +120,7 @@ describe("LLMPage", () => {
   });
 
   it("hides the platform-LLM alert when a platform provider is configured", async () => {
-    llmDefaultsMock.mockResolvedValueOnce({
-      data: { openai: "sk-...abc" },
-      platform_model: "gpt-5.4-nano",
-    });
+    llmDefaultsMock.mockResolvedValueOnce({ data: { openai: "sk-...abc" } });
 
     renderWithProviders(<LLMPage />);
 
@@ -298,13 +292,10 @@ describe("LLMPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Remove" }));
 
-    await waitFor(() => {
-      expect(screen.getByText("Remove API key")).toBeInTheDocument();
-    });
-
-    // The AlertDialog's confirmation "Remove" action is the second matching button.
-    const removeButtons = screen.getAllByRole("button", { name: /^Remove$/ });
-    await user.click(removeButtons[removeButtons.length - 1]);
+    // Scope the confirmation click to the AlertDialog so we don't accidentally
+    // click the "Remove" button in the still-open ProviderKeyDialog.
+    const confirmDialog = await screen.findByRole("alertdialog");
+    await user.click(within(confirmDialog).getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
       expect(credentialsDeleteMock).toHaveBeenCalledWith("openai");
@@ -360,7 +351,7 @@ describe("LLMPage", () => {
   });
 
   it("shows an amber warning when no provider for the default model is configured", async () => {
-    llmDefaultsMock.mockResolvedValueOnce({ data: {}, platform_model: "gpt-5.4-nano" });
+    llmDefaultsMock.mockResolvedValueOnce({ data: {} });
 
     renderWithProviders(<LLMPage />);
 

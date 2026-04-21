@@ -82,7 +82,25 @@ export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: rea
   anthropic: { label: "Anthropic", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"] },
   openai: { label: "OpenAI", models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"] },
   gemini: { label: "Gemini", models: ["gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
-  openrouter: { label: "OpenRouter", models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
+  openrouter: {
+    label: "OpenRouter",
+    models: [
+      "claude-opus-4-7",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.4-nano",
+      "gemini-3.1-pro",
+      "gemini-3-flash",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      // OpenRouter-exclusive open-weight models — give OpenRouter-only orgs a
+      // default model they can pick and save without needing a native provider.
+      "qwen3-235b-a22b",
+      "qwen3-32b",
+    ],
+  },
 };
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
@@ -97,18 +115,35 @@ export const LLM_PROVIDER_INFO: Record<string, { name: string; description: stri
   openrouter: { name: "OpenRouter", description: "Access all models with a single key", keyPlaceholder: "sk-or-..." },
 };
 
-// ownerProviderForModel returns the native provider that owns a model, skipping
-// OpenRouter unless no native provider offers the model. Returns null if the
-// model isn't present in any provider's list.
+// ownerProviderForModel returns the provider whose key will actually serve the
+// model. When providerStatus is supplied, a configured provider wins over an
+// unconfigured one (native configured > openrouter configured > fall through).
+// Without providerStatus it returns the preferred owner: native first, then
+// openrouter. Returns null if no provider offers the model.
 export function ownerProviderForModel(
   model: string,
   modelsByProvider: Record<string, { label: string; models: readonly string[] }>,
+  providerStatus?: Record<string, { orgConfigured?: boolean; platformAvailable?: boolean }>,
 ): string | null {
+  const owners: string[] = [];
   for (const [provider, group] of Object.entries(modelsByProvider)) {
-    if (provider === "openrouter") continue;
-    if (group.models.includes(model)) return provider;
+    if (group.models.includes(model)) owners.push(provider);
   }
-  const openrouter = modelsByProvider["openrouter"];
-  if (openrouter?.models.includes(model)) return "openrouter";
-  return null;
+  if (owners.length === 0) return null;
+
+  const nativeOwners = owners.filter((p) => p !== "openrouter");
+  const hasOpenRouter = owners.includes("openrouter");
+
+  if (providerStatus) {
+    const isConfigured = (p: string) => {
+      const s = providerStatus[p];
+      return Boolean(s?.orgConfigured || s?.platformAvailable);
+    };
+    const configuredNative = nativeOwners.find(isConfigured);
+    if (configuredNative) return configuredNative;
+    if (hasOpenRouter && isConfigured("openrouter")) return "openrouter";
+  }
+
+  if (nativeOwners.length > 0) return nativeOwners[0];
+  return hasOpenRouter ? "openrouter" : null;
 }

@@ -259,6 +259,26 @@ func TestGeminiProvider_Complete_NoTextSurfacesFinishReason(t *testing.T) {
 	require.Contains(t, err.Error(), "MAX_TOKENS", "finishReason should appear in the error message")
 }
 
+func TestGeminiProvider_BaseURLTrailingSlashIsTolerated(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(geminiResponse{
+			Candidates: []geminiCandidate{{Content: geminiContent{Parts: []geminiPart{{Text: "ok"}}}}},
+		})
+	}))
+	defer server.Close()
+
+	// A GEMINI_BASE_URL with a trailing slash should not produce "//v1beta/...".
+	p := NewGeminiProvider("key", WithGeminiBaseURL(server.URL+"/"), WithGeminiHTTPClient(server.Client()))
+	_, err := p.Complete(context.Background(), "gemini-2.5-flash", "", "user", "")
+	require.NoError(t, err)
+	require.Equal(t, "/v1beta/models/gemini-2.5-flash:generateContent", gotPath, "trailing slash on baseURL must not leak into the path")
+}
+
 func TestModelSupportsThinking(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

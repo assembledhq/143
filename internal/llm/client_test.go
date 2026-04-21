@@ -131,6 +131,19 @@ func TestFallbackClient_AllProvidersFail(t *testing.T) {
 	require.Equal(t, 1, p2.callCount)
 }
 
+func TestBuildChain_QwenIsServableByOpenRouterAlone(t *testing.T) {
+	t.Parallel()
+
+	// Regression guard: a user with only OpenRouter configured should still get
+	// a chain for the OpenRouter-exclusive Qwen models.
+	openrouter := &mockProvider{name: "openrouter"}
+	chain, err := buildChain("qwen3-235b-a22b", map[string]Provider{"openrouter": openrouter})
+	require.NoError(t, err, "qwen3-235b-a22b should route through OpenRouter")
+	require.GreaterOrEqual(t, len(chain), 1)
+	require.Equal(t, "openrouter", chain[0].provider.Name(), "OpenRouter should be the primary for Qwen")
+	require.Equal(t, "qwen/qwen3-235b-a22b", chain[0].modelID)
+}
+
 func TestBuildChain_FiltersUnavailableProviders(t *testing.T) {
 	t.Parallel()
 

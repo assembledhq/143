@@ -26,7 +26,7 @@ export function ProviderKeyRow({
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <span
-          role="img"
+          role="status"
           aria-label={configured ? "Configured" : "Not configured"}
           className={
             configured

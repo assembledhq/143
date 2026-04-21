@@ -56,6 +56,7 @@ func TestLLMModelConstants(t *testing.T) {
 		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
 		"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash",
+		"qwen3-235b-a22b", "qwen3-32b",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -72,6 +73,13 @@ func TestLLMModelsByProvider(t *testing.T) {
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
 	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"}, byProvider["gemini"])
 	require.Contains(t, byProvider["openrouter"], "gemini-3.1-pro", "openrouter should proxy the latest gemini models too")
+	// OpenRouter exclusively carries the Qwen models — they must appear there
+	// and nowhere else.
+	require.Contains(t, byProvider["openrouter"], "qwen3-235b-a22b")
+	require.Contains(t, byProvider["openrouter"], "qwen3-32b")
+	require.NotContains(t, byProvider["anthropic"], "qwen3-235b-a22b")
+	require.NotContains(t, byProvider["openai"], "qwen3-235b-a22b")
+	require.NotContains(t, byProvider["gemini"], "qwen3-235b-a22b")
 }
 
 // TestLLMProvidersHaveModels guards against drift between the LLMProviders

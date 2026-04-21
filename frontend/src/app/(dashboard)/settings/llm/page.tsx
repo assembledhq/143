@@ -54,7 +54,7 @@ export default function LLMPage() {
   });
   const credentials = useMemo(() => credentialsResp?.data ?? [], [credentialsResp?.data]);
 
-  const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string>; platform_model?: string }>({
+  const { data: llmDefaultsResp } = useQuery<{ data: Record<string, string> }>({
     queryKey: ["llm-defaults"],
     queryFn: () => api.settings.getLLMDefaults(),
   });
@@ -120,8 +120,8 @@ export default function LLMPage() {
   }, [modelsByProvider, providerStatus]);
 
   const ownerProvider = useMemo(
-    () => ownerProviderForModel(llmModel, modelsByProvider),
-    [llmModel, modelsByProvider],
+    () => ownerProviderForModel(llmModel, modelsByProvider, providerStatus),
+    [llmModel, modelsByProvider, providerStatus],
   );
   const ownerProviderInfo = ownerProvider ? LLM_PROVIDER_INFO[ownerProvider] : null;
   const ownerConfigured = Boolean(
