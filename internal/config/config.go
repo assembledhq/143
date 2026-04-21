@@ -96,6 +96,8 @@ type Config struct {
 	OpenRouterBaseURL  string `env:"OPENROUTER_BASE_URL"`
 	OpenRouterAppName  string `env:"OPENROUTER_APP_NAME"   envDefault:"143"`
 	OpenRouterSiteURL  string `env:"OPENROUTER_SITE_URL"`
+	GeminiAPIKey       string `env:"GEMINI_API_KEY"`
+	GeminiBaseURL      string `env:"GEMINI_BASE_URL"`
 
 	// SMTP (optional — invitation emails are logged to console when not configured)
 	SMTPHost     string `env:"SMTP_HOST"`
@@ -241,6 +243,8 @@ func (c *Config) LLMConfig() llm.Config {
 		OpenRouterBaseURL: c.OpenRouterBaseURL,
 		OpenRouterAppName: c.OpenRouterAppName,
 		OpenRouterSiteURL: c.OpenRouterSiteURL,
+		GeminiAPIKey:      c.GeminiAPIKey,
+		GeminiBaseURL:     c.GeminiBaseURL,
 	}
 }
 
@@ -261,6 +265,8 @@ func (c *Config) PlatformLLMConfig() llm.Config {
 		OpenRouterBaseURL: c.OpenRouterBaseURL,
 		OpenRouterAppName: c.OpenRouterAppName,
 		OpenRouterSiteURL: c.OpenRouterSiteURL,
+		GeminiAPIKey:      c.GeminiAPIKey,
+		GeminiBaseURL:     c.GeminiBaseURL,
 	}
 }
 
@@ -285,6 +291,9 @@ func (c *Config) SafeLLMEnv() map[string]string {
 	}
 	if c.OpenRouterAPIKey != "" {
 		result["openrouter"] = maskSecret(c.OpenRouterAPIKey)
+	}
+	if c.GeminiAPIKey != "" {
+		result["gemini"] = maskSecret(c.GeminiAPIKey)
 	}
 	return result
 }
@@ -328,6 +337,9 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 	}
 	if c.OpenRouterAPIKey != "" {
 		providers = append(providers, "openrouter")
+	}
+	if c.GeminiAPIKey != "" {
+		providers = append(providers, "gemini")
 	}
 
 	llmModel := c.LLMModel

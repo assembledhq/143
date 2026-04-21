@@ -593,7 +593,7 @@ func TestIsLLMProvider(t *testing.T) {
 		{"anthropic is LLM", ProviderAnthropic, true},
 		{"openai is LLM", ProviderOpenAI, true},
 		{"openrouter is LLM", ProviderOpenRouter, true},
-		{"gemini is not LLM", ProviderGemini, false},
+		{"gemini is LLM", ProviderGemini, true},
 		{"github_app is not LLM", ProviderGitHubApp, false},
 		{"github_oauth is not LLM", ProviderGitHubOAuth, false},
 		{"sentry is not LLM", ProviderSentry, false},

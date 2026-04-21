@@ -33,7 +33,7 @@ func TestGeminiCLIModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{GeminiCLIModelGemini3ProPreview, GeminiCLIModelGemini3FlashPreview, GeminiCLIModelGemini25Pro, GeminiCLIModelGemini25Flash},
+		[]string{GeminiCLIModelGemini31ProPreview, GeminiCLIModelGemini3FlashPreview, GeminiCLIModelGemini25Pro, GeminiCLIModelGemini25Flash},
 		AvailableGeminiCLIModels,
 		"AvailableGeminiCLIModels should include current Gemini 3 and 2.5 options",
 	)
@@ -55,6 +55,8 @@ func TestLLMModelConstants(t *testing.T) {
 	require.Equal(t, []string{
 		"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5",
 		"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
+		"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash",
+		"qwen3-235b-a22b", "qwen3-32b",
 	}, AvailableLLMModels, "AvailableLLMModels should contain all supported LLM models")
 }
 
@@ -62,12 +64,36 @@ func TestLLMModelsByProvider(t *testing.T) {
 	t.Parallel()
 
 	byProvider := LLMModelsByProvider()
-	require.Len(t, byProvider, 3, "should have 3 providers")
+	require.Len(t, byProvider, 4, "should have 4 LLM providers (anthropic, openai, gemini, openrouter)")
 	require.Contains(t, byProvider, "anthropic")
 	require.Contains(t, byProvider, "openai")
+	require.Contains(t, byProvider, "gemini")
 	require.Contains(t, byProvider, "openrouter")
 	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"}, byProvider["anthropic"])
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"}, byProvider["openai"])
+	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"}, byProvider["gemini"])
+	require.Contains(t, byProvider["openrouter"], "gemini-3.1-pro", "openrouter should proxy the latest gemini models too")
+	// OpenRouter exclusively carries the Qwen models — they must appear there
+	// and nowhere else.
+	require.Contains(t, byProvider["openrouter"], "qwen3-235b-a22b")
+	require.Contains(t, byProvider["openrouter"], "qwen3-32b")
+	require.NotContains(t, byProvider["anthropic"], "qwen3-235b-a22b")
+	require.NotContains(t, byProvider["openai"], "qwen3-235b-a22b")
+	require.NotContains(t, byProvider["gemini"], "qwen3-235b-a22b")
+}
+
+// TestLLMProvidersHaveModels guards against drift between the LLMProviders
+// slice and LLMModelsByProvider: every LLM provider must have at least one
+// general-purpose model available in the dropdown.
+func TestLLMProvidersHaveModels(t *testing.T) {
+	t.Parallel()
+
+	byProvider := LLMModelsByProvider()
+	for _, p := range LLMProviders {
+		models, ok := byProvider[string(p)]
+		require.Truef(t, ok, "LLM provider %q must be present in LLMModelsByProvider", p)
+		require.NotEmptyf(t, models, "LLM provider %q must have at least one model", p)
+	}
 }
 
 func TestIsSupportedLLMModel(t *testing.T) {
@@ -90,7 +116,7 @@ func TestValidateModelForAgentType(t *testing.T) {
 	}{
 		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet},
-		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini3ProPreview},
+		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini31ProPreview},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
 		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
@@ -134,7 +160,7 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"codex":       {"OPENAI_MODEL": CodexModelGPT53Codex},
 					"claude_code": {"ANTHROPIC_MODEL": ClaudeCodeModelSonnet},
-					"gemini_cli":  {"GEMINI_MODEL": GeminiCLIModelGemini3ProPreview},
+					"gemini_cli":  {"GEMINI_MODEL": GeminiCLIModelGemini31ProPreview},
 				},
 			},
 		},
@@ -155,7 +181,7 @@ func TestValidateSettingsModels(t *testing.T) {
 		{
 			name: "accepts gemini model as pm model",
 			settings: OrgSettings{
-				PMModel: GeminiCLIModelGemini3ProPreview,
+				PMModel: GeminiCLIModelGemini31ProPreview,
 			},
 		},
 		{
