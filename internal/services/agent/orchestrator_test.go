@@ -2424,6 +2424,51 @@ func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"pre-flight auth check must fire before sandbox creation")
 }
 
+// TestRunAgent_PiMissingProviderKeysFailsFast asserts that a Pi run fails
+// fast when no provider credentials (Anthropic/OpenAI/Gemini) are configured.
+// Pi routes through one of those providers based on its model string, so
+// without any key the CLI would just return an opaque upstream 401.
+func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypePi
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypePi
+
+	var sandboxCreated bool
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		sandboxCreated = true
+		return &agent.Sandbox{ID: "pi-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		// Orgs and credentials intentionally empty — no provider keys anywhere.
+		Jobs:          d.jobs,
+		GitHub:        d.github,
+		Credentials:   d.creds,
+		Logger:        zerolog.Nop(),
+		MaxConcurrent: 3,
+	})
+
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "Pi run without any provider credentials must fail fast")
+	require.Contains(t, err.Error(), "Pi",
+		"error should identify Pi so users know which agent is misconfigured")
+	require.False(t, sandboxCreated,
+		"pre-flight auth check must fire before sandbox creation")
+}
+
 // TestRunAgent_AmpAgentConfigCached asserts the orchestrator's
 // OrgSettingsCache amortizes repeated Amp session starts for the same org
 // down to a single DB lookup. Without this, large-traffic bursts (many

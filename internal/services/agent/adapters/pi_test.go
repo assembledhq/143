@@ -77,7 +77,7 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 100)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "Fix it.",
 		UserPrompt:   "Bug.",
 		MaxTokens:    50_000,
@@ -122,7 +122,7 @@ func TestPiAdapter_Execute_NonZeroExit(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "x",
 		UserPrompt:   "y",
 		MaxTokens:    50_000,
@@ -148,7 +148,7 @@ func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		Continuation: true,
 		UserMessage:  "follow-up instruction",
 		MaxTokens:    50_000,
@@ -156,7 +156,7 @@ func TestPiAdapter_Execute_ContinuationUsesUserMessage(t *testing.T) {
 	require.NoError(t, err)
 	close(logCh)
 
-	promptData, ok := provider.Files["/workspace/.143-prompt.md"]
+	promptData, ok := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.True(t, ok, "continuation should still write the prompt file")
 	require.Equal(t, "follow-up instruction", string(promptData),
 		"continuation prompt should be the new UserMessage, not empty system/user prompts")
@@ -167,7 +167,7 @@ func TestPiAdapter_Execute_MissingProvider(t *testing.T) {
 
 	adapter := NewPiAdapter(zerolog.Nop())
 	logCh := make(chan agent.LogEntry, 10)
-	_, err := adapter.Execute(context.Background(), &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	_, err := adapter.Execute(context.Background(), &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
 	}, logCh)
 	require.Error(t, err)
@@ -186,7 +186,7 @@ func TestPiAdapter_Execute_WriteFileError(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
 	}, logCh)
 	require.Error(t, err)
@@ -205,7 +205,7 @@ func TestPiAdapter_Execute_ExecStreamError(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	_, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
 	}, logCh)
 	require.Error(t, err)
@@ -225,7 +225,7 @@ func TestPiAdapter_Execute_SummaryFromAssistantFallback(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	ctx := WithSandboxProvider(context.Background(), provider)
 
-	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace"}, &agent.AgentPrompt{
+	result, err := adapter.Execute(ctx, &agent.Sandbox{ID: "t", WorkDir: "/workspace", HomeDir: "/home/sandbox"}, &agent.AgentPrompt{
 		SystemPrompt: "x", UserPrompt: "y", MaxTokens: 50_000,
 	}, logCh)
 	require.NoError(t, err)

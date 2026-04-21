@@ -1611,12 +1611,22 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 // to beat the generic "CLI exited 1" failure with something the user can act
 // on — "configure AMP_API_KEY" instead of "amp: invalid api key".
 //
-// Scoped to agent types whose auth lives exclusively in agent_config (Amp
-// today) — for the others, resolveProviderConfig already surfaces richer
-// errors, and we don't want to duplicate those rules here.
+// Scoped to agent types whose auth lives exclusively in agent_config (Amp,
+// Pi) — for the others, resolveProviderConfig already surfaces richer errors,
+// and we don't want to duplicate those rules here.
 func (o *Orchestrator) checkAgentAuth(agentType models.AgentType, env map[string]string) error {
-	if agentType == models.AgentTypeAmp && env["AMP_API_KEY"] == "" {
-		return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
+	switch agentType {
+	case models.AgentTypeAmp:
+		if env["AMP_API_KEY"] == "" {
+			return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
+		}
+	case models.AgentTypePi:
+		// Pi routes through whichever provider its model string selects, so
+		// at least one inherited provider key must be present. Without any,
+		// the CLI would fail with an opaque upstream 401.
+		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
+			return fmt.Errorf("missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key")
+		}
 	}
 	return nil
 }

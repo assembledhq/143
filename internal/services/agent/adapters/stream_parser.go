@@ -240,7 +240,9 @@ func runStreamingAgent(
 	} else {
 		promptContent = fmt.Sprintf("%s\n\n---\n\n%s", prompt.SystemPrompt, prompt.UserPrompt)
 	}
-	promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.WorkDir)
+	// Write under $HOME (not WorkDir) so the file doesn't pollute the cloned
+	// repo's git status.
+	promptPath := fmt.Sprintf("%s/.143-prompt.md", sandbox.HomeDir)
 	if err := provider.WriteFile(ctx, sandbox, promptPath, []byte(promptContent)); err != nil {
 		return nil, fmt.Errorf("write prompt file: %w", err)
 	}

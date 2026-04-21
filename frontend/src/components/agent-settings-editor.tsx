@@ -22,8 +22,6 @@ import { AgentBadge } from "@/components/agent-badge";
 import { AGENTS } from "@/lib/agents";
 import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
 
-const AGENT_TYPES = AGENTS;
-
 export function AgentSettingsEditor({
   title,
   description,
@@ -95,7 +93,7 @@ export function AgentSettingsEditor({
   });
 
   const selectedAgent = useMemo(
-    () => AGENT_TYPES.find((agent) => agent.key === defaultAgentType) ?? AGENT_TYPES[0],
+    () => AGENTS.find((agent) => agent.key === defaultAgentType) ?? AGENTS[0],
     [defaultAgentType]
   );
 
@@ -136,7 +134,7 @@ export function AgentSettingsEditor({
           onValueChange={(value) => setDefaultAgentTypeOverride(value as OrgSettings["default_agent_type"])}
           className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4"
         >
-          {AGENT_TYPES.map((agent) => (
+          {AGENTS.map((agent) => (
             <label
               key={agent.key}
               className={`relative flex cursor-pointer flex-col rounded-lg border px-3 py-2 shadow-sm transition-all duration-150 ${

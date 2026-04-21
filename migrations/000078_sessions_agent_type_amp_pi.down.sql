@@ -23,6 +23,23 @@
 --   3. Re-run this migration. The ADD CONSTRAINT ... NOT VALID step always
 --      succeeds; the VALIDATE step is what enforces the invariant.
 
+-- Pre-flight: surface a clear, actionable error up-front if Amp/Pi rows
+-- still exist, instead of letting VALIDATE CONSTRAINT fail with the generic
+-- "check constraint violated" message the operator would otherwise get.
+DO $$
+DECLARE
+    leftover_count bigint;
+BEGIN
+    SELECT count(*) INTO leftover_count
+      FROM sessions
+     WHERE agent_type IN ('amp', 'pi');
+    IF leftover_count > 0 THEN
+        RAISE EXCEPTION
+            'cannot roll back migration 000078: % session row(s) still reference agent_type IN (''amp'', ''pi''). Resolve them first per the playbook in this file (delete or reassign), then re-run the down migration.',
+            leftover_count;
+    END IF;
+END$$;
+
 ALTER TABLE sessions DROP CONSTRAINT IF EXISTS chk_sessions_agent_type;
 ALTER TABLE sessions
     ADD CONSTRAINT chk_sessions_agent_type CHECK (agent_type IN (
