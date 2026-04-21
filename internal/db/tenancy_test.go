@@ -41,6 +41,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"eval_runs",
 		"eval_batches",
 		"eval_bootstrap_runs",
+		"organization_memberships",
 	}
 
 	// Tables exempt from org_id requirement (global or no org_id column)
@@ -70,8 +71,25 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK
 		{"session_logs", "into session_logs"}, // no org_id column; scoped via session_id FK
 		{"users", "where github_id"},          // pre-auth lookup by GitHub ID
-		{"users", "where email"},              // pre-auth lookup by email
+		{"users", "where lower(email)"},       // pre-auth lookup by email (case-insensitive)
 		{"users", "where google_id"},          // pre-auth lookup by Google ID
+		// GetByIDGlobal: the auth middleware loads user identity *before* the
+		// active-org is resolved (multi-org users; org comes from the session
+		// hint or X-Active-Org-ID header against organization_memberships, not
+		// the legacy users.org_id column).
+		//
+		// The trailing backtick in the pattern is load-bearing: it anchors on
+		// the closing of the SQL raw-string literal so the exemption matches
+		// ONLY the exact cross-org lookup. A query like
+		// `WHERE id = @id AND org_id = @org_id` would substring-match the
+		// shorter pattern and incorrectly inherit the exemption — but it
+		// already includes org_id so it is not actually a violation. Anchoring
+		// on the backtick keeps the exemption surgical: any future variant of
+		// "users WHERE id = @id" without org_id must add its own exemption
+		// (with its own justification) rather than silently piggybacking.
+		{"users", "where id = @id`"},
+
+		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
 	}
 
 	// Scan all .go files in the db package (not test files)
