@@ -4,6 +4,41 @@ A preview is a live, iframed view of your app running inside a 143 session. When
 
 This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/44-sandbox-preview-server.md`](design/44-sandbox-preview-server.md).
 
+## Dogfood preview
+
+143 ships its own `.143/preview.json`, `.143/preview-start.sh`, and `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
+
+**How to launch it locally:**
+
+1. Boot the local stack (`docker compose up` or the repo-specific make target).
+2. Open a session against the 143 repo (or anything on `main`).
+3. Click **Start Preview**.
+
+**Demo credentials** (shown on the login page when `DEMO_MODE=true`):
+
+- Email: `dogfood@143.dev`
+- Password: `preview-dogfood`
+
+The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
+
+**What you can and cannot do in the dogfood:**
+
+| Works | Does not work |
+|---|---|
+| Browse seeded sessions / PR previews / activity | **Start session** (no Docker socket — the button will error) |
+| Sign in as the seeded admin | **Connect GitHub** on Settings → Integrations (no OAuth app; button is hidden) |
+| Open the session detail, messages, logs | **Import repositories** (no GitHub App; install-redirect no-ops) |
+| View the seeded PR preview panel and its linked PR | **Comment on a PR / retry CI / merge** (all route through the GitHub API) |
+| Navigate projects, sessions list, activity feed | **Start Preview** from a new session (needs a live sandbox) |
+
+The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
+
+Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
+
+**How the dogfood handles `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets, so the secret is generated at boot from `/dev/urandom` and cached at `/tmp/143-preview/session_secret`. Server restarts within the same sandbox reuse the cached value, so a reviewer stays signed in. A full sandbox recycle generates a fresh secret — reviewers just re-sign-in with the public demo credentials.
+
+**Why `MODE=api` and not `MODE=all`:** The dogfood sandbox has no Docker socket, so the background worker mode (which spawns session sandboxes and previews) cannot function. Running it would only produce worker-loop errors in the logs. Any UI that polls job status will therefore show the seeded snapshot forever — no background processing advances it.
+
 ## Quickstart
 
 Add `.143/preview.json` at the root of your repo:

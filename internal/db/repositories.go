@@ -140,15 +140,18 @@ func (s *RepositoryStore) UpsertFromGitHub(ctx context.Context, repo *models.Rep
 	return row.Scan(&repo.ID, &repo.CreatedAt, &repo.UpdatedAt)
 }
 
-// GetByFullName returns the active repository with the given owner/name slug.
-// lint:allow-no-orgid reason="pre-auth lookup in GitHub webhook handlers; no org context available"
-func (s *RepositoryStore) GetByFullName(ctx context.Context, fullName string) (models.Repository, error) {
+// GetByFullName returns the active repository with the given owner/name slug,
+// scoped to the provided org. Scoping matters because the same GitHub repo
+// can legitimately be connected to more than one org (e.g. a contractor who
+// installs the app into two separate customer orgs), and an unscoped lookup
+// would error on multiple rows or silently cross org boundaries.
+func (s *RepositoryStore) GetByFullName(ctx context.Context, orgID uuid.UUID, fullName string) (models.Repository, error) {
 	query := `
 		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
 		FROM repositories
-		WHERE full_name = @full_name AND status = 'active'`
+		WHERE org_id = @org_id AND full_name = @full_name AND status = 'active'`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"full_name": fullName})
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "full_name": fullName})
 	if err != nil {
 		return models.Repository{}, fmt.Errorf("query repository by full name: %w", err)
 	}

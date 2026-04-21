@@ -89,6 +89,65 @@ describe('LoginPage', () => {
     expect(screen.queryByRole('button', { name: 'Continue with Google' })).not.toBeInTheDocument();
   });
 
+  it('shows demo banner with credentials from /providers when demo mode is on', () => {
+    useAuthProvidersMock.mockReturnValue({
+      providers: {
+        github: false,
+        google: false,
+        email: true,
+        demo: true,
+        demo_email: 'dogfood@143.dev',
+        demo_password: 'preview-dogfood',
+      },
+      isLoading: false,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    const banner = screen.getByTestId('demo-banner');
+    expect(banner).toHaveTextContent('Demo environment');
+    expect(banner).toHaveTextContent('dogfood@143.dev');
+    expect(banner).toHaveTextContent('preview-dogfood');
+  });
+
+  it('renders banner text returned by /providers verbatim (server is source of truth)', () => {
+    useAuthProvidersMock.mockReturnValue({
+      providers: {
+        github: false,
+        google: false,
+        email: true,
+        demo: true,
+        demo_email: 'override@example.com',
+        demo_password: 'override-pw',
+      },
+      isLoading: false,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    const banner = screen.getByTestId('demo-banner');
+    expect(banner).toHaveTextContent('override@example.com');
+    expect(banner).toHaveTextContent('override-pw');
+    expect(banner).not.toHaveTextContent('dogfood@143.dev');
+  });
+
+  it('hides demo banner when demo mode is off', () => {
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
+  });
+
+  it('hides demo banner when demo is on but credentials are missing', () => {
+    useAuthProvidersMock.mockReturnValue({
+      providers: { github: false, google: false, email: true, demo: true },
+      isLoading: false,
+    });
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
+  });
+
   it('calls login on GitHub button click', async () => {
     const user = userEvent.setup();
     renderWithProviders(<LoginPage />);
