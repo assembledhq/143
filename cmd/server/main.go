@@ -165,7 +165,10 @@ func main() {
 	// so no corruption — but don't rely on a strict happens-before between
 	// settings commit and next-read.
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache)
+	// Closed when the process receives SIGTERM so long-lived handlers (SSE
+	// streams, etc.) can end their loops cleanly during graceful shutdown.
+	shutdownCh := make(chan struct{})
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -305,12 +308,26 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown.
+	//
+	// Ordering matters here. docker-compose.app.yml sets stop_grace_period to
+	// 120s; we must finish shutting down before Docker SIGKILLs us. The total
+	// budget spent below is:
+	//   - SSE drain + http.Server.Shutdown:  up to 110s
+	//   - preview gateway.Shutdown:          up to 60s (parallel with above)
+	// leaving a safety margin under the 120s SIGKILL deadline.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
+
+		// Signal long-lived SSE handlers to return before calling Shutdown.
+		// Without this, Shutdown blocks on each open SSE connection until its
+		// deadline expires; the client then sees an abrupt reset rather than
+		// a clean EOF (which EventSource retries from on its own).
+		close(shutdownCh)
+
 		cancel() // stop worker
 		if recycleWorker != nil {
 			recycleWorker.Stop()
@@ -321,20 +338,30 @@ func main() {
 			}
 		}
 		// Gateway carries long-lived WebSocket (HMR) proxies; give it a
-		// longer drain window than the main API server so in-flight preview
-		// sessions close cleanly instead of being severed mid-frame.
-		gwShutdownCtx, gwShutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer gwShutdownCancel()
-		if gwSrv != nil {
+		// generous drain window so in-flight preview sessions close cleanly
+		// instead of being severed mid-frame. Runs in parallel with the
+		// main server's Shutdown below.
+		gwDone := make(chan struct{})
+		go func() {
+			defer close(gwDone)
+			if gwSrv == nil {
+				return
+			}
+			gwShutdownCtx, gwShutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer gwShutdownCancel()
 			if err := gwSrv.Shutdown(gwShutdownCtx); err != nil {
 				logger.Error().Err(err).Msg("preview gateway shutdown failed")
 			}
-		}
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		}()
+
+		// Drain the main API server. 110s leaves ~10s of headroom before
+		// Docker SIGKILLs the container at stop_grace_period=120s.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 110*time.Second)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			logger.Error().Err(err).Msg("server shutdown failed")
 		}
+		<-gwDone
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
