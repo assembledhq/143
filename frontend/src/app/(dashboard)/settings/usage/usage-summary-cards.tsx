@@ -1,11 +1,13 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
-import { Activity, Layers, Gauge, Cpu } from "lucide-react";
-import { formatMinutes, formatNumber, formatTokenCount, formatCost } from "./usage-helpers";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Activity, Layers, Gauge, Cpu, Info } from "lucide-react";
+import { formatNumber, formatTokenCount, formatCost } from "./usage-helpers";
 import type { LucideIcon } from "lucide-react";
 
 interface UsageSummaryCardsProps {
@@ -19,15 +21,26 @@ interface KPICardProps {
   value: string;
   subtitle?: string;
   loading?: boolean;
+  labelTooltip?: ReactNode;
 }
 
-function KPICard({ icon: Icon, label, value, subtitle, loading }: KPICardProps) {
+function KPICard({ icon: Icon, label, value, subtitle, loading, labelTooltip }: KPICardProps) {
   return (
     <Card>
       <CardContent className="p-4">
         <div className="flex items-center gap-2 text-muted-foreground mb-2">
           <Icon className="h-4 w-4" />
           <span className="text-xs font-medium">{label}</span>
+          {labelTooltip && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Info className="h-3 w-3 cursor-help" aria-label="More info" />
+                </TooltipTrigger>
+                <TooltipContent>{labelTooltip}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
         </div>
         {loading ? (
           <div className="space-y-2">
@@ -77,9 +90,8 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <KPICard
         icon={Activity}
-        label="Container Minutes"
-        value={isLoading ? "" : formatMinutes(summary?.total_container_minutes ?? 0)}
-        subtitle={`${formatNumber(summary?.total_container_minutes ?? 0)} total min`}
+        label="Container Hours"
+        value={isLoading ? "" : `${((summary?.total_container_minutes ?? 0) / 60).toFixed(1)}h`}
         loading={isLoading}
       />
       <KPICard
@@ -97,9 +109,17 @@ export function UsageSummaryCards({ start, end }: UsageSummaryCardsProps) {
       <KPICard
         icon={Cpu}
         label="LLM Tokens"
-        value={isLoading ? "" : `${formatTokenCount(tokenTotals.input)} / ${formatTokenCount(tokenTotals.output)}`}
+        value={isLoading ? "" : formatTokenCount(tokenTotals.input + tokenTotals.output)}
         subtitle={`~${formatCost(tokenTotals.cost)} est. cost`}
         loading={isLoading}
+        labelTooltip={
+          isLoading ? null : (
+            <div className="space-y-0.5">
+              <div>Input: {formatTokenCount(tokenTotals.input)}</div>
+              <div>Output: {formatTokenCount(tokenTotals.output)}</div>
+            </div>
+          )
+        }
       />
     </div>
   );

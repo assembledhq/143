@@ -384,7 +384,7 @@ describe('UsageSummaryCards', () => {
     renderWithProviders(
       <UsageSummaryCards start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
     );
-    expect(screen.getByText('Container Minutes')).toBeInTheDocument();
+    expect(screen.getByText('Container Hours')).toBeInTheDocument();
     expect(screen.getByText('Total Sessions')).toBeInTheDocument();
     expect(screen.getByText('Peak Concurrent')).toBeInTheDocument();
     expect(screen.getByText('LLM Tokens')).toBeInTheDocument();
