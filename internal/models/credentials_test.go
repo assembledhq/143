@@ -253,8 +253,12 @@ func TestProviderConfig_Validate(t *testing.T) {
 		cfg       ProviderConfig
 		expectErr bool
 	}{
-		{"anthropic valid", AnthropicConfig{APIKey: "sk-ant-test"}, false},
-		{"anthropic empty key", AnthropicConfig{APIKey: ""}, true},
+		{"anthropic valid api key", AnthropicConfig{APIKey: "sk-ant-test"}, false},
+		{"anthropic empty", AnthropicConfig{}, true},
+		{"anthropic subscription valid", AnthropicConfig{Subscription: &AnthropicSubscription{AccessToken: "cla_tok", RefreshToken: "clr_tok"}}, false},
+		{"anthropic subscription missing access_token", AnthropicConfig{Subscription: &AnthropicSubscription{RefreshToken: "clr_tok"}}, true},
+		{"anthropic subscription missing refresh_token", AnthropicConfig{Subscription: &AnthropicSubscription{AccessToken: "cla_tok"}}, true},
+		{"anthropic both api key and subscription", AnthropicConfig{APIKey: "sk-ant-test", Subscription: &AnthropicSubscription{AccessToken: "cla_tok", RefreshToken: "clr_tok"}}, true},
 		{"openai valid", OpenAIConfig{APIKey: "sk-test", APIType: "chat"}, false},
 		{"openai empty key", OpenAIConfig{APIKey: ""}, true},
 		{"openrouter valid", OpenRouterConfig{APIKey: "sk-or-test"}, false},
@@ -327,6 +331,54 @@ func TestMaskedSummary_Anthropic(t *testing.T) {
 	require.Equal(t, ProviderAnthropic, summary.Provider, "summary should have correct provider")
 	require.True(t, summary.Configured, "summary should be configured")
 	require.Equal(t, "sk-ant...y123", summary.MaskedKey, "summary should have masked key")
+	require.Empty(t, summary.AccountType, "api-key summary should not have account type")
+}
+
+func TestMaskedSummary_AnthropicSubscription(t *testing.T) {
+	t.Parallel()
+
+	cfg := AnthropicConfig{Subscription: &AnthropicSubscription{
+		AccessToken: "cla_access_token_abcdef",
+		AccountType: "max",
+	}}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderAnthropic, summary.Provider)
+	require.True(t, summary.Configured)
+	require.Equal(t, "max", summary.AccountType, "subscription summary should include account_type")
+	require.Empty(t, summary.MaskedKey, "subscription summary should omit the masked access token")
+}
+
+func TestAnthropicSubscription_IsExpired(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, AnthropicSubscription{ExpiresAt: time.Now().Add(-time.Minute)}.IsExpired())
+	require.False(t, AnthropicSubscription{ExpiresAt: time.Now().Add(time.Hour)}.IsExpired())
+}
+
+func TestAnthropicSubscription_NeedsRefresh(t *testing.T) {
+	t.Parallel()
+
+	window := 5 * time.Minute
+	require.True(t, AnthropicSubscription{ExpiresAt: time.Now().Add(2 * time.Minute)}.NeedsRefresh(window), "within window")
+	require.False(t, AnthropicSubscription{ExpiresAt: time.Now().Add(time.Hour)}.NeedsRefresh(window), "outside window")
+	require.True(t, AnthropicSubscription{ExpiresAt: time.Now().Add(-time.Minute)}.NeedsRefresh(window), "already expired")
+}
+
+func TestParseProviderConfig_AnthropicSubscription(t *testing.T) {
+	t.Parallel()
+
+	input := `{"subscription":{"access_token":"cla_tok","refresh_token":"clr_tok","account_type":"pro"}}`
+	cfg, err := ParseProviderConfig(ProviderAnthropic, []byte(input))
+	require.NoError(t, err)
+
+	ac, ok := cfg.(AnthropicConfig)
+	require.True(t, ok, "config should be AnthropicConfig")
+	require.Empty(t, ac.APIKey, "subscription-only config should not carry an API key")
+	require.NotNil(t, ac.Subscription)
+	require.Equal(t, "cla_tok", ac.Subscription.AccessToken)
+	require.Equal(t, "clr_tok", ac.Subscription.RefreshToken)
+	require.Equal(t, "pro", ac.Subscription.AccountType)
 }
 
 func TestMaskedSummary_OpenAI(t *testing.T) {

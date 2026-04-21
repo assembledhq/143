@@ -595,7 +595,18 @@ func defaultDeps() testDeps {
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
-		creds:     &mockCredentialProvider{},
+		creds: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				// Seed an Anthropic API key so ensureClaudeCodeAuth's fallback
+				// path succeeds for tests that use the default Claude Code
+				// agent type. Tests exercising credential-specific behavior
+				// override d.creds directly.
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-default-test"},
+				},
+			},
+		},
 		snapshots: &mockSnapshotStore{},
 	}
 }
@@ -926,7 +937,15 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 		Orgs:             mockOrgs,
 		Jobs:             mockJobs,
 		GitHub:           mockGH,
-		Logger:           zerolog.Nop(),
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-pm-ctx-test"},
+				},
+			},
+		},
+		Logger: zerolog.Nop(),
 	})
 
 	err := orchestrator.RunAgent(context.Background(), run)
@@ -1285,6 +1304,9 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
+	// Override: no credential configured at all so we can assert on the
+	// sandbox env and the fail-fast path.
+	d.creds = &mockCredentialProvider{}
 
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -1292,7 +1314,6 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
-	// No credential configured for "claude_code".
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         d.provider,
 		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -1310,15 +1331,23 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	})
 
 	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err)
+	// Without any Claude subscription or Anthropic API key, ensureClaudeCodeAuth
+	// fails the run fast. The sandbox is still created (capturedCfg populated)
+	// before the auth check runs.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credentials for claude code agent")
 
-	// Sandbox should have no agent-specific env vars since "claude_code" has no credential.
-	// HOME is always injected as a fallback, and GitHub integration vars are injected
-	// when integration skills are available (independent of agent type).
+	// Sandbox config was captured before the auth check failed. Confirm no
+	// ANTHROPIC_API_KEY was injected since no credential was configured.
 	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
 		"sandbox config should not have agent-specific env for unconfigured agent type")
 	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
 		"HOME should always be set to the sandbox user's home dir")
+
+	// The failure should be categorized as claude_code_auth.
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {

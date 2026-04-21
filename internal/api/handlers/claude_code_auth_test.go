@@ -1,0 +1,247 @@
+package handlers
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/claudecodeauth"
+)
+
+func claudeTestLogger() zerolog.Logger {
+	return zerolog.Nop()
+}
+
+func claudeAddOrgContext(r *http.Request) *http.Request {
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+	return r.WithContext(ctx)
+}
+
+// claudeStoreStub is a minimal claudecodeauth.CredentialStore implementation for
+// handler tests. Only the methods the handler exercises are meaningful; the
+// rest return zero/error defaults.
+type claudeStoreStub struct {
+	insertPendingAuthErr        error
+	disableErr                  error
+	disabled                    bool
+	existsForProviderByIDResult bool
+}
+
+func (s *claudeStoreStub) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+func (s *claudeStoreStub) UpsertWithLabel(context.Context, uuid.UUID, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
+	return nil, errors.New("not implemented")
+}
+func (s *claudeStoreStub) InsertPendingAuth(context.Context, uuid.UUID, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
+	if s.insertPendingAuthErr != nil {
+		return nil, s.insertPendingAuthErr
+	}
+	id := uuid.New()
+	return &id, nil
+}
+func (s *claudeStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+func (s *claudeStoreStub) GetByProviderAndLabel(context.Context, uuid.UUID, models.ProviderName, string) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+func (s *claudeStoreStub) ListByProvider(context.Context, uuid.UUID, models.ProviderName) ([]models.DecryptedCredential, error) {
+	return nil, nil
+}
+func (s *claudeStoreStub) ClaimNextLabeledRoundRobin(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
+	return nil, errors.New("not found")
+}
+func (s *claudeStoreStub) DisableByID(context.Context, uuid.UUID, uuid.UUID) error {
+	if s.disableErr != nil {
+		return s.disableErr
+	}
+	s.disabled = true
+	return nil
+}
+func (s *claudeStoreStub) UpdateStatusByID(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
+func (s *claudeStoreStub) UpsertByID(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig) error {
+	return nil
+}
+func (s *claudeStoreStub) ExistsForProviderByID(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (bool, error) {
+	return s.existsForProviderByIDResult, nil
+}
+func (s *claudeStoreStub) DisableLabeled(context.Context, uuid.UUID, models.ProviderName) error {
+	s.disabled = true
+	return nil
+}
+
+func TestClaudeCodeAuthHandler_Initiate_RequiresLabel(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := bytes.NewBufferString(`{"label":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/initiate", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "empty label should be rejected")
+	require.Contains(t, w.Body.String(), "INVALID_LABEL")
+}
+
+func TestClaudeCodeAuthHandler_Initiate_LabelTaken(t *testing.T) {
+	t.Parallel()
+
+	store := &claudeStoreStub{
+		insertPendingAuthErr: &db.ErrCredentialLabelTaken{Label: "work", ExistingStatus: "active"},
+	}
+	svc := claudecodeauth.NewService(store, claudeTestLogger())
+
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := strings.NewReader(`{"label":"work"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/initiate", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "duplicate active label should return 409")
+	require.Contains(t, w.Body.String(), "LABEL_TAKEN")
+}
+
+func TestClaudeCodeAuthHandler_Initiate_ReturnsAuthorizeURL(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := strings.NewReader(`{"label":"team-a"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/initiate", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp models.SingleResponse[claudecodeauth.InitiateResponse]
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Data.AuthorizeURL)
+	require.NotEmpty(t, resp.Data.State)
+	require.Equal(t, "team-a", resp.Data.Label)
+	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge=")
+	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge_method=S256")
+}
+
+func TestClaudeCodeAuthHandler_Complete_MissingBody(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/complete", nil)
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Complete(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REQUEST")
+}
+
+func TestClaudeCodeAuthHandler_Complete_RequiresLabelAndCode(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := strings.NewReader(`{"label":"team-a","code":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/complete", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Complete(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_CODE")
+}
+
+func TestClaudeCodeAuthHandler_Complete_NoPendingRow(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := strings.NewReader(`{"label":"team-a","code":"abc123#state456"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/complete", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Complete(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "PENDING_AUTH_NOT_FOUND")
+}
+
+func TestClaudeCodeAuthHandler_DisconnectByPath_NotFound(t *testing.T) {
+	t.Parallel()
+
+	store := &claudeStoreStub{existsForProviderByIDResult: false}
+	svc := claudecodeauth.NewService(store, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	credID := uuid.New()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/claude-code-auth/subscriptions/"+credID.String(), nil)
+	req = claudeAddOrgContext(req)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", credID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	handler.DisconnectByPath(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.False(t, store.disabled, "unknown credential should not be disabled")
+}
+
+func TestClaudeCodeAuthHandler_DisconnectAll(t *testing.T) {
+	t.Parallel()
+
+	store := &claudeStoreStub{}
+	svc := claudecodeauth.NewService(store, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/disconnect", nil)
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.DisconnectAll(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, store.disabled, "DisconnectAll should call DisableLabeled")
+}

@@ -37,6 +37,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { ClaudeCodeDeviceCodeModal } from "@/components/claude-code-device-code-modal";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { queryKeys } from "@/lib/query-keys";
@@ -56,6 +57,7 @@ import type {
   UserCredentialSummary,
   ResolvedCredential,
   CodexSubscription,
+  ClaudeCodeSubscription,
   ListResponse,
   Organization,
   OrgSettings,
@@ -119,6 +121,13 @@ export default function AgentPage() {
   const codexSubscriptions = codexSubscriptionsResp?.data ?? [];
   const activeSubscriptions = codexSubscriptions.filter((s) => s.status === "active");
 
+  const { data: claudeCodeSubscriptionsResp } = useQuery<ListResponse<ClaudeCodeSubscription>>({
+    queryKey: ["claude-code-subscriptions"],
+    queryFn: () => api.claudeCodeAuth.listSubscriptions(),
+  });
+  const claudeCodeSubscriptions = claudeCodeSubscriptionsResp?.data ?? [];
+  const activeClaudeSubscriptions = claudeCodeSubscriptions.filter((s) => s.status === "active");
+
   /* ---------- Org settings queries (admin-gated) ---------- */
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -152,10 +161,26 @@ export default function AgentPage() {
   const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
   const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
 
+  const hasAnthropicAPIKey = useMemo(() => {
+    const claudeOrgConfig = agentConfig.claude_code ?? {};
+    return Boolean(claudeOrgConfig.ANTHROPIC_API_KEY);
+  }, [agentConfig.claude_code]);
+
+  // Default to subscription unless the org only has an API key configured and
+  // no active subscription.
+  const inferredClaudeCredentialMethod: "subscription" | "api_key" =
+    hasAnthropicAPIKey && activeClaudeSubscriptions.length === 0 ? "api_key" : "subscription";
+
+  const [claudeCredentialMethodOverride, setClaudeCredentialMethodOverride] = useState<"subscription" | "api_key" | null>(null);
+  const claudeCredentialMethod = claudeCredentialMethodOverride ?? inferredClaudeCredentialMethod;
+
   const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [showClaudeDeviceCodeModal, setShowClaudeDeviceCodeModal] = useState(false);
   const [newSubscriptionLabel, setNewSubscriptionLabel] = useState("");
+  const [newClaudeSubscriptionLabel, setNewClaudeSubscriptionLabel] = useState("");
   const [removingSubscriptionId, setRemovingSubscriptionId] = useState<string | null>(null);
+  const [removingClaudeSubscriptionId, setRemovingClaudeSubscriptionId] = useState<string | null>(null);
 
   const autosave = useAutosave<SettingsPatch>({
     queryKey: queryKeys.settings.all,
@@ -260,6 +285,17 @@ export default function AgentPage() {
     },
   });
 
+  const removeClaudeSubscriptionMutation = useMutation({
+    mutationFn: (id: string) => api.claudeCodeAuth.removeSubscription(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["claude-code-subscriptions"] });
+      setRemovingClaudeSubscriptionId(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "claude-code-subscription-remove" });
+    },
+  });
+
   /* ---------- Render helpers ---------- */
 
   /** Shared ChatGPT auth status — shows list of subscriptions with add/remove. */
@@ -335,6 +371,101 @@ export default function AgentPage() {
     );
   }
 
+  /** Shared Claude subscription auth status — list + add/remove. */
+  function renderClaudeSubscriptionAuthStatus(): ReactNode {
+    return (
+      <div className="space-y-3">
+        {activeClaudeSubscriptions.length > 0 && (
+          <div className="space-y-2">
+            <Label className="text-xs text-muted-foreground">
+              Connected subscriptions ({activeClaudeSubscriptions.length}) &mdash; usage is distributed via round-robin
+            </Label>
+            {activeClaudeSubscriptions.map((sub) => (
+              <div key={sub.id} className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="border-green-600 text-green-600">
+                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                    Active
+                  </Badge>
+                  <span className="text-sm font-medium">{sub.label}</span>
+                  {sub.account_type && (
+                    <span className="text-xs text-muted-foreground">({sub.account_type})</span>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => setRemovingClaudeSubscriptionId(sub.id)}
+                  aria-label={`Remove Claude subscription ${sub.label}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="Subscription label (e.g. Team A)"
+            value={newClaudeSubscriptionLabel}
+            onChange={(e) => setNewClaudeSubscriptionLabel(e.target.value.slice(0, 100))}
+            maxLength={100}
+            className="max-w-xs text-sm"
+          />
+          <Button
+            size="sm"
+            onClick={() => setShowClaudeDeviceCodeModal(true)}
+            disabled={showClaudeDeviceCodeModal || newClaudeSubscriptionLabel.trim() === ""}
+          >
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            Add subscription
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  /** Shared Claude credential method toggle (subscription vs API key). */
+  function renderClaudeCredentialToggle({
+    method,
+    onMethodChange,
+  }: {
+    method: "subscription" | "api_key";
+    onMethodChange: (value: "subscription" | "api_key") => void;
+  }): ReactNode {
+    return (
+      <div className="space-y-3">
+        <Label className="text-xs text-muted-foreground">Credential method</Label>
+        <RadioGroup
+          value={method}
+          onValueChange={(value) => onMethodChange(value as "subscription" | "api_key")}
+          className="grid gap-3 md:grid-cols-2"
+        >
+          <RadioCard
+            value="subscription"
+            label="Sign in with Claude"
+            description="Use your Claude Pro/Max/Team/Enterprise subscription."
+            selected={method === "subscription"}
+            icon={<Sparkles className="h-4 w-4 text-primary" />}
+            ariaLabel="Sign in with Claude"
+          />
+          <RadioCard
+            value="api_key"
+            label="Use API key"
+            description="Pay-as-you-go Anthropic API credentials."
+            selected={method === "api_key"}
+            icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
+            ariaLabel="Use Anthropic API key"
+          />
+        </RadioGroup>
+
+        {method === "subscription" && renderClaudeSubscriptionAuthStatus()}
+      </div>
+    );
+  }
+
   /** Shared Codex credential method toggle (ChatGPT vs API key). */
   function renderCodexCredentialToggle({
     method,
@@ -381,7 +512,10 @@ export default function AgentPage() {
     const source = r?.source ?? "none";
     const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
     const isCodex = agent.key === "codex";
-    const hideEnvVars = isCodex && codexCredentialMethod === "chatgpt";
+    const isClaude = agent.key === "claude_code";
+    const hideEnvVars =
+      (isCodex && codexCredentialMethod === "chatgpt") ||
+      (isClaude && claudeCredentialMethod === "subscription");
     const envVarsToRender = hideEnvVars
       ? []
       : agent.envVars.filter((v) => !v.advanced || showAdvanced);
@@ -424,6 +558,11 @@ export default function AgentPage() {
         {isCodex && renderCodexCredentialToggle({
           method: codexCredentialMethod,
           onMethodChange: setCodexCredentialMethodOverride,
+        })}
+
+        {isClaude && renderClaudeCredentialToggle({
+          method: claudeCredentialMethod,
+          onMethodChange: setClaudeCredentialMethodOverride,
         })}
 
         {envVarsToRender.map((envVar) => {
@@ -497,7 +636,7 @@ export default function AgentPage() {
 
         {hideEnvVars && (
           <p className="text-xs text-muted-foreground">
-            API key fields are hidden while ChatGPT sign-in is selected.
+            API key fields are hidden while {isClaude ? "Claude" : "ChatGPT"} sign-in is selected.
           </p>
         )}
         {hasAdvanced && !hideEnvVars && (
@@ -726,6 +865,42 @@ export default function AgentPage() {
             queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
             setShowDeviceCodeModal(false);
             setNewSubscriptionLabel("");
+          }}
+        />
+      )}
+
+      {/* Remove Claude Subscription Dialog */}
+      <AlertDialog open={!!removingClaudeSubscriptionId} onOpenChange={(open) => !open && setRemovingClaudeSubscriptionId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Claude subscription</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to disconnect this Claude subscription? Agents will no longer use it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (removingClaudeSubscriptionId) removeClaudeSubscriptionMutation.mutate(removingClaudeSubscriptionId);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Claude Code Device Code Modal */}
+      {showClaudeDeviceCodeModal && newClaudeSubscriptionLabel.trim() !== "" && (
+        <ClaudeCodeDeviceCodeModal
+          label={newClaudeSubscriptionLabel.trim()}
+          onClose={() => { setShowClaudeDeviceCodeModal(false); setNewClaudeSubscriptionLabel(""); }}
+          onConnected={() => {
+            queryClient.invalidateQueries({ queryKey: ["claude-code-subscriptions"] });
+            setShowClaudeDeviceCodeModal(false);
+            setNewClaudeSubscriptionLabel("");
           }}
         />
       )}

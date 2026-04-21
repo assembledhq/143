@@ -176,12 +176,18 @@ func (s *OrgCredentialStore) UpsertByID(ctx context.Context, orgID uuid.UUID, id
 	return err
 }
 
-// Get decrypts and returns a strongly-typed credential.
+// Get decrypts and returns the unlabeled credential for an (org, provider).
+// Convention: a provider that stores a single credential per org (e.g. an
+// Anthropic API key) uses label=""; providers with multiple rows per org
+// (e.g. Claude Code subscriptions) use non-empty labels and should be read
+// via ListByProvider or GetByProviderAndLabel. Enforcing `label = ”` here
+// keeps callers like resolveProviderConfig safe against the mixed case where
+// an API key and several labeled subscriptions coexist under one provider.
 func (s *OrgCredentialStore) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	query := `
 		SELECT ` + credentialColumns + `
 		FROM org_credentials
-		WHERE org_id = @org_id AND provider = @provider AND status != 'disabled'`
+		WHERE org_id = @org_id AND provider = @provider AND label = '' AND status != 'disabled'`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
@@ -354,6 +360,43 @@ func (s *OrgCredentialStore) ListByProvider(ctx context.Context, orgID uuid.UUID
 	return creds, nil
 }
 
+// ClaimNextLabeledRoundRobin is the subscription-scoped variant of
+// ClaimNextRoundRobin: it claims the LRU active credential whose label is
+// non-empty. This is how providers that mix a singleton API-key row
+// (label = ”) with multiple labeled subscription rows (e.g. ProviderAnthropic
+// holding both an Anthropic API key and Claude Code subscriptions) keep
+// round-robin scoped to the subscription set. Locking semantics and the
+// "preemptive last_used_at" tradeoff match ClaimNextRoundRobin.
+func (s *OrgCredentialStore) ClaimNextLabeledRoundRobin(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	query := `
+		WITH next AS (
+			SELECT id FROM org_credentials
+			WHERE org_id = @org_id AND provider = @provider AND label != '' AND status = 'active'
+			ORDER BY last_used_at NULLS FIRST, created_at
+			LIMIT 1
+			FOR UPDATE
+		)
+		UPDATE org_credentials c
+		SET last_used_at = now(), updated_at = now()
+		FROM next
+		WHERE c.id = next.id
+		RETURNING c.id, c.org_id, c.provider, c.label, c.config, c.status, c.last_verified_at, c.last_used_at, c.created_by, c.created_at, c.updated_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(provider),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query next labeled round-robin %s credential: %w", provider, err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	if err != nil {
+		return nil, fmt.Errorf("get next labeled round-robin %s credential: %w", provider, err)
+	}
+
+	return s.decryptRow(row)
+}
+
 // ClaimNextRoundRobin atomically selects the active credential with the oldest
 // last_used_at and marks it as used. The row-level FOR UPDATE lock serializes
 // concurrent claims so each request consistently sees the latest last_used_at,
@@ -403,6 +446,19 @@ func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid
 // Disable soft-deletes a credential.
 func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
 	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"org_id":   orgID,
+		"provider": string(provider),
+	})
+	return err
+}
+
+// DisableLabeled soft-deletes only the labeled rows for (org, provider),
+// leaving the singleton label=” row untouched. Used when a provider mixes
+// an API-key row (label=”) with subscription rows (label!=”) and the
+// caller wants to clear only the subscriptions.
+func (s *OrgCredentialStore) DisableLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
+	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label != ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),

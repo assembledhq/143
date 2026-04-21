@@ -524,6 +524,28 @@ export interface CodexSubscription {
   created_at?: string;
 }
 
+export interface ClaudeCodeInitiateResponse {
+  authorize_url: string;
+  state: string;
+  label: string;
+}
+
+export interface ClaudeCodeCompleteResponse {
+  account_type?: string;
+}
+
+export type ClaudeCodeSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+
+export interface ClaudeCodeSubscription {
+  id: string;
+  label: string;
+  account_type?: string;
+  status: ClaudeCodeSubscriptionStatus;
+  last_used_at?: string;
+  created_by?: string;
+  created_at?: string;
+}
+
 export interface InvitationResponse {
   id: string;
   email?: string | null;

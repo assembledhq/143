@@ -427,6 +427,18 @@ export const api = {
     // there is no per-subscription picker.
     disconnectAll: () => post<import('./types').SingleResponse<{ disconnected: boolean }>>('/api/v1/settings/codex-auth/disconnect'),
   },
+  claudeCodeAuth: {
+    // Starts a PKCE auth flow. The response's authorize_url is opened in the
+    // user's browser; after logging in the user pastes `<code>#<state>` back
+    // and the caller invokes complete() with it.
+    initiate: (label: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>('/api/v1/settings/claude-code-auth/initiate', { label }),
+    complete: (label: string, code: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>('/api/v1/settings/claude-code-auth/complete', { label, code }),
+    listSubscriptions: () => get<import('./types').ListResponse<import('./types').ClaudeCodeSubscription>>('/api/v1/settings/claude-code-auth/subscriptions'),
+    removeSubscription: (id: string) => del(`/api/v1/settings/claude-code-auth/subscriptions/${id}`),
+    // Disconnects every Claude subscription for the org while leaving any
+    // Anthropic API-key fallback in place.
+    disconnectAll: () => post<import('./types').SingleResponse<{ disconnected: boolean }>>('/api/v1/settings/claude-code-auth/disconnect'),
+  },
   githubStatus: {
     get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),
     connect: () => { window.location.href = `${API_BASE}/api/v1/users/me/github/connect`; },

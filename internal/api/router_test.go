@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -36,7 +37,8 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 
 			cfg := &config.Config{EncryptionMasterKey: tt.masterKey}
 			codexSvc := codexauth.NewService(nil, zerolog.Nop())
-			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), codexSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 			if tt.expectErr {
 				require.Error(t, err, "NewRouter should return an error when encryption key is invalid")
 				require.Nil(t, router, "NewRouter should not construct a router with an invalid encryption key")

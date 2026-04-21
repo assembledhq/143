@@ -52,6 +52,15 @@ type CodexAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
+// ClaudeCodeAuthProvider abstracts Claude Code subscription OAuth: the
+// existence check drives the resolveAgentEnv branch (so we know whether to
+// set ANTHROPIC_API_KEY or leave it empty for the file path to win), while
+// GetValidToken drives the sandbox file injection.
+type ClaudeCodeAuthProvider interface {
+	HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error)
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -195,7 +204,8 @@ type Orchestrator struct {
 	orgs              OrgStore
 	jobs              JobStore
 	github            GitHubTokenProvider
-	codexAuth         CodexAuthProvider // can be nil
+	codexAuth         CodexAuthProvider      // can be nil
+	claudeCodeAuth    ClaudeCodeAuthProvider // can be nil
 	credentials       CredentialProvider
 	memory            MemoryService          // can be nil
 	userCredentials   UserCredentialProvider // can be nil
@@ -223,7 +233,8 @@ type OrchestratorConfig struct {
 	Orgs             OrgStore
 	Jobs             JobStore
 	GitHub           GitHubTokenProvider
-	CodexAuth        CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
+	CodexAuth        CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth   ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials      CredentialProvider
 	Memory           MemoryService          // optional — injects learned memories into agent prompts
 	UserCredentials  UserCredentialProvider // optional — enables personal/team credential resolution
@@ -258,6 +269,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		jobs:              cfg.Jobs,
 		github:            cfg.GitHub,
 		codexAuth:         cfg.CodexAuth,
+		claudeCodeAuth:    cfg.ClaudeCodeAuth,
 		credentials:       cfg.Credentials,
 		memory:            cfg.Memory,
 		userCredentials:   cfg.UserCredentials,
@@ -594,11 +606,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	// 9. Inject Codex auth.json if this is a codex agent run.
-	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
-	//    Done after clone so the workspace is available.
-	if run.AgentType == models.AgentTypeCodex {
+	// 9. Inject auth credentials into the sandbox. Done after clone so the
+	//    workspace is available.
+	//    - Codex: auth.json is the primary (and only) auth mechanism.
+	//    - Claude Code: subscription credentials file is preferred, with
+	//      ANTHROPIC_API_KEY env var as the fallback.
+	switch run.AgentType {
+	case models.AgentTypeCodex:
 		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+			return err
+		}
+	case models.AgentTypeClaudeCode:
+		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox); err != nil {
 			return err
 		}
 	}
@@ -1108,11 +1127,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
 	if reusedExisting || hasSnapshot {
-		// Re-inject Codex auth.json. Cheap, and catches the case where the
-		// file was cleared or drifted while the container was idle (or where
-		// the preview created the container without agent credentials).
-		if session.AgentType == models.AgentTypeCodex {
+		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
+		// Cheap, and catches the case where the file was cleared or drifted
+		// while the container was idle (or where the preview created the
+		// container without agent credentials).
+		switch session.AgentType {
+		case models.AgentTypeCodex:
 			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+				return err
+			}
+		case models.AgentTypeClaudeCode:
+			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
 				return err
 			}
 		}
@@ -1279,14 +1304,21 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
-	// Inject Codex auth if needed.
-	if session.AgentType == models.AgentTypeCodex {
+	// Inject auth credentials into the sandbox.
+	switch session.AgentType {
+	case models.AgentTypeCodex:
 		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
 		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
 		if !injected {
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
+		}
+	case models.AgentTypeClaudeCode:
+		// Subscription is preferred; fall through silently when only an API
+		// key is configured (the env var was already set by resolveAgentEnv).
+		if _, err := o.injectClaudeCodeAuth(ctx, session.OrgID, sandbox); err != nil {
+			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}
 
@@ -1705,13 +1737,24 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
-		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
-		if ac, ok := cfg.(models.AnthropicConfig); ok {
-			if ac.APIKey != "" {
-				merged["ANTHROPIC_API_KEY"] = ac.APIKey
+		// Subscription takes priority: when an active Claude Code subscription
+		// exists for this org, skip ANTHROPIC_API_KEY so the credentials file
+		// injected by injectClaudeCodeAuth isn't overridden at runtime.
+		hasSubscription := false
+		if o.claudeCodeAuth != nil {
+			if has, err := o.claudeCodeAuth.HasActiveSubscription(ctx, orgID); err == nil {
+				hasSubscription = has
 			}
-			if ac.BaseURL != "" {
-				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
+		}
+		if !hasSubscription {
+			cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
+			if ac, ok := cfg.(models.AnthropicConfig); ok {
+				if ac.APIKey != "" {
+					merged["ANTHROPIC_API_KEY"] = ac.APIKey
+				}
+				if ac.BaseURL != "" {
+					merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
+				}
 			}
 		}
 	case models.AgentTypeCodex:
@@ -2122,6 +2165,105 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+// injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
+// sandbox if an active Claude Code subscription exists for this org. The
+// Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
+// vars, so when a subscription is present resolveAgentEnv deliberately omits
+// ANTHROPIC_API_KEY to let this path win. Returns (true, nil) when the file
+// was written, (false, nil) when no subscription exists so the API-key
+// fallback should be used, or (false, err) on failure.
+//
+// TBD: the Claude Code CLI credentials file schema is not yet publicly
+// documented. The shape below (claudeAiOauth.{accessToken, refreshToken,
+// expiresAt, subscriptionType}) is the observed Claude Code CLI format —
+// confirm against the official docs before production rollout.
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.claudeCodeAuth == nil {
+		return false, nil
+	}
+
+	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get claude code subscription token: %w", err)
+	}
+	if sub == nil {
+		return false, nil
+	}
+
+	credsJSON, err := json.Marshal(map[string]interface{}{
+		"claudeAiOauth": map[string]interface{}{
+			"accessToken":      sub.AccessToken,
+			"refreshToken":     sub.RefreshToken,
+			"expiresAt":        sub.ExpiresAt.UnixMilli(),
+			"subscriptionType": sub.AccountType,
+		},
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal claude credentials: %w", err)
+	}
+
+	authDir := path.Join(sandbox.HomeDir, ".claude")
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+
+	var mkdirOut, mkdirErr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
+	if err != nil {
+		return false, fmt.Errorf("create .claude dir: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("create .claude dir: mkdir exited with code %d: %s", exitCode, mkdirErr.String())
+	}
+
+	credsPath := authDir + "/.credentials.json"
+	if err := o.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
+		return false, fmt.Errorf("write claude credentials: %w", err)
+	}
+
+	o.logger.Debug().
+		Str("org_id", orgID.String()).
+		Msg("injected claude subscription credentials into sandbox")
+
+	return true, nil
+}
+
+// ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
+// credential path available in the sandbox. Priority is subscription file >
+// ANTHROPIC_API_KEY env var; the run only fails when neither is configured.
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("claude subscription injection failed: %s", err),
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
+			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+		)
+		return fmt.Errorf("claude code auth injection: %w", err)
+	}
+	if injected {
+		return nil
+	}
+
+	// No subscription — check for an Anthropic API-key fallback. The env var
+	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
+	// credential exists the sandbox is already configured.
+	cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
+	if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+		return nil
+	}
+
+	o.failRunWithCategory(ctx, run,
+		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
+		FailureCategoryClaudeCodeAuth,
+		"No Claude Code credentials are configured. Connect your Claude subscription (recommended) or add an Anthropic API key from the Agent settings page.",
+		[]string{
+			"Connect a Claude subscription from the Agent settings page",
+			"Or add an Anthropic API key under Credentials",
+		},
+	)
+	return fmt.Errorf("no credentials for claude code agent")
 }
 
 // BuildIntegrationSkills generates a CLI skills doc from the org's integration

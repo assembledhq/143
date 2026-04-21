@@ -78,8 +78,46 @@ type ProviderConfig interface {
 // --- Per-provider config structs ---
 
 type AnthropicConfig struct {
-	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
+	APIKey  string `json:"api_key,omitempty"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
+
+	// Subscription carries a Claude Code CLI OAuth token (Pro/Max/Team/Enterprise).
+	// Mutually exclusive with APIKey — a single row holds one or the other.
+	Subscription *AnthropicSubscription `json:"subscription,omitempty"`
+}
+
+// AnthropicSubscription holds OAuth tokens issued by the Claude Code CLI
+// authorization-code + PKCE flow. Stored inside AnthropicConfig so
+// subscription rows and API-key rows share the same provider
+// (ProviderAnthropic); the presence of a non-nil Subscription is what marks
+// a row as a subscription credential.
+type AnthropicSubscription struct {
+	AccessToken  string    `json:"access_token"`  // #nosec G117 -- JSON config field
+	RefreshToken string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	ExpiresAt    time.Time `json:"expires_at"`
+	AccountType  string    `json:"account_type,omitempty"` // "pro" | "max" | "team" | "enterprise"
+
+	// Pending PKCE-auth fields — only populated between InitiateOAuth and
+	// CompleteOAuth. Persisted so the flow survives server restarts.
+	//   State        — opaque CSRF token echoed back by Anthropic; verified
+	//                  against the user-supplied `code#state` paste.
+	//   CodeVerifier — the PKCE verifier whose SHA-256 we sent as
+	//                  code_challenge; required to complete the exchange.
+	//   AuthorizeURL — the fully-formed /cai/oauth/authorize URL we handed
+	//                  to the UI; kept for observability + resume support.
+	State        string `json:"state,omitempty"`
+	CodeVerifier string `json:"code_verifier,omitempty"` // #nosec G117 -- JSON config field
+	AuthorizeURL string `json:"authorize_url,omitempty"`
+}
+
+// IsExpired returns true if the access token has passed its expiry.
+func (s AnthropicSubscription) IsExpired() bool {
+	return time.Now().After(s.ExpiresAt)
+}
+
+// NeedsRefresh returns true if the access token will expire within window.
+func (s AnthropicSubscription) NeedsRefresh(window time.Duration) bool {
+	return time.Now().Add(window).After(s.ExpiresAt)
 }
 
 type OpenAIConfig struct {
@@ -188,8 +226,30 @@ func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChat
 // --- Validate() implementations ---
 
 func (c AnthropicConfig) Validate() error {
-	if c.APIKey == "" {
-		return errors.New("api_key is required")
+	hasKey := c.APIKey != ""
+	hasSub := c.Subscription != nil
+	if hasKey == hasSub {
+		// Either both set or neither set — both are invalid. A single
+		// AnthropicConfig row holds exactly one credential method.
+		if hasKey {
+			return errors.New("api_key and subscription are mutually exclusive")
+		}
+		return errors.New("api_key or subscription is required")
+	}
+	if hasSub {
+		// A subscription row is valid in one of two shapes:
+		//   1. Active: AccessToken + RefreshToken populated.
+		//   2. Pending PKCE auth: State + CodeVerifier populated, tokens empty.
+		// Anything else is malformed.
+		hasTokens := c.Subscription.AccessToken != "" && c.Subscription.RefreshToken != ""
+		hasPending := c.Subscription.State != "" && c.Subscription.CodeVerifier != ""
+		if hasTokens {
+			return nil
+		}
+		if hasPending {
+			return nil
+		}
+		return errors.New("subscription requires either (access_token + refresh_token) or (state + code_verifier) for a pending auth")
 	}
 	return nil
 }
@@ -279,11 +339,20 @@ func (c OpenAIChatGPTConfig) Validate() error {
 // --- MaskedSummary() implementations ---
 
 func (c AnthropicConfig) MaskedSummary() CredentialSummary {
-	return CredentialSummary{
+	summary := CredentialSummary{
 		Provider:   ProviderAnthropic,
 		Configured: true,
-		MaskedKey:  MaskKey(c.APIKey),
 	}
+	if c.Subscription != nil {
+		// Do not mask the access token — it's a JWT whose high-entropy suffix
+		// is exactly what we want to keep secret. AccountType + the presence of
+		// a label (shown by the subscription list endpoint) is enough context
+		// for the UI to distinguish subscriptions in the generic summary view.
+		summary.AccountType = c.Subscription.AccountType
+	} else {
+		summary.MaskedKey = MaskKey(c.APIKey)
+	}
+	return summary
 }
 
 func (c OpenAIConfig) MaskedSummary() CredentialSummary {
