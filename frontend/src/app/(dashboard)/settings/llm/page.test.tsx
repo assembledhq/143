@@ -317,20 +317,18 @@ describe("LLMPage", () => {
     expect(input).toHaveAttribute("type", "text");
   });
 
-  it("calls settings.update when Save is clicked on the default model card", async () => {
+  it("autosaves the default model when a new option is selected", async () => {
     const user = userEvent.setup();
     renderWithProviders(<LLMPage />);
 
-    // The default model is gpt-5.4-mini which is owned by OpenAI, and OpenAI is
-    // present as a platform provider, so the Save button is enabled.
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Save default model" })).toBeEnabled();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Save default model" }));
+    const combobox = await screen.findByRole("combobox", { name: /LLM Model/i });
+    await user.click(combobox);
+    await user.click(await screen.findByRole("option", { name: "gpt-5.4" }));
 
     await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalled();
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { llm_model: "gpt-5.4" },
+      });
     });
   });
 

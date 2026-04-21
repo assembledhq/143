@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,7 +16,11 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { queryKeys } from "@/lib/query-keys";
+import { useAutosave } from "@/hooks/useAutosave";
+import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
 import type { OrgSettings } from "@/lib/types";
+
+const TEXT_DEBOUNCE_MS = 400;
 
 function parseTagList(value: string): string[] {
   return value
@@ -38,7 +42,6 @@ export function AutopilotSteeringSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       {open && (
         <AutopilotSteeringSheetBody
-          key={JSON.stringify(settings)}
           onOpenChange={onOpenChange}
           settings={settings}
         />
@@ -54,87 +57,109 @@ function AutopilotSteeringSheetBody({
   onOpenChange: (open: boolean) => void;
   settings: OrgSettings;
 }) {
-  const queryClient = useQueryClient();
-  const [philosophy, setPhilosophy] = useState(settings.product_context?.philosophy ?? "");
-  const [direction, setDirection] = useState(settings.product_context?.direction ?? settings.product_direction ?? "");
-  const [focusAreas, setFocusAreas] = useState((settings.product_context?.focus_areas ?? []).join(", "));
-  const [avoidAreas, setAvoidAreas] = useState((settings.product_context?.avoid_areas ?? []).join(", "));
-  const [autonomyLevel, setAutonomyLevel] = useState<NonNullable<OrgSettings["autonomy_level"]>>(settings.autonomy_level ?? "auto_simple");
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const serverPhilosophy = settings.product_context?.philosophy ?? "";
+  const serverDirection =
+    settings.product_context?.direction ?? settings.product_direction ?? "";
+  const serverFocusAreas = (settings.product_context?.focus_areas ?? []).join(", ");
+  const serverAvoidAreas = (settings.product_context?.avoid_areas ?? []).join(", ");
+  const serverAutonomy: NonNullable<OrgSettings["autonomy_level"]> =
+    settings.autonomy_level ?? "auto_simple";
 
-  const mutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      onOpenChange(false);
-    },
-    onError: (error) => {
-      console.error("failed to save autopilot steering", error);
-      setSaveError("Failed to save changes.");
-    },
+  const autosave = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: (payload) => api.settings.update(payload),
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
 
-  function handleSave() {
-    mutation.mutate({
+  // Build a product_context patch by merging the proposed field change against
+  // the currently displayed values. The server shallow-merges at the top-level
+  // `product_context` key, so sending a partial object would wipe siblings.
+  const saveProductContext = (patch: {
+    philosophy?: string;
+    direction?: string;
+    focus_areas?: string[];
+    avoid_areas?: string[];
+  }) => {
+    const next = {
+      philosophy: patch.philosophy ?? serverPhilosophy,
+      direction: patch.direction ?? serverDirection,
+      focus_areas: patch.focus_areas ?? parseTagList(serverFocusAreas),
+      avoid_areas: patch.avoid_areas ?? parseTagList(serverAvoidAreas),
+    };
+    const payload: SettingsPatch = {
       settings: {
-        autonomy_level: autonomyLevel,
-        product_direction: direction,
-        product_context: {
-          philosophy,
-          direction,
-          focus_areas: parseTagList(focusAreas),
-          avoid_areas: parseTagList(avoidAreas),
-        },
+        product_context: next,
+        // Mirror `direction` to the legacy `product_direction` for consumers
+        // that still read it.
+        ...(patch.direction !== undefined ? { product_direction: patch.direction } : {}),
       },
-    });
-  }
+    };
+    autosave.save(payload);
+  };
 
   return (
     <SheetContent className="w-full sm:max-w-xl">
       <SheetHeader>
-        <SheetTitle>Edit direction</SheetTitle>
-        <SheetDescription>Adjust the product context that guides Autopilot recommendations.</SheetDescription>
+        <div className="flex items-center justify-between">
+          <div>
+            <SheetTitle>Edit direction</SheetTitle>
+            <SheetDescription>
+              Adjust the product context that guides Autopilot recommendations.
+            </SheetDescription>
+          </div>
+          <AutosaveIndicator status={autosave.status} />
+        </div>
       </SheetHeader>
       <div className="mt-6 space-y-5">
         <div className="space-y-2">
           <Label htmlFor="autopilot-philosophy">Philosophy</Label>
-          <Textarea
+          <DebouncedTextarea
             id="autopilot-philosophy"
             rows={4}
-            value={philosophy}
-            onChange={(event) => setPhilosophy(event.target.value)}
+            serverValue={serverPhilosophy}
+            onCommit={(value) => saveProductContext({ philosophy: value })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-direction">Current direction</Label>
-          <Textarea
+          <DebouncedTextarea
             id="autopilot-direction"
             rows={3}
-            value={direction}
-            onChange={(event) => setDirection(event.target.value)}
+            serverValue={serverDirection}
+            onCommit={(value) => saveProductContext({ direction: value })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-focus-areas">Focus areas</Label>
-          <Input
+          <DebouncedInput
             id="autopilot-focus-areas"
-            value={focusAreas}
-            onChange={(event) => setFocusAreas(event.target.value)}
+            serverValue={serverFocusAreas}
             placeholder="auth, incidents, checkout"
+            onCommit={(value) => saveProductContext({ focus_areas: parseTagList(value) })}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="autopilot-avoid-areas">Avoid areas</Label>
-          <Input
+          <DebouncedInput
             id="autopilot-avoid-areas"
-            value={avoidAreas}
-            onChange={(event) => setAvoidAreas(event.target.value)}
+            serverValue={serverAvoidAreas}
             placeholder="redesigns, polish"
+            onCommit={(value) => saveProductContext({ avoid_areas: parseTagList(value) })}
           />
         </div>
         <div className="space-y-3">
           <Label>Autonomy level</Label>
-          <RadioGroup value={autonomyLevel} onValueChange={(value) => setAutonomyLevel(value as NonNullable<OrgSettings["autonomy_level"]>)}>
+          <RadioGroup
+            value={serverAutonomy}
+            onValueChange={(value) =>
+              autosave.save({
+                settings: {
+                  autonomy_level: value as NonNullable<OrgSettings["autonomy_level"]>,
+                },
+              })
+            }
+          >
             <label className="flex items-center gap-3 rounded-lg border p-3">
               <RadioGroupItem value="manual" aria-label="Suggest" />
               <div>
@@ -158,14 +183,136 @@ function AutopilotSteeringSheetBody({
             </label>
           </RadioGroup>
         </div>
-        {saveError && <p className="text-sm text-destructive">{saveError}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={handleSave} disabled={mutation.isPending}>
-            {mutation.isPending ? "Saving..." : "Save"}
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            onClick={() => {
+              autosave.flush();
+              onOpenChange(false);
+            }}
+          >
+            Done
           </Button>
         </div>
       </div>
     </SheetContent>
+  );
+}
+
+interface DebouncedTextareaProps {
+  id: string;
+  rows: number;
+  placeholder?: string;
+  serverValue: string;
+  onCommit: (value: string) => void;
+}
+
+function DebouncedTextarea({ id, rows, placeholder, serverValue, onCommit }: DebouncedTextareaProps) {
+  const [trackedServer, setTrackedServer] = useState(serverValue);
+  const [local, setLocal] = useState(serverValue);
+  const [lastSent, setLastSent] = useState(serverValue);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  if (serverValue !== trackedServer) {
+    setTrackedServer(serverValue);
+    if (serverValue !== lastSent) {
+      setLocal(serverValue);
+      setLastSent(serverValue);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const commit = (value: string) => {
+    if (value === lastSent) return;
+    setLastSent(value);
+    onCommit(value);
+  };
+
+  return (
+    <Textarea
+      id={id}
+      rows={rows}
+      placeholder={placeholder}
+      value={local}
+      onChange={(event) => {
+        const value = event.target.value;
+        setLocal(value);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          debounceRef.current = null;
+          commit(value);
+        }, TEXT_DEBOUNCE_MS);
+      }}
+      onBlur={() => {
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current);
+          debounceRef.current = null;
+        }
+        commit(local);
+      }}
+    />
+  );
+}
+
+interface DebouncedInputProps {
+  id: string;
+  placeholder?: string;
+  serverValue: string;
+  onCommit: (value: string) => void;
+}
+
+function DebouncedInput({ id, placeholder, serverValue, onCommit }: DebouncedInputProps) {
+  const [trackedServer, setTrackedServer] = useState(serverValue);
+  const [local, setLocal] = useState(serverValue);
+  const [lastSent, setLastSent] = useState(serverValue);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  if (serverValue !== trackedServer) {
+    setTrackedServer(serverValue);
+    if (serverValue !== lastSent) {
+      setLocal(serverValue);
+      setLastSent(serverValue);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const commit = (value: string) => {
+    if (value === lastSent) return;
+    setLastSent(value);
+    onCommit(value);
+  };
+
+  return (
+    <Input
+      id={id}
+      placeholder={placeholder}
+      value={local}
+      onChange={(event) => {
+        const value = event.target.value;
+        setLocal(value);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          debounceRef.current = null;
+          commit(value);
+        }, TEXT_DEBOUNCE_MS);
+      }}
+      onBlur={() => {
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current);
+          debounceRef.current = null;
+        }
+        commit(local);
+      }}
+    />
   );
 }

@@ -4,6 +4,14 @@ import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { useAutosave } from "@/hooks/useAutosave";
+import { queryKeys } from "@/lib/query-keys";
+import {
+  applyOrgSettingsPatch,
+  coalesceSettingsPatch,
+  type SettingsPatch,
+} from "@/lib/settings-autosave";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   AlertDialog,
@@ -87,22 +95,14 @@ export default function LLMPage() {
     return LLM_MODELS_BY_PROVIDER;
   }, [llmModelsResp?.data]);
 
-  const [llmModel, setLlmModel] = useState(DEFAULT_LLM_MODEL);
-  const [reasoningEffort, setReasoningEffort] = useState<string>("");
-  const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [keySaveStatus, setKeySaveStatus] = useState<Record<string, SaveStatus>>({});
   const [keySaveError, setKeySaveError] = useState<Record<string, string>>({});
   const [removingProvider, setRemovingProvider] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
 
-  const [prevSettingsRef, setPrevSettingsRef] = useState<unknown>(undefined);
-  const settingsData = settings?.data?.settings;
-  if (settingsData && settingsData !== prevSettingsRef) {
-    setPrevSettingsRef(settingsData);
-    setLlmModel(orgSettings.llm_model || DEFAULT_LLM_MODEL);
-    setReasoningEffort(orgSettings.llm_reasoning_effort || "");
-  }
+  const llmModel = orgSettings.llm_model || DEFAULT_LLM_MODEL;
+  const reasoningEffort = orgSettings.llm_reasoning_effort || "";
 
   const providerStatus = useMemo(() => {
     const status: Record<string, { orgConfigured: boolean; platformAvailable: boolean; maskedKey?: string }> = {};
@@ -136,18 +136,11 @@ export default function LLMPage() {
       (providerStatus[ownerProvider]?.orgConfigured || providerStatus[ownerProvider]?.platformAvailable),
   );
 
-  const modelMutation = useMutation({
-    mutationFn: (data: Record<string, unknown>) => api.settings.update(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setSaveStatus("success");
-      setTimeout(() => setSaveStatus("idle"), 2000);
-    },
-    onError: (error) => {
-      captureError(error, { feature: "llm-model-save" });
-      setSaveStatus("error");
-      setTimeout(() => setSaveStatus("idle"), 3000);
-    },
+  const autosave = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: (payload) => api.settings.update(payload),
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
 
   const keyMutation = useMutation({
@@ -192,15 +185,6 @@ export default function LLMPage() {
       setRemovingProvider(null);
     },
   });
-
-  function handleSaveModel() {
-    modelMutation.mutate({
-      settings: {
-        llm_model: llmModel,
-        llm_reasoning_effort: reasoningEffort || "",
-      },
-    });
-  }
 
   function handleSaveKey(provider: string, key: string) {
     if (!key) return;
@@ -256,7 +240,10 @@ export default function LLMPage() {
         )}
 
         <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">Default model</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-medium text-foreground">Default model</h2>
+            <AutosaveIndicator status={autosave.status} />
+          </div>
           <DefaultModelCard
             value={llmModel}
             reasoningEffort={reasoningEffort}
@@ -264,11 +251,10 @@ export default function LLMPage() {
             ownerProvider={ownerProvider}
             ownerProviderInfo={ownerProviderInfo}
             ownerConfigured={ownerConfigured}
-            saving={modelMutation.isPending}
-            saveStatus={saveStatus}
-            onChange={setLlmModel}
-            onReasoningChange={setReasoningEffort}
-            onSave={handleSaveModel}
+            onChange={(model) => autosave.save({ settings: { llm_model: model } })}
+            onReasoningChange={(effort) =>
+              autosave.save({ settings: { llm_reasoning_effort: effort } })
+            }
           />
         </section>
 

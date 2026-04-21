@@ -1,12 +1,13 @@
 "use client";
 
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AGENT_TYPES, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,6 +35,14 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
+import { useAutosave } from "@/hooks/useAutosave";
+import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
+import { queryKeys } from "@/lib/query-keys";
+import {
+  applyOrgSettingsPatch,
+  coalesceSettingsPatch,
+  type SettingsPatch,
+} from "@/lib/settings-autosave";
 import type {
   UserCredentialSummary,
   ResolvedCredential,
@@ -49,11 +58,8 @@ import type {
 // MaxMaxSessionDurationSeconds. ParseOrgSettings on the server clamps
 // whatever we send into the same range, so UI drift won't break
 // persistence, but users would see values snap.
-const DEFAULT_EXECUTION_SETTINGS: Pick<
-  Required<OrgSettings>,
-  "autonomy_level" | "execution_aggressiveness" | "max_concurrent_runs" | "max_session_duration_seconds"
-> = {
-  autonomy_level: "auto_simple",
+const DEFAULT_EXECUTION_SETTINGS = {
+  autonomy_level: "auto_simple" as const,
   execution_aggressiveness: 2,
   max_concurrent_runs: 5,
   max_session_duration_seconds: 25 * 60,
@@ -61,10 +67,11 @@ const DEFAULT_EXECUTION_SETTINGS: Pick<
 
 const MIN_SESSION_DURATION_MINUTES = 2;
 const MAX_SESSION_DURATION_MINUTES = 120;
+const MIN_CONCURRENT_RUNS = 1;
+const MAX_CONCURRENT_RUNS = 10;
 
-/* ------------------------------------------------------------------ */
-/*  Page                                                              */
-/* ------------------------------------------------------------------ */
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
 export default function AgentPage() {
   const queryClient = useQueryClient();
@@ -100,7 +107,7 @@ export default function AgentPage() {
   });
 
   const { data: codexAuthStatusResp } = useQuery({
-    queryKey: ["codex-auth-status"],
+    queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
     refetchInterval: false,
   });
@@ -116,38 +123,22 @@ export default function AgentPage() {
   /* ---------- Org settings queries (admin-gated) ---------- */
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: ["settings"],
+    queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
     enabled: isAdmin,
   });
 
   const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
 
-  /* ---------- Org settings state (agent config + execution combined) ---------- */
-
-  // Override-only state: null until the user edits, then holds the user's value.
-  // Effective values are derived as: override ?? serverValue ?? default.
-  const [defaultAgentTypeOverride, setDefaultAgentTypeOverride] = useState<OrgSettings["default_agent_type"] | null>(null);
-  const [agentConfigOverride, setAgentConfigOverride] = useState<Record<string, Record<string, string>> | null>(null);
-  const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
-  const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
-  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
-  const [newSubscriptionLabel, setNewSubscriptionLabel] = useState("");
-  const [removingSubscriptionId, setRemovingSubscriptionId] = useState<string | null>(null);
-  const [orgSaveStatus, setOrgSaveStatus] = useState<"idle" | "success" | "error">("idle");
-
-  const [autonomyLevelOverride, setAutonomyLevelOverride] = useState<string | null>(null);
-  const [aggressivenessOverride, setAggressivenessOverride] = useState<string | null>(null);
-  const [maxConcurrentOverride, setMaxConcurrentOverride] = useState<string | null>(null);
-  const [maxSessionMinutesOverride, setMaxSessionMinutesOverride] = useState<string | null>(null);
-
-  const defaultAgentType = defaultAgentTypeOverride ?? orgSettings?.default_agent_type ?? "codex";
-  const agentConfig = agentConfigOverride ?? orgSettings?.agent_config ?? {};
-  const autonomyLevel = autonomyLevelOverride ?? orgSettings?.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
-  const aggressiveness = aggressivenessOverride ?? String(orgSettings?.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness);
-  const maxConcurrent = maxConcurrentOverride ?? String(orgSettings?.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs);
-  const serverSessionSeconds = orgSettings?.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
-  const maxSessionMinutes = maxSessionMinutesOverride ?? String(Math.round(serverSessionSeconds / 60));
+  const defaultAgentType = orgSettings.default_agent_type ?? "codex";
+  const agentConfig = orgSettings.agent_config ?? {};
+  const autonomyLevel = orgSettings.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
+  const aggressiveness = String(
+    orgSettings.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness,
+  );
+  const maxConcurrentServer = orgSettings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+  const serverSessionSeconds = orgSettings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
+  const serverSessionMinutes = Math.round(serverSessionSeconds / 60);
 
   const hasCodexAPIKey = useMemo(() => {
     const codexOrgConfig = agentConfig.codex ?? {};
@@ -156,66 +147,70 @@ export default function AgentPage() {
 
   const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
     hasCodexAPIKey && activeSubscriptions.length === 0 && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
+
+  // Pure UI toggle — the server has no `codex_credential_method` field.
+  // Null means "follow the inference"; setting a value pins the user's choice.
+  const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
   const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
 
-  // Single mutation for all org settings (agent config + execution)
-  const orgMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => api.settings.update(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setOrgSaveStatus("success");
-      setTimeout(() => setOrgSaveStatus("idle"), 2000);
-    },
-    onError: (error) => {
-      captureError(error, { feature: "agent-org-settings" });
-      setOrgSaveStatus("error");
-      setTimeout(() => setOrgSaveStatus("idle"), 3000);
-    },
+  const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
+  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
+  const [newSubscriptionLabel, setNewSubscriptionLabel] = useState("");
+  const [removingSubscriptionId, setRemovingSubscriptionId] = useState<string | null>(null);
+
+  const autosave = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: (payload) => api.settings.update(payload),
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
+
+  const maxConcurrentField = useAutosaveNumericField({
+    serverValue: maxConcurrentServer,
+    autosave,
+    toPatch: (v) => ({ settings: { max_concurrent_runs: v } }),
+    clamp: (v) => clamp(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
+  });
+
+  const maxSessionMinutesField = useAutosaveNumericField({
+    serverValue: serverSessionMinutes,
+    autosave,
+    toPatch: (minutes) => ({ settings: { max_session_duration_seconds: minutes * 60 } }),
+    clamp: (v) => clamp(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
+  });
+
+  // Write an env var into agent_config. Because the server's mergeSettingsJSON
+  // is shallow at the top level, we always send the FULL merged agent_config
+  // so sibling providers (claude_code, gemini_cli) aren't wiped out.
+  function saveAgentConfigField(agentKey: string, envVar: string, value: string) {
+    const current = { ...agentConfig };
+    const providerConfig = { ...(current[agentKey] ?? {}) };
+    if (value) {
+      providerConfig[envVar] = value;
+    } else {
+      delete providerConfig[envVar];
+    }
+
+    if (Object.keys(providerConfig).length > 0) {
+      current[agentKey] = providerConfig;
+    } else {
+      delete current[agentKey];
+    }
+
+    autosave.save({ settings: { agent_config: current } });
+  }
 
   const removeSubscriptionMutation = useMutation({
     mutationFn: (id: string) => api.codexAuth.removeSubscription(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
-      queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.codexAuth.status });
       setRemovingSubscriptionId(null);
     },
     onError: (error) => {
       captureError(error, { feature: "codex-subscription-remove" });
     },
   });
-
-  function handleSaveOrgSettings() {
-    const cleanedAgentConfig: Record<string, Record<string, string>> = {};
-
-    for (const [agentKey, vars] of Object.entries(agentConfig)) {
-      const filtered: Record<string, string> = {};
-      for (const [key, value] of Object.entries(vars)) {
-        if (value) {
-          filtered[key] = value;
-        }
-      }
-      if (Object.keys(filtered).length > 0) {
-        cleanedAgentConfig[agentKey] = filtered;
-      }
-    }
-
-    const parsedSessionMinutes = parseInt(maxSessionMinutes, 10);
-    const clampedSessionMinutes = Number.isFinite(parsedSessionMinutes)
-      ? Math.min(MAX_SESSION_DURATION_MINUTES, Math.max(MIN_SESSION_DURATION_MINUTES, parsedSessionMinutes))
-      : DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds / 60;
-
-    orgMutation.mutate({
-      settings: {
-        default_agent_type: defaultAgentType,
-        ...(Object.keys(cleanedAgentConfig).length > 0 && { agent_config: cleanedAgentConfig }),
-        autonomy_level: autonomyLevel,
-        execution_aggressiveness: parseInt(aggressiveness, 10),
-        max_concurrent_runs: parseInt(maxConcurrent, 10),
-        max_session_duration_seconds: clampedSessionMinutes * 60,
-      },
-    });
-  }
 
   /* ---------- Render helpers ---------- */
 
@@ -383,7 +378,6 @@ export default function AgentPage() {
           onMethodChange: setCodexCredentialMethodOverride,
         })}
 
-        {/* Env var fields */}
         {envVarsToRender.map((envVar) => {
           const displayValue = agentConfig[agent.key]?.[envVar.name] ?? "";
 
@@ -397,15 +391,7 @@ export default function AgentPage() {
               {envVar.options ? (
                 <Select
                   value={displayValue || undefined}
-                  onValueChange={(value) => {
-                    setAgentConfigOverride({
-                      ...(agentConfigOverride ?? agentConfig),
-                      [agent.key]: {
-                        ...(agentConfigOverride ?? agentConfig)[agent.key],
-                        [envVar.name]: value,
-                      },
-                    });
-                  }}
+                  onValueChange={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
                 >
                   <SelectTrigger
                     id={`org-${agent.key}-${envVar.name}`}
@@ -422,21 +408,12 @@ export default function AgentPage() {
                   </SelectContent>
                 </Select>
               ) : (
-                <Input
+                <AgentConfigTextField
                   id={`org-${agent.key}-${envVar.name}`}
-                  type={envVar.sensitive ? "password" : "text"}
+                  sensitive={envVar.sensitive}
                   placeholder={envVar.placeholder ?? "Not set"}
-                  value={displayValue}
-                  className="font-mono text-xs"
-                  onChange={(e) => {
-                    setAgentConfigOverride({
-                      ...(agentConfigOverride ?? agentConfig),
-                      [agent.key]: {
-                        ...(agentConfigOverride ?? agentConfig)[agent.key],
-                        [envVar.name]: e.target.value,
-                      },
-                    });
-                  }}
+                  serverValue={displayValue}
+                  onCommit={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
                 />
               )}
             </div>
@@ -463,19 +440,15 @@ export default function AgentPage() {
     );
   }
 
-  /* ---------- Render ---------- */
-
   return (
     <PageContainer size="default">
       <div className="space-y-8">
         <PageHeader
           title="Coding agents"
           description="Configure organization agent defaults and execution behavior."
+          action={isAdmin ? <AutosaveIndicator status={autosave.status} /> : undefined}
         />
 
-        {/* ============================================================ */}
-        {/*  SECTION 1 — Organization coding agents (admin only)        */}
-        {/* ============================================================ */}
         {isAdmin && (
           <section className="space-y-3">
             <div>
@@ -493,7 +466,13 @@ export default function AgentPage() {
                   <Label>Default coding agent</Label>
                   <RadioGroup
                     value={defaultAgentType}
-                    onValueChange={(value) => setDefaultAgentTypeOverride(value as OrgSettings["default_agent_type"])}
+                    onValueChange={(value) =>
+                      autosave.save({
+                        settings: {
+                          default_agent_type: value as OrgSettings["default_agent_type"],
+                        },
+                      })
+                    }
                     className="grid grid-cols-3 gap-3"
                   >
                     {AGENT_TYPES.map((agent) => (
@@ -507,7 +486,6 @@ export default function AgentPage() {
                     ))}
                   </RadioGroup>
 
-                  {/* Config details for the selected agent */}
                   {renderOrgAgentConfigCard()}
                 </div>
               </CardContent>
@@ -515,9 +493,6 @@ export default function AgentPage() {
           </section>
         )}
 
-        {/* ============================================================ */}
-        {/*  SECTION 3 — Execution (admin only)                         */}
-        {/* ============================================================ */}
         {isAdmin && (
           <section className="space-y-3">
             <div>
@@ -536,7 +511,13 @@ export default function AgentPage() {
                     <Label>Autonomy level</Label>
                     <RadioGroup
                       value={autonomyLevel}
-                      onValueChange={(v) => setAutonomyLevelOverride(v)}
+                      onValueChange={(v) =>
+                        autosave.save({
+                          settings: {
+                            autonomy_level: v as "manual" | "auto_simple" | "auto_all",
+                          },
+                        })
+                      }
                       className="grid grid-cols-3 gap-3"
                     >
                       {[
@@ -559,7 +540,9 @@ export default function AgentPage() {
                     <Label>Execution aggressiveness</Label>
                     <RadioGroup
                       value={aggressiveness}
-                      onValueChange={setAggressivenessOverride}
+                      onValueChange={(v) =>
+                        autosave.save({ settings: { execution_aggressiveness: parseInt(v, 10) } })
+                      }
                       className="grid grid-cols-4 gap-3"
                     >
                       {[
@@ -584,10 +567,11 @@ export default function AgentPage() {
                     <Input
                       id="max-concurrent"
                       type="number"
-                      min={1}
-                      max={10}
-                      value={maxConcurrent}
-                      onChange={(e) => setMaxConcurrentOverride(e.target.value)}
+                      min={MIN_CONCURRENT_RUNS}
+                      max={MAX_CONCURRENT_RUNS}
+                      value={maxConcurrentField.value}
+                      onChange={maxConcurrentField.onChange}
+                      onBlur={maxConcurrentField.onBlur}
                     />
                   </div>
 
@@ -598,37 +582,10 @@ export default function AgentPage() {
                       type="number"
                       min={MIN_SESSION_DURATION_MINUTES}
                       max={MAX_SESSION_DURATION_MINUTES}
-                      value={maxSessionMinutes}
-                      onChange={(e) => setMaxSessionMinutesOverride(e.target.value)}
+                      value={maxSessionMinutesField.value}
+                      onChange={maxSessionMinutesField.onChange}
+                      onBlur={maxSessionMinutesField.onBlur}
                     />
-                    {(() => {
-                      const trimmed = maxSessionMinutes.trim();
-                      if (trimmed === "") {
-                        return (
-                          <p className="text-xs text-destructive">
-                            Enter a number between {MIN_SESSION_DURATION_MINUTES} and {MAX_SESSION_DURATION_MINUTES} minutes; empty saves will revert to the {DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds / 60}-minute default.
-                          </p>
-                        );
-                      }
-                      // Strict integer match — `parseInt("5abc", 10)` silently
-                      // returns 5, so we validate the whole string first.
-                      if (!/^\d+$/.test(trimmed)) {
-                        return (
-                          <p className="text-xs text-destructive">
-                            &quot;{trimmed}&quot; is not a whole number of minutes; enter a value between {MIN_SESSION_DURATION_MINUTES} and {MAX_SESSION_DURATION_MINUTES}.
-                          </p>
-                        );
-                      }
-                      const parsed = parseInt(trimmed, 10);
-                      if (parsed < MIN_SESSION_DURATION_MINUTES || parsed > MAX_SESSION_DURATION_MINUTES) {
-                        return (
-                          <p className="text-xs text-destructive">
-                            Value will be clamped to {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes on save.
-                          </p>
-                        );
-                      }
-                      return null;
-                    })()}
                     <p className="text-xs text-muted-foreground">
                       Sessions that exceed this wall-clock limit are cancelled and marked failed. Defaults to 25 minutes; allowed range {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes.
                     </p>
@@ -640,24 +597,6 @@ export default function AgentPage() {
         )}
       </div>
 
-      {/* Sticky save bar for org settings (admin only) */}
-      {isAdmin && (
-        <div className="sticky bottom-0 z-50 -mx-4 mt-6 border-t bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-          <div className="flex items-center justify-end gap-3">
-            <Button onClick={handleSaveOrgSettings} disabled={orgMutation.isPending}>
-              {orgMutation.isPending ? "Saving..." : "Save organization settings"}
-            </Button>
-            {orgSaveStatus === "success" && (
-              <span className="text-xs text-emerald-600 dark:text-emerald-400">Settings saved.</span>
-            )}
-            {orgSaveStatus === "error" && (
-              <span className="text-xs text-destructive">Failed to save settings.</span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Remove Team Default Dialog */}
       <AlertDialog open={!!removingTeamProvider} onOpenChange={(open) => !open && setRemovingTeamProvider(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -681,7 +620,6 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Remove Subscription Dialog */}
       <AlertDialog open={!!removingSubscriptionId} onOpenChange={(open) => !open && setRemovingSubscriptionId(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -704,13 +642,12 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Codex Device Code Modal (shared across personal + org) */}
       {showDeviceCodeModal && (
         <CodexDeviceCodeModal
           label={newSubscriptionLabel.trim() || undefined}
           onClose={() => { setShowDeviceCodeModal(false); setNewSubscriptionLabel(""); }}
           onConnected={() => {
-            queryClient.invalidateQueries({ queryKey: ["codex-auth-status"] });
+            queryClient.invalidateQueries({ queryKey: queryKeys.codexAuth.status });
             queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
             setShowDeviceCodeModal(false);
             setNewSubscriptionLabel("");
@@ -718,5 +655,82 @@ export default function AgentPage() {
         />
       )}
     </PageContainer>
+  );
+}
+
+/**
+ * Text field for an agent_config env var. Debounces typing locally (400ms),
+ * fires on blur, and resyncs from the server only when the server value
+ * diverges from the last value this field sent. Distinct from
+ * useAutosaveNumericField because these values are free-form strings — we
+ * don't want to parse/clamp, and an empty string means "delete this env var".
+ */
+interface AgentConfigTextFieldProps {
+  id: string;
+  sensitive?: boolean;
+  placeholder: string;
+  serverValue: string;
+  onCommit: (value: string) => void;
+}
+
+function AgentConfigTextField({
+  id,
+  sensitive,
+  placeholder,
+  serverValue,
+  onCommit,
+}: AgentConfigTextFieldProps) {
+  // Using the "store information from previous renders" pattern so we can
+  // resync local state when the server value changes for reasons other than
+  // our own save (optimistic rollback, another tab) without firing an effect.
+  const [trackedServer, setTrackedServer] = useState(serverValue);
+  const [local, setLocal] = useState(serverValue);
+  const [lastSent, setLastSent] = useState(serverValue);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  if (serverValue !== trackedServer) {
+    setTrackedServer(serverValue);
+    if (serverValue !== lastSent) {
+      setLocal(serverValue);
+      setLastSent(serverValue);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const commit = (value: string) => {
+    if (value === lastSent) return;
+    setLastSent(value);
+    onCommit(value);
+  };
+
+  return (
+    <Input
+      id={id}
+      type={sensitive ? "password" : "text"}
+      placeholder={placeholder}
+      value={local}
+      className="font-mono text-xs"
+      onChange={(e) => {
+        const value = e.target.value;
+        setLocal(value);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          debounceRef.current = null;
+          commit(value);
+        }, 400);
+      }}
+      onBlur={() => {
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current);
+          debounceRef.current = null;
+        }
+        commit(local);
+      }}
+    />
   );
 }

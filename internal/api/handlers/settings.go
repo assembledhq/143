@@ -161,19 +161,49 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
 }
 
+// mergeSettingsJSON deep-merges a settings patch into the existing settings
+// blob. Objects merge recursively (so patching
+// `agent_config.codex.OPENAI_API_KEY` leaves sibling providers intact);
+// arrays and scalars are replaced wholesale. This matches autosave semantics
+// on the client, where every field mutation needs to be safe against
+// concurrent edits of unrelated fields.
 func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error) {
-	base := map[string]json.RawMessage{}
+	var base map[string]any
 	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &base); err != nil {
 			return nil, err
 		}
 	}
-	incoming := map[string]json.RawMessage{}
+	if base == nil {
+		base = map[string]any{}
+	}
+	var incoming map[string]any
 	if err := json.Unmarshal(patch, &incoming); err != nil {
 		return nil, err
 	}
-	for k, v := range incoming {
-		base[k] = v
+	merged := deepMergeMap(base, incoming)
+	return json.Marshal(merged)
+}
+
+// deepMergeMap returns a new map where keys from `incoming` overlay `base`.
+// When both sides hold an object at the same key, it recurses; otherwise the
+// incoming value replaces. Arrays are replaced (not index-merged) — removing
+// an element from a list is a valid edit and must propagate.
+func deepMergeMap(base, incoming map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(incoming))
+	for k, v := range base {
+		out[k] = v
 	}
-	return json.Marshal(base)
+	for k, v := range incoming {
+		if existing, ok := out[k]; ok {
+			if existingMap, isMap := existing.(map[string]any); isMap {
+				if incomingMap, isIncomingMap := v.(map[string]any); isIncomingMap {
+					out[k] = deepMergeMap(existingMap, incomingMap)
+					continue
+				}
+			}
+		}
+		out[k] = v
+	}
+	return out
 }

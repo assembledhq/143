@@ -293,3 +293,121 @@ func TestSettingsHandler_Update(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeSettingsJSON_ShallowKey(t *testing.T) {
+	t.Parallel()
+	existing := json.RawMessage(`{"llm_model":"gpt-5.3","pm_schedule_hours":4}`)
+	patch := json.RawMessage(`{"llm_model":"gpt-5.4"}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "gpt-5.4", parsed["llm_model"])
+	// Sibling unrelated key must survive.
+	require.EqualValues(t, 4, parsed["pm_schedule_hours"])
+}
+
+func TestMergeSettingsJSON_NestedObjectPreservesSiblingProviders(t *testing.T) {
+	t.Parallel()
+	existing := json.RawMessage(`{
+		"agent_config": {
+			"codex": {"OPENAI_API_KEY":"sk-old"},
+			"claude_code": {"ANTHROPIC_API_KEY":"claude-key"}
+		}
+	}`)
+	// Patch only codex's OPENAI_API_KEY. claude_code must not be wiped.
+	patch := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_API_KEY":"sk-new"}}}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+
+	var parsed struct {
+		AgentConfig map[string]map[string]string `json:"agent_config"`
+	}
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "sk-new", parsed.AgentConfig["codex"]["OPENAI_API_KEY"])
+	require.Equal(t, "claude-key", parsed.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"],
+		"claude_code provider should not be wiped by a patch to codex")
+}
+
+func TestMergeSettingsJSON_NestedObjectPreservesSiblingEnvVars(t *testing.T) {
+	t.Parallel()
+	existing := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_API_KEY":"sk-old","OPENAI_BASE_URL":"https://api.openai.com"}}}`)
+	patch := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_API_KEY":"sk-new"}}}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+
+	var parsed struct {
+		AgentConfig map[string]map[string]string `json:"agent_config"`
+	}
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "sk-new", parsed.AgentConfig["codex"]["OPENAI_API_KEY"])
+	require.Equal(t, "https://api.openai.com", parsed.AgentConfig["codex"]["OPENAI_BASE_URL"],
+		"sibling env vars inside the same provider should survive")
+}
+
+func TestMergeSettingsJSON_ArrayReplaces(t *testing.T) {
+	t.Parallel()
+	// Arrays must REPLACE, not index-merge — a user removing an element
+	// from focus_areas must see the list shrink.
+	existing := json.RawMessage(`{"product_context":{"focus_areas":["a","b","c"]}}`)
+	patch := json.RawMessage(`{"product_context":{"focus_areas":["a"]}}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+
+	var parsed struct {
+		ProductContext struct {
+			FocusAreas []string `json:"focus_areas"`
+		} `json:"product_context"`
+	}
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, []string{"a"}, parsed.ProductContext.FocusAreas)
+}
+
+func TestMergeSettingsJSON_NestedObjectPreservesSiblingFields(t *testing.T) {
+	t.Parallel()
+	existing := json.RawMessage(`{"product_context":{"philosophy":"old","direction":"keep","focus_areas":["a"]}}`)
+	patch := json.RawMessage(`{"product_context":{"philosophy":"new"}}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+
+	var parsed struct {
+		ProductContext struct {
+			Philosophy string   `json:"philosophy"`
+			Direction  string   `json:"direction"`
+			FocusAreas []string `json:"focus_areas"`
+		} `json:"product_context"`
+	}
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "new", parsed.ProductContext.Philosophy)
+	require.Equal(t, "keep", parsed.ProductContext.Direction, "direction should survive a philosophy-only patch")
+	require.Equal(t, []string{"a"}, parsed.ProductContext.FocusAreas)
+}
+
+func TestMergeSettingsJSON_EmptyExisting(t *testing.T) {
+	t.Parallel()
+	got, err := mergeSettingsJSON(nil, json.RawMessage(`{"llm_model":"gpt-5.4"}`))
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "gpt-5.4", parsed["llm_model"])
+}
+
+func TestMergeSettingsJSON_ScalarReplacesObject(t *testing.T) {
+	t.Parallel()
+	// Type mismatch: incoming scalar replaces existing object. Should not panic.
+	existing := json.RawMessage(`{"llm_model":{"nested":true}}`)
+	patch := json.RawMessage(`{"llm_model":"gpt-5.4"}`)
+
+	got, err := mergeSettingsJSON(existing, patch)
+	require.NoError(t, err)
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(got, &parsed))
+	require.Equal(t, "gpt-5.4", parsed["llm_model"])
+}
