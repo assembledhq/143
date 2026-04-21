@@ -60,6 +60,7 @@ func (m *mockCredentialStore) UpsertWithLabel(_ context.Context, orgID uuid.UUID
 }
 
 func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UUID, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
+	now := time.Now()
 	for _, cred := range m.creds {
 		if cred.OrgID == orgID && cred.Provider == cfg.Provider() && cred.Label == label {
 			if cred.Status != "pending_auth" && cred.Status != "disabled" {
@@ -67,6 +68,7 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UU
 			}
 			cred.Config = cfg
 			cred.Status = "pending_auth"
+			cred.UpdatedAt = now
 			return &cred.ID, nil
 		}
 	}
@@ -79,6 +81,8 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, orgID uuid.UU
 		Config:    cfg,
 		Status:    "pending_auth",
 		CreatedBy: createdBy,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	return &id, nil
 }

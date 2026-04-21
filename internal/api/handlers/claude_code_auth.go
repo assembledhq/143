@@ -120,6 +120,8 @@ func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request)
 		switch {
 		case errors.Is(err, claudecodeauth.ErrPendingAuthNotFound):
 			writeError(w, r, http.StatusNotFound, "PENDING_AUTH_NOT_FOUND", err.Error(), err)
+		case errors.Is(err, claudecodeauth.ErrPendingAuthExpired):
+			writeError(w, r, http.StatusGone, "PENDING_AUTH_EXPIRED", "your login session expired — please click \"Open Anthropic login\" again to start a fresh flow", err)
 		case errors.Is(err, claudecodeauth.ErrInvalidPaste):
 			writeError(w, r, http.StatusBadRequest, "INVALID_CODE", "pasted code is invalid — paste the full <code>#<state> string Anthropic shows", err)
 		default:

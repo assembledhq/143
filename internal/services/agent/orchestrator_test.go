@@ -1374,14 +1374,13 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	require.True(t, ok, "scopes should be an array")
 	require.Len(t, scopes, 3)
 
-	// Permissions must be locked down to 0600 — the CLI refuses a
-	// world-readable token file. Verified via the executed chmod command.
+	// The credentials file must be pre-created at 0600 in the same Exec that
+	// mkdirs ~/.claude, so the subsequent WriteFile (which uses `>`) inherits
+	// the locked-down mode instead of briefly existing at the shell's default
+	// umask. The CLI refuses a world-readable token file.
 	require.Contains(t, d.provider.ExecCalls,
-		"mkdir -p '/home/sandbox/.claude'",
-		"should create ~/.claude with mkdir -p")
-	require.Contains(t, d.provider.ExecCalls,
-		"chmod 600 '/home/sandbox/.claude/.credentials.json'",
-		"should chmod the credentials file to 0600")
+		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
+		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
 }
 
 func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {

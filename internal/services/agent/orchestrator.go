@@ -2226,36 +2226,34 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 	}
 
 	authDir := path.Join(sandbox.HomeDir, ".claude")
-	// Single-quote the path defensively even though HomeDir is orchestrator-
+	credsPath := authDir + "/.credentials.json"
+
+	// Single-quote each path defensively even though HomeDir is orchestrator-
 	// controlled today; a future refactor could start threading user input
 	// through HomeDir and we don't want a silent shell-injection footgun.
-	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
+	// We combine mkdir + pre-create-with-0600 into one Exec so there is no
+	// window where the credentials file exists at the shell's default umask
+	// (typically 0644) before being locked down. `install -m 600 /dev/null`
+	// creates an empty file with mode 0600 atomically; the subsequent
+	// WriteFile uses POSIX `>` truncation, which preserves the existing
+	// file's mode rather than re-applying the umask.
+	prepCmd := fmt.Sprintf(
+		"mkdir -p '%s' && install -m 600 /dev/null '%s'",
+		shellEscapeSingleQuote(authDir),
+		shellEscapeSingleQuote(credsPath),
+	)
 
-	var mkdirOut, mkdirErr bytes.Buffer
-	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
+	var prepOut, prepErr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, prepCmd, &prepOut, &prepErr)
 	if err != nil {
-		return false, fmt.Errorf("create .claude dir: %w", err)
+		return false, fmt.Errorf("prepare claude credentials file: %w", err)
 	}
 	if exitCode != 0 {
-		return false, fmt.Errorf("create .claude dir: mkdir exited with code %d: %s", exitCode, mkdirErr.String())
+		return false, fmt.Errorf("prepare claude credentials file: exited with code %d: %s", exitCode, prepErr.String())
 	}
 
-	credsPath := authDir + "/.credentials.json"
 	if err := o.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
 		return false, fmt.Errorf("write claude credentials: %w", err)
-	}
-
-	// Lock down permissions on the credentials file; the CLI expects 0600
-	// and refuses to use a world-readable token file. Single-quote the path
-	// against future HomeDir refactors for the same reason mkdir does.
-	chmodCmd := fmt.Sprintf("chmod 600 '%s'", shellEscapeSingleQuote(credsPath))
-	var chmodOut, chmodErr bytes.Buffer
-	exitCode, err = o.provider.Exec(ctx, sandbox, chmodCmd, &chmodOut, &chmodErr)
-	if err != nil {
-		return false, fmt.Errorf("chmod claude credentials: %w", err)
-	}
-	if exitCode != 0 {
-		return false, fmt.Errorf("chmod claude credentials: exited with code %d: %s", exitCode, chmodErr.String())
 	}
 
 	o.logger.Debug().

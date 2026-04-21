@@ -80,6 +80,26 @@ const (
 	// and the anti-CSRF state parameter. 32 bytes → 43 base64url chars,
 	// comfortably above the 43-char minimum RFC 7636 requires.
 	verifierBytes = 32
+
+	// anthropicAPIVersion pins the Anthropic API version header sent on
+	// requests to api.anthropic.com. The profile endpoint requires it, and
+	// pinning a specific version avoids accidental breakage when the API
+	// default rolls forward.
+	anthropicAPIVersion = "2023-06-01"
+
+	// maxLoggedBodyBytes caps how many bytes of an upstream error body we
+	// embed into returned errors / logs. Upstream responses are assumed
+	// trusted but not vetted, so we truncate to bound log size and avoid
+	// accidentally echoing large or unexpected payloads.
+	maxLoggedBodyBytes = 256
+
+	// pendingAuthTTL bounds how long a pending_auth row may live before
+	// CompleteOAuth refuses to honor it. The CSRF state and PKCE verifier
+	// should only be valid for the duration of a fresh login flow; a paste
+	// that arrives hours later almost certainly means the user abandoned
+	// the flow (or the row was resurrected by a replay attempt), so we
+	// force them to re-initiate and get a fresh verifier + state.
+	pendingAuthTTL = 10 * time.Minute
 )
 
 // defaultScopes is the minimum set of OAuth scopes the Claude Code CLI
@@ -122,6 +142,11 @@ var ErrCredentialNotFound = fmt.Errorf("credential not found")
 // ErrPendingAuthNotFound is returned when CompleteOAuth is called without a
 // prior InitiateOAuth for the (org, label).
 var ErrPendingAuthNotFound = fmt.Errorf("no pending auth flow — initiate first")
+
+// ErrPendingAuthExpired is returned when CompleteOAuth finds a pending_auth
+// row that is older than pendingAuthTTL. The user must re-initiate to get
+// a fresh PKCE verifier and CSRF state before pasting again.
+var ErrPendingAuthExpired = fmt.Errorf("pending auth flow expired — initiate again")
 
 // ErrInvalidPaste is returned when the user's pasted code#state string is
 // malformed or the state doesn't match the one we stored.
@@ -309,7 +334,16 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	muVal, _ := s.initMu.LoadOrStore(pKey, &sync.Mutex{})
 	mu := muVal.(*sync.Mutex)
 	mu.Lock()
-	defer mu.Unlock()
+	// After Complete, the pending_auth row is either upgraded to active or
+	// remains pending for another attempt; either way we drop the init-side
+	// mutex so per-(org,label) entries don't persist for the lifetime of
+	// the process. A racing Initiate that loaded mu before the Delete still
+	// holds a valid pointer and serializes correctly; a later Initiate picks
+	// up a fresh mutex via LoadOrStore, which is what we want.
+	defer func() {
+		mu.Unlock()
+		s.initMu.Delete(pKey)
+	}()
 
 	code, returnedState, err := splitCodeAndState(codeAndState)
 	if err != nil {
@@ -334,6 +368,19 @@ func (s *Service) CompleteOAuth(ctx context.Context, orgID uuid.UUID, label, cod
 	}
 	if cfg.Subscription.State == "" || cfg.Subscription.CodeVerifier == "" {
 		return nil, ErrPendingAuthNotFound
+	}
+	// Only pending_auth rows should be completable. If the row is already
+	// active or has been invalidated, fail closed rather than risking
+	// overwriting live tokens with a replayed (and expired) code.
+	if cred.Status != string(SubscriptionStatusPendingAuth) {
+		return nil, ErrPendingAuthNotFound
+	}
+	// Reject pastes that arrive after the TTL window. UpdatedAt moves
+	// forward on every InsertPendingAuth upsert, so the window starts at
+	// the most recent Initiate — users who re-click "start auth" still get
+	// a fresh clock.
+	if time.Since(cred.UpdatedAt) > pendingAuthTTL {
+		return nil, ErrPendingAuthExpired
 	}
 	// Constant-time compare on the CSRF state to avoid leaking it via timing
 	// side channels. ConstantTimeCompare also returns 0 for length mismatches.
@@ -389,6 +436,19 @@ func parseScopes(raw string) []string {
 	return strings.Fields(trimmed)
 }
 
+// redactedBody bounds an upstream response body before we include it in an
+// error or log line. Oversized bodies are truncated and tagged so operators
+// can tell a body was cut. We don't attempt to strip token-shaped substrings
+// — the token/profile response bodies shouldn't carry credentials we care
+// about echoing, but the size cap keeps a misbehaving upstream from
+// flooding logs with an unbounded payload.
+func redactedBody(body []byte) string {
+	if len(body) <= maxLoggedBodyBytes {
+		return string(body)
+	}
+	return string(body[:maxLoggedBodyBytes]) + "…(truncated)"
+}
+
 // splitCodeAndState parses the "<code>#<state>" string Anthropic shows to the
 // user. Whitespace is trimmed because users routinely paste with surrounding
 // line breaks.
@@ -441,6 +501,7 @@ func (s *Service) fetchProfile(ctx context.Context, accessToken string) (*profil
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -453,7 +514,7 @@ func (s *Service) fetchProfile(ctx context.Context, accessToken string) (*profil
 		return nil, fmt.Errorf("read profile response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("profile fetch failed (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("profile fetch failed (status %d): %s", resp.StatusCode, redactedBody(body))
 	}
 
 	var profile profileResponse
@@ -497,7 +558,7 @@ func (s *Service) exchangeAuthCode(ctx context.Context, code, state, verifier st
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("token exchange failed (status %d): %s", resp.StatusCode, redactedBody(body))
 	}
 
 	var tokenResp tokenExchangeResponse
@@ -587,7 +648,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh failed (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("refresh failed (status %d): %s", resp.StatusCode, redactedBody(body))
 	}
 
 	var tokenResp tokenExchangeResponse
