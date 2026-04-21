@@ -20,6 +20,18 @@ export function isAgentConnected(
       return Boolean(agentConfig.claude_code?.ANTHROPIC_API_KEY);
     case "gemini_cli":
       return Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY);
+    case "amp":
+      return Boolean(agentConfig.amp?.AMP_API_KEY);
+    case "pi":
+      // Pi routes to other providers and reuses their keys by default.
+      return Boolean(
+        agentConfig.pi?.PI_MODEL
+          || agentConfig.pi?.PI_MODEL_CUSTOM
+          || agentConfig.claude_code?.ANTHROPIC_API_KEY
+          || agentConfig.codex?.OPENAI_API_KEY
+          || agentConfig.gemini_cli?.GEMINI_API_KEY
+          || codexAuthStatus?.status === "completed",
+      );
     default:
       return false;
   }

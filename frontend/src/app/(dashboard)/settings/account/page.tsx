@@ -132,8 +132,10 @@ export default function AccountPage() {
 
   const initialPersonalAgent = useMemo(() => {
     if (!personalCredsLoaded) return null;
-    const configured = AGENT_TYPES.find((a) =>
-      personalCreds.some((c) => c.provider === a.providerKey && c.configured),
+    const configured = AGENT_TYPES.find(
+      (a) =>
+        !a.inheritsProviderKeys &&
+        personalCreds.some((c) => c.provider === a.providerKey && c.configured),
     );
     return configured?.key ?? "codex";
   }, [personalCreds, personalCredsLoaded]);
@@ -464,7 +466,7 @@ export default function AccountPage() {
                   onValueChange={setPersonalAgentType}
                   className="grid grid-cols-3 gap-3"
                 >
-                  {AGENT_TYPES.map((agent) => {
+                  {AGENT_TYPES.filter((a) => !a.inheritsProviderKeys).map((agent) => {
                     const cred = personalCreds.find((c) => c.provider === agent.providerKey);
                     return (
                       <RadioCard

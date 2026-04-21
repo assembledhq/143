@@ -68,7 +68,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
 				"gemini --resume %s --approval-mode=yolo --output-format stream-json -p \"%s\"",
-				shellEscapeGemini(prompt.ResumeSessionID),
+				shellEscapeSingle(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
@@ -87,7 +87,7 @@ func (a *GeminiCLIAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, 
 		}
 		cmd = fmt.Sprintf(
 			"gemini -p \"$(cat '%s')\" --approval-mode=yolo --output-format stream-json",
-			shellEscapeGemini(promptPath),
+			shellEscapeSingle(promptPath),
 		)
 	}
 
@@ -537,9 +537,4 @@ func parseGeminiStreamOutput(output []byte, result *agent.AgentResult, logCh cha
 	} else if lastAssistantContent != "" {
 		result.Summary = lastAssistantContent
 	}
-}
-
-// shellEscapeGemini escapes single quotes for safe shell usage.
-func shellEscapeGemini(s string) string {
-	return strings.ReplaceAll(s, "'", "'\\''")
 }

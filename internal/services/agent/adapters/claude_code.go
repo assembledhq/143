@@ -660,20 +660,6 @@ func tryExtractConfidence(text string, result *agent.AgentResult) {
 	}
 }
 
-// shellEscapeDouble escapes characters for safe use inside double-quoted shell strings.
-// Handles backslash, double quote, dollar sign, backtick, and exclamation mark
-// (history expansion in bash, harmless in POSIX sh but escaped for safety).
-func shellEscapeDouble(s string) string {
-	r := strings.NewReplacer(
-		`\`, `\\`,
-		`"`, `\"`,
-		`$`, `\$`,
-		"`", "\\`",
-		`!`, `\!`,
-	)
-	return r.Replace(s)
-}
-
 // collectDiff runs git diff inside the sandbox to capture changes.
 // Returns an empty string (not an error) when the workspace is not a git repository,
 // which happens when no repository was configured for the issue.

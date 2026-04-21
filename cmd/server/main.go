@@ -140,7 +140,24 @@ func main() {
 	}
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
-	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec)
+	// Shared org-settings cache: the settings handler invalidates it on write,
+	// the orchestrator reads it when resolving Amp/Pi agent_config. In single-
+	// process deployments (MODE=all), the router and worker share this instance
+	// so a settings write is observed immediately. In split deployments
+	// (MODE=api + separate MODE=worker), the worker process holds its own
+	// cache that the API process can't reach — settings updates take effect on
+	// that worker only after the TTL (DefaultOrgSettingsCacheTTL) expires.
+	// That's the safety net; if you need cross-process invalidation later,
+	// wire LISTEN/NOTIFY through OrgSettingsCache.InvalidateOrg.
+	//
+	// Even in single-process mode the invalidation is *soft*: a reader racing
+	// the post-write InvalidateOrg can re-populate the cache with the
+	// pre-write value (cache miss → DB read → Set with stale row), leaving
+	// the entry stale until the next write or TTL expiry. Last-writer-wins,
+	// so no corruption — but don't rely on a strict happens-before between
+	// settings commit and next-read.
+	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
+	router, gwSrv, recycleWorker, inspectorCloser, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, orgSettingsCache)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -206,7 +223,7 @@ func main() {
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry)
+				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
 		}
 		// Refuse to start an anemic worker. Without agent services (GitHub App,
 		// Docker, sandbox health), run_agent won't register, but the worker will
@@ -342,6 +359,7 @@ func buildServices(
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
+	orgSettingsCache *agent.OrgSettingsCache,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -398,6 +416,8 @@ func buildServices(
 		models.AgentTypeClaudeCode: adapters.NewClaudeCodeAdapter(logger),
 		models.AgentTypeGeminiCLI:  adapters.NewGeminiCLIAdapter(logger),
 		models.AgentTypeCodex:      adapters.NewCodexAdapter(logger),
+		models.AgentTypeAmp:        adapters.NewAmpAdapter(logger),
+		models.AgentTypePi:         adapters.NewPiAdapter(logger),
 	}
 
 	// Orchestrator.
@@ -428,6 +448,7 @@ func buildServices(
 		Snapshots:        snapshotStore,
 		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
+		OrgSettingsCache: orgSettingsCache,
 		Logger:           logger,
 	})
 

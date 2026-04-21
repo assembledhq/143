@@ -1,6 +1,10 @@
 package models
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
 
 // Legacy PM model aliases (kept for backward compatibility).
 const (
@@ -20,6 +24,37 @@ func init() {
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
+}
+
+// Amp uses agent "modes" (not models) to select model + system prompt + tools.
+// Values map directly to amp's --mode flag.
+const (
+	AmpModeSmart = "smart"
+	AmpModeDeep  = "deep"
+	AmpModeLarge = "large"
+	AmpModeRush  = "rush"
+)
+
+var AvailableAmpModes = []string{AmpModeSmart, AmpModeDeep, AmpModeLarge, AmpModeRush}
+
+// Pi accepts provider/model patterns. Curated short list; users with niche needs
+// can override per-session via PI_MODEL_CUSTOM in agent_config. Opus 4.7 is
+// listed first because it's the current top model and doubles as the hardcoded
+// default in piStreamingConfig.BuildCmd when no PI_MODEL is set.
+const (
+	PiModelClaudeOpus47   = "anthropic/claude-opus-4-7"
+	PiModelClaudeSonnet46 = "anthropic/claude-sonnet-4-6"
+	PiModelClaudeHaiku45  = "anthropic/claude-haiku-4-5"
+	PiModelGPT54          = "openai/gpt-5.4"
+	PiModelGemini25Pro    = "google/gemini-2.5-pro"
+)
+
+var AvailablePiModels = []string{
+	PiModelClaudeOpus47,
+	PiModelClaudeSonnet46,
+	PiModelClaudeHaiku45,
+	PiModelGPT54,
+	PiModelGemini25Pro,
 }
 
 const (
@@ -105,6 +140,64 @@ func IsSupportedCodexModel(model string) bool {
 	return false
 }
 
+func IsSupportedAmpMode(mode string) bool {
+	for _, supported := range AvailableAmpModes {
+		if mode == supported {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSupportedPiModel reports whether a model is in the curated AvailablePiModels
+// list. It is strict — use it to drive UI dropdowns and to validate settings
+// writes. Pi itself accepts many more "provider/model" patterns; the permissive
+// paths live at the call sites (ValidateSettingsModels skips this check when
+// PI_MODEL_CUSTOM is set; ValidateModelForAgentType accepts any value matching
+// the "provider/model" shape for per-session overrides).
+func IsSupportedPiModel(model string) bool {
+	for _, supportedModel := range AvailablePiModels {
+		if model == supportedModel {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowedAgentConfigKeys lists the env-var keys that may be set in
+// settings.agent_config[<agent>] for agents whose agent_config is propagated
+// directly into the sandbox env (Amp, Pi). Bounds the blast radius of an org
+// admin smuggling arbitrary vars (PATH, LD_PRELOAD, NODE_OPTIONS, …) into
+// the container by way of agent_config.
+//
+// Scoped to Amp and Pi today — those are the only agent types whose
+// agent_config the orchestrator's resolveAgentEnv injects (see
+// applyAgentConfigOverrides). Other agents pull credentials from the
+// encrypted credential store, so unknown agent_config keys for them are
+// stored-but-ignored rather than security-relevant. Add an agent here when
+// that changes.
+var AllowedAgentConfigKeys = map[AgentType]map[string]struct{}{
+	AgentTypeAmp: {
+		"AMP_API_KEY": {},
+		"AMP_MODE":    {},
+	},
+	AgentTypePi: {
+		"PI_MODEL":        {},
+		"PI_MODEL_CUSTOM": {},
+	},
+}
+
+// sortedKeys returns the keys of a string-set in lexicographic order so the
+// "allowed: [...]" hint in validation errors is stable across runs.
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // ValidateModelForAgentType checks whether the given model is valid for the given agent type.
 func ValidateModelForAgentType(agentType AgentType, model string) error {
 	switch agentType {
@@ -119,6 +212,23 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 	case AgentTypeGeminiCLI:
 		if !IsSupportedGeminiCLIModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableGeminiCLIModels)
+		}
+	case AgentTypeAmp:
+		if !IsSupportedAmpMode(model) {
+			return fmt.Errorf("amp mode must be one of: %v", AvailableAmpModes)
+		}
+	case AgentTypePi:
+		// Pi proxies to many providers and accepts arbitrary "provider/model"
+		// patterns. The curated AvailablePiModels list drives UI dropdowns, but
+		// callers (session/project creation) may pass any value matching the
+		// "provider/model" shape — this mirrors the PI_MODEL_CUSTOM bypass in
+		// ValidateSettingsModels while still catching obvious typos (e.g.
+		// "claude-sonnet-4-6" missing its provider prefix).
+		if model == "" {
+			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypePi)
+		}
+		if !strings.Contains(model, "/") {
+			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeOpus47)
 		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)
@@ -136,6 +246,10 @@ func ModelEnvVarForAgentType(agentType AgentType) string {
 		return "ANTHROPIC_MODEL"
 	case AgentTypeGeminiCLI:
 		return "GEMINI_MODEL"
+	case AgentTypeAmp:
+		return "AMP_MODE"
+	case AgentTypePi:
+		return "PI_MODEL"
 	default:
 		return ""
 	}
@@ -210,7 +324,15 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	}
 
 	for agentTypeStr, envVars := range settings.AgentConfig {
-		switch AgentType(agentTypeStr) {
+		agentType := AgentType(agentTypeStr)
+		if allowed, gated := AllowedAgentConfigKeys[agentType]; gated {
+			for key := range envVars {
+				if _, ok := allowed[key]; !ok {
+					return fmt.Errorf("agent_config.%s.%s is not an allowed key (allowed: %v)", agentTypeStr, key, sortedKeys(allowed))
+				}
+			}
+		}
+		switch agentType {
 		case AgentTypeCodex:
 			model := envVars["OPENAI_MODEL"]
 			if model != "" && !IsSupportedCodexModel(model) {
@@ -225,6 +347,20 @@ func ValidateSettingsModels(settings OrgSettings) error {
 			model := envVars["GEMINI_MODEL"]
 			if model != "" && !IsSupportedGeminiCLIModel(model) {
 				return fmt.Errorf("agent_config.gemini_cli.GEMINI_MODEL must be one of: %v", AvailableGeminiCLIModels)
+			}
+		case AgentTypeAmp:
+			mode := envVars["AMP_MODE"]
+			if mode != "" && !IsSupportedAmpMode(mode) {
+				return fmt.Errorf("agent_config.amp.AMP_MODE must be one of: %v", AvailableAmpModes)
+			}
+		case AgentTypePi:
+			// Skip enum validation when PI_MODEL_CUSTOM is set; user is opting into Pi's full model catalog.
+			if envVars["PI_MODEL_CUSTOM"] != "" {
+				continue
+			}
+			model := envVars["PI_MODEL"]
+			if model != "" && !IsSupportedPiModel(model) {
+				return fmt.Errorf("agent_config.pi.PI_MODEL must be one of: %v (or set PI_MODEL_CUSTOM)", AvailablePiModels)
 			}
 		}
 	}

@@ -31,6 +31,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { AgentBadge } from "@/components/agent-badge";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, SessionListItem, User } from "@/lib/types";
@@ -141,11 +142,9 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       id: "agent_type",
       accessorKey: "agent_type",
       header: ({ column }) => <SortableHeader label="Agent" column={column} />,
-      size: 120,
+      size: 140,
       cell: ({ row }) => (
-        <span className="text-xs text-muted-foreground">
-          {row.original.agent_type.replace(/_/g, " ")}
-        </span>
+        <AgentBadge agentType={row.original.agent_type} />
       ),
     },
     {
