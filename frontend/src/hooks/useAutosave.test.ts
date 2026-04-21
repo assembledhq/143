@@ -3,7 +3,7 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
 import { toast } from "sonner";
-import { useAutosave } from "./useAutosave";
+import { useAutosave, __resetAutosaveQueuesForTests } from "./useAutosave";
 
 vi.mock("sonner", () => ({
   toast: {
@@ -45,6 +45,11 @@ describe("useAutosave", () => {
   let queryClient: QueryClient;
 
   beforeEach(() => {
+    // The autosave queue map is module-level, so leftover entries from a
+    // previous test (in-flight, pending, or lingering listeners) would bleed
+    // into this one and make "first dispatcher wins on coalesce" / eviction
+    // assertions non-deterministic. Reset before every case.
+    __resetAutosaveQueuesForTests();
     queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
     });
@@ -422,5 +427,67 @@ describe("useAutosave", () => {
     // mutation promise resolves asynchronously through the shared queue.
     await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
     expect(mutationFn).toHaveBeenCalledWith({ settings: { x: 1 } });
+  });
+
+  it("queues pending debounced payload on unmount while a mutation is in flight", async () => {
+    // Interleave: a first save is already in flight when the user types again
+    // (new debounced payload) and then navigates away, unmounting the hook.
+    // The unmount-flush must NOT drop the debounced payload — it should
+    // dispatch into the shared queue, where it's held as pending behind the
+    // in-flight mutation and drained once that resolves. This proves the
+    // module-level queue survives the component teardown.
+    let resolveFirst: (() => void) | undefined;
+    const mutationFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+
+    const { result, unmount } = renderHook(
+      () =>
+        useAutosave<{ settings: Record<string, unknown> }>({
+          queryKey: ["settings", "test-unmount-interleave"],
+          mutationFn,
+          applyOptimistic,
+          coalesce,
+          debounceMs: 200,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    // Kick off an immediate dispatch (flush fires without waiting for the
+    // debounce) so the shared queue has a genuine in-flight mutation.
+    act(() => {
+      result.current.save({ settings: { first: 1 } });
+      result.current.flush();
+    });
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
+    expect(mutationFn).toHaveBeenNthCalledWith(1, { settings: { first: 1 } });
+
+    // A second debounced save lands in the local timer — NOT yet dispatched.
+    act(() => {
+      result.current.save({ settings: { second: 2 } });
+    });
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+
+    // Unmount while the first mutation is still in flight and the debounce
+    // timer is still pending. The unmount effect must flush the pending
+    // payload into the shared queue.
+    unmount();
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+
+    // Release the in-flight mutation; the queue should drain the payload
+    // that was parked during unmount.
+    await act(async () => {
+      resolveFirst?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(2));
+    expect(mutationFn).toHaveBeenNthCalledWith(2, { settings: { second: 2 } });
   });
 });

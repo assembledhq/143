@@ -170,9 +170,15 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 // matches autosave semantics on the client, where every field mutation needs
 // to be safe against concurrent edits of unrelated fields.
 //
-// The top-level patch MUST be a JSON object. Scalars, arrays, and explicit
-// `null` are rejected rather than silently ignored — "no-op" settings PATCHes
-// are a class of bug we want to surface loudly.
+// Top-level shape is strict: the patch MUST be a JSON object. A top-level
+// scalar, array, or explicit `null` is rejected rather than silently ignored
+// — "no-op" settings PATCHes are a class of bug we want to surface loudly.
+//
+// Nested values are permissive by design: a nested `null` (e.g.
+// `{"product_context": null}`) propagates through as a real JSON `null` that
+// replaces the existing value at that key. This is how the client clears a
+// nested object — see `TestMergeSettingsJSON_NullIncomingValueReplaces`. Do
+// not confuse the two: top-level null is rejected, nested null clears.
 func mergeSettingsJSON(existing, patch json.RawMessage) (json.RawMessage, error) {
 	// Use UseNumber() on both sides so integers survive the round-trip as
 	// json.Number rather than being promoted to float64 and re-serialized.

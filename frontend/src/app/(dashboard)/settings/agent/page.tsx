@@ -474,7 +474,7 @@ export default function AgentPage() {
                   hasExistingValue={Boolean(displayValue)}
                   isSaving={isPendingSensitiveSave}
                   onSave={(value) =>
-                    sensitiveSaveMutation.mutate({
+                    sensitiveSaveMutation.mutateAsync({
                       agentKey: agent.key,
                       envVar: envVar.name,
                       value,
@@ -738,7 +738,7 @@ interface AgentConfigSensitiveFieldProps {
   placeholder: string;
   hasExistingValue: boolean;
   isSaving: boolean;
-  onSave: (value: string) => void;
+  onSave: (value: string) => Promise<unknown>;
 }
 
 // Sensitive fields own their input state — the plaintext key is never
@@ -757,6 +757,21 @@ function AgentConfigSensitiveField({
   const [showKey, setShowKey] = useState(false);
   const trimmed = value.trim();
   const canSave = trimmed.length > 0 && !isSaving;
+
+  // Only clear the input on a successful save. If the mutation rejects
+  // (network error, server validation), the typed value is preserved so
+  // the user doesn't have to retype the key.
+  const handleSave = async () => {
+    if (!canSave) return;
+    try {
+      await onSave(trimmed);
+      setValue("");
+      setShowKey(false);
+    } catch {
+      // Parent's mutation.onError surfaces the toast + captureError; we
+      // deliberately keep the input populated here.
+    }
+  };
 
   return (
     <div className="flex gap-2">
@@ -782,12 +797,7 @@ function AgentConfigSensitiveField({
       </div>
       <Button
         size="sm"
-        onClick={() => {
-          if (!canSave) return;
-          onSave(trimmed);
-          setValue("");
-          setShowKey(false);
-        }}
+        onClick={handleSave}
         disabled={!canSave}
       >
         {isSaving ? "Saving..." : "Save key"}

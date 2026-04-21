@@ -41,6 +41,10 @@ const clamp = (value: number, min: number, max: number) =>
 
 type RepoPatch = { settings: RepoSettings };
 
+// Repo settings is replaced wholesale on the server, so the latest patch
+// wins — no field-level coalesce needed.
+const coalesceReplaceLatest = <T,>(_a: T, b: T) => b;
+
 // Seed a PM object from org-level defaults. Used whenever the first edit on a
 // non-customized repo needs to be promoted to a full PM object — partial PM
 // objects fail server validation, so every entry point materializes the whole
@@ -143,9 +147,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
         data: { ...previous.data, settings: patch.settings },
       };
     },
-    // Repo settings is replaced wholesale on the server, so the latest patch
-    // wins — no field-level coalesce needed.
-    coalesce: (_a, b) => b,
+    coalesce: coalesceReplaceLatest,
   });
 
   // Helper: produce a patch that writes a new PM object. Undefined means

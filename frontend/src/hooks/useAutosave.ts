@@ -127,6 +127,13 @@ async function run(
     // NOTE: `inFlight` flips to false only after `invalidateQueries` settles.
     // Any `save()` call that races in between lands in the pending slot; the
     // follow-up dispatch below drains it.
+    //
+    // Pending drains even after an error: a pending payload represents fresh
+    // user intent (e.g. the user kept typing while the previous save was
+    // failing), not a retry of the failed vars. Suppressing it would silently
+    // drop edits the user made after the failure. Rollback already reverted
+    // the optimistic cache for the failed write, so the pending run starts
+    // from the rolled-back baseline and applies only the new intent.
     entry.inFlight = false;
     await queryClient.invalidateQueries({ queryKey });
     if (entry.hasPending) {
@@ -206,6 +213,14 @@ export function useAutosave<TVars>({
   const coalesceRef = useRef(coalesce);
   const errorMessageRef = useRef(errorMessage);
   const debounceMsRef = useRef(debounceMs);
+  // Intentional: NO dependency array. This effect must run after every
+  // commit so the refs always mirror the freshest prop/callback values a
+  // parent passed in. Adding deps (e.g. `[mutationFn, applyOptimistic, ...]`)
+  // would be equivalent in this case but invites future churn if callers
+  // pass new inline closures each render — with no deps, React just re-runs
+  // the assignment and we never miss an update. Do not "fix" this by adding
+  // a dep array.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     mutationFnRef.current = mutationFn;
     applyOptimisticRef.current = applyOptimistic;
