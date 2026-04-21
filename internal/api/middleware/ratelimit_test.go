@@ -250,6 +250,29 @@ func TestClaimRateLimit(t *testing.T) {
 		require.Contains(t, w.Body.String(), "CLAIM_RATE_LIMITED")
 	})
 
+	t.Run("ignores X-Forwarded-For so rotating it cannot bypass the IP bucket", func(t *testing.T) {
+		t.Parallel()
+		handler := ClaimRateLimit(2)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		// Same peer address; attacker cycles XFF each request.
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+			req.RemoteAddr = "10.0.4.1:1234"
+			req.Header.Set("X-Forwarded-For", fmt.Sprintf("203.0.113.%d", i+1))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+		}
+		// A fresh XFF must not reset the bucket — peer address is what counts.
+		req := httptest.NewRequest(http.MethodPost, "/claim", nil)
+		req.RemoteAddr = "10.0.4.1:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113.99")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		require.Equal(t, http.StatusTooManyRequests, w.Code)
+	})
+
 	t.Run("blocks the user across IPs once their per-user bucket empties", func(t *testing.T) {
 		t.Parallel()
 		handler := ClaimRateLimit(2)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -193,6 +193,12 @@ func (s *UserStore) LinkGitHubAccount(ctx context.Context, userID, orgID uuid.UU
 }
 
 // ListByOrg returns all users in the given organization, ordered by creation time.
+//
+// This reads the legacy users.org_id column and so only returns users whose
+// primary org is the one queried. New code should prefer ListByOrgViaMemberships,
+// which joins through organization_memberships and therefore also returns users
+// who hold a non-primary membership (e.g. someone who joined a second org via
+// ClaimInvitation). Kept for the sunset window while remaining callers migrate.
 func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
@@ -203,6 +209,30 @@ func (s *UserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Us
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("query users: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
+}
+
+// ListByOrgViaMemberships returns every user who currently holds a membership
+// in the given org, joined through organization_memberships. Each row's Role
+// is populated from the membership (not users.role) so a user who is admin in
+// their primary org but member here is reported as `member`.
+//
+// Ordered by membership created_at so the admin/member directory stays stable
+// and matches the order members joined this specific org.
+func (s *UserStore) ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
+	query := `
+		SELECT u.id, u.org_id, u.email, u.name, m.role,
+		       u.github_id, u.github_login, u.avatar_url,
+		       u.password_hash, u.google_id, u.created_at
+		FROM users u
+		JOIN organization_memberships m ON m.user_id = u.id
+		WHERE m.org_id = @org_id
+		ORDER BY m.created_at ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query users via memberships: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.User])
 }

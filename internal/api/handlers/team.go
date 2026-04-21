@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -29,7 +28,7 @@ import (
 // Membership-scoped operations (role updates, removal, admin counts) live on
 // teamMembershipStore instead — users own identity, memberships own access.
 type teamUserStore interface {
-	ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
+	ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
 	GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models.User, error)
 	GetByEmail(ctx context.Context, email string) (models.User, error)
 	IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
@@ -80,8 +79,6 @@ type teamIntegrationStore interface {
 type teamGitHubService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
-
-var validRoles = []string{"admin", "member", "viewer"}
 
 // TeamHandler serves the /api/v1/team/* endpoints.
 type TeamHandler struct {
@@ -136,11 +133,15 @@ func NewTeamHandler(
 	}
 }
 
-// ListMembers returns all users in the org.
+// ListMembers returns every user holding a membership in the active org,
+// regardless of whether the org is their legacy primary. The directory is
+// keyed on organization_memberships (joined with users for display fields)
+// rather than users.org_id, so multi-org members (e.g. someone who joined via
+// ClaimInvitation) appear exactly where the admin expects to manage them.
 func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	users, err := h.users.ListByOrg(r.Context(), orgID)
+	users, err := h.users.ListByOrgViaMemberships(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list members", err)
 		return
@@ -170,7 +171,7 @@ func (h *TeamHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !slices.Contains(validRoles, body.Role) {
+	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}
@@ -332,9 +333,9 @@ func (h *TeamHandler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Role == "" {
-		body.Role = "member"
+		body.Role = models.RoleMember
 	}
-	if !slices.Contains(validRoles, body.Role) {
+	if !models.IsValidRole(body.Role) {
 		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "invalid role: must be admin, member, or viewer")
 		return
 	}

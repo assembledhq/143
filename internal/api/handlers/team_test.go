@@ -23,15 +23,15 @@ import (
 // --- mock stores ---
 
 type mockTeamUserStore struct {
-	listByOrgFn                func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
+	listByOrgViaMembershipsFn  func(ctx context.Context, orgID uuid.UUID) ([]models.User, error)
 	getByIDGlobalFn            func(ctx context.Context, userID uuid.UUID) (models.User, error)
 	getByEmailFn               func(ctx context.Context, email string) (models.User, error)
 	isGitHubLoginMemberOfOrgFn func(ctx context.Context, githubLogin string, orgID uuid.UUID) (bool, error)
 }
 
-func (m *mockTeamUserStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
-	if m.listByOrgFn != nil {
-		return m.listByOrgFn(ctx, orgID)
+func (m *mockTeamUserStore) ListByOrgViaMemberships(ctx context.Context, orgID uuid.UUID) ([]models.User, error) {
+	if m.listByOrgViaMembershipsFn != nil {
+		return m.listByOrgViaMembershipsFn(ctx, orgID)
 	}
 	return nil, nil
 }
@@ -202,7 +202,7 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "returns members",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
 					return []models.User{
 						{ID: uuid.New(), Email: "a@b.com", Name: "Alice", Role: "admin"},
 						{ID: uuid.New(), Email: "c@d.com", Name: "Bob", Role: "member"},
@@ -215,7 +215,7 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "returns empty array when no members",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
 					return nil, nil
 				},
 			},
@@ -225,7 +225,7 @@ func TestTeamHandler_ListMembers(t *testing.T) {
 		{
 			name: "store error returns 500",
 			users: &mockTeamUserStore{
-				listByOrgFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
+				listByOrgViaMembershipsFn: func(_ context.Context, _ uuid.UUID) ([]models.User, error) {
 					return nil, fmt.Errorf("db error")
 				},
 			},

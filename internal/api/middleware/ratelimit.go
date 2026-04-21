@@ -3,6 +3,7 @@ package middleware
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,7 +207,15 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractIP(r)
+			// Deliberately use r.RemoteAddr and ignore X-Forwarded-For here.
+			// The general-purpose extractIP trusts XFF because it simplifies
+			// bucketing behind a reverse proxy, but XFF is attacker-controlled
+			// — rotating the header trivially bypasses an IP bucket. On the
+			// invitation claim path that bucket is load-bearing anti-brute-
+			// force, so we fall back to the TCP peer address and accept that
+			// NAT gateways share a bucket. The per-user bucket below still
+			// prevents single-user enumeration across proxied deployments.
+			ip := remoteAddrIP(r)
 			if !getBucket(ipBuckets, ip).allow() {
 				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("invitation claim rate limit exceeded (IP)")
 				w.Header().Set("Retry-After", "60")
@@ -228,21 +237,26 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 	}
 }
 
+// extractIP returns the client's IP for rate-limit bucketing. Prefers the
+// first entry in X-Forwarded-For when present (reverse-proxy deployments) and
+// otherwise falls back to the TCP peer address. The XFF path trusts its input
+// — callers on security-critical paths (e.g. ClaimRateLimit) should use
+// remoteAddrIP instead so an attacker cannot rotate the header to sidestep
+// the IP bucket.
 func extractIP(r *http.Request) string {
-	// Check X-Forwarded-For header first (for reverse proxy setups)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Take the first IP (client IP)
-		if idx := len(xff); idx > 0 {
-			for i, c := range xff {
-				if c == ',' {
-					return xff[:i]
-				}
-				_ = i // suppress unused variable
-			}
-			return xff
+		if comma := strings.IndexByte(xff, ','); comma >= 0 {
+			return strings.TrimSpace(xff[:comma])
 		}
+		return strings.TrimSpace(xff)
 	}
-	// Fall back to RemoteAddr
+	return remoteAddrIP(r)
+}
+
+// remoteAddrIP returns the TCP peer IP (host portion of r.RemoteAddr) without
+// consulting any request-controlled header. Use this for rate-limit buckets
+// that guard against abuse; extractIP is fine for best-effort shaping.
+func remoteAddrIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

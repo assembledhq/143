@@ -39,8 +39,12 @@ BEGIN
     WHERE org_id = target_org_id AND role = 'admin';
 
     IF admin_count = 0 THEN
+        -- CONSTRAINT tag lets the Go layer identify trigger-raised violations
+        -- precisely (see mapLastAdminViolation) rather than matching every
+        -- 23514 SQLSTATE as last-admin, which could catch unrelated check
+        -- constraints added later.
         RAISE EXCEPTION 'organization % would be left with no admins', target_org_id
-            USING ERRCODE = 'check_violation';
+            USING ERRCODE = 'check_violation', CONSTRAINT = 'enforce_last_admin';
     END IF;
 
     RETURN NULL;

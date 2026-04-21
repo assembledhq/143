@@ -7,9 +7,34 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/assembledhq/143/internal/models"
 )
+
+// pgErrCheckViolation is the SQLSTATE raised by the enforce_last_admin
+// constraint trigger (migration 000079) when a membership delete or role
+// update would leave the org with no admins. Normal paths go through the
+// *Guarded variants and catch the condition in Go, but any non-guarded write
+// can still trip the trigger — we translate that into ErrLastAdmin so the
+// handler layer reports the invariant consistently regardless of which layer
+// actually caught it.
+const pgErrCheckViolation = "23514"
+
+// mapLastAdminViolation returns ErrLastAdmin if err is a PgError raised by the
+// enforce_last_admin trigger, otherwise err unchanged. Callers use this to
+// funnel trigger-raised violations into the same sentinel the Guarded paths
+// return via in-tx lock-based checking.
+func mapLastAdminViolation(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgErrCheckViolation && pgErr.ConstraintName == "enforce_last_admin" {
+		return ErrLastAdmin
+	}
+	return err
+}
 
 // ErrLastAdmin is returned by guarded role/removal operations when the
 // requested change would leave the organization with no admin members.
@@ -116,7 +141,10 @@ func (s *OrganizationMembershipStore) GrantAtLeast(ctx context.Context, userID, 
 
 // UpdateRole changes the user's role within a specific org. Returns
 // pgx.ErrNoRows if no membership exists for that (user, org) pair so callers
-// can surface a 404.
+// can surface a 404. If the change would demote the last admin the
+// enforce_last_admin trigger rejects the update; that is translated to
+// ErrLastAdmin so callers get the same sentinel they'd see from
+// UpdateRoleGuarded.
 func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, orgID uuid.UUID, role string) error {
 	if !models.IsValidRole(role) {
 		return fmt.Errorf("invalid role %q", role)
@@ -131,7 +159,7 @@ func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, or
 		"role":    role,
 	})
 	if err != nil {
-		return err
+		return mapLastAdminViolation(err)
 	}
 	if ct.RowsAffected() == 0 {
 		return pgx.ErrNoRows
@@ -141,7 +169,9 @@ func (s *OrganizationMembershipStore) UpdateRole(ctx context.Context, userID, or
 
 // Remove deletes the membership row for the (user, org) pair. The user row
 // itself is preserved because it may still hold memberships in other orgs.
-// Returns pgx.ErrNoRows if no such membership exists.
+// Returns pgx.ErrNoRows if no such membership exists, or ErrLastAdmin if the
+// enforce_last_admin trigger rejects the delete (non-guarded callers should
+// prefer RemoveGuarded for a readable pre-check, but the sentinel is the same).
 //
 // Remove also clears org-scoped references to the user so removing a member
 // cannot leave orphaned rows that mention a no-longer-member: pending
@@ -192,7 +222,7 @@ func (s *OrganizationMembershipStore) Remove(ctx context.Context, userID, orgID 
 		"org_id":  orgID,
 	}).Scan(&deleted)
 	if err != nil {
-		return err
+		return mapLastAdminViolation(err)
 	}
 	if !deleted {
 		return pgx.ErrNoRows
@@ -332,8 +362,12 @@ func (s *OrganizationMembershipStore) UpdateRoleGuarded(ctx context.Context, use
 		}
 	}
 
+	// Commit can still surface the enforce_last_admin trigger: it is DEFERRABLE
+	// INITIALLY DEFERRED so the check runs at COMMIT. The in-tx lockAdminCount
+	// guard should make this unreachable, but mapping keeps the sentinel
+	// consistent if anything ever slips past the application check.
 	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit tx: %w", err)
+		return "", mapLastAdminViolation(fmt.Errorf("commit tx: %w", err))
 	}
 	return prevRole, nil
 }
@@ -383,8 +417,11 @@ func (s *OrganizationMembershipStore) RemoveGuarded(ctx context.Context, userID,
 		return "", err
 	}
 
+	// See UpdateRoleGuarded for why commit errors are mapped: the trigger is
+	// DEFERRED and fires at COMMIT, so a last-admin violation that the in-tx
+	// check somehow misses would otherwise surface here as a raw PgError.
 	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("commit tx: %w", err)
+		return "", mapLastAdminViolation(fmt.Errorf("commit tx: %w", err))
 	}
 	return prevRole, nil
 }

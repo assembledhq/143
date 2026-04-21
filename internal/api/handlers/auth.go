@@ -128,8 +128,17 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for existing user
+	// Check for existing user. A 409 here would strand an invited existing
+	// user — they can't create a new account, but Register has no way to
+	// authenticate them either. Surface a distinct code so the frontend can
+	// route them to the sign-in + claim flow instead of showing the generic
+	// "account already exists" error.
 	if _, err := h.userStore.GetByEmail(r.Context(), body.Email); err == nil {
+		if body.Invitation != "" {
+			writeError(w, r, http.StatusConflict, "EMAIL_EXISTS_USE_LOGIN",
+				"An account with this email already exists. Sign in and reopen the invitation link to join this organization.")
+			return
+		}
 		writeError(w, r, http.StatusConflict, "EMAIL_EXISTS", "An account with this email already exists.")
 		return
 	}
@@ -1066,8 +1075,18 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 	return inv, inv.OrgID, inv.Role, nil
 }
 
-// emitAuthEvent emits an audit log entry for an authentication event.
-// It works even before org context middleware runs (e.g., during registration/login).
+// emitAuthEvent emits an audit log entry for an authentication event. It
+// works even before org context middleware runs (e.g., during registration/
+// login).
+//
+// Attribution note: audit events are written against user.OrgID — the user's
+// legacy primary org. For login events that's the best we can do since the
+// active membership isn't resolved yet (the X-Active-Org-ID middleware sits
+// downstream of the auth handlers). For register/invite-accept we set
+// user.OrgID to the joined org *before* calling emitAuthEvent, so the audit
+// row lands in the org the user just entered. Both flows produce a stable
+// "this event belongs to exactly one org" invariant for downstream auditing
+// without needing to look at memberships.
 func (h *AuthHandler) emitAuthEvent(r *http.Request, user *models.User, action models.AuditAction) {
 	if h.audit == nil || user == nil {
 		return
