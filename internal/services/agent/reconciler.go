@@ -11,9 +11,10 @@ import (
 )
 
 // OrphanedContainerLister is the narrow subset of the session store needed
-// by the reconciler.
+// by the reconciler. ListOrphanedContainers is keyset-paginated by session id
+// (pass uuid.Nil as the cursor for the first page).
 type OrphanedContainerLister interface {
-	ListOrphanedContainers(ctx context.Context) ([]models.Session, error)
+	ListOrphanedContainers(ctx context.Context, afterID uuid.UUID) ([]models.Session, error)
 	ClearContainerID(ctx context.Context, orgID, sessionID uuid.UUID) error
 }
 
@@ -38,31 +39,52 @@ func ReconcileOrphanedContainers(ctx context.Context, store OrphanedContainerLis
 
 	const maxBatches = 20 // 20 * 100 = 2000 orphans, far more than we'd ever see
 	var totalDestroyed, totalCleared, totalSkipped int
+	var cursor uuid.UUID // keyset cursor; advances past rows we couldn't clear
 
 	for batch := 0; batch < maxBatches; batch++ {
-		sessions, err := store.ListOrphanedContainers(ctx)
+		sessions, err := store.ListOrphanedContainers(ctx, cursor)
 		if err != nil {
 			return fmt.Errorf("list orphaned containers: %w", err)
 		}
 		if len(sessions) == 0 {
 			break
 		}
+		// Advance the cursor to the last row we saw before processing, so
+		// the next batch skips past this page regardless of whether we
+		// successfully cleared each row. Without this, a persistently
+		// transient inspect or destroy failure on the same row would cause
+		// us to re-read the same page every iteration.
+		cursor = sessions[len(sessions)-1].ID
 
 		for _, s := range sessions {
 			if s.ContainerID == nil || *s.ContainerID == "" {
 				continue
 			}
 			sb := &Sandbox{ID: *s.ContainerID, Provider: "docker"}
-			if err := provider.Destroy(ctx, sb); err != nil {
-				// Container may already be gone (common case: Docker pruned on
-				// host restart). Log at info, not error — this is expected.
-				logger.Info().Err(err).
+			// Probe first so we can distinguish "container is gone; safe to
+			// clear the row" from "lookup failed transiently; leave it for
+			// the next startup". Without this probe a transient error from
+			// Destroy would cause us to clear container_id and permanently
+			// forget a container that may still be alive.
+			alive, aliveErr := provider.IsAlive(ctx, sb)
+			if aliveErr != nil {
+				logger.Warn().Err(aliveErr).
 					Str("session_id", s.ID.String()).
 					Str("container_id", *s.ContainerID).
-					Msg("reconciler: destroy failed; clearing container_id anyway")
-				totalSkipped++
-			} else {
+					Msg("reconciler: liveness check failed; leaving orphan row for next startup")
+				continue
+			}
+			if alive {
+				if err := provider.Destroy(ctx, sb); err != nil {
+					logger.Warn().Err(err).
+						Str("session_id", s.ID.String()).
+						Str("container_id", *s.ContainerID).
+						Msg("reconciler: destroy failed on live container; leaving orphan row for next startup")
+					continue
+				}
 				totalDestroyed++
+			} else {
+				totalSkipped++
 			}
 
 			if err := store.ClearContainerID(ctx, s.OrgID, s.ID); err != nil {

@@ -167,14 +167,40 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// fall through to hydrate/expired instead of attaching to a dead ID.
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == string(models.SandboxStateRunning) {
-		return &agent.Sandbox{
+		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
 			WorkDir:   "/workspace",
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",
-		}, "", nil
+		}
+		// Verify the container actually exists on the host. A row can drift
+		// from reality when Docker is pruned out-of-band or a worker died
+		// before the hold was released; attaching to a zombie ID would then
+		// fail deeper in the preview start path with a confusing error.
+		// A definitive "not found" falls through to hydrate; a transient
+		// inspect error also falls through rather than attaching blindly
+		// (hydrate will recreate the container cleanly).
+		if h.sandboxProvider != nil {
+			alive, inspectErr := h.sandboxProvider.IsAlive(ctx, candidate)
+			if inspectErr != nil {
+				h.logger.Warn().Err(inspectErr).
+					Str("session_id", session.ID.String()).
+					Str("container_id", candidate.ID).
+					Msg("preview reuse: liveness check failed; falling through to hydrate")
+			} else if alive {
+				return candidate, "", nil
+			} else {
+				h.logger.Info().
+					Str("session_id", session.ID.String()).
+					Str("container_id", candidate.ID).
+					Msg("preview reuse: recorded container no longer exists; falling through to hydrate")
+			}
+		} else {
+			// No provider wired (e.g., cold handler): trust the row.
+			return candidate, "", nil
+		}
 	}
 
 	// No live container. Check whether we can hydrate one from a snapshot.

@@ -849,24 +849,29 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 // containers that leaked from a crashed server — the reconciler destroys the
 // container (best-effort) and then calls ClearContainerID.
 //
-// Returns at most 100 rows per call; the reconciler loops until it gets an
-// empty slice so a backlog after a long outage doesn't block startup.
+// Returns at most 100 rows per call, keyset-paginated by session id > afterID
+// and ordered by id ASC. The reconciler passes the last seen id as a cursor
+// so that rows it can't clear (e.g. transient destroy/inspect failures)
+// don't cause it to re-read the same 100 rows forever — it simply moves past
+// them and they'll be picked up again on the next startup.
 // lint:allow-no-orgid reason="startup reconciler scans across all orgs by design"
-func (s *SessionStore) ListOrphanedContainers(ctx context.Context) ([]models.Session, error) {
+func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
 		WHERE container_id IS NOT NULL
 		  AND turn_holding_container = FALSE
+		  AND id > @after_id
 		  AND NOT EXISTS (
 		    SELECT 1 FROM preview_instances p
 		    WHERE p.session_id = sessions.id
 		      AND p.org_id = sessions.org_id
 		      AND p.preview_holding_container = TRUE
 		  )
+		ORDER BY id ASC
 		LIMIT 100`
 
-	rows, err := s.db.Query(ctx, query)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"after_id": afterID})
 	if err != nil {
 		return nil, fmt.Errorf("list orphaned containers: %w", err)
 	}

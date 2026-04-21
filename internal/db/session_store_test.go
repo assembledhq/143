@@ -1179,13 +1179,14 @@ func TestSessionStore_ListOrphanedContainers(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	now := time.Now()
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND turn_holding_container = FALSE`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND turn_holding_container = FALSE\s+AND id > @after_id`).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
 				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...),
 		)
 
-	sessions, err := store.ListOrphanedContainers(context.Background())
+	sessions, err := store.ListOrphanedContainers(context.Background(), uuid.Nil)
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1200,9 +1201,10 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	_, err = store.ListOrphanedContainers(context.Background())
+	_, err = store.ListOrphanedContainers(context.Background(), uuid.Nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list orphaned containers")
 }

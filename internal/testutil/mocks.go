@@ -25,6 +25,7 @@ type MockSandboxProvider struct {
 	ConnInfoFn   func(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error)
 	SnapshotFn   func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error)
 	RestoreFn    func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error
+	IsAliveFn    func(ctx context.Context, sb *agent.Sandbox) (bool, error)
 
 	Files     map[string][]byte
 	ExecCalls []string
@@ -115,6 +116,13 @@ func (m *MockSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, re
 		return m.RestoreFn(ctx, sb, reader)
 	}
 	return nil
+}
+
+func (m *MockSandboxProvider) IsAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	if m.IsAliveFn != nil {
+		return m.IsAliveFn(ctx, sb)
+	}
+	return true, nil
 }
 
 func (m *MockSandboxProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
