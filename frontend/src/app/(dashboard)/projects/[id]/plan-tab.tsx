@@ -218,7 +218,7 @@ export function SpecsSection({
                 {isEditing ? (
                   <Textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} rows={16} className="font-mono text-xs" />
                 ) : (
-                  <pre className="whitespace-pre-wrap text-xs bg-muted/30 rounded-md p-4 font-mono">
+                  <pre className="whitespace-pre-wrap break-words text-xs bg-muted/30 rounded-md p-4 font-mono max-w-full">
                     {spec.content || "(empty)"}
                   </pre>
                 )}
