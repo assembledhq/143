@@ -14,7 +14,7 @@ import (
 )
 
 // mapLastAdminViolation returns ErrLastAdmin if err is a PgError raised by the
-// enforce_last_admin trigger (migration 000080), otherwise err unchanged. The
+// enforce_last_admin trigger (migration 000082), otherwise err unchanged. The
 // *Guarded variants catch the condition in Go with in-tx admin-row locks, but
 // any non-guarded write can still trip the trigger at COMMIT time since it is
 // DEFERRABLE INITIALLY DEFERRED; funnelling both paths through this mapper
