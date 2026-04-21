@@ -41,11 +41,6 @@ export function useDebouncedTextField({
   const [lastSent, setLastSent] = useState(serverValue);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep the latest onCommit in a ref so the returned callbacks stay stable
-  // across renders without forcing consumers to memoize their handlers.
-  const onCommitRef = useRef(onCommit);
-  onCommitRef.current = onCommit;
-
   if (serverValue !== trackedServer) {
     setTrackedServer(serverValue);
     if (serverValue !== lastSent) {
@@ -63,7 +58,7 @@ export function useDebouncedTextField({
   const commit = (value: string) => {
     if (value === lastSent) return;
     setLastSent(value);
-    onCommitRef.current(value);
+    onCommit(value);
   };
 
   const onChange = (next: string) => {
