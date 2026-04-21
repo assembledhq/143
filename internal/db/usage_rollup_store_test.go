@@ -350,7 +350,9 @@ func TestGetDailySessionCounts_Capacity(t *testing.T) {
 	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("WITH days AS").
+	// Regression guard (same as GetBreakdown capacity test): format() must use
+	// '%scpu_%smb' after casting, not '%0.0fcpu_%smb'.
+	mock.ExpectQuery(`format\('%scpu_%smb', round\(e\.cpu_limit\)::int, e\.memory_limit_mb\)`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "start": start, "end": end, "tz": "UTC"}).
 		WillReturnRows(pgxmock.NewRows([]string{"local_date", "user_email", "capacity_tier", "sessions"}).
 			AddRow("2026-04-01", "", "2cpu_4096mb", 2))
@@ -773,7 +775,11 @@ func TestGetBreakdown_CapacityDimension(t *testing.T) {
 		"total_container_minutes", "total_sessions", "total_container_starts",
 		"peak_concurrent", "total_input_tokens", "total_output_tokens", "total_llm_cost_usd",
 	}
-	mock.ExpectQuery("WITH session_counts").
+	// Regression guard: Postgres format() only accepts %s/%I/%L specifiers, so
+	// the capacity_tier CTE must use '%scpu_%smb' (not '%0.0fcpu_%smb'). This
+	// regex only matches the fixed form; if someone reintroduces %f the test
+	// will fail with an unexpected-query error from pgxmock.
+	mock.ExpectQuery(`format\('%scpu_%smb', round\(e\.cpu_limit\)::int, e\.memory_limit_mb\)`).
 		WithArgs(args).
 		WillReturnRows(pgxmock.NewRows(cols).
 			AddRow("2cpu_4096mb", "2cpu_4096mb", 100.0, 5, 5, 2, int64(2000), int64(1000), 1.0))

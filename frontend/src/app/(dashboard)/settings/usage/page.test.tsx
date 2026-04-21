@@ -12,6 +12,7 @@ import {
   formatNumber,
   getDateRangePreset,
   groupByLocalDay,
+  fillMissingDays,
   formatDayLabel,
   formatDateForApi,
   nextDayIso,
@@ -251,6 +252,48 @@ describe('groupByLocalDay', () => {
     const result = groupByLocalDay(buckets);
     const totalCost = result.reduce((s, d) => s + d.total_llm_cost_usd, 0);
     expect(totalCost).toBeCloseTo(4.0);
+  });
+});
+
+describe('fillMissingDays', () => {
+  // Use midday UTC so local day matches across timezones up to UTC-10.
+  const start = '2026-04-01T12:00:00Z';
+  const end = '2026-04-03T12:00:00Z';
+
+  it('returns a zero-filled day for every day in the inclusive range', () => {
+    const result = fillMissingDays([], start, end);
+    expect(result.map((d) => d.day)).toEqual([
+      '2026-04-01',
+      '2026-04-02',
+      '2026-04-03',
+    ]);
+    for (const d of result) {
+      expect(d.total_container_minutes).toBe(0);
+      expect(d.total_sessions).toBe(0);
+      expect(d.total_input_tokens).toBe(0);
+    }
+  });
+
+  it('preserves existing days and zero-fills the gaps', () => {
+    const existing = groupByLocalDay([
+      makeBucket({
+        hour_utc: '2026-04-02T12:00:00Z',
+        total_container_minutes: 45,
+        total_sessions: 2,
+      }),
+    ]);
+    const result = fillMissingDays(existing, start, end);
+    expect(result).toHaveLength(3);
+    expect(result[0].total_container_minutes).toBe(0);
+    expect(result[1].total_container_minutes).toBe(45);
+    expect(result[1].total_sessions).toBe(2);
+    expect(result[2].total_container_minutes).toBe(0);
+  });
+
+  it('returns a single day when start and end fall on the same day', () => {
+    const result = fillMissingDays([], start, start);
+    expect(result).toHaveLength(1);
+    expect(result[0].day).toBe('2026-04-01');
   });
 });
 
