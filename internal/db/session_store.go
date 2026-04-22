@@ -27,6 +27,7 @@ func NewSessionStore(db DBTX) *SessionStore {
 	return &SessionStore{db: db}
 }
 
+// Begin starts a transaction on the underlying session store.
 // lint:allow-no-orgid reason="transaction helper only; scoped methods still enforce org_id individually"
 func (s *SessionStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	txStarter, ok := s.db.(TxStarter)

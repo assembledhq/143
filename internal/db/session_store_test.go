@@ -9,6 +9,8 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -502,6 +504,43 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+type noTxDB struct{}
+
+func (noTxDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (noTxDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unused")
+}
+func (noTxDB) QueryRow(context.Context, string, ...any) pgx.Row       { return nil }
+func (noTxDB) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+
+func TestSessionStore_Begin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("starts transaction when supported", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+		tx, err := NewSessionStore(mock).Begin(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, tx)
+		require.NoError(t, tx.Rollback(context.Background()))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when transactions unsupported", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewSessionStore(noTxDB{}).Begin(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not support transactions")
+	})
 }
 
 func TestSessionStore_UpdatePMPlanID(t *testing.T) {

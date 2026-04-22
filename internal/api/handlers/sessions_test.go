@@ -2465,6 +2465,75 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedBody: "NOT_RESUMABLE",
 		},
 		{
+			name: "returns error when transaction begin fails",
+			body: `{"message":"Please continue"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectBegin().WillReturnError(fmt.Errorf("cannot begin tx"))
+			},
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "TX_BEGIN_FAILED",
+		},
+		{
+			name: "logs rollback error when transaction rollback fails",
+			body: `{"message":"More work"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 0, now, "none", nil,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectRollback().WillReturnError(fmt.Errorf("rollback failed"))
+			},
+			expectedCode: http.StatusConflict,
+			expectedBody: "NOT_RESUMABLE",
+		},
+		{
 			name: "rejects message to completed session with destroyed sandbox snapshot",
 			body: `{"message":"Continue please"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
@@ -2600,6 +2669,62 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedBody: "Continue working on this",
 		},
 		{
+			name: "returns error when message creation fails in transaction",
+			body: `{"message":"Please continue"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("insert failed"))
+				mock.ExpectRollback()
+			},
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "CREATE_FAILED",
+		},
+		{
 			name: "sends message to awaiting input session via ClaimForResume",
 			body: `{"message":"Here is the clarification"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
@@ -2662,7 +2787,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							"blocks_phase", "answer_text", "answered_by", "answered_at", "status", "created_at",
 						}).AddRow(
 							uuid.New(), sessionID, orgID, "Which fix?", nil, nil,
-							nil, &answer, &userID, &now, "answered", now,
+							stringPtr("implementation"), &answer, &userID, &now, "answered", now,
 						),
 					)
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -2675,6 +2800,68 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			},
 			expectedCode: http.StatusCreated,
 			expectedBody: "Here is the clarification",
+		},
+		{
+			name: "returns error when awaiting input answer update fails",
+			body: `{"message":"Here is the clarification"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("UPDATE session_questions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("update failed"))
+				mock.ExpectRollback()
+			},
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "ANSWER_FAILED",
 		},
 		{
 			name: "sends message to needs human guidance session via ClaimForResume",
@@ -2894,6 +3081,66 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			},
 			expectedCode: http.StatusInternalServerError,
 			expectedBody: "ENQUEUE_FAILED",
+		},
+		{
+			name: "returns error when commit fails",
+			body: `{"message":"Please continue"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectCommit().WillReturnError(fmt.Errorf("commit failed"))
+				mock.ExpectRollback()
+			},
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "TX_COMMIT_FAILED",
 		},
 	}
 
