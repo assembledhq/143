@@ -232,11 +232,11 @@ describe("ChatTimeline", () => {
     // Click thumbnail to open lightbox.
     await userEvent.click(screen.getByAltText("Attached image"));
     // Lightbox shows a larger image with close button.
-    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close image preview" })).toBeInTheDocument();
 
     // Close via button.
-    await userEvent.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Close image preview" }));
+    expect(screen.queryByRole("button", { name: "Close image preview" })).not.toBeInTheDocument();
   });
 
   it("renders attachments on assistant messages", () => {

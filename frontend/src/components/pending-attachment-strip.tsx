@@ -77,14 +77,18 @@ function AttachmentImageTile({
             />
           </Button>
         </HoverCardTrigger>
-        <HoverCardContent side="top" align="start">
+        <HoverCardContent
+          side="top"
+          align="center"
+          className="w-auto max-w-[min(72vw,58rem)] border-border/80 bg-popover/95 p-2 shadow-xl backdrop-blur-sm"
+        >
           <Image
             src={url}
             alt={`Preview of ${fileName}`}
             width={1200}
             height={900}
             unoptimized
-            className="max-h-80 max-w-80 rounded-md object-contain"
+            className="max-h-[70vh] max-w-[min(70vw,56rem)] rounded-lg object-contain"
           />
         </HoverCardContent>
       </HoverCard>
