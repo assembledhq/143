@@ -19,6 +19,7 @@ const (
 	ProviderOpenAIChatGPT ProviderName = "openai_chatgpt"
 	ProviderOpenRouter    ProviderName = "openrouter"
 	ProviderGitHubApp     ProviderName = "github_app"
+	ProviderGitHubAppUser ProviderName = "github_app_user"
 	ProviderGitHubOAuth   ProviderName = "github_oauth"
 	ProviderSentry        ProviderName = "sentry"
 	ProviderLinear        ProviderName = "linear"
@@ -29,7 +30,7 @@ const (
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
 	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenAIChatGPT, ProviderOpenRouter,
-	ProviderGitHubApp, ProviderGitHubOAuth,
+	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
 }
 
@@ -161,6 +162,14 @@ type GitHubOAuthConfig struct {
 	Scope        string `json:"scope,omitempty"`
 }
 
+type GitHubAppUserConfig struct {
+	AccessToken           string    `json:"access_token"`  // #nosec G117 -- JSON config field
+	RefreshToken          string    `json:"refresh_token"` // #nosec G117 -- JSON config field
+	TokenType             string    `json:"token_type,omitempty"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	RefreshTokenExpiresAt time.Time `json:"refresh_token_expires_at"`
+}
+
 type SentryConfig struct {
 	WebhookSecret string `json:"webhook_secret,omitempty"`
 	AccessToken   string `json:"access_token,omitempty"`  // #nosec G117 -- JSON config field
@@ -218,6 +227,27 @@ func (c OpenAIChatGPTConfig) NeedsRefresh(window time.Duration) bool {
 	return time.Now().Add(window).After(c.ExpiresAt)
 }
 
+// IsExpired returns true if the access token has expired.
+func (c GitHubAppUserConfig) IsExpired() bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().After(c.ExpiresAt)
+}
+
+// NeedsRefresh returns true if the access token will expire within the given window.
+func (c GitHubAppUserConfig) NeedsRefresh(window time.Duration) bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().Add(window).After(c.ExpiresAt)
+}
+
+// RefreshTokenExpired returns true if the refresh token is expired.
+func (c GitHubAppUserConfig) RefreshTokenExpired() bool {
+	return !c.RefreshTokenExpiresAt.IsZero() && time.Now().After(c.RefreshTokenExpiresAt)
+}
+
 // --- Provider() implementations ---
 
 func (c AnthropicConfig) Provider() ProviderName     { return ProviderAnthropic }
@@ -225,6 +255,7 @@ func (c OpenAIConfig) Provider() ProviderName        { return ProviderOpenAI }
 func (c GeminiConfig) Provider() ProviderName        { return ProviderGemini }
 func (c OpenRouterConfig) Provider() ProviderName    { return ProviderOpenRouter }
 func (c GitHubAppConfig) Provider() ProviderName     { return ProviderGitHubApp }
+func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppUser }
 func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
@@ -303,6 +334,13 @@ func (c GitHubOAuthConfig) Validate() error {
 	}
 	if c.ClientSecret == "" {
 		return errors.New("client_secret is required")
+	}
+	return nil
+}
+
+func (c GitHubAppUserConfig) Validate() error {
+	if c.AccessToken == "" {
+		return errors.New("access_token is required")
 	}
 	return nil
 }
@@ -399,6 +437,14 @@ func (c GitHubAppConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c GitHubAppUserConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderGitHubAppUser,
+		Configured: true,
+		MaskedKey:  MaskKey(c.AccessToken),
+	}
+}
+
 func (c GitHubOAuthConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:   ProviderGitHubOAuth,
@@ -481,6 +527,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg GitHubAppConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("invalid github_app config: %w", err)
+		}
+		return cfg, nil
+	case ProviderGitHubAppUser:
+		var cfg GitHubAppUserConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid github_app_user config: %w", err)
 		}
 		return cfg, nil
 	case ProviderGitHubOAuth:

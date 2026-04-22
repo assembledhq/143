@@ -971,9 +971,10 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
-			Draft     *bool  `json:"draft,omitempty"`
+			SessionID  string `json:"session_id"`
+			OrgID      string `json:"org_id"`
+			Draft      *bool  `json:"draft,omitempty"`
+			AuthorMode string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -1005,6 +1006,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		var params []ghservice.CreatePRParams
 		if input.Draft != nil {
 			params = append(params, ghservice.CreatePRParams{Draft: input.Draft})
+		}
+		if input.AuthorMode != "" {
+			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
 		}
 
 		_, createErr := services.PR.CreatePR(ctx, &run, params...)
