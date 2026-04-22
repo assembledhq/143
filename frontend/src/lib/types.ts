@@ -230,8 +230,19 @@ export interface SessionMessage {
   role: 'user' | 'assistant';
   content: string;
   attachments?: string[];
+  references?: SessionInputReference[];
   token_usage?: Record<string, unknown>;
   created_at: string;
+}
+
+export type SessionInputReferenceKind = "file" | "directory" | "app" | "plugin";
+
+export interface SessionInputReference {
+  kind: SessionInputReferenceKind;
+  token?: string;
+  path?: string;
+  id?: string;
+  display: string;
 }
 
 export interface SessionQuestion {

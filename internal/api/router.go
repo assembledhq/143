@@ -148,6 +148,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
+	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -492,6 +493,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 			r.Get("/api/v1/repositories/summary", repoHandler.Summary)
 			r.Get("/api/v1/repositories/{id}", repoHandler.Get)
 			r.Get("/api/v1/repositories/{id}/branches", repoHandler.ListBranches)
+			r.Get("/api/v1/session-composer/files", sessionComposerHandler.ListFileMentions)
 			r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 			r.Get("/api/v1/issues", issueHandler.List)
 			r.Get("/api/v1/issues/{id}", issueHandler.Get)
