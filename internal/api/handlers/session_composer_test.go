@@ -330,3 +330,109 @@ func TestSessionComposerHandler_ListFileMentions_InvalidRepoRouteContextUnused(t
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	require.NotNil(t, req.Context().Value(chi.RouteCtxKey), "test should pin that route context is irrelevant for query-param endpoint")
 }
+
+func TestSessionComposerHandler_ListFileMentions_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		repoFullName string
+		repoTree     sessionComposerRepoTreeService
+		serviceErr   error
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:         "github not configured",
+			repoFullName: "acme/app",
+			repoTree:     nil,
+			expectedCode: http.StatusServiceUnavailable,
+			expectedBody: "GITHUB_NOT_CONFIGURED",
+		},
+		{
+			name:         "invalid repository full name",
+			repoFullName: "acme-only",
+			repoTree:     &mockSessionComposerRepoTreeService{},
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "INVALID_REPOSITORY",
+		},
+		{
+			name:         "installation token failure",
+			repoFullName: "acme/app",
+			repoTree: &mockSessionComposerRepoTreeService{
+				err: fmt.Errorf("token exchange failed"),
+			},
+			expectedCode: http.StatusBadGateway,
+			expectedBody: "GITHUB_TOKEN_FAILED",
+		},
+		{
+			name:         "repository tree failure",
+			repoFullName: "acme/app",
+			repoTree: &mockSessionComposerRepoTreeService{
+				err: fmt.Errorf("upstream github unavailable"),
+			},
+			expectedCode: http.StatusBadGateway,
+			expectedBody: "GITHUB_API_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			now := time.Now()
+			mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+				WithArgs(repoID, orgID).
+				WillReturnRows(
+					pgxmock.NewRows(repoColumns()).AddRow(
+						repoID, orgID, uuid.New(), int64(1001), tt.repoFullName, "main",
+						false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+						nil, nil, []byte(`{}`), now, now,
+					),
+				)
+
+			handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), tt.repoTree)
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/files?repository_id=%s&q=sess", repoID), nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			w := httptest.NewRecorder()
+
+			handler.ListFileMentions(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "status code should match the expected failure mode")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should surface the expected error code")
+			require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
+		})
+	}
+}
+
+func TestRankSessionComposerReferences_FiltersUnsupportedEntries(t *testing.T) {
+	t.Parallel()
+
+	tree := []models.RepositoryTreeEntry{
+		{Path: "", Type: models.RepositoryTreeEntryTypeFile},
+		{Path: "internal/session", Type: models.RepositoryTreeEntryType("commit")},
+		{Path: "pkg/sessioncomposer", Type: models.RepositoryTreeEntryTypeDirectory},
+		{Path: "docs/session-guide.md", Type: models.RepositoryTreeEntryTypeFile},
+	}
+
+	results := rankSessionComposerReferences("sess", tree)
+	require.Equal(t, []models.SessionInputReference{
+		{
+			Kind:    models.SessionInputReferenceKindDirectory,
+			Token:   "@pkg/sessioncomposer",
+			Path:    "pkg/sessioncomposer",
+			Display: "pkg/sessioncomposer",
+		},
+		{
+			Kind:    models.SessionInputReferenceKindFile,
+			Token:   "@docs/session-guide.md",
+			Path:    "docs/session-guide.md",
+			Display: "docs/session-guide.md",
+		},
+	}, results, "rankSessionComposerReferences should skip empty paths and unsupported tree entry types")
+}
