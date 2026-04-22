@@ -32,6 +32,12 @@ type S3SnapshotStore struct {
 	prefix string
 }
 
+var createSnapshotTempFile = os.CreateTemp
+var copySnapshotToTemp = io.Copy
+var rewindSnapshotTempFile = func(f *os.File) (int64, error) {
+	return f.Seek(0, io.SeekStart)
+}
+
 // NewS3SnapshotStore creates an S3SnapshotStore for the given bucket.
 func NewS3SnapshotStore(client S3Client, bucket, prefix string) *S3SnapshotStore {
 	return &S3SnapshotStore{
@@ -53,7 +59,7 @@ func (s *S3SnapshotStore) Save(ctx context.Context, key string, reader io.Reader
 	// Content-Length header. Snapshot streams come from an io.Pipe-backed tar
 	// process, so stage them to a temp file first so we can upload with a known
 	// byte size.
-	tmp, err := os.CreateTemp("", "session-snapshot-*.tar.zst")
+	tmp, err := createSnapshotTempFile("", "session-snapshot-*.tar.zst")
 	if err != nil {
 		return fmt.Errorf("create temp snapshot file %s: %w", key, err)
 	}
@@ -62,11 +68,11 @@ func (s *S3SnapshotStore) Save(ctx context.Context, key string, reader io.Reader
 		_ = os.Remove(tmp.Name())
 	}()
 
-	size, err := io.Copy(tmp, reader)
+	size, err := copySnapshotToTemp(tmp, reader)
 	if err != nil {
 		return fmt.Errorf("buffer snapshot %s: %w", key, err)
 	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+	if _, err := rewindSnapshotTempFile(tmp); err != nil {
 		return fmt.Errorf("rewind snapshot %s: %w", key, err)
 	}
 
