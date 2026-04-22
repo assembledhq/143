@@ -30,6 +30,7 @@ describe("ClaudeCodeAuthModal", () => {
       data: {
         authorize_url: "https://claude.ai/oauth/authorize",
         state: "state-123",
+        label: "Alice Smith",
       },
     });
     completeMock.mockReset();
@@ -49,10 +50,10 @@ describe("ClaudeCodeAuthModal", () => {
     const onClose = vi.fn();
     const user = userEvent.setup();
 
-    render(<ClaudeCodeAuthModal label="team-a" onClose={onClose} />);
+    render(<ClaudeCodeAuthModal onClose={onClose} />);
 
     await waitFor(() => {
-      expect(initiateMock).toHaveBeenCalledWith("team-a");
+      expect(initiateMock).toHaveBeenCalledWith(undefined);
     });
 
     await user.keyboard("{Escape}");
@@ -64,7 +65,7 @@ describe("ClaudeCodeAuthModal", () => {
     const onConnected = vi.fn();
 
     const { unmount } = render(
-      <ClaudeCodeAuthModal label="team-a" onClose={vi.fn()} onConnected={onConnected} />,
+      <ClaudeCodeAuthModal onClose={vi.fn()} onConnected={onConnected} />,
     );
 
     expect(await screen.findByPlaceholderText("e.g. abc123#xyz789")).toBeInTheDocument();
@@ -79,7 +80,7 @@ describe("ClaudeCodeAuthModal", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(completeMock).toHaveBeenCalledWith("team-a", "abc123#state456");
+    expect(completeMock).toHaveBeenCalledWith("Alice Smith", "abc123#state456");
     expect(screen.getByText("Connected successfully!")).toBeInTheDocument();
 
     unmount();

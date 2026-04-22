@@ -34,6 +34,10 @@ func codexAddOrgContext(r *http.Request) *http.Request {
 	return r.WithContext(ctx)
 }
 
+func codexAddUserContext(r *http.Request, user *models.User) *http.Request {
+	return r.WithContext(middleware.WithUser(r.Context(), user))
+}
+
 type codexCredentialStoreStub struct {
 	disableErr error
 	disabled   bool
@@ -152,6 +156,46 @@ func TestCodexAuthHandler_Initiate(t *testing.T) {
 	require.Equal(t, "TEST-CODE", resp.Data.UserCode, "initiate should return expected user code")
 }
 
+func TestCodexAuthHandler_Initiate_AutoGeneratesLabelFromUser(t *testing.T) {
+	t.Parallel()
+
+	mockOpenAI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"device_auth_id":   "dev_test_456",
+			"user_code":        "TEST-CODE",
+			"verification_uri": "https://auth.openai.com/codex/device",
+			"expires_in":       900,
+			"interval":         5,
+		})
+	}))
+	defer mockOpenAI.Close()
+
+	svc := codexauth.NewService(nil, codexTestLogger())
+	svc.SetHTTPClient(mockOpenAI.Client())
+	svc.SetIssuer(mockOpenAI.URL)
+
+	handler := NewCodexAuthHandler(svc, codexTestLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/codex-auth/initiate", nil)
+	req = codexAddOrgContext(req)
+	req = codexAddUserContext(req, &models.User{
+		ID:    uuid.MustParse("00000000-0000-0000-0000-000000000111"),
+		Name:  "Alice Smith",
+		Email: "alice@example.com",
+	})
+	w := httptest.NewRecorder()
+
+	handler.Initiate(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "initiate should succeed without a manual label")
+
+	var resp models.SingleResponse[codexauth.DeviceAuthResponse]
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err, "initiate response should be valid JSON")
+	require.Equal(t, "Alice Smith", resp.Data.Label, "handler should return the generated label")
+}
+
 func TestCodexAuthHandler_Status_NoPending(t *testing.T) {
 	t.Parallel()
 
@@ -212,9 +256,9 @@ func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
-		disableErr:       errors.New("db error"),
+		disableErr:                  errors.New("db error"),
 		existsForProviderByIDResult: true,
-		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		getByIDResult:               &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())
@@ -236,7 +280,7 @@ func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
 		existsForProviderByIDResult: true,
-		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		getByIDResult:               &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())

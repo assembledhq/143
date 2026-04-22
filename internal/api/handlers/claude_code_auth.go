@@ -66,17 +66,19 @@ func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	body.Label = strings.TrimSpace(body.Label)
-	if body.Label == "" {
-		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label is required for Claude subscriptions", nil)
-		return
-	}
+	body.Label = normalizedSubscriptionLabel(body.Label)
 	if len(body.Label) > claudeCodeSubscriptionLabelMax {
 		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", fmt.Sprintf("label must be %d characters or fewer", claudeCodeSubscriptionLabelMax), nil)
 		return
 	}
 
-	resp, err := h.svc.InitiateOAuth(r.Context(), orgID, createdBy, body.Label)
+	user := middleware.UserFromContext(r.Context())
+	var resp *claudecodeauth.InitiateResponse
+	label, err := resolveSubscriptionLabel(body.Label, user, claudeCodeSubscriptionLabelMax, func(label string) error {
+		var err error
+		resp, err = h.svc.InitiateOAuth(r.Context(), orgID, createdBy, label)
+		return err
+	})
 	if err != nil {
 		var labelErr *db.ErrCredentialLabelTaken
 		if errors.As(err, &labelErr) {
@@ -86,6 +88,7 @@ func (h *ClaudeCodeAuthHandler) Initiate(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate Claude OAuth", err)
 		return
 	}
+	resp.Label = label
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[claudecodeauth.InitiateResponse]{Data: *resp})
 }

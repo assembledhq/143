@@ -4,7 +4,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, CheckCircle2, Clock3, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import type { ClaudeCodeSubscription } from "@/lib/types";
@@ -17,8 +16,6 @@ import type { ClaudeCodeSubscription } from "@/lib/types";
 // them (the embedded editor hides remove to keep the card simple).
 export function ClaudeSubscriptionManager({
   subscriptions,
-  label,
-  onLabelChange,
   showModal,
   onOpenModal,
   onCloseModal,
@@ -27,8 +24,6 @@ export function ClaudeSubscriptionManager({
   addButtonVariant = "plain",
 }: {
   subscriptions: ClaudeCodeSubscription[];
-  label: string;
-  onLabelChange: (value: string) => void;
   showModal: boolean;
   onOpenModal: () => void;
   onCloseModal: () => void;
@@ -73,26 +68,18 @@ export function ClaudeSubscriptionManager({
       )}
 
       <div className="flex items-center gap-2">
-        <Input
-          placeholder="Subscription label (e.g. Team A)"
-          value={label}
-          onChange={(e) => onLabelChange(e.target.value.slice(0, 100))}
-          maxLength={100}
-          className="max-w-xs text-sm"
-        />
         <Button
-          size="sm"
+          size="lg"
           onClick={onOpenModal}
-          disabled={showModal || label.trim() === ""}
+          disabled={showModal}
         >
           {addButtonVariant === "plus" && <Plus className="mr-1 h-3.5 w-3.5" />}
           Add subscription
         </Button>
       </div>
 
-      {showModal && label.trim() !== "" && (
+      {showModal && (
         <ClaudeCodeAuthModal
-          label={label.trim()}
           onClose={onCloseModal}
           onConnected={() => {
             queryClient.invalidateQueries({ queryKey: ["claude-code-subscriptions"] });

@@ -73,9 +73,9 @@ type PendingAuth struct {
 	UserCode        string
 	VerificationURI string
 	ExpiresAt       time.Time
-	Interval        int       // poll interval in seconds
-	LastPollAt      time.Time // tracks when we last polled OpenAI
-	Label           string    // user-provided label for this subscription
+	Interval        int        // poll interval in seconds
+	LastPollAt      time.Time  // tracks when we last polled OpenAI
+	Label           string     // user-provided label for this subscription
 	CredentialID    *uuid.UUID // DB credential ID once persisted
 }
 
@@ -84,6 +84,7 @@ type DeviceAuthResponse struct {
 	UserCode        string `json:"user_code"`
 	VerificationURI string `json:"verification_uri"`
 	ExpiresIn       int    `json:"expires_in"`
+	Label           string `json:"label,omitempty"`
 }
 
 // AuthStatus represents the current state of a device code auth flow.
@@ -125,8 +126,8 @@ type Service struct {
 	logger      zerolog.Logger
 	issuer      string
 	clientID    string
-	pending   sync.Map // pendingKey (orgID+label) -> *PendingAuth
-	refreshMu sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
+	pending     sync.Map // pendingKey (orgID+label) -> *PendingAuth
+	refreshMu   sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
 	// initMu entries accumulate per distinct (org, label) pair. Growth is bounded
 	// in practice by the number of subscription labels an org ever uses, and
 	// entries are reclaimed on DisconnectAll. Cleaning up inside InitiateDeviceAuth

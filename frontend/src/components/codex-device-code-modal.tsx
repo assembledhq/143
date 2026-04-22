@@ -18,6 +18,7 @@ export function CodexDeviceCodeModal({
 }) {
   // Capture the label at mount time so it stays stable throughout the auth flow.
   const [stableLabel] = useState(() => label);
+  const [resolvedLabel, setResolvedLabel] = useState(() => label);
   const [deviceAuth, setDeviceAuth] = useState<CodexDeviceAuth | null>(null);
   const [status, setStatus] = useState<string>("initiating");
   const [error, setError] = useState("");
@@ -38,6 +39,7 @@ export function CodexDeviceCodeModal({
       setError("");
       const resp = await api.codexAuth.initiate(stableLabel);
       setDeviceAuth(resp.data);
+      setResolvedLabel(resp.data.label ?? stableLabel);
       setTimeLeft(resp.data.expires_in);
       setStatus("pending");
     } catch (err) {
@@ -61,7 +63,7 @@ export function CodexDeviceCodeModal({
 
     pollRef.current = setInterval(async () => {
       try {
-        const resp = await api.codexAuth.status(stableLabel);
+        const resp = await api.codexAuth.status(resolvedLabel);
         if (resp.data.status === "completed") {
           setStatus("completed");
           if (pollRef.current) clearInterval(pollRef.current);
@@ -94,7 +96,7 @@ export function CodexDeviceCodeModal({
       if (timerRef.current) clearInterval(timerRef.current);
       if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
     };
-  }, [status, stableLabel]);
+  }, [status, resolvedLabel]);
 
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;

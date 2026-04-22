@@ -455,7 +455,7 @@ export const api = {
     // Starts a PKCE auth flow. The response's authorize_url is opened in the
     // user's browser; after logging in the user pastes `<code>#<state>` back
     // and the caller invokes complete() with it.
-    initiate: (label: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>('/api/v1/settings/claude-code-auth/initiate', { label }),
+    initiate: (label?: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeInitiateResponse>>('/api/v1/settings/claude-code-auth/initiate', { label: label ?? '' }),
     complete: (label: string, code: string) => post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>('/api/v1/settings/claude-code-auth/complete', { label, code }),
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').ClaudeCodeSubscription>>('/api/v1/settings/claude-code-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/claude-code-auth/subscriptions/${id}`),

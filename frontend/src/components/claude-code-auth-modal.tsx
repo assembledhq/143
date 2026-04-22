@@ -22,10 +22,11 @@ export function ClaudeCodeAuthModal({
 }: {
   onClose: () => void;
   onConnected?: () => void;
-  label: string;
+  label?: string;
 }) {
   // Capture the label at mount time so it stays stable throughout the auth flow.
   const [stableLabel] = useState(() => label);
+  const [resolvedLabel, setResolvedLabel] = useState<string | undefined>(label);
   const connectedTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
   const [initiated, setInitiated] = useState<ClaudeCodeInitiateResponse | null>(null);
   const [status, setStatus] = useState<
@@ -41,6 +42,7 @@ export function ClaudeCodeAuthModal({
       setCode("");
       const resp = await api.claudeCodeAuth.initiate(stableLabel);
       setInitiated(resp.data);
+      setResolvedLabel(resp.data.label ?? stableLabel);
       setStatus("awaiting_paste");
     } catch (err) {
       captureError(err, { feature: "claude-code-auth" });
@@ -81,10 +83,15 @@ export function ClaudeCodeAuthModal({
       setError("Paste the code Anthropic displayed after you logged in.");
       return;
     }
+    if (!resolvedLabel) {
+      setError("Authentication session is missing a subscription label. Please try again.");
+      setStatus("error");
+      return;
+    }
     try {
       setStatus("exchanging");
       setError("");
-      await api.claudeCodeAuth.complete(stableLabel, trimmed);
+      await api.claudeCodeAuth.complete(resolvedLabel, trimmed);
       setStatus("completed");
       connectedTimerRef.current = setTimeout(() => {
         onConnected?.();
@@ -98,7 +105,7 @@ export function ClaudeCodeAuthModal({
       setError(message);
       setStatus("awaiting_paste");
     }
-  }, [code, stableLabel, onConnected]);
+  }, [code, onConnected, resolvedLabel]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

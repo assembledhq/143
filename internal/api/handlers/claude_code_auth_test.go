@@ -31,6 +31,10 @@ func claudeAddOrgContext(r *http.Request) *http.Request {
 	return r.WithContext(ctx)
 }
 
+func claudeAddUserContext(r *http.Request, user *models.User) *http.Request {
+	return r.WithContext(middleware.WithUser(r.Context(), user))
+}
+
 // claudeStoreStub is a minimal claudecodeauth.CredentialStore implementation for
 // handler tests. Only the methods the handler exercises are meaningful; the
 // rest return zero/error defaults.
@@ -112,7 +116,7 @@ func (s *claudeStoreStub) HasActiveLabeled(context.Context, uuid.UUID, models.Pr
 	return false, nil
 }
 
-func TestClaudeCodeAuthHandler_Initiate_RequiresLabel(t *testing.T) {
+func TestClaudeCodeAuthHandler_Initiate_AutoGeneratesLabelFromUser(t *testing.T) {
 	t.Parallel()
 
 	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
@@ -123,12 +127,21 @@ func TestClaudeCodeAuthHandler_Initiate_RequiresLabel(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(body.Len())
 	req = claudeAddOrgContext(req)
+	req = claudeAddUserContext(req, &models.User{
+		ID:    uuid.MustParse("00000000-0000-0000-0000-000000000222"),
+		Name:  "Alice Smith",
+		Email: "alice@example.com",
+	})
 	w := httptest.NewRecorder()
 
 	handler.Initiate(w, req)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "empty label should be rejected")
-	require.Contains(t, w.Body.String(), "INVALID_LABEL")
+	require.Equal(t, http.StatusOK, w.Code, "empty label should be replaced with a generated label")
+
+	var resp models.SingleResponse[claudecodeauth.InitiateResponse]
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err, "initiate response should be valid JSON")
+	require.Equal(t, "Alice Smith", resp.Data.Label, "handler should return the generated label")
 }
 
 func TestClaudeCodeAuthHandler_Initiate_LabelTaken(t *testing.T) {

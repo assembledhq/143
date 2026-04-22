@@ -13,6 +13,7 @@ const mockDeviceAuth = {
   user_code: "ABCD-1234",
   verification_uri: "https://auth.example.com/device",
   expires_in: 600,
+  label: "Alice Smith",
 };
 
 describe("CodexDeviceCodeModal", () => {
@@ -50,6 +51,30 @@ describe("CodexDeviceCodeModal", () => {
     await waitFor(() => {
       expect(screen.getByText("Nope")).toBeInTheDocument();
     });
+  });
+
+  it("polls with the generated label returned by initiate", async () => {
+    let requestedLabel = "";
+
+    server.use(
+      http.post(INITIATE_URL, () => {
+        return HttpResponse.json({ data: mockDeviceAuth });
+      }),
+      http.get(STATUS_URL, ({ request }) => {
+        requestedLabel = new URL(request.url).searchParams.get("label") ?? "";
+        return HttpResponse.json({ data: { status: "completed" } });
+      }),
+    );
+
+    render(<CodexDeviceCodeModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ABCD-1234")).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(requestedLabel).toBe("Alice Smith");
+    }, { timeout: 5000 });
   });
 
   it("falls back to a generic error message when the thrown error has no message", async () => {

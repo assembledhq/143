@@ -26,8 +26,6 @@ describe("ClaudeSubscriptionManager", () => {
             status: "pending_auth",
           },
         ]}
-        label=""
-        onLabelChange={vi.fn()}
         showModal={false}
         onOpenModal={vi.fn()}
         onCloseModal={vi.fn()}
@@ -57,8 +55,6 @@ describe("ClaudeSubscriptionManager", () => {
             status: "invalid",
           },
         ]}
-        label=""
-        onLabelChange={vi.fn()}
         showModal={false}
         onOpenModal={vi.fn()}
         onCloseModal={vi.fn()}
@@ -72,5 +68,19 @@ describe("ClaudeSubscriptionManager", () => {
       label: "Team Broken",
       status: "invalid",
     });
+  });
+
+  it("uses the standard field-height add button and removes the manual label input", () => {
+    renderWithProviders(
+      <ClaudeSubscriptionManager
+        subscriptions={[]}
+        showModal={false}
+        onOpenModal={vi.fn()}
+        onCloseModal={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByPlaceholderText(/subscription label/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add subscription" })).toHaveAttribute("data-size", "lg");
   });
 });

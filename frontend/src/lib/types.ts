@@ -524,6 +524,7 @@ export interface CodexDeviceAuth {
   user_code: string;
   verification_uri: string;
   expires_in: number;
+  label?: string;
 }
 
 export type CodexSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
@@ -541,6 +542,7 @@ export interface CodexSubscription {
 export interface ClaudeCodeInitiateResponse {
   authorize_url: string;
   state: string;
+  label?: string;
 }
 
 export interface ClaudeCodeCompleteResponse {

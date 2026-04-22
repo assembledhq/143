@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -57,13 +56,19 @@ func (h *CodexAuthHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate and normalize label.
-	body.Label = strings.TrimSpace(body.Label)
+	body.Label = normalizedSubscriptionLabel(body.Label)
 	if len(body.Label) > 100 {
 		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL", "label must be 100 characters or fewer", nil)
 		return
 	}
 
-	resp, err := h.svc.InitiateDeviceAuth(r.Context(), orgID, createdBy, body.Label)
+	user := middleware.UserFromContext(r.Context())
+	var resp *codexauth.DeviceAuthResponse
+	label, err := resolveSubscriptionLabel(body.Label, user, 100, func(label string) error {
+		var err error
+		resp, err = h.svc.InitiateDeviceAuth(r.Context(), orgID, createdBy, label)
+		return err
+	})
 	if err != nil {
 		var labelErr *db.ErrCredentialLabelTaken
 		if errors.As(err, &labelErr) {
@@ -73,6 +78,7 @@ func (h *CodexAuthHandler) Initiate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "AUTH_INITIATE_FAILED", "failed to initiate device auth", err)
 		return
 	}
+	resp.Label = label
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[codexauth.DeviceAuthResponse]{Data: *resp})
 }

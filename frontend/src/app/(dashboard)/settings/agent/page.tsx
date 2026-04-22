@@ -1,18 +1,37 @@
 "use client";
 
 import { type ReactNode, useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, CheckCircle2, Eye, EyeOff, KeyRound, Sparkles, Shield, Plus, Trash2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlertCircle,
+  Bot,
+  Check,
+  CheckCircle2,
+  KeyRound,
+  Layers3,
+  Plus,
+  Shield,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
-import { AGENT_TYPES, sourceLabel, sourceBadgeVariant, providerDisplayName } from "@/lib/agent-constants";
+import { AGENT_TYPES, providerDisplayName } from "@/lib/agent-constants";
+import { AgentBadge } from "@/components/agent-badge";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup } from "@/components/ui/radio-group";
@@ -33,11 +52,19 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { RadioCard } from "@/components/radio-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
-import { ClaudeSubscriptionManager } from "@/components/claude-subscription-manager";
+import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { queryKeys } from "@/lib/query-keys";
@@ -54,19 +81,15 @@ import {
   clampNumber,
 } from "@/lib/settings-constants";
 import type {
-  UserCredentialSummary,
-  ResolvedCredential,
-  CodexSubscription,
   ClaudeCodeSubscription,
+  CodexSubscription,
   ListResponse,
   Organization,
   OrgSettings,
   SingleResponse,
+  UserCredentialSummary,
 } from "@/lib/types";
 
-// Bounds live in `@/lib/settings-constants`; defaults mirror
-// `internal/models/org_settings.go`. The server clamps on save, so UI drift
-// is visible (values snap) rather than corrupting state.
 const DEFAULT_EXECUTION_SETTINGS = {
   autonomy_level: "auto_simple" as const,
   execution_aggressiveness: 2,
@@ -74,18 +97,19 @@ const DEFAULT_EXECUTION_SETTINGS = {
   max_session_duration_seconds: 25 * 60,
 };
 
+type DisplaySubscription = {
+  id: string;
+  label: string;
+  status: string;
+  account_type?: string;
+  last_used_at?: string;
+  created_at?: string;
+};
+
 export default function AgentPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-
-  /* ---------- Credentials queries ---------- */
-
-  const { data: resolvedResp } = useQuery<ListResponse<ResolvedCredential>>({
-    queryKey: ["user-credentials", "resolved"],
-    queryFn: () => api.userCredentials.listResolved(),
-  });
-  const resolved = useMemo(() => resolvedResp?.data ?? [], [resolvedResp?.data]);
 
   const { data: teamResp } = useQuery<ListResponse<UserCredentialSummary>>({
     queryKey: ["user-credentials", "team"],
@@ -94,41 +118,23 @@ export default function AgentPage() {
   });
   const teamDefaults = useMemo(() => teamResp?.data ?? [], [teamResp?.data]);
 
-  const [removingTeamProvider, setRemovingTeamProvider] = useState<string | null>(null);
-
-  const removeTeamMutation = useMutation({
-    mutationFn: (provider: string) => api.userCredentials.removeTeamDefault(provider),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      setRemovingTeamProvider(null);
-    },
-    onError: (error) => {
-      captureError(error, { feature: "agent-team-key-remove" });
-    },
-  });
-
-  const { data: codexAuthStatusResp } = useQuery({
-    queryKey: queryKeys.codexAuth.status,
-    queryFn: () => api.codexAuth.status(),
-    refetchInterval: false,
-  });
-  const codexAuthStatus = codexAuthStatusResp?.data;
-
   const { data: codexSubscriptionsResp } = useQuery<ListResponse<CodexSubscription>>({
     queryKey: ["codex-subscriptions"],
     queryFn: () => api.codexAuth.listSubscriptions(),
   });
-  const codexSubscriptions = codexSubscriptionsResp?.data ?? [];
-  const activeSubscriptions = codexSubscriptions.filter((s) => s.status === "active");
+  const codexSubscriptions = useMemo(
+    () => codexSubscriptionsResp?.data ?? [],
+    [codexSubscriptionsResp?.data],
+  );
 
   const { data: claudeCodeSubscriptionsResp } = useQuery<ListResponse<ClaudeCodeSubscription>>({
     queryKey: ["claude-code-subscriptions"],
     queryFn: () => api.claudeCodeAuth.listSubscriptions(),
   });
-  const claudeCodeSubscriptions = claudeCodeSubscriptionsResp?.data ?? [];
-  const activeClaudeSubscriptions = claudeCodeSubscriptions.filter((s) => s.status === "active");
-
-  /* ---------- Org settings queries (admin-gated) ---------- */
+  const claudeCodeSubscriptions = useMemo(
+    () => claudeCodeSubscriptionsResp?.data ?? [],
+    [claudeCodeSubscriptionsResp?.data],
+  );
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -137,48 +143,103 @@ export default function AgentPage() {
   });
 
   const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-
   const defaultAgentType = orgSettings.default_agent_type ?? "codex";
   const agentConfig = orgSettings.agent_config ?? {};
   const autonomyLevel = orgSettings.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
   const aggressiveness = String(
     orgSettings.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness,
   );
-  const maxConcurrentServer = orgSettings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
-  const serverSessionSeconds = orgSettings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
+  const maxConcurrentServer =
+    orgSettings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+  const serverSessionSeconds =
+    orgSettings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
   const serverSessionMinutes = Math.round(serverSessionSeconds / 60);
 
-  const hasCodexAPIKey = useMemo(() => {
-    const codexOrgConfig = agentConfig.codex ?? {};
-    return Boolean(codexOrgConfig.OPENAI_API_KEY);
-  }, [agentConfig.codex]);
+  const selectedAgent = AGENT_TYPES.find((agent) => agent.key === defaultAgentType) ?? AGENT_TYPES[0];
+  const selectedTeamDefault = teamDefaults.find((cred) => cred.provider === selectedAgent.providerKey);
+  const selectedSubscriptions = useMemo<DisplaySubscription[]>(() => {
+    if (selectedAgent.key === "codex") return codexSubscriptions;
+    if (selectedAgent.key === "claude_code") return claudeCodeSubscriptions;
+    return [];
+  }, [claudeCodeSubscriptions, codexSubscriptions, selectedAgent.key]);
 
-  const inferredCodexCredentialMethod: "chatgpt" | "api_key" =
-    hasCodexAPIKey && activeSubscriptions.length === 0 && codexAuthStatus?.status !== "completed" ? "api_key" : "chatgpt";
+  const selectedSensitiveEnvVar = selectedAgent.envVars.find((envVar) => envVar.sensitive);
+  const selectedModelEnvVar = selectedAgent.envVars.find((envVar) => envVar.options);
+  const selectedHasDirectAPIKey = Boolean(
+    selectedSensitiveEnvVar && agentConfig[selectedAgent.key]?.[selectedSensitiveEnvVar.name],
+  );
+  const selectedHasFallbackCredential = selectedHasDirectAPIKey || Boolean(selectedTeamDefault);
+  const selectedFallbackSourceLabel = selectedTeamDefault ? "team default" : "organization key";
+  const selectedModel = selectedModelEnvVar
+    ? agentConfig[selectedAgent.key]?.[selectedModelEnvVar.name]
+    : undefined;
+  const selectedSupportsSubscriptions =
+    selectedAgent.key === "codex" || selectedAgent.key === "claude_code";
+  const selectedHasCredentialSettings =
+    selectedAgent.envVars.length > 0 || Boolean(selectedTeamDefault);
 
-  // Pure UI toggle — the server has no `codex_credential_method` field.
-  // Null means "follow the inference"; setting a value pins the user's choice.
-  const [codexCredentialMethodOverride, setCodexCredentialMethodOverride] = useState<"chatgpt" | "api_key" | null>(null);
-  const codexCredentialMethod = codexCredentialMethodOverride ?? inferredCodexCredentialMethod;
+  const activeSubscriptions = selectedSubscriptions.filter((sub) => sub.status === "active");
+  const needsAttentionSubscriptions = selectedSubscriptions.filter(
+    (sub) => sub.status === "pending_auth" || sub.status === "invalid",
+  );
 
-  const hasAnthropicAPIKey = useMemo(() => {
-    const claudeOrgConfig = agentConfig.claude_code ?? {};
-    return Boolean(claudeOrgConfig.ANTHROPIC_API_KEY);
-  }, [agentConfig.claude_code]);
+  const credentialSourcesLabel = selectedAgent.inheritsProviderKeys
+    ? "Inherited provider keys"
+    : selectedSupportsSubscriptions
+      ? activeSubscriptions.length > 0 && selectedHasFallbackCredential
+        ? "Subscriptions + API key"
+        : activeSubscriptions.length > 0
+          ? "Subscriptions"
+          : selectedHasFallbackCredential
+            ? "API key"
+            : "Not configured"
+      : selectedHasFallbackCredential
+        ? "API key"
+        : "Not configured";
 
-  // Default to subscription unless the org only has an API key configured and
-  // no active subscription.
-  const inferredClaudeCredentialMethod: "subscription" | "api_key" =
-    hasAnthropicAPIKey && activeClaudeSubscriptions.length === 0 ? "api_key" : "subscription";
+  const executionRouteLabel = selectedAgent.inheritsProviderKeys
+    ? "Uses configured Anthropic, OpenAI, and Gemini credentials"
+    : selectedSupportsSubscriptions
+      ? activeSubscriptions.length > 0 && selectedHasFallbackCredential
+        ? "Subscriptions first, API key fallback"
+        : activeSubscriptions.length > 0
+          ? "Round-robin across subscriptions"
+          : selectedHasFallbackCredential
+            ? "API key only"
+            : "No credential sources configured"
+      : selectedHasFallbackCredential
+        ? "API key only"
+        : "API key required";
 
-  const [claudeCredentialMethodOverride, setClaudeCredentialMethodOverride] = useState<"subscription" | "api_key" | null>(null);
-  const claudeCredentialMethod = claudeCredentialMethodOverride ?? inferredClaudeCredentialMethod;
+  const healthLabel = selectedSupportsSubscriptions
+    ? activeSubscriptions.length > 0 || needsAttentionSubscriptions.length > 0
+      ? [
+          activeSubscriptions.length > 0 ? `${activeSubscriptions.length} active` : null,
+          needsAttentionSubscriptions.length > 0
+            ? `${needsAttentionSubscriptions.length} needs attention`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : selectedHasFallbackCredential
+        ? "Fallback only configured"
+        : "No credentials configured"
+    : selectedAgent.inheritsProviderKeys
+      ? "Uses other configured providers"
+      : selectedHasFallbackCredential
+        ? "Configured"
+        : "Needs setup";
+
+  const summaryRows = selectedSubscriptions.filter((sub) => sub.status !== "disabled");
 
   const [showAdvancedPerAgent, setShowAdvancedPerAgent] = useState<Record<string, boolean>>({});
-  const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
-  const [showClaudeDeviceCodeModal, setShowClaudeDeviceCodeModal] = useState(false);
-  const [newSubscriptionLabel, setNewSubscriptionLabel] = useState("");
-  const [newClaudeSubscriptionLabel, setNewClaudeSubscriptionLabel] = useState("");
+  const [showManageSubscriptionsDialog, setShowManageSubscriptionsDialog] = useState(false);
+  const [showManageSettingsDialog, setShowManageSettingsDialog] = useState(false);
+  const [showCodexAuthModal, setShowCodexAuthModal] = useState(false);
+  const [showClaudeAuthModal, setShowClaudeAuthModal] = useState(false);
+  const [codexAuthModalLabel, setCodexAuthModalLabel] = useState<string | undefined>(undefined);
+  const [claudeAuthModalLabel, setClaudeAuthModalLabel] = useState<string | undefined>(undefined);
+  const [removingTeamProvider, setRemovingTeamProvider] = useState<string | null>(null);
   const [removingSubscriptionId, setRemovingSubscriptionId] = useState<string | null>(null);
   const [removingClaudeSubscriptionId, setRemovingClaudeSubscriptionId] = useState<string | null>(null);
 
@@ -192,33 +253,23 @@ export default function AgentPage() {
   const maxConcurrentField = useAutosaveNumericField({
     serverValue: maxConcurrentServer,
     autosave,
-    toPatch: (v) => ({ settings: { max_concurrent_runs: v } }),
-    clamp: (v) => clampNumber(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
+    toPatch: (value) => ({ settings: { max_concurrent_runs: value } }),
+    clamp: (value) => clampNumber(value, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
 
   const maxSessionMinutesField = useAutosaveNumericField({
     serverValue: serverSessionMinutes,
     autosave,
     toPatch: (minutes) => ({ settings: { max_session_duration_seconds: minutes * 60 } }),
-    clamp: (v) => clampNumber(v, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
+    clamp: (value) => clampNumber(value, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
   });
 
-  // Read the latest `agent_config` from the React Query cache rather than a
-  // render-time closure. The cache entry is advanced synchronously by each
-  // autosave's `applyOptimistic`, so back-to-back saves (e.g. typing in two
-  // providers' keys, or a debounced commit firing while a model select has
-  // already advanced the cache) always start from the freshest snapshot —
-  // a ref-based mirror would lag by a render.
   function readLatestAgentConfig(): Record<string, Record<string, string>> {
     const cached = queryClient.getQueryData<SingleResponse<Organization>>(queryKeys.settings.all);
     const latest = (cached?.data?.settings ?? {}) as OrgSettings;
     return latest.agent_config ?? {};
   }
 
-  // Write an env var into agent_config. `mergeSettingsJSON` on the server now
-  // deep-merges, so a sparse patch would also be safe, but we keep the full
-  // merged object for clarity and to match `coalesceSettingsPatch`, which
-  // shallow-merges at the `settings` level.
   function saveAgentConfigField(agentKey: string, envVar: string, value: string) {
     const current = { ...readLatestAgentConfig() };
     const providerConfig = { ...(current[agentKey] ?? {}) };
@@ -237,19 +288,6 @@ export default function AgentPage() {
     autosave.save({ settings: { agent_config: current } });
   }
 
-  // Sensitive env vars (API keys) intentionally skip the autosave pipeline:
-  // we never prefill the plaintext into the input, never optimistically apply
-  // a half-typed key to the cache, and never commit on keystroke/blur. The
-  // caller must press "Save key" to dispatch. See settings/AGENTS.md for the
-  // policy.
-  //
-  // The patch is sparse — just the one env var under its provider — and
-  // relies on the server's `mergeSettingsJSON` to deep-merge into the
-  // existing `agent_config`. Sending the full merged object (as an earlier
-  // version did) would race with any in-flight autosave for an unrelated
-  // field in the same provider: both requests would carry overlapping
-  // sibling values and the later writer would silently clobber the earlier
-  // one. Sparse + deep-merge keeps each write scoped to the field it owns.
   const sensitiveSaveMutation = useMutation({
     mutationFn: ({
       agentKey,
@@ -273,11 +311,21 @@ export default function AgentPage() {
     },
   });
 
+  const removeTeamMutation = useMutation({
+    mutationFn: (provider: string) => api.userCredentials.removeTeamDefault(provider),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+      setRemovingTeamProvider(null);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-team-key-remove" });
+    },
+  });
+
   const removeSubscriptionMutation = useMutation({
     mutationFn: (id: string) => api.codexAuth.removeSubscription(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
-      queryClient.invalidateQueries({ queryKey: queryKeys.codexAuth.status });
       setRemovingSubscriptionId(null);
     },
     onError: (error) => {
@@ -296,328 +344,28 @@ export default function AgentPage() {
     },
   });
 
-  /* ---------- Render helpers ---------- */
+  const manageSettingsLabel = selectedSensitiveEnvVar ? "Manage API key & settings" : "Manage settings";
 
-  /** Shared ChatGPT auth status — shows list of subscriptions with add/remove. */
-  function renderChatGPTAuthStatus(): ReactNode {
-    return (
-      <div className="space-y-3">
-        {activeSubscriptions.length > 0 && (
-          <div className="space-y-2">
-            <Label className="text-xs text-muted-foreground">
-              Connected subscriptions ({activeSubscriptions.length}) &mdash; usage is distributed via round-robin
-            </Label>
-            {activeSubscriptions.map((sub) => (
-              <div key={sub.id} className="flex items-center justify-between rounded-md border px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="border-green-600 text-green-600">
-                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                    Active
-                  </Badge>
-                  <span className="text-sm font-medium">{sub.label || "Default"}</span>
-                  {sub.account_type && (
-                    <span className="text-xs text-muted-foreground">({sub.account_type})</span>
-                  )}
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-xs text-muted-foreground hover:text-destructive"
-                  onClick={() => setRemovingSubscriptionId(sub.id)}
-                  aria-label={`Remove subscription ${sub.label || "Default"}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="flex items-center gap-2">
-          <Input
-            placeholder="Subscription label (e.g. Team A)"
-            value={newSubscriptionLabel}
-            onChange={(e) => setNewSubscriptionLabel(e.target.value.slice(0, 100))}
-            maxLength={100}
-            className="max-w-xs text-sm"
-          />
-          <Button size="sm" onClick={() => setShowDeviceCodeModal(true)} disabled={showDeviceCodeModal}>
-            <Plus className="mr-1 h-3.5 w-3.5" />
-            Add subscription
-          </Button>
-        </div>
-      </div>
-    );
+  function openSubscriptionAuth(agentKey: string, label?: string) {
+    if (agentKey === "codex") {
+      setCodexAuthModalLabel(label);
+      setShowCodexAuthModal(true);
+      return;
+    }
+    if (agentKey === "claude_code") {
+      setClaudeAuthModalLabel(label);
+      setShowClaudeAuthModal(true);
+    }
   }
 
-  /** Shared header row for agent config sections. */
-  function renderAgentConfigHeader({
-    title,
-    badges,
-    action,
-  }: {
-    title: string;
-    badges: ReactNode;
-    action?: ReactNode;
-  }): ReactNode {
-    return (
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">{title}</span>
-          {badges}
-        </div>
-        {action}
-      </div>
-    );
+  function closeCodexAuthModal() {
+    setShowCodexAuthModal(false);
+    setCodexAuthModalLabel(undefined);
   }
 
-  /** Shared Claude subscription auth status — list + add/remove. */
-  function renderClaudeSubscriptionAuthStatus(): ReactNode {
-    return (
-      <ClaudeSubscriptionManager
-        subscriptions={claudeCodeSubscriptions}
-        label={newClaudeSubscriptionLabel}
-        onLabelChange={setNewClaudeSubscriptionLabel}
-        showModal={showClaudeDeviceCodeModal}
-        onOpenModal={() => setShowClaudeDeviceCodeModal(true)}
-        onCloseModal={() => {
-          setShowClaudeDeviceCodeModal(false);
-          setNewClaudeSubscriptionLabel("");
-        }}
-        onRemove={(sub) => setRemovingClaudeSubscriptionId(sub.id)}
-        connectedLabelText={(count) =>
-          `Connected subscriptions (${count}) — usage is distributed via round-robin`
-        }
-        addButtonVariant="plus"
-      />
-    );
-  }
-
-  /** Shared Claude credential method toggle (subscription vs API key). */
-  function renderClaudeCredentialToggle({
-    method,
-    onMethodChange,
-  }: {
-    method: "subscription" | "api_key";
-    onMethodChange: (value: "subscription" | "api_key") => void;
-  }): ReactNode {
-    return (
-      <div className="space-y-3">
-        <Label className="text-xs text-muted-foreground">Credential method</Label>
-        <RadioGroup
-          value={method}
-          onValueChange={(value) => onMethodChange(value as "subscription" | "api_key")}
-          className="grid gap-3 md:grid-cols-2"
-        >
-          <RadioCard
-            value="subscription"
-            label="Sign in with Claude"
-            description="Use your Claude Pro/Max/Team/Enterprise subscription."
-            selected={method === "subscription"}
-            icon={<Sparkles className="h-4 w-4 text-primary" />}
-            ariaLabel="Sign in with Claude"
-          />
-          <RadioCard
-            value="api_key"
-            label="Use API key"
-            description="Pay-as-you-go Anthropic API credentials."
-            selected={method === "api_key"}
-            icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
-            ariaLabel="Use Anthropic API key"
-          />
-        </RadioGroup>
-
-        {method === "subscription" && renderClaudeSubscriptionAuthStatus()}
-      </div>
-    );
-  }
-
-  /** Shared Codex credential method toggle (ChatGPT vs API key). */
-  function renderCodexCredentialToggle({
-    method,
-    onMethodChange,
-  }: {
-    method: "chatgpt" | "api_key";
-    onMethodChange: (value: "chatgpt" | "api_key") => void;
-  }): ReactNode {
-    return (
-      <div className="space-y-3">
-        <Label className="text-xs text-muted-foreground">Credential method</Label>
-        <RadioGroup
-          value={method}
-          onValueChange={(value) => onMethodChange(value as "chatgpt" | "api_key")}
-          className="grid gap-3 md:grid-cols-2"
-        >
-          <RadioCard
-            value="chatgpt"
-            label="Sign in with ChatGPT"
-            description="Best for gpt-5.3-codex model access."
-            selected={method === "chatgpt"}
-            icon={<Sparkles className="h-4 w-4 text-primary" />}
-            ariaLabel="Sign in with ChatGPT"
-          />
-          <RadioCard
-            value="api_key"
-            label="Use API key"
-            description="Pay-as-you-go credentials with configurable model/base URL."
-            selected={method === "api_key"}
-            icon={<KeyRound className="h-4 w-4 text-muted-foreground" />}
-            ariaLabel="Use API key"
-          />
-        </RadioGroup>
-
-        {method === "chatgpt" && renderChatGPTAuthStatus()}
-      </div>
-    );
-  }
-
-  function renderOrgAgentConfigCard(): ReactNode {
-    const agent = AGENT_TYPES.find((a) => a.key === defaultAgentType) ?? AGENT_TYPES[0];
-    const teamCred = teamDefaults.find((c) => c.provider === agent.providerKey);
-    const r = resolved.find((c) => c.provider === agent.providerKey);
-    const source = r?.source ?? "none";
-    const showAdvanced = showAdvancedPerAgent[agent.key] ?? false;
-    const isCodex = agent.key === "codex";
-    const isClaude = agent.key === "claude_code";
-    const hideEnvVars =
-      (isCodex && codexCredentialMethod === "chatgpt") ||
-      (isClaude && claudeCredentialMethod === "subscription");
-    const envVarsToRender = hideEnvVars
-      ? []
-      : agent.envVars.filter((v) => !v.advanced || showAdvanced);
-    const hasAdvanced = agent.envVars.some((v) => v.advanced);
-
-    return (
-      <div className="space-y-3 border-t pt-3 mt-1">
-        {renderAgentConfigHeader({
-          title: `${agent.label} settings`,
-          badges: teamCred ? (
-            <Badge variant="secondary" className="text-xs px-1.5 py-0">
-              <Shield className="mr-0.5 h-3 w-3" />
-              Team default set
-            </Badge>
-          ) : (
-            <Badge variant={sourceBadgeVariant(source)} className="text-xs px-1.5 py-0">
-              {sourceLabel(source)}
-            </Badge>
-          ),
-          action: teamCred ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs text-muted-foreground"
-              onClick={() => setRemovingTeamProvider(agent.providerKey)}
-              disabled={removeTeamMutation.isPending}
-            >
-              Remove team default
-            </Button>
-          ) : undefined,
-        })}
-
-        {teamCred?.masked_key && (
-          <p className="text-xs text-muted-foreground font-mono">
-            Team key: {teamCred.masked_key}
-            {teamCred.set_by_user_name && <span> &middot; Set by {teamCred.set_by_user_name}</span>}
-          </p>
-        )}
-
-        {isCodex && renderCodexCredentialToggle({
-          method: codexCredentialMethod,
-          onMethodChange: setCodexCredentialMethodOverride,
-        })}
-
-        {isClaude && renderClaudeCredentialToggle({
-          method: claudeCredentialMethod,
-          onMethodChange: setClaudeCredentialMethodOverride,
-        })}
-
-        {envVarsToRender.map((envVar) => {
-          const displayValue = agentConfig[agent.key]?.[envVar.name] ?? "";
-          const isPendingSensitiveSave = Boolean(
-            envVar.sensitive &&
-              sensitiveSaveMutation.isPending &&
-              sensitiveSaveMutation.variables?.agentKey === agent.key &&
-              sensitiveSaveMutation.variables?.envVar === envVar.name,
-          );
-
-          return (
-            <div key={envVar.name} className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label htmlFor={`org-${agent.key}-${envVar.name}`} className="text-xs text-muted-foreground">
-                  {envVar.label}
-                </Label>
-                {envVar.sensitive && displayValue && (
-                  <span className="inline-flex items-center text-xs text-emerald-600 dark:text-emerald-400">
-                    <Check className="mr-0.5 h-3 w-3" />
-                    Configured
-                  </span>
-                )}
-              </div>
-              {envVar.options ? (
-                <Select
-                  value={displayValue || undefined}
-                  onValueChange={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
-                >
-                  <SelectTrigger
-                    id={`org-${agent.key}-${envVar.name}`}
-                    aria-label={envVar.label}
-                  >
-                    <SelectValue placeholder="Select a model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {envVar.options.map((option) => (
-                      <SelectItem key={option} value={option}>
-                        {option}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : envVar.sensitive ? (
-                <AgentConfigSensitiveField
-                  id={`org-${agent.key}-${envVar.name}`}
-                  placeholder={envVar.placeholder ?? "API key"}
-                  hasExistingValue={Boolean(displayValue)}
-                  isSaving={isPendingSensitiveSave}
-                  onSave={(value) =>
-                    sensitiveSaveMutation.mutateAsync({
-                      agentKey: agent.key,
-                      envVar: envVar.name,
-                      value,
-                    })
-                  }
-                />
-              ) : (
-                <DebouncedInput
-                  id={`org-${agent.key}-${envVar.name}`}
-                  type="text"
-                  className="font-mono text-xs"
-                  placeholder={envVar.placeholder ?? "Not set"}
-                  serverValue={displayValue}
-                  onCommit={(value) => saveAgentConfigField(agent.key, envVar.name, value)}
-                />
-              )}
-            </div>
-          );
-        })}
-
-        {hideEnvVars && (
-          <p className="text-xs text-muted-foreground">
-            API key fields are hidden while {isClaude ? "Claude" : "ChatGPT"} sign-in is selected.
-          </p>
-        )}
-        {hasAdvanced && !hideEnvVars && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="text-xs text-muted-foreground"
-            onClick={() => setShowAdvancedPerAgent((prev) => ({ ...prev, [agent.key]: !prev[agent.key] }))}
-          >
-            {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
-          </Button>
-        )}
-      </div>
-    );
+  function closeClaudeAuthModal() {
+    setShowClaudeAuthModal(false);
+    setClaudeAuthModalLabel(undefined);
   }
 
   return (
@@ -630,44 +378,198 @@ export default function AgentPage() {
         />
 
         {isAdmin && (
-          <section className="space-y-3">
+          <section className="space-y-4">
             <div>
               <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Organization coding agents
               </h2>
-              <p className="text-xs text-muted-foreground mt-1">
-                Default agent and credentials for your organization. Used when members don&apos;t have personal keys configured.
+              <p className="mt-1 text-xs text-muted-foreground">
+                Default agent and credentials for your organization. Used when members don&apos;t
+                have personal keys configured.
               </p>
             </div>
 
             <Card>
-              <CardContent>
-                <div className="space-y-3">
-                  <Label>Default coding agent</Label>
-                  <RadioGroup
-                    value={defaultAgentType}
-                    onValueChange={(value) =>
-                      autosave.save({
-                        settings: {
-                          default_agent_type: value as OrgSettings["default_agent_type"],
-                        },
-                      })
-                    }
-                    className="grid grid-cols-3 gap-3"
-                  >
-                    {AGENT_TYPES.map((agent) => (
-                      <RadioCard
-                        key={agent.key}
-                        value={agent.key}
-                        label={agent.label}
-                        description={agent.description}
-                        selected={defaultAgentType === agent.key}
-                      />
-                    ))}
-                  </RadioGroup>
-
-                  {renderOrgAgentConfigCard()}
+              <CardContent className="space-y-4">
+                <div className="space-y-1">
+                  <Label>Available coding agents</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Set the default organization agent. The selected agent&apos;s credential
+                    sources and fallback behavior are managed below.
+                  </p>
                 </div>
+                <RadioGroup
+                  value={defaultAgentType}
+                  onValueChange={(value) =>
+                    autosave.save({
+                      settings: {
+                        default_agent_type: value as OrgSettings["default_agent_type"],
+                      },
+                    })
+                  }
+                  className="grid gap-3 md:grid-cols-2 xl:grid-cols-3"
+                >
+                  {AGENT_TYPES.map((agent) => (
+                    <RadioCard
+                      key={agent.key}
+                      value={agent.key}
+                      label={agent.label}
+                      description={agent.description}
+                      selected={defaultAgentType === agent.key}
+                    />
+                  ))}
+                </RadioGroup>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="space-y-4">
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground">Selected agent</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <AgentBadge agentType={selectedAgent.key} labelClassName="text-base font-medium" />
+                    {selectedTeamDefault && (
+                      <Badge variant="secondary" className="text-xs">
+                        <Shield className="mr-1 h-3 w-3" />
+                        Team default set
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{selectedAgent.description}</p>
+                  {selectedModel && (
+                    <p className="text-xs text-muted-foreground">
+                      Default model: <span className="font-mono text-foreground">{selectedModel}</span>
+                    </p>
+                  )}
+                  {selectedAgent.note && (
+                    <p className="text-xs text-muted-foreground">{selectedAgent.note}</p>
+                  )}
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <SummaryCard
+                    icon={<Layers3 className="h-4 w-4 text-muted-foreground" />}
+                    title="Credential sources"
+                    value={credentialSourcesLabel}
+                  />
+                  <SummaryCard
+                    icon={<Bot className="h-4 w-4 text-muted-foreground" />}
+                    title="Execution route"
+                    value={executionRouteLabel}
+                  />
+                  <SummaryCard
+                    icon={<CheckCircle2 className="h-4 w-4 text-muted-foreground" />}
+                    title="Health"
+                    value={healthLabel}
+                  />
+                </div>
+
+                {selectedSupportsSubscriptions ? (
+                  summaryRows.length > 0 ? (
+                    <Card className="border-border/70 shadow-none">
+                      <CardContent className="space-y-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <p className="text-sm font-medium">{selectedAgent.label} subscriptions</p>
+                            <p className="text-xs text-muted-foreground">
+                              Active subscriptions are used in round-robin order before falling back
+                              to the API key.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button variant="outline" size="sm" onClick={() => setShowManageSubscriptionsDialog(true)}>
+                              Manage subscriptions
+                            </Button>
+                            {selectedHasCredentialSettings && (
+                              <Button size="sm" onClick={() => setShowManageSettingsDialog(true)}>
+                                {manageSettingsLabel}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+
+                        <SubscriptionSummaryTable subscriptions={summaryRows} />
+
+                        {selectedSensitiveEnvVar && (
+                          <p className="text-xs text-muted-foreground">
+                            API key fallback:{" "}
+                            <span className="font-medium text-foreground">
+                              {selectedHasFallbackCredential ? "Configured" : "Not configured"}
+                            </span>
+                          </p>
+                        )}
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <Card className="border-dashed border-border/80 shadow-none">
+                      <CardContent className="space-y-4 py-8">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/60 ring-1 ring-border/60">
+                          <SparklesFallbackIcon />
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">
+                            No {selectedAgent.label} subscriptions connected yet
+                          </p>
+                          <p className="max-w-2xl text-xs text-muted-foreground">
+                            Connect a {selectedAgent.label} subscription to use{" "}
+                            {selectedAgent.label === "Claude Code"
+                              ? "Anthropic-backed"
+                              : "ChatGPT-backed"}{" "}
+                            agent runs for your organization. Labels are generated for you
+                            automatically.
+                          </p>
+                          {selectedSensitiveEnvVar && (
+                            <p className="text-xs text-muted-foreground">
+                              {selectedHasFallbackCredential
+                                ? `API key fallback is configured via ${selectedFallbackSourceLabel}.`
+                                : "Optional: add an API key too as a fallback source."}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button onClick={() => openSubscriptionAuth(selectedAgent.key)}>
+                            <Plus className="mr-1.5 h-3.5 w-3.5" />
+                            Add {selectedAgent.label === "Claude Code" ? "Claude subscription" : "Codex subscription"}
+                          </Button>
+                          {selectedHasCredentialSettings && (
+                            <Button variant="outline" onClick={() => setShowManageSettingsDialog(true)}>
+                              {selectedSensitiveEnvVar && !selectedHasFallbackCredential
+                                ? "Add API key fallback"
+                                : manageSettingsLabel}
+                            </Button>
+                          )}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )
+                ) : (
+                  <Card className="border-dashed border-border/80 shadow-none">
+                    <CardContent className="space-y-3 py-8">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/60 ring-1 ring-border/60">
+                        <KeyRound className="h-5 w-5 text-muted-foreground" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold">
+                          {selectedAgent.inheritsProviderKeys
+                            ? "This agent reuses credentials from other providers."
+                            : "This agent uses API-key credentials only."}
+                        </p>
+                        <p className="max-w-2xl text-xs text-muted-foreground">
+                          {selectedAgent.inheritsProviderKeys
+                            ? "Configure the provider agents Pi depends on, then use settings here to control routing and model overrides."
+                            : "Configure the API key and default settings for this agent. Those credentials are used for organization-level runs when members do not provide personal keys."}
+                        </p>
+                      </div>
+                      {selectedHasCredentialSettings && (
+                        <div className="flex flex-wrap gap-2">
+                          <Button onClick={() => setShowManageSettingsDialog(true)}>
+                            {manageSettingsLabel}
+                          </Button>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </CardContent>
             </Card>
           </section>
@@ -679,7 +581,7 @@ export default function AgentPage() {
               <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Execution
               </h2>
-              <p className="text-xs text-muted-foreground mt-1">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Control how the coding agent runs across your organization.
               </p>
             </div>
@@ -691,10 +593,10 @@ export default function AgentPage() {
                     <Label>Autonomy level</Label>
                     <RadioGroup
                       value={autonomyLevel}
-                      onValueChange={(v) =>
+                      onValueChange={(value) =>
                         autosave.save({
                           settings: {
-                            autonomy_level: v as "manual" | "auto_simple" | "auto_all",
+                            autonomy_level: value as "manual" | "auto_simple" | "auto_all",
                           },
                         })
                       }
@@ -720,8 +622,10 @@ export default function AgentPage() {
                     <Label>Execution aggressiveness</Label>
                     <RadioGroup
                       value={aggressiveness}
-                      onValueChange={(v) =>
-                        autosave.save({ settings: { execution_aggressiveness: parseInt(v, 10) } })
+                      onValueChange={(value) =>
+                        autosave.save({
+                          settings: { execution_aggressiveness: parseInt(value, 10) },
+                        })
                       }
                       className="grid grid-cols-4 gap-3"
                     >
@@ -767,7 +671,9 @@ export default function AgentPage() {
                       onBlur={maxSessionMinutesField.onBlur}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Sessions that exceed this wall-clock limit are cancelled and marked failed. Defaults to 25 minutes; allowed range {MIN_SESSION_DURATION_MINUTES}–{MAX_SESSION_DURATION_MINUTES} minutes.
+                      Sessions that exceed this wall-clock limit are cancelled and marked failed.
+                      Defaults to 25 minutes; allowed range {MIN_SESSION_DURATION_MINUTES}–
+                      {MAX_SESSION_DURATION_MINUTES} minutes.
                     </p>
                   </div>
                 </div>
@@ -777,13 +683,193 @@ export default function AgentPage() {
         )}
       </div>
 
-      <AlertDialog open={!!removingTeamProvider} onOpenChange={(open) => !open && setRemovingTeamProvider(null)}>
+      <Dialog open={showManageSubscriptionsDialog} onOpenChange={setShowManageSubscriptionsDialog}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Manage {selectedAgent.label} subscriptions</DialogTitle>
+            <DialogDescription>
+              Active subscriptions are used in round-robin order before falling back to the API
+              key when one is configured.
+            </DialogDescription>
+          </DialogHeader>
+
+          {summaryRows.length > 0 ? (
+            <SubscriptionManagementTable
+              subscriptions={summaryRows}
+              onResume={(subscription) => openSubscriptionAuth(selectedAgent.key, subscription.label)}
+              onRemove={(subscriptionId) =>
+                selectedAgent.key === "codex"
+                  ? setRemovingSubscriptionId(subscriptionId)
+                  : setRemovingClaudeSubscriptionId(subscriptionId)
+              }
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No subscriptions connected yet for {selectedAgent.label}.
+            </p>
+          )}
+
+          <DialogFooter className="sm:justify-between">
+            <Button onClick={() => openSubscriptionAuth(selectedAgent.key)}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              Add subscription
+            </Button>
+            <Button variant="outline" onClick={() => setShowManageSubscriptionsDialog(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showManageSettingsDialog} onOpenChange={setShowManageSettingsDialog}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedSensitiveEnvVar
+                ? `${selectedAgent.label} API key & settings`
+                : `${selectedAgent.label} settings`}
+            </DialogTitle>
+            <DialogDescription>
+              {selectedSupportsSubscriptions
+                ? "Manage the fallback API key and provider settings used for organization runs."
+                : selectedAgent.inheritsProviderKeys
+                  ? "Adjust model routing and override settings for this meta-agent."
+                  : "Manage the credentials and defaults used for organization runs."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {selectedTeamDefault?.masked_key && (
+              <p className="text-xs text-muted-foreground">
+                Team key: <span className="font-mono">{selectedTeamDefault.masked_key}</span>
+                {selectedTeamDefault.set_by_user_name && (
+                  <span> &middot; Set by {selectedTeamDefault.set_by_user_name}</span>
+                )}
+              </p>
+            )}
+
+            {selectedAgent.envVars
+              .filter((envVar) => !envVar.advanced || showAdvancedPerAgent[selectedAgent.key])
+              .map((envVar) => {
+                const displayValue = agentConfig[selectedAgent.key]?.[envVar.name] ?? "";
+                const isPendingSensitiveSave = Boolean(
+                  envVar.sensitive &&
+                    sensitiveSaveMutation.isPending &&
+                    sensitiveSaveMutation.variables?.agentKey === selectedAgent.key &&
+                    sensitiveSaveMutation.variables?.envVar === envVar.name,
+                );
+
+                return (
+                  <div key={envVar.name} className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor={`org-${selectedAgent.key}-${envVar.name}`}>{envVar.label}</Label>
+                      {envVar.sensitive && displayValue && (
+                        <span className="inline-flex items-center text-xs text-emerald-600 dark:text-emerald-400">
+                          <Check className="mr-1 h-3 w-3" />
+                          Configured
+                        </span>
+                      )}
+                    </div>
+                    {envVar.options ? (
+                      <Select
+                        value={displayValue || undefined}
+                        onValueChange={(value) => saveAgentConfigField(selectedAgent.key, envVar.name, value)}
+                      >
+                        <SelectTrigger
+                          id={`org-${selectedAgent.key}-${envVar.name}`}
+                          aria-label={envVar.label}
+                        >
+                          <SelectValue placeholder="Select a value" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {envVar.options.map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {option}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : envVar.sensitive ? (
+                      <AgentConfigSensitiveField
+                        id={`org-${selectedAgent.key}-${envVar.name}`}
+                        placeholder={envVar.placeholder ?? "API key"}
+                        hasExistingValue={Boolean(displayValue)}
+                        isSaving={isPendingSensitiveSave}
+                        onSave={(value) =>
+                          sensitiveSaveMutation.mutateAsync({
+                            agentKey: selectedAgent.key,
+                            envVar: envVar.name,
+                            value,
+                          })
+                        }
+                      />
+                    ) : (
+                      <DebouncedInput
+                        id={`org-${selectedAgent.key}-${envVar.name}`}
+                        type="text"
+                        className="font-mono text-xs"
+                        placeholder={envVar.placeholder ?? "Not set"}
+                        serverValue={displayValue}
+                        onCommit={(value) => saveAgentConfigField(selectedAgent.key, envVar.name, value)}
+                      />
+                    )}
+                    {envVar.helpText && (
+                      <p className="text-xs text-muted-foreground">{envVar.helpText}</p>
+                    )}
+                  </div>
+                );
+              })}
+
+            {selectedAgent.envVars.some((envVar) => envVar.advanced) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-xs text-muted-foreground"
+                onClick={() =>
+                  setShowAdvancedPerAgent((prev) => ({
+                    ...prev,
+                    [selectedAgent.key]: !prev[selectedAgent.key],
+                  }))
+                }
+              >
+                {showAdvancedPerAgent[selectedAgent.key] ? "Hide advanced settings" : "Advanced settings"}
+              </Button>
+            )}
+          </div>
+
+          <DialogFooter className="sm:justify-between">
+            {selectedTeamDefault ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                onClick={() => setRemovingTeamProvider(selectedAgent.providerKey)}
+                disabled={removeTeamMutation.isPending}
+              >
+                Remove team default
+              </Button>
+            ) : (
+              <span />
+            )}
+            <Button variant="outline" onClick={() => setShowManageSettingsDialog(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={!!removingTeamProvider}
+        onOpenChange={(open) => !open && setRemovingTeamProvider(null)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove team default</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to remove the team default for {providerDisplayName(removingTeamProvider ?? "")}?
-              Team members without personal keys will fall back to the organization credential.
+              Are you sure you want to remove the team default for{" "}
+              {providerDisplayName(removingTeamProvider ?? "")}? Team members without personal keys
+              will fall back to the organization credential.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -800,12 +886,16 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={!!removingSubscriptionId} onOpenChange={(open) => !open && setRemovingSubscriptionId(null)}>
+      <AlertDialog
+        open={!!removingSubscriptionId}
+        onOpenChange={(open) => !open && setRemovingSubscriptionId(null)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove subscription</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to disconnect this ChatGPT subscription? Agents will no longer use it.
+              Are you sure you want to disconnect this ChatGPT subscription? Agents will no longer
+              use it.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -822,33 +912,25 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {showDeviceCodeModal && (
-        <CodexDeviceCodeModal
-          label={newSubscriptionLabel.trim() || undefined}
-          onClose={() => { setShowDeviceCodeModal(false); setNewSubscriptionLabel(""); }}
-          onConnected={() => {
-            queryClient.invalidateQueries({ queryKey: queryKeys.codexAuth.status });
-            queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
-            setShowDeviceCodeModal(false);
-            setNewSubscriptionLabel("");
-          }}
-        />
-      )}
-
-      {/* Remove Claude Subscription Dialog */}
-      <AlertDialog open={!!removingClaudeSubscriptionId} onOpenChange={(open) => !open && setRemovingClaudeSubscriptionId(null)}>
+      <AlertDialog
+        open={!!removingClaudeSubscriptionId}
+        onOpenChange={(open) => !open && setRemovingClaudeSubscriptionId(null)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove Claude subscription</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to disconnect this Claude subscription? Agents will no longer use it.
+              Are you sure you want to disconnect this Claude subscription? Agents will no longer
+              use it.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (removingClaudeSubscriptionId) removeClaudeSubscriptionMutation.mutate(removingClaudeSubscriptionId);
+                if (removingClaudeSubscriptionId) {
+                  removeClaudeSubscriptionMutation.mutate(removingClaudeSubscriptionId);
+                }
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -858,8 +940,179 @@ export default function AgentPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {showCodexAuthModal && (
+        <CodexDeviceCodeModal
+          label={codexAuthModalLabel}
+          onClose={closeCodexAuthModal}
+          onConnected={() => {
+            queryClient.invalidateQueries({ queryKey: ["codex-subscriptions"] });
+            closeCodexAuthModal();
+          }}
+        />
+      )}
+
+      {showClaudeAuthModal && (
+        <ClaudeCodeAuthModal
+          label={claudeAuthModalLabel}
+          onClose={closeClaudeAuthModal}
+          onConnected={() => {
+            queryClient.invalidateQueries({ queryKey: ["claude-code-subscriptions"] });
+            closeClaudeAuthModal();
+          }}
+        />
+      )}
     </PageContainer>
   );
+}
+
+function SummaryCard({
+  icon,
+  title,
+  value,
+}: {
+  icon: ReactNode;
+  title: string;
+  value: string;
+}) {
+  return (
+    <Card className="shadow-none">
+      <CardContent className="space-y-2">
+        <div className="flex items-center gap-2 text-muted-foreground">
+          {icon}
+          <p className="text-xs font-medium uppercase tracking-wider">{title}</p>
+        </div>
+        <p className="text-sm font-medium text-foreground">{value}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SubscriptionSummaryTable({ subscriptions }: { subscriptions: DisplaySubscription[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Type</TableHead>
+          <TableHead>Last used</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {subscriptions.map((subscription) => (
+          <TableRow key={subscription.id}>
+            <TableCell className="font-medium">{subscription.label || "Default"}</TableCell>
+            <TableCell>
+              <SubscriptionStatusBadge status={subscription.status} />
+            </TableCell>
+            <TableCell>{subscription.account_type ?? "Unknown"}</TableCell>
+            <TableCell>{formatRelativeTimestamp(subscription.last_used_at)}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function SubscriptionManagementTable({
+  subscriptions,
+  onResume,
+  onRemove,
+}: {
+  subscriptions: DisplaySubscription[];
+  onResume: (subscription: DisplaySubscription) => void;
+  onRemove: (subscriptionId: string) => void;
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Name</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Type</TableHead>
+          <TableHead>Last used</TableHead>
+          <TableHead className="text-right">Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {subscriptions.map((subscription) => (
+          <TableRow key={subscription.id}>
+            <TableCell className="font-medium">{subscription.label || "Default"}</TableCell>
+            <TableCell>
+              <SubscriptionStatusBadge status={subscription.status} />
+            </TableCell>
+            <TableCell>{subscription.account_type ?? "Unknown"}</TableCell>
+            <TableCell>{formatRelativeTimestamp(subscription.last_used_at)}</TableCell>
+            <TableCell className="text-right">
+              <div className="flex justify-end gap-2">
+                {subscription.status === "pending_auth" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onResume(subscription)}
+                    aria-label={`Resume setup ${subscription.label || "Default"}`}
+                  >
+                    Resume setup
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => onRemove(subscription.id)}
+                  aria-label={`Remove subscription ${subscription.label || "Default"}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function SubscriptionStatusBadge({ status }: { status: string }) {
+  if (status === "active") {
+    return (
+      <Badge variant="outline" className="border-green-600 text-green-600">
+        <CheckCircle2 className="mr-1 h-3 w-3" />
+        Active
+      </Badge>
+    );
+  }
+  if (status === "pending_auth") {
+    return (
+      <Badge variant="outline" className="border-amber-600 text-amber-700">
+        <AlertCircle className="mr-1 h-3 w-3" />
+        Needs attention
+      </Badge>
+    );
+  }
+  if (status === "invalid") {
+    return (
+      <Badge variant="outline" className="border-destructive text-destructive">
+        <AlertCircle className="mr-1 h-3 w-3" />
+        Needs attention
+      </Badge>
+    );
+  }
+  return <Badge variant="outline">{status}</Badge>;
+}
+
+function SparklesFallbackIcon() {
+  return <Layers3 className="h-5 w-5 text-muted-foreground" />;
+}
+
+function formatRelativeTimestamp(value?: string): string {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Never";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
 interface AgentConfigSensitiveFieldProps {
@@ -870,11 +1123,6 @@ interface AgentConfigSensitiveFieldProps {
   onSave: (value: string) => Promise<unknown>;
 }
 
-// Sensitive fields own their input state — the plaintext key is never
-// seeded from the server cache, so reloads and background refetches can't
-// resurface a partially typed value or pre-populate the DOM. Save is
-// explicit: the caller dispatches a full-object patch through the
-// non-optimistic `sensitiveSaveMutation` on the parent page.
 function AgentConfigSensitiveField({
   id,
   placeholder,
@@ -883,52 +1131,34 @@ function AgentConfigSensitiveField({
   onSave,
 }: AgentConfigSensitiveFieldProps) {
   const [value, setValue] = useState("");
-  const [showKey, setShowKey] = useState(false);
   const trimmed = value.trim();
   const canSave = trimmed.length > 0 && !isSaving;
 
-  // Only clear the input on a successful save. If the mutation rejects
-  // (network error, server validation), the typed value is preserved so
-  // the user doesn't have to retype the key.
   const handleSave = async () => {
     if (!canSave) return;
     try {
       await onSave(trimmed);
       setValue("");
-      setShowKey(false);
     } catch {
-      // Parent's mutation.onError surfaces the toast + captureError; we
-      // deliberately keep the input populated here.
+      // Parent mutation owns error handling and preserves the typed value.
     }
   };
 
   return (
     <div className="flex gap-2">
-      <div className="relative flex-1">
+      <div className="flex-1">
         <Input
           id={id}
-          type={showKey ? "text" : "password"}
+          type="password"
           placeholder={hasExistingValue ? "Replace existing key..." : placeholder}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
-          className="pr-9 font-mono text-xs"
+          onChange={(event) => setValue(event.target.value)}
+          className="font-mono text-xs"
           autoComplete="off"
           spellCheck={false}
         />
-        <button
-          type="button"
-          onClick={() => setShowKey((prev) => !prev)}
-          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          aria-label={showKey ? "Hide key" : "Show key"}
-        >
-          {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-        </button>
       </div>
-      <Button
-        size="sm"
-        onClick={handleSave}
-        disabled={!canSave}
-      >
+      <Button size="sm" onClick={handleSave} disabled={!canSave}>
         {isSaving ? "Saving..." : "Save key"}
       </Button>
     </div>

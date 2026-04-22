@@ -163,12 +163,12 @@ var ErrInvalidPaste = fmt.Errorf("pasted code is invalid or expired")
 
 // InitiateResponse is returned by the /initiate endpoint. The caller hands
 // AuthorizeURL to the user's browser; State is echoed back to the UI so the
-// modal can verify the eventual paste matches this session. Label is not
-// echoed back — the caller already owns that value and adding it here would
-// be a no-op round trip.
+// modal can verify the eventual paste matches this session. Label is included
+// because the server may auto-generate it when the caller omits one.
 type InitiateResponse struct {
 	AuthorizeURL string `json:"authorize_url"`
 	State        string `json:"state"`
+	Label        string `json:"label,omitempty"`
 }
 
 // CompleteResponse is returned by the /complete endpoint once the auth code

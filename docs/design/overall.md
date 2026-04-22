@@ -490,6 +490,7 @@ The main 143.dev container includes:
 - The Overview dashboard keeps users in setup context when configuring coding agents.
 - In the "Connect your coding agent" card, the **Settings** action opens an in-place modal for common agent edits (default agent selection and provider credentials).
 - The modal includes a secondary path to advanced agent settings at `/settings/agents` for deeper configuration.
+- Subscription-backed agent auth should keep setup friction low: labels are auto-generated from user metadata, while deeper multi-subscription management remains an advanced-settings concern. See `docs/design/future/57-coding-agent-subscription-ui.md`.
 - The UX goal is fast in-flow completion first, with a clear handoff to advanced controls when needed.
 
 # **Why 143?**
