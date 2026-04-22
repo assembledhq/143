@@ -73,6 +73,17 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Autopilot" })).toHaveAttribute("href", "/autopilot");
   });
 
+  it("uses a slightly narrower default sidebar width", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("aside");
+    expect(sidebar).toHaveClass("w-[236px]");
+  });
+
   it("uses a full-width content area with generous padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
