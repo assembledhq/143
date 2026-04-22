@@ -15,6 +15,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
+WORKDIR /app
 
 # Install runtime deps + sops/age for encrypted secrets decryption at boot
 RUN apt-get update && apt-get install -y ca-certificates wget && rm -rf /var/lib/apt/lists/* \
@@ -39,7 +40,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:8080/healthz || exit 1
 
-RUN useradd -r -s /usr/sbin/nologin appuser
+RUN useradd -r -s /usr/sbin/nologin appuser \
+    && mkdir -p /app/.data \
+    && chown -R appuser:appuser /app
 USER appuser
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

@@ -598,6 +598,31 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("shows a specific message when preview snapshot is unavailable", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const err = new Error("snapshot unavailable");
+    (err as Error & { code?: string }).code = "SNAPSHOT_UNAVAILABLE";
+    mockStart.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    const startButtons = screen.getAllByText("Start Preview");
+    await user.click(startButtons[0]);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
+        )
+      ).toBeInTheDocument();
+    });
+  });
+
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));

@@ -22,6 +22,9 @@ export const PREVIEW_ERROR_CODES = {
   // the snapshot blob is gone from the store). User needs to send a new
   // message to rebuild the sandbox.
   SNAPSHOT_EXPIRED: "SNAPSHOT_EXPIRED",
+  // 409 — the session is not expired, but there is no restorable snapshot
+  // available (for example snapshot persistence failed on the worker).
+  SNAPSHOT_UNAVAILABLE: "SNAPSHOT_UNAVAILABLE",
   // 409 — this worker has no sandbox provider / snapshot store wired, or
   // a concurrent hydrate won the publish race. A retry may resolve the
   // race-loss case; configuration needs admin attention.
