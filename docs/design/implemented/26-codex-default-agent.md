@@ -3,7 +3,7 @@
 > **Status:** Implemented | **Last reviewed:** 2026-03-25
 
 **Status**: implemented
-**Depends on**: 06-agent-orchestrator, 20-security-architecture, 21-first-run-experience, 25-dashboard-credentials
+**Depends on**: 06-agent-orchestrator, 20-security-architecture, 25-dashboard-credentials
 
 ## Problem
 
@@ -603,7 +603,7 @@ Each phase is independently reversible:
 
 **Security Architecture (doc 20)**: OAuth tokens use the same encryption infrastructure. Sandbox isolation unchanged — auth.json is ephemeral.
 
-**First-Run Experience (doc 21)**: Agent setup becomes part of the onboarding checklist. The quick-start flow should trigger Codex by default.
+**Onboarding / activation**: Agent setup becomes part of the onboarding checklist. The quick-start flow should trigger Codex by default.
 
 **Dashboard Credentials (doc 25)**: The `openai_chatgpt` provider type follows the same `ProviderConfig` interface pattern. Stored in the same `org_credentials` table with the same encryption.
 

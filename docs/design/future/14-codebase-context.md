@@ -1,6 +1,6 @@
 # Design: Codebase Context Layer
 
-> **Status:** Not Started | **Last reviewed:** 2026-03-19
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 
 This document describes how 143.dev builds, maintains, and serves deep codebase context to coding agents. This is the single most important factor in agent success — an agent with rich context about a repo's architecture, conventions, and file ownership produces dramatically better fixes.
 

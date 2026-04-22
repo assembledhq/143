@@ -1,10 +1,12 @@
 # 48 — Automations: First-Class, Team-Owned Recurring Agents
 
-> **Status:** Complete (Phases 1-3). Notifications + failure alerting deferred to [doc 49](49-automation-notifications.md). | **Date:** 2026-04-15
+> **Status:** Implemented | **Last reviewed:** 2026-04-21
 >
-> **Supersedes:** [31-automations-tab.md](31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](32-project-cadence-and-lifecycle.md) (evergreen projects)
+> **Implementation notes:** Core automations and `automation_runs` are implemented. Notification delivery and repeated-failure alerting were explicitly split out into [doc 49](../future/49-automation-notifications.md).
 >
-> **Depends on:** [29-projects.md](29-projects.md)
+> **Supersedes:** [31-automations-tab.md](../31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](../32-project-cadence-and-lifecycle.md) (evergreen projects)
+>
+> **Depends on:** [29-projects.md](../29-projects.md)
 
 ---
 
@@ -538,7 +540,7 @@ This is the key differentiator. Specifics:
 2. **Any member can edit/pause/trigger.** No permission gating beyond org membership (initially). The `created_by` and audit log track who did what.
 3. **Run history shows who triggered manual runs.** "Triggered by @sarah" vs "Scheduled."
 4. **Pause/enable shows who changed state.** "Paused by @john 2d ago" is visible on the list page.
-5. **Notifications** (per-automation preferences, Slack/email on completion/failure, repeated-failure alerting) are specified separately in [doc 49](49-automation-notifications.md).
+5. **Notifications** (per-automation preferences, Slack/email on completion/failure, repeated-failure alerting) are specified separately in [doc 49](../future/49-automation-notifications.md).
 
 ## 9. Templates
 
@@ -588,14 +590,14 @@ Templates pre-fill name, goal, and schedule. User picks a repo and clicks create
 3. ~~Drop legacy schedule fields from projects (Migration Stage 4).~~ ✅ (migration 000075)
 4. ~~Wire automation execution end-to-end: worker handler creates a session per run and dispatches `run_agent`; orchestrator's completion hook (`internal/services/automations/hooks.go`) maps terminal session status back to the `automation_runs` row.~~ ✅
 
-**Deferred to [doc 49](49-automation-notifications.md):** per-automation notification preferences (Slack/email on completion/failure) and repeated-failure alerting. These depend on the notification infrastructure in [doc 22](future/22-notifications.md) landing first, so they are scoped out of doc 48.
+**Deferred to [doc 49](../future/49-automation-notifications.md):** per-automation notification preferences (Slack/email on completion/failure) and repeated-failure alerting. These depend on the notification infrastructure in [doc 22](../future/22-notifications.md) landing first, so they are scoped out of doc 48.
 
 ## 11. What This Doesn't Do (Yet)
 
 - **Event-based triggers** (webhook, PR opened, Slack message). Interval/cron is enough for v1. Can add a `triggers` abstraction later.
 - **Multi-repo fan-out.** One automation = one repo for now. The `automation_runs` → sessions relationship is already one-to-many, so multi-repo fan-out (one run, N sessions across repos) is a natural v2 extension.
 - **Cost tracking per-automation.** Valuable — sessions already have `token_usage`, so aggregating per-automation via `automation_runs` is straightforward.
-- **Alerting on repeated failures.** If an automation fails N times in a row, notify the team. Moved to [doc 49](49-automation-notifications.md) along with per-automation notification preferences.
+- **Alerting on repeated failures.** If an automation fails N times in a row, notify the team. Moved to [doc 49](../future/49-automation-notifications.md) along with per-automation notification preferences.
 - **Retry policies.** Currently, failed runs stay failed. Auto-retry with backoff is a v2 feature. Manual retry (via the [Retry] button) is supported in v1.
 - **User-created templates / template marketplace.** Templates are hardcoded in the frontend for v1 (§9.1). Org-level custom templates and public sharing are v3 ideas.
 - **Automation versioning / changelog.** Config snapshots on runs (§4.2) provide point-in-time debuggability, but there's no explicit version history or diff view for automation config changes. Could add an `automation_versions` table later if needed.

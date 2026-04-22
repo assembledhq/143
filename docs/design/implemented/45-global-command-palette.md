@@ -1,8 +1,8 @@
 # Design: Global Command Palette
 
-> **Status:** Implemented (Phases 1–3) | **Last reviewed:** 2026-04-06
+> **Status:** Implemented | **Last reviewed:** 2026-04-21
 >
-> **Depends on:** [03-frontend.md](03-frontend.md), [34-repo-ribbons-nav.md](34-repo-ribbons-nav.md)
+> **Depends on:** [03-frontend.md](../03-frontend.md), [34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md)
 
 ## Problem
 
@@ -17,7 +17,7 @@ Today a user must:
 
 That is workable for first-run exploration, but not for daily usage. In a multi-repo, agent-heavy app, this creates too much UI travel and too little discoverability.
 
-This is especially visible because [03-frontend.md](03-frontend.md) already establishes `Cmd+K` as a cross-cutting UX pattern, but the product does not yet implement it.
+This is especially visible because [03-frontend.md](../03-frontend.md) already establishes `Cmd+K` as a cross-cutting UX pattern, but the product does not yet implement it.
 
 ## Design Goal
 

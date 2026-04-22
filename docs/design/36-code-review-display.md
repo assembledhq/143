@@ -1,6 +1,6 @@
 # 36 - Code Review Display
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 >
 > **Implementation notes:** Backend infrastructure complete: `diff_stats`, `diff_history` columns, `session_review_comments` table, review comments API/handler. Missing: syntax highlighting, file tree panel, inline comments UI, rich diff viewer components.
 

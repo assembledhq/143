@@ -700,7 +700,7 @@ DROP TABLE IF EXISTS invitations;
 - Invitation emails use the same SMTP infrastructure
 - Member removal could emit a notification event in the future
 
-**First-Run Experience (doc 21):**
+**Onboarding / activation flows:**
 - The first user to register for an org gets the `admin` role (existing behavior)
 - Subsequent users who join via invitation get the role specified in the invitation
 

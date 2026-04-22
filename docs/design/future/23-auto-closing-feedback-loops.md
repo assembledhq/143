@@ -1,6 +1,6 @@
 # Design: Auto-Closing Feedback Loops
 
-> **Status:** Not Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 >
 > **Implementation notes:** No `tuning_config_versions` or `tuning_decisions` tables, no tuning service, no API endpoints for tuning configuration, no `tuning_autonomy` fields in org settings.
 
