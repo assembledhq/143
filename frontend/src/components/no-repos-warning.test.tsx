@@ -32,7 +32,7 @@ describe("NoReposWarning", () => {
     server.use(
       http.get("/api/v1/integrations", () => {
         return HttpResponse.json({
-          data: [{ id: "int-1", provider: "github", status: "active" }],
+          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: true }],
           meta: {},
         });
       }),
@@ -63,7 +63,7 @@ describe("NoReposWarning", () => {
     server.use(
       http.get("/api/v1/integrations", () => {
         return HttpResponse.json({
-          data: [{ id: "int-1", provider: "github", status: "active" }],
+          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: true }],
           meta: {},
         });
       }),
@@ -88,7 +88,7 @@ describe("NoReposWarning", () => {
     server.use(
       http.get("/api/v1/integrations", () => {
         return HttpResponse.json({
-          data: [{ id: "int-1", provider: "github", status: "active" }],
+          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: true }],
           meta: {},
         });
       }),
@@ -105,6 +105,28 @@ describe("NoReposWarning", () => {
     await waitFor(() => {
       expect(
         screen.getByText(/no repositories are synced/i)
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("keeps neutral copy when github integration exists without an app installation", async () => {
+    server.use(
+      http.get("/api/v1/integrations", () => {
+        return HttpResponse.json({
+          data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: false }],
+          meta: {},
+        });
+      }),
+      http.get("/api/v1/repositories", () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<NoReposWarning />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/github is connected but no repositories are synced/i)
       ).toBeInTheDocument();
     });
   });
