@@ -52,6 +52,7 @@ type PRService struct {
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
+	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
 	users           *db.UserStore
 	orgs            *db.OrganizationStore
@@ -96,6 +97,11 @@ func NewPRService(
 // SetReviewCommentStore sets the review comment store for the feedback loop.
 func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
+}
+
+// SetIntegrationStore sets the integration store for installation fallback lookups.
+func (s *PRService) SetIntegrationStore(store *db.IntegrationStore) {
+	s.integrations = store
 }
 
 // SetUserCredentialStore sets the user credential store for user-authored PRs.
@@ -176,6 +182,23 @@ func shouldRetryWithOrgInstallation(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
+func integrationInstallationID(integration *models.Integration) (int64, error) {
+	if integration == nil || len(integration.Config) == 0 {
+		return 0, fmt.Errorf("github integration config missing installation_id")
+	}
+
+	var cfg struct {
+		InstallationID int64 `json:"installation_id"`
+	}
+	if err := json.Unmarshal(integration.Config, &cfg); err != nil {
+		return 0, fmt.Errorf("parse github integration config: %w", err)
+	}
+	if cfg.InstallationID <= 0 {
+		return 0, fmt.Errorf("github integration config missing installation_id")
+	}
+	return cfg.InstallationID, nil
+}
+
 func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
 	tryInstallation := func(installationID int64) (string, error) {
 		if installationID <= 0 {
@@ -202,15 +225,20 @@ func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.
 		primaryErr = fmt.Errorf("repository %s has no github installation_id", repo.FullName)
 	}
 
-	if s.repos == nil {
+	if s.integrations == nil || repo.IntegrationID == uuid.Nil {
 		return "", primaryErr
 	}
 
-	fallbackInstallationID, err := s.repos.GetAnyInstallationIDByOrg(ctx, orgID)
+	integration, err := s.integrations.GetByID(ctx, repo.IntegrationID)
 	if err != nil {
 		return "", primaryErr
 	}
-	if fallbackInstallationID <= 0 || fallbackInstallationID == repo.InstallationID {
+
+	fallbackInstallationID, err := integrationInstallationID(&integration)
+	if err != nil {
+		return "", primaryErr
+	}
+	if fallbackInstallationID == repo.InstallationID {
 		return "", primaryErr
 	}
 
@@ -222,9 +250,10 @@ func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.
 	s.logger.Warn().
 		Str("org_id", orgID.String()).
 		Str("repo", repo.FullName).
+		Str("integration_id", repo.IntegrationID.String()).
 		Int64("repo_installation_id", repo.InstallationID).
 		Int64("fallback_installation_id", fallbackInstallationID).
-		Msg("using fallback GitHub installation for PR creation")
+		Msg("using GitHub integration installation fallback for PR creation")
 
 	return token, nil
 }
