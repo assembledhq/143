@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 
 interface CommentInputProps {
   onSubmit: (body: string) => void;
@@ -11,6 +12,7 @@ interface CommentInputProps {
   initialValue?: string;
   submitLabel?: string;
   autoFocus?: boolean;
+  className?: string;
 }
 
 export function CommentInput({
@@ -19,6 +21,7 @@ export function CommentInput({
   initialValue = "",
   submitLabel = "Add comment",
   autoFocus = true,
+  className,
 }: CommentInputProps) {
   const [value, setValue] = useState(initialValue);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -55,7 +58,13 @@ export function CommentInput({
   }
 
   return (
-    <div className="mx-2 my-1.5 rounded-md border border-border bg-background shadow-sm">
+    <div
+      data-testid="inline-comment-composer"
+      className={cn(
+        "my-1.5 rounded-md border border-border bg-background shadow-sm",
+        className
+      )}
+    >
       <Textarea
         ref={textareaRef}
         value={value}

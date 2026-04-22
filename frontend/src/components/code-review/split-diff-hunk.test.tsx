@@ -131,7 +131,7 @@ describe("SplitDiffHunk", () => {
 
   it("renders comment input when activeCommentLine matches", () => {
     const hunk = makeHunk([addLine]);
-    render(
+    const { container } = render(
       <SplitDiffHunk
         hunk={hunk}
         filePath="src/app.ts"
@@ -141,6 +141,12 @@ describe("SplitDiffHunk", () => {
       />
     );
     expect(screen.getByRole("button", { name: /submit|comment/i })).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="right-comment-composer-slot"]')).toHaveClass(
+      "flex-1"
+    );
+    expect(container.querySelector('[data-testid="inline-comment-composer"]')).toHaveClass(
+      "max-w-2xl"
+    );
   });
 
   it("handles multiple removes followed by multiple adds", () => {

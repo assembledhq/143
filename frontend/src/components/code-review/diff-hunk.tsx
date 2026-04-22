@@ -87,7 +87,13 @@ export function DiffHunk({
             )}
             {/* New comment input */}
             {isActiveCommentLine && onSubmitComment && onCancelComment && (
-              <CommentInput onSubmit={onSubmitComment} onCancel={onCancelComment} />
+              <div data-testid="inline-comment-composer-anchor" className="pl-[120px] pr-2">
+                <CommentInput
+                  className="max-w-2xl"
+                  onSubmit={onSubmitComment}
+                  onCancel={onCancelComment}
+                />
+              </div>
             )}
           </div>
         );
