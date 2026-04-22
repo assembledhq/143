@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type JobStore struct {
@@ -95,4 +99,308 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 		"SELECT delete_expired_completed_jobs($1)", retentionDays,
 	).Scan(&deleted)
 	return deleted, err
+}
+
+const claimedJobColumns = `id, org_id, queue, job_type, payload, priority, status,
+	attempts, max_attempts, run_at, locked_by_node_id, locked_at,
+	lease_expires_at, lock_token, run_owner_id, last_error,
+	dedupe_key, created_at, updated_at, completed_at`
+
+type jobExecer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+// ClaimNextRunnable atomically claims the next due pending job, marking it as
+// running with a renewable lease and fencing token. Returns nil, nil when no
+// runnable job exists.
+// lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
+func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	query := fmt.Sprintf(`
+		WITH next_job AS (
+			SELECT id
+			FROM jobs
+			WHERE status = 'pending' AND run_at <= now()
+			ORDER BY priority DESC, created_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE jobs j
+		SET status = 'running',
+			locked_by_node_id = @node_id,
+			run_owner_id = @owner_id,
+			lock_token = @lock_token,
+			locked_at = now(),
+			lease_expires_at = now() + (@lease_seconds * interval '1 second'),
+			attempts = attempts + 1,
+			updated_at = now()
+		FROM next_job
+		WHERE j.id = next_job.id
+		RETURNING %s`, claimedJobColumns)
+
+	var job models.Job
+	var lockedByNodeID pgtype.Text
+	var lockedAt pgtype.Timestamptz
+	var leaseExpiresAt pgtype.Timestamptz
+	var persistedLockToken pgtype.UUID
+	var runOwnerID pgtype.Text
+	var lastError pgtype.Text
+	var dedupeKey pgtype.Text
+	var completedAt pgtype.Timestamptz
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"node_id":       nodeID,
+		"owner_id":      ownerID,
+		"lock_token":    lockToken,
+		"lease_seconds": int(leaseDuration.Seconds()),
+	}).Scan(
+		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
+		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
+		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
+		&lastError, &dedupeKey, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim next runnable job: %w", err)
+	}
+	if lockedByNodeID.Valid {
+		job.LockedByNodeID = &lockedByNodeID.String
+	}
+	if lockedAt.Valid {
+		job.LockedAt = &lockedAt.Time
+	}
+	if leaseExpiresAt.Valid {
+		job.LeaseExpiresAt = &leaseExpiresAt.Time
+	}
+	if persistedLockToken.Valid {
+		token := uuid.UUID(persistedLockToken.Bytes)
+		job.LockToken = &token
+	}
+	if runOwnerID.Valid {
+		job.RunOwnerID = &runOwnerID.String
+	}
+	if lastError.Valid {
+		job.LastError = &lastError.String
+	}
+	if dedupeKey.Valid {
+		job.DedupeKey = &dedupeKey.String
+	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	return &job, nil
+}
+
+// RenewLease extends the lease for a running job owned by the provided fencing
+// token. ok=false means ownership was already lost.
+// lint:allow-no-orgid reason="worker queue consumer renews cross-org job leases by design"
+func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+	query := `
+		UPDATE jobs
+		SET lease_expires_at = now() + (@lease_seconds * interval '1 second'),
+			updated_at = now()
+		WHERE id = @job_id
+		  AND status = 'running'
+		  AND lock_token = @lock_token
+		RETURNING lease_expires_at`
+
+	var leaseExpiresAt time.Time
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"lease_seconds": int(leaseDuration.Seconds()),
+		"job_id":        jobID,
+		"lock_token":    lockToken,
+	}).Scan(&leaseExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("renew job lease: %w", err)
+	}
+	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
+}
+
+// MarkSucceededWithLease transitions a running job to succeeded only if the
+// caller still owns the current fencing token.
+// lint:allow-no-orgid reason="worker queue consumer completes cross-org jobs by design"
+func (s *JobStore) MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'succeeded',
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lock_token = $2`, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("mark job succeeded with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// MarkFailedWithLease transitions a running job to failed only if the caller
+// still owns the current fencing token.
+// lint:allow-no-orgid reason="worker queue consumer completes cross-org jobs by design"
+func (s *JobStore) MarkFailedWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'failed',
+			last_error = $1,
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $2
+		  AND status = 'running'
+		  AND lock_token = $3`, errMsg, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("mark job failed with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RetryWithLease requeues a running job for a future retry only if the caller
+// still owns the current fencing token.
+// lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
+func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'pending',
+			last_error = $1,
+			run_at = $2,
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("retry job with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RetryWithoutConsumingAttemptWithLease requeues a running job while undoing the
+// claim-time attempt increment. This preserves the existing semantics for
+// retryable capacity/dependency conditions.
+// lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
+func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'pending',
+			last_error = $1,
+			run_at = $2,
+			attempts = GREATEST(attempts - 1, 0),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("retry job without consuming attempt with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// DeadLetterWithLease transitions a running job to dead_letter only if the
+// caller still owns the current fencing token.
+// lint:allow-no-orgid reason="worker queue consumer completes cross-org jobs by design"
+func (s *JobStore) DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'dead_letter',
+			last_error = $1,
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $2
+		  AND status = 'running'
+		  AND lock_token = $3`, errMsg, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("dead-letter job with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ReclaimLostRunningJobs requeues jobs whose lease expired or whose owner node
+// is considered dead.
+// lint:allow-no-orgid reason="recovery loop scans cross-org jobs by design"
+func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+	query := `
+		WITH dead_nodes AS (
+			SELECT id
+			FROM nodes
+			WHERE status = 'dead'
+			   OR last_heartbeat_at < $1
+		),
+		reclaimable AS (
+			SELECT j.id
+			FROM jobs j
+			LEFT JOIN dead_nodes d ON d.id = j.locked_by_node_id
+			WHERE j.status = 'running'
+			  AND (
+				j.lease_expires_at < now()
+				OR d.id IS NOT NULL
+			  )
+			ORDER BY j.locked_at ASC
+			LIMIT $2
+		)
+		UPDATE jobs j
+		SET status = 'pending',
+			last_error = 'job ownership lost; re-queued by recovery loop',
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			run_at = now(),
+			updated_at = now()
+		FROM reclaimable r
+		WHERE j.id = r.id`
+
+	tag, err := s.db.Exec(ctx, query, staleBefore, limit)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// CountRunningOwnedByNode returns the number of running jobs currently owned by
+// the given node.
+// lint:allow-no-orgid reason="worker drain status is node-scoped across all orgs"
+func (s *JobStore) CountRunningOwnedByNode(ctx context.Context, nodeID string) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM jobs
+		WHERE status = 'running' AND locked_by_node_id = $1
+	`, nodeID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count running jobs by node: %w", err)
+	}
+	return count, nil
+}
+
+func (s *JobStore) execLeaseTerminalUpdate(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	execer, ok := s.db.(jobExecer)
+	if !ok {
+		return pgconn.CommandTag{}, fmt.Errorf("job store db does not support Exec")
+	}
+	return execer.Exec(ctx, query, args...)
 }
