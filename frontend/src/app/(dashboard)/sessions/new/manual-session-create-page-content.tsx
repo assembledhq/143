@@ -1,6 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -65,12 +66,21 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
+type MentionPickerPosition = {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+  side: "top" | "bottom";
+};
+
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  const composerCardRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   // Synchronous guard: React Query's isPending flips on the next render, so
   // rapid Enter presses can all pass the isPending check in the same tick.
@@ -95,6 +105,7 @@ export function ManualSessionCreatePageContent() {
   const [caretPosition, setCaretPosition] = useState(0);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [mentionPickerPosition, setMentionPickerPosition] = useState<MentionPickerPosition | null>(null);
   const previousRepoIdRef = useRef<string>("");
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
@@ -291,6 +302,48 @@ export function ManualSessionCreatePageContent() {
     setReferences([]);
   }, [references, selectedRepoId]);
 
+  useEffect(() => {
+    if (!showMentionPicker) {
+      setMentionPickerPosition(null);
+      return;
+    }
+
+    function updateMentionPickerPosition() {
+      const composerCard = composerCardRef.current;
+      if (!composerCard) {
+        return;
+      }
+
+      const rect = composerCard.getBoundingClientRect();
+      const spacing = 12;
+      const viewportHeight = window.innerHeight;
+      const spaceAbove = rect.top - spacing;
+      const spaceBelow = viewportHeight - rect.bottom - spacing;
+      const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
+      const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
+      const top = side === "top"
+        ? Math.max(spacing, rect.top - Math.min(320, availableHeight) - spacing)
+        : Math.min(viewportHeight - spacing - Math.min(320, availableHeight), rect.bottom + spacing);
+
+      setMentionPickerPosition({
+        left: rect.left,
+        top,
+        width: rect.width,
+        maxHeight: Math.min(320, availableHeight),
+        side,
+      });
+    }
+
+    updateMentionPickerPosition();
+    window.addEventListener("resize", updateMentionPickerPosition);
+    window.addEventListener("scroll", updateMentionPickerPosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updateMentionPickerPosition);
+      window.removeEventListener("scroll", updateMentionPickerPosition, true);
+    };
+  }, [showMentionPicker, fileMentions.length, fileMentionsLoading]);
+
   function updateMessage(nextMessage: string, nextCaret: number) {
     setMessage(nextMessage);
     setReferences((previous) => syncReferencesWithMessage(nextMessage, previous));
@@ -450,11 +503,16 @@ export function ManualSessionCreatePageContent() {
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">
         <div className="relative mx-auto w-full max-w-3xl">
-          {showMentionPicker && (
+          {showMentionPicker && mentionPickerPosition && typeof document !== "undefined" && createPortal(
             <Card
-              className="absolute inset-x-0 bottom-[calc(100%+12px)] z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
-              data-side="top"
+              className="fixed z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
+              data-side={mentionPickerPosition.side}
               data-testid="mention-picker-overlay"
+              style={{
+                left: mentionPickerPosition.left,
+                top: mentionPickerPosition.top,
+                width: mentionPickerPosition.width,
+              }}
             >
               <CardContent className="p-2">
                 <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
@@ -468,7 +526,7 @@ export function ManualSessionCreatePageContent() {
                     <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
                   )}
                   {!fileMentionsLoading && fileMentions.length > 0 && (
-                    <div className="max-h-80 space-y-1 overflow-y-auto">
+                    <div className="space-y-1 overflow-y-auto" style={{ maxHeight: mentionPickerPosition.maxHeight }}>
                       {fileMentions.map((reference, index) => (
                         <Button
                           key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
@@ -487,10 +545,12 @@ export function ManualSessionCreatePageContent() {
                   )}
                 </div>
               </CardContent>
-            </Card>
+            </Card>,
+            document.body,
           )}
 
           <Card
+            ref={composerCardRef}
             className="w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]"
             data-testid="manual-session-composer"
           >
