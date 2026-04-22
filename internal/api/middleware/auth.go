@@ -17,6 +17,10 @@ import (
 
 type contextKey string
 
+type resolvedIdentityRecorder interface {
+	SetResolvedIdentity(orgID, userID uuid.UUID)
+}
+
 const (
 	userContextKey       contextKey = "user"
 	orgIDContextKey      contextKey = "org_id"
@@ -236,6 +240,9 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	ctx := WithUser(r.Context(), &user)
 	ctx = WithOrgID(ctx, activeOrgID)
 	ctx = WithActiveRole(ctx, activeRole)
+	if recorder, ok := w.(resolvedIdentityRecorder); ok {
+		recorder.SetResolvedIdentity(activeOrgID, user.ID)
+	}
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 

@@ -28,6 +28,9 @@ transforms:
         .trace_id = parsed.trace_id
         .request_id = parsed.request_id
         .path = parsed.path
+        .status = parsed.status
+        .error_code = parsed.error_code
+        .error_message = parsed.error_message
         .response_time_ms = parsed.response_time_ms
       }
 

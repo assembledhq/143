@@ -34,6 +34,7 @@ type AgentInput struct {
 	Issue              *models.Issue
 	RepoURL            string
 	RepoBranch         string
+	References         []models.SessionInputReference
 	OrgSettings        json.RawMessage
 	TokenMode          string // "low" or "high"
 	ComplexityEstimate *ComplexityEstimate

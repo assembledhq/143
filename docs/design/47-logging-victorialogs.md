@@ -316,7 +316,7 @@ Vector will still collect and ship logs without this change, but all fields will
 The logging server follows the same provisioning pattern as app, worker, and db nodes. This requires changes to:
 
 - **Makefile**: Add `provision-logging` and `deploy-logging` targets
-- **`deploy/scripts/provision.sh`**: Add `logging` role — lightweight bootstrap (Docker only, no gVisor, no kernel tuning), `GRAFANA_ADMIN_PASSWORD` as the only secret (no DB credentials or age key)
+- **`deploy/scripts/provision.sh`**: Add `logging` role — lightweight bootstrap (Docker only, no gVisor, no kernel tuning), `GRAFANA_ADMIN_PASSWORD` as the only required secret (no DB credentials or age key). Alert webhook URLs are optional and default to disabled local sinks.
 - **`deploy/scripts/deploy.sh`**: Add `logging` role with `grafana` as the health service
 - **`deploy/scripts/bootstrap.sh`**: Accept `logging` as a valid role
 - **`deploy/cloud-init/logging.yml`**: Cloud-init template for automated provisioning
@@ -326,7 +326,8 @@ Key differences from other roles:
 - **No gVisor** — logging server doesn't run sandboxes
 - **No DB credentials** — logging server doesn't connect to Postgres
 - **No GHCR login needed** — VictoriaLogs and Grafana are public Docker Hub images
-- **Minimal secrets** — only `GRAFANA_ADMIN_PASSWORD`
+- **Minimal required secrets** — only `GRAFANA_ADMIN_PASSWORD`
+- **Optional alert webhooks** — missing warning/critical webhook URLs fall back to disabled localhost endpoints so logging deploys still succeed
 
 Provisioning workflow:
 
@@ -379,7 +380,7 @@ service:api AND response_time_ms:range(1000, Inf)
 
 VictoriaLogs supports alerting via `vmalert` (VictoriaMetrics alerting engine) which evaluates LogsQL rules and fires to Alertmanager.
 
-For now, Grafana alerting on log queries is sufficient:
+For now, keep Grafana as the alerting UI and use `Alertmanager` for notification delivery, with log alert rules stored in `vmalert` YAML:
 
 - **Error rate spike**: Alert if `level:error` count exceeds threshold in 5-min window
 - **Agent run failures**: Alert if `"agent run failed"` appears > 3 times in 15 min
@@ -400,6 +401,13 @@ For now, Grafana alerting on log queries is sufficient:
     restart: unless-stopped
   ```
   Grafana alert query: `service:disk-monitor AND disk_used_pct:range(80, Inf)`
+
+The repo-owned production rule set now lives in `deploy/vmalert/rules/production-alerts.yml`. The logging node now runs:
+
+- `VictoriaLogs` for storage/query
+- `vmalert` for rule evaluation
+- `Alertmanager` for grouping and delivery
+- `Grafana` for dashboards and alert visibility via the provisioned Alertmanager datasource
 
 ## Resource Budget
 
@@ -478,7 +486,8 @@ if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
 fi
 if [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
-  : "${PRIVATE_IP:?PRIVATE_IP is required for logging role (set it or add to .env.production.enc)}"
+  GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-http://localhost:65535/disabled-warning}"
+  GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-http://localhost:65535/disabled-critical}"
 fi
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
@@ -507,9 +516,9 @@ Add secrets block (before the `db` block):
 
 ```bash
 if [ "$ROLE" = "logging" ]; then
-  # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  : "${PRIVATE_IP:?PRIVATE_IP is required for logging role (set it or add to .env.production.enc)}"
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nPRIVATE_IP=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$PRIVATE_IP" \
+  # Logging nodes need the Grafana admin password, VictoriaLogs bind IP, and optional alert webhooks
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
+    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
 ```

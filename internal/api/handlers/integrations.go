@@ -269,7 +269,30 @@ func (h *IntegrationHandler) ListIntegrations(w http.ResponseWriter, r *http.Req
 	if integrations == nil {
 		integrations = []models.Integration{}
 	}
+	for i := range integrations {
+		h.deriveIntegrationStatus(r.Context(), &integrations[i])
+	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.Integration]{Data: integrations})
+}
+
+func (h *IntegrationHandler) deriveIntegrationStatus(ctx context.Context, integration *models.Integration) {
+	if integration == nil || integration.Provider != models.IntegrationProviderGitHub {
+		return
+	}
+
+	var cfg struct {
+		InstallationID int64 `json:"installation_id"`
+	}
+	installed := false
+	if len(integration.Config) > 0 && json.Unmarshal(integration.Config, &cfg) == nil && cfg.InstallationID > 0 {
+		installed = true
+	}
+	if !installed && h.repoStore != nil {
+		if installationID, err := h.repoStore.GetAnyInstallationIDByOrg(ctx, integration.OrgID); err == nil && installationID > 0 {
+			installed = true
+		}
+	}
+	integration.GitHubAppInstalled = &installed
 }
 
 // DisconnectIntegration sets the integration status to inactive for a given provider.
@@ -309,6 +332,12 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 		if err := h.integrationStore.UpdateStatus(r.Context(), orgID, integration.ID, string(models.IntegrationStatusInactive)); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect integration", err)
 			return
+		}
+		if provider == models.IntegrationProviderGitHub && h.repoStore != nil {
+			if err := h.repoStore.DisconnectByIntegration(r.Context(), orgID, integration.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect github repositories", err)
+				return
+			}
 		}
 	}
 

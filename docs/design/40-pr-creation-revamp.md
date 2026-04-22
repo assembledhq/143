@@ -2,7 +2,7 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 >
-> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). Missing: user GitHub auth OAuth expansion, user-authored PR creation flow, issueless session support.
+> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). Missing: GitHub App user-to-server token storage/refresh, user-authored PR creation flow via GitHub App authorization, issueless session support.
 
 **Depends on**: [08-pr-and-ship.md](implemented/08-pr-and-ship.md), [13-repository-onboarding.md](implemented/13-repository-onboarding.md), [34-personal-team-coding-agents.md](implemented/34-personal-team-coding-agents.md)
 
@@ -22,7 +22,7 @@ The current PR creation system has three limitations:
 
 ## 2. Goals
 
-- Let users create PRs **as themselves** via their GitHub OAuth token
+- Let users create PRs **as themselves** via GitHub App user access tokens
 - Fall back to the GitHub App when a user hasn't connected GitHub or for automated/unattended sessions
 - Detect and use the repo's existing PR template, filling it in with session context
 - Fall back to a minimal default template when no repo template exists
@@ -42,254 +42,566 @@ Today we have two GitHub auth mechanisms:
 | **GitHub OAuth App** | User identity (sign-in) | `read:user`, `user:email` |
 | **GitHub App installation** | Repo access (clone, push, create PRs) | Contents R/W, PRs R/W, Checks R, Deployments R |
 
-The OAuth token is used only during login to fetch the user profile. It is **not stored** after the session is created — we have no long-lived user GitHub token.
+The GitHub OAuth token remains useful for identity, but it should not be the source of repo-write authority. Creating a PR "as the user" should use a GitHub App **user access token** (user-to-server auth), not a broad OAuth app token with `repo` scope.
 
-### 3.2 What Needs to Change
+### 3.2 Chosen Approach: GitHub App User Access Tokens
 
-To create PRs as the user, we need a GitHub token with repo-scoped write permissions for that user.
+GitHub App user access tokens are the right fit for PR authorship because they are constrained by three things at once:
 
-**Approach: Expand OAuth scopes.** Add `repo` scope to the existing OAuth flow. This grants read/write access to repos the user can access.
+- the user's own access to the repo
+- the GitHub App installation's access to the repo
+- the GitHub App's granted permissions
 
-**Why this approach:**
-- Single auth flow — no extra setup step for users
-- Users already sign in with GitHub; they just see an updated scope consent screen
-- Matches what Codex (web), Claude Code (web), and Devin do
-- OAuth App tokens don't expire, so no refresh token complexity
+That matches 143's trust model better than reusing GitHub login OAuth:
 
-**Trade-off:** The `repo` scope is broad (all repos the user can access, not just 143-connected ones). This is acceptable because (a) we only use the token to create PRs in repos where the GitHub App is already installed, and (b) this is the standard scope every comparable tool requests.
+- login proves identity
+- the app installation proves repo connectivity
+- user access tokens authorize "act on behalf of this human in this installed repo context"
 
-**Scope change:**
-```
-Before: read:user, user:email
-After:  read:user, user:email, repo
-```
+This also keeps all repo-mutating behavior aligned with the GitHub App model the rest of the product already uses.
 
-Existing users will need to re-authorize on next login to grant the new scope. Users who signed up before the scope change will not have a stored token until they re-auth — the system falls back to the GitHub App for these users (see 3.5).
+### 3.3 Why We Are Not Expanding Login OAuth
 
-### 3.3 Token Storage
+The rejected alternative is to expand the login OAuth app from `read:user,user:email` to `read:user,user:email,repo`.
 
-Store the user's GitHub token in the existing `user_credentials` table (from design doc 34):
+That would work technically, but it is the wrong long-term security shape:
+
+- `repo` is broader than needed
+- it grants repo access outside the app-installation boundary
+- it conflates authentication for login with authorization for repo writes
+
+The product should treat these as two distinct user consents:
+
+- "sign me in with GitHub"
+- "let the 143 GitHub App create PRs on my behalf"
+
+### 3.4 Token Storage Model
+
+Store GitHub App user tokens in `user_credentials` as a new provider distinct from login OAuth:
 
 ```sql
--- No new table needed. Use user_credentials with provider = 'github'
 INSERT INTO user_credentials (user_id, org_id, provider, config, status)
-VALUES ($1, $2, 'github', encrypt({
+VALUES ($1, $2, 'github_app_user', encrypt({
     "access_token": "ghu_xxxx",
+    "refresh_token": "ghr_xxxx",
     "token_type": "bearer",
-    "scope": "repo,read:user,user:email"
+    "expires_at": "2026-04-21T22:10:00Z",
+    "refresh_token_expires_at": "2026-10-18T22:10:00Z"
 }), 'active');
 ```
 
-OAuth App tokens don't expire — store once at login, done. No refresh logic needed.
-
-### 3.4 Auth Flow Changes
-
-During GitHub OAuth callback, after fetching the user profile:
+Proposed model additions in `internal/models/credentials.go`:
 
 ```go
-func (h *AuthHandler) GitHubCallback(w http.ResponseWriter, r *http.Request) {
-    // ... existing code: validate CSRF, exchange code for token, fetch profile ...
+const (
+    ProviderGitHubOAuth   ProviderName = "github_oauth"
+    ProviderGitHubAppUser ProviderName = "github_app_user"
+)
 
-    // NEW: Store the GitHub token for PR creation
-    if err := h.userCredentials.Upsert(ctx, user.ID, user.OrgID, "github", &GitHubOAuthConfig{
-        AccessToken: token.AccessToken,
-        TokenType:   token.TokenType,
-        Scope:       token.Scope,
-    }); err != nil {
-        logger.Warn().Err(err).Msg("failed to store GitHub token for user")
-        // Non-fatal — user can still sign in, just can't create PRs as themselves
-    }
+type GitHubAppUserConfig struct {
+    AccessToken           string     `json:"access_token"`
+    RefreshToken          string     `json:"refresh_token,omitempty"`
+    TokenType             string     `json:"token_type"`
+    ExpiresAt             *time.Time `json:"expires_at,omitempty"`
+    RefreshTokenExpiresAt *time.Time `json:"refresh_token_expires_at,omitempty"`
 }
 ```
 
-### 3.5 Token Resolution Order
+Provider split:
+
+- `github_oauth`: login identity
+- `github_app_user`: repo actions on behalf of the user
+
+### 3.5 Auth Flow Changes
+
+Add a dedicated GitHub App authorization flow for PR authorship. This is separate from `/api/v1/auth/github/*`.
+
+New endpoints:
+
+```text
+GET  /api/v1/users/me/github-app/connect
+GET  /api/v1/users/me/github-app/callback
+POST /api/v1/users/me/github-app/disconnect
+GET  /api/v1/users/me/github-status
+```
+
+Flow:
+
+1. User clicks `Create PR`
+2. 143 checks whether the triggering user already has a valid `github_app_user` credential
+3. If yes, PR creation continues immediately
+4. If no, the backend returns a typed "authorization required" response with a connect URL
+5. The frontend opens a lightweight modal and sends the user through GitHub App authorization
+6. GitHub redirects back with an authorization `code`
+7. 143 exchanges the code for a GitHub App user access token and stores it under `provider = github_app_user`
+8. 143 redirects the user back to the same session page with enough state to auto-resume PR creation
+9. Future PR creation attempts reuse the stored credential and refresh it silently when possible
+
+Handler shape:
+
+```go
+func (h *GitHubAppUserHandler) HandleConnectCallback(w http.ResponseWriter, r *http.Request) {
+    code, ok := validateOAuthCallback(w, r, githubAppUserStateCookie)
+    if !ok {
+        return
+    }
+
+    user := middleware.UserFromContext(r.Context())
+    orgID := middleware.OrgIDFromContext(r.Context())
+
+    tokenResp, err := h.githubAppAuth.ExchangeUserCode(r.Context(), code)
+    if err != nil {
+        writeError(w, r, http.StatusBadGateway, "TOKEN_EXCHANGE_FAILED", "failed to exchange GitHub App user code", err)
+        return
+    }
+
+    cfg := models.GitHubAppUserConfig{
+        AccessToken:           tokenResp.AccessToken,
+        RefreshToken:          tokenResp.RefreshToken,
+        TokenType:             tokenResp.TokenType,
+        ExpiresAt:             tokenResp.ExpiresAt,
+        RefreshTokenExpiresAt: tokenResp.RefreshTokenExpiresAt,
+    }
+    if err := h.userCredentials.Upsert(r.Context(), user.ID, orgID, cfg, false); err != nil {
+        writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store GitHub App user credential", err)
+        return
+    }
+
+    // sessionID/return target comes from signed state or a short-lived cookie
+    // captured when PR creation initiated the connect flow.
+    http.Redirect(w, r, h.frontendURL+"/sessions/"+sessionID+"?github_pr=connected&resume_pr=1", http.StatusTemporaryRedirect)
+}
+```
+
+### 3.6 Token Refresh Lifecycle
+
+Unlike login OAuth, GitHub App user tokens may expire and require refresh. We therefore need a small token manager in `internal/services/github/`.
+
+Interface:
+
+```go
+type GitHubAppUserTokenManager interface {
+    GetValidToken(ctx context.Context, orgID, userID uuid.UUID) (string, *models.User, error)
+}
+```
+
+Behavior:
+
+1. Load `github_app_user` credential
+2. If `expires_at` is comfortably in the future, return the access token
+3. Otherwise refresh using `refresh_token`
+4. Persist the rotated token pair
+5. If refresh fails because the user revoked access or the refresh token expired:
+   - disable the credential
+   - return a typed auth error so the UI can prompt reconnect
+
+We only need lazy refresh during PR creation for v1. The intended UX is "authorize once when you first try to create a PR, then stay connected unless GitHub requires reauthorization later."
+
+### 3.7 Token Resolution Order
 
 When creating a PR, resolve the token in this order:
 
-```
-1. Triggering user's personal GitHub token (user_credentials where provider='github')
-2. GitHub App installation token (current behavior)
+```text
+1. Triggering user's GitHub App user token
+2. GitHub App installation token
 ```
 
+Updated `resolveToken` shape:
+
 ```go
-func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository) (string, bool, error) {
-    // Try user token first
-    if run.TriggeredByUserID != nil {
-        cred, err := s.userCredentials.Get(ctx, *run.TriggeredByUserID, run.OrgID, "github")
+func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (*tokenResolution, error) {
+    if orgSettings.PRAuthorship != models.PRAuthorshipAppOnly && run.TriggeredByUserID != nil {
+        token, user, err := s.githubAppUserTokens.GetValidToken(ctx, run.OrgID, *run.TriggeredByUserID)
         if err == nil {
-            cfg, _ := ParseGitHubOAuthConfig(cred.Config)
-            if cfg.AccessToken != "" {
-                return cfg.AccessToken, true /* isUserToken */, nil
-            }
+            return &tokenResolution{Token: token, IsUserToken: true, User: user}, nil
         }
+        if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired {
+            return nil, err
+        }
+        s.logger.Warn().Err(err).Msg("falling back to installation token for PR creation")
     }
 
-    // Fall back to app installation token
     token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
-    return token, false, err
+    if err != nil {
+        return nil, fmt.Errorf("get installation token: %w", err)
+    }
+    return &tokenResolution{Token: token, IsUserToken: false}, nil
 }
 ```
 
-The `isUserToken` flag is returned so the caller knows whether to set git author info (see 3.6).
+Before using a user token, 143 should validate that:
 
-### 3.6 Commit Author Attribution
+- the GitHub App is installed on the repo owner/account
+- the user token can access that installation
+- the user still has access to the repo
 
-When using a user token, set the commit author to the user:
+If any of those checks fail:
 
-```go
-// When creating the commit via the Git Data API
-author := &commitAuthor{
-    Name:  user.Name,
-    Email: user.Email,
-    Date:  time.Now().UTC(),
-}
-```
+- `user_preferred`: fall back to installation token
+- `user_required`: block PR creation and prompt reconnect
 
-When using the app token (fallback), add a `Co-authored-by` trailer:
+### 3.8 Commit Author Attribution
 
-```
-fix: resolve null pointer in user API
+When using a GitHub App user access token:
 
-Co-authored-by: Jane Smith <jane@example.com>
-```
+- set local git author name/email to the triggering user
+- push and PR creation use the user token
+- GitHub will attribute the action to the user, with the GitHub App badge overlay
 
-### 3.7 Org-Level Configuration
+When using the installation token (fallback), keep the current bot flow and add a `Co-authored-by` trailer when a triggering user exists.
 
-PR authorship policy is stored in the existing `organizations.settings` JSONB column, parsed via `models.OrgSettings`. This is the same settings object that holds `autonomy_level`, `max_concurrent_runs`, `default_agent_type`, etc.
+### 3.9 Org-Level Configuration
 
-**Model change** — add to `OrgSettings` in `internal/models/org_settings.go`:
-
-```go
-type OrgSettings struct {
-    // ... existing fields ...
-    PRAuthorship   string `json:"pr_authorship,omitempty"`    // "user_preferred" | "app_only" | "user_required"
-    PRDraftDefault bool   `json:"pr_draft_default,omitempty"` // create PRs as draft by default
-}
-```
-
-**Values:**
+PR authorship policy still lives in `organizations.settings`:
 
 | Mode | Behavior |
 |------|----------|
-| `user_preferred` (default) | Use user token if available, fall back to app |
-| `app_only` | Always use the GitHub App (current behavior) |
-| `user_required` | Require user GitHub auth; block PR creation if not connected |
+| `user_preferred` (default) | Use GitHub App user token if available, else fall back to installation token |
+| `app_only` | Always use installation token |
+| `user_required` | Require GitHub App user authorization; block PR creation otherwise |
 
-The default is `user_preferred` (zero-value treated as `user_preferred` in `resolveToken`). This means existing orgs see no behavior change — since no users have stored GitHub tokens yet, all PRs continue using the app until users re-auth with the expanded scope.
+No new org settings are needed beyond the already-existing `pr_authorship` and `pr_draft_default`.
 
-**Settings UI** — The `pr_authorship` field is exposed on the existing Settings > Autopilot page (`frontend/src/app/(dashboard)/settings/autopilot/page.tsx`), which already manages org-level agent configuration. It fits naturally alongside the existing autonomy and agent config controls. Alternatively, it could live under a new "Pull Requests" subsection on the settings page if the autopilot page becomes too crowded.
+### 3.10 PR Authorship UX
 
-The setting is persisted via the existing `PATCH /api/v1/orgs/{id}/settings` endpoint, which updates the `organizations.settings` JSONB column. No new API endpoint is needed — the handler at `internal/api/handlers/settings.go` already accepts partial `OrgSettings` updates and merges them.
+The UX should be **on-demand**, not a permanent setup hurdle. We should only ask for GitHub App user authorization the first time a user actually presses `Create PR` and needs user-authored PRs.
 
-### 3.8 PR Authorship UX
+#### Session Detail
 
-The user experience around PR authorship should feel invisible when working, and clear when it matters. Three touchpoints:
+When connected:
 
-#### Session Detail — "Create PR" Button
-
-The existing "Create PR" button on the session detail page gets a small addition: a subtle author indicator below/beside it showing who the PR will be created as.
-
-**When the user has a GitHub token stored:**
-
-```
-┌─────────────────────────────────────────┐
-│                                         │
-│   [ Create PR ]                         │
-│                                         │
-│   PR will be opened as @janedoe         │
-│                                         │
-└─────────────────────────────────────────┘
+```text
+PR will be opened as @janedoe
 ```
 
-The `@janedoe` text is a muted secondary color (e.g., `text-muted-foreground`). It uses the `github_login` from the `users` table — already available on every authenticated request. No tooltip needed; the information is glanceable and unobtrusive.
+When not connected, the default idle state should stay simple:
 
-**When the user does NOT have a GitHub token stored:**
-
-```
-┌─────────────────────────────────────────┐
-│                                         │
-│   [ Create PR ]                         │
-│                                         │
-│   PR will be opened by 143              │
-│   Connect GitHub to open PRs as you ›   │
-│                                         │
-└─────────────────────────────────────────┘
+```text
+[ Create PR ]
 ```
 
-The "Connect GitHub to open PRs as you" line is a text link (`text-sm text-muted-foreground hover:underline`) that triggers the GitHub OAuth re-auth flow with the expanded `repo` scope. After auth completes, the user is redirected back to the session page, and the indicator updates to show their username.
+No persistent secondary CTA is required before the user clicks. The first click is the trigger point for auth if needed.
 
-**When the org has `pr_authorship: "app_only"`:**
+#### First Create PR Click: `user_preferred`
 
-```
-┌─────────────────────────────────────────┐
-│                                         │
-│   [ Create PR ]                         │
-│                                         │
-│   PR will be opened by 143              │
-│                                         │
-└─────────────────────────────────────────┘
-```
+If the org is `user_preferred` and the user has not authorized the GitHub App yet, the backend should return a typed response and the frontend should show a modal like:
 
-No connect prompt. The org has explicitly chosen app-only mode.
+```text
+Open this pull request as yourself?
 
-**When the org has `pr_authorship: "user_required"` and user hasn't connected:**
+Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app.
 
-```
-┌─────────────────────────────────────────┐
-│                                         │
-│   [ Create PR ]  (disabled)             │
-│                                         │
-│   Connect GitHub to create PRs ›        │
-│                                         │
-└─────────────────────────────────────────┘
+[ Continue with GitHub ] [ Create as 143 ]
 ```
 
-The button is disabled. The connect link is the only call to action. This makes it unambiguous that the org requires personal auth.
+Behavior:
 
-#### User Profile / Account Page
+- `Continue with GitHub` sends the user through the GitHub App authorization flow
+- after callback, the session page auto-retries PR creation
+- `Create as 143` immediately retries PR creation using the installation token
 
-The user's account page (or a section within Settings) shows GitHub connection status:
+#### First Create PR Click: `user_required`
 
-```
-GitHub
+If the org is `user_required` and the user has not authorized yet, the modal becomes blocking:
 
-  Connected as @janedoe                 [ Disconnect ]
+```text
+Authorize GitHub to create this pull request as yourself
 
-  Your pull requests will be opened under your GitHub account.
-```
+You only need to do this the first time unless GitHub requires reauthorization later.
 
-Or, when not connected:
-
-```
-GitHub
-
-  Not connected                         [ Connect GitHub ]
-
-  Pull requests are currently opened by the 143 app.
-  Connect your GitHub account to open PRs as yourself.
+[ Continue with GitHub ]
 ```
 
-This uses the same visual language as the existing integration cards on the Settings > Integrations page — a provider name, status indicator, and action button. The difference is that this is per-user, not per-org.
+The `Create PR` button does not need to start disabled in the steady state. The click itself can be the intercept point.
 
-#### API Endpoint for Frontend
+#### Automatic Resume After Callback
 
-The frontend needs to know the user's GitHub connection status to render the correct indicator. Add:
+After successful authorization, the user should land back on the same session detail page and **not** need to click `Create PR` again.
 
+The canonical request/response shapes live in the backend contract below. The important UX rule is: after callback, the user returns to the same session page and the frontend automatically retries PR creation using the short-lived resume token issued by the backend.
+
+#### Backend Contract for PR Authorship Intercept
+
+The auth-on-first-PR UX needs an explicit backend contract so the API, callback, and frontend resume behavior stay stable.
+
+##### `POST /api/v1/sessions/{id}/pr`
+
+Request body:
+
+```json
+{
+  "draft": false,
+  "author_mode": "auto"
+}
 ```
-GET /api/v1/users/me/github-status
+
+`author_mode` values:
+
+| Value | Meaning |
+|------|---------|
+| `auto` | Default. Use org policy and available credentials. May trigger auth-required response. |
+| `user` | Caller explicitly wants a user-authored PR. If unavailable, return auth-required or auth-failed instead of falling back silently. |
+| `app` | Caller explicitly wants an app-authored PR. Skip user-token lookup. |
+
+`author_mode` is optional. If omitted, treat it as `auto`.
+
+Success response remains the normal PR payload:
+
+```json
+{
+  "id": "pr-db-id",
+  "session_id": "session-123",
+  "github_pr_number": 42,
+  "github_pr_url": "https://github.com/acme/repo/pull/42",
+  "authored_by": "user"
+}
 ```
 
-Response:
+##### Auth Intercept Response
+
+When the org is `user_preferred` or `user_required`, the request wants a user-authored PR, and no valid `github_app_user` credential is available, return `409 Conflict`:
+
+```json
+{
+  "error": {
+    "code": "GITHUB_PR_AUTHORSHIP_REQUIRED",
+    "message": "Authorize GitHub to create this pull request as you."
+  },
+  "details": {
+    "session_id": "session-123",
+    "connect_url": "/api/v1/users/me/github-app/connect?flow=pr_authorship",
+    "resume_token": "opaque-short-lived-token",
+    "can_fallback_to_app": true,
+    "suggested_author_mode": "user"
+  }
+}
+```
+
+Contract notes:
+
+- `resume_token` is generated server-side, short-lived, single-use, and signed or stored server-side
+- `resume_token` encodes the minimum state required to resume the flow:
+  - `session_id`
+  - requesting `user_id`
+  - `org_id`
+  - requested PR params such as `draft`
+  - fallback eligibility
+- `connect_url` should not carry raw session state directly; it should only reference `resume_token`
+
+If the user explicitly requested `author_mode=app`, do not return this response.
+
+##### Fallback-to-App Retry
+
+If the modal offers `Create as 143`, the frontend should retry:
+
+```json
+{
+  "draft": false,
+  "author_mode": "app"
+}
+```
+
+That makes the fallback explicit and avoids backend ambiguity about whether the second attempt should still try user auth.
+
+##### `GET /api/v1/users/me/github-app/connect`
+
+This endpoint starts GitHub App user authorization.
+
+Required query params:
+
+```text
+flow=pr_authorship
+resume_token=<opaque-token>
+```
+
+Behavior:
+
+- validate the current authenticated user matches the intended flow owner
+- validate the `resume_token` is still active
+- store a short-lived CSRF state cookie
+- store or bind the `resume_token` to the auth state
+- redirect to GitHub's user authorization URL
+
+##### `GET /api/v1/users/me/github-app/callback`
+
+Behavior after GitHub redirects back:
+
+1. Validate state cookie
+2. Exchange code for GitHub App user token
+3. Upsert `github_app_user` credential
+4. Load the bound `resume_token`
+5. Validate it has not expired and belongs to the current user/org
+6. Redirect back to the originating session page with a lightweight resume marker
+
+Recommended redirect:
+
+```text
+/sessions/{id}?github_pr=connected&resume_pr=<resume_token>
+```
+
+The callback should not directly create the PR. It should only restore the user to the product UI with enough state for the frontend to retry safely.
+
+##### Frontend Resume Retry
+
+When the frontend sees `resume_pr=<resume_token>` on the session page, it should automatically issue:
+
+```json
+{
+  "draft": false,
+  "author_mode": "user",
+  "resume_token": "opaque-short-lived-token"
+}
+```
+
+Why send `resume_token` back on the retry:
+
+- prevents accidental auto-submit on unrelated page loads
+- lets the backend correlate the resumed request to the original intercepted request
+- allows single-use invalidation after successful retry
+
+##### Resume Validation Rules
+
+On resumed `POST /api/v1/sessions/{id}/pr`, the backend should verify:
+
+- `resume_token` exists and is unexpired
+- token `session_id` matches the route param
+- token `user_id` matches the current authenticated user
+- token `org_id` matches the current org context
+- token has not already been consumed
+
+If validation fails, return `409` with:
+
+```json
+{
+  "error": {
+    "code": "PR_RESUME_EXPIRED",
+    "message": "GitHub authorization completed, but the PR resume request expired. Please click Create PR again."
+  }
+}
+```
+
+##### Typed Auth Failure Response
+
+If a user had previously authorized GitHub but refresh/revalidation fails, return `403 Forbidden`:
+
+```json
+{
+  "error": {
+    "code": "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED",
+    "message": "GitHub needs you to reauthorize before this pull request can be opened as you."
+  },
+  "details": {
+    "connect_url": "/api/v1/users/me/github-app/connect?flow=pr_authorship",
+    "resume_token": "opaque-short-lived-token",
+    "can_fallback_to_app": true
+  }
+}
+```
+
+This lets the frontend distinguish:
+
+- first-time connect required
+- reauthorization required after expiry/revocation
+- normal app fallback path
+
+#### Settings / Account
+
+Show two separate statuses:
+
+```text
+GitHub login
+Connected as @janedoe
+
+GitHub PR authorship
+Authorized for user-authored PRs
+```
+
+This avoids the current ambiguity where "signed in with GitHub" might be mistaken for "143 can create PRs as me."
+
+Recommended copy:
+
+- connected: `Authorized for PRs opened as you`
+- disconnected: `Authorize when you first create a pull request`
+
+#### Frontend Status API
+
+Expand `GET /api/v1/users/me/github-status`:
 
 ```json
 {
   "connected": true,
   "github_login": "janedoe",
-  "pr_authorship_mode": "user_preferred"
+  "pr_authorship_mode": "user_preferred",
+  "pr_draft_default": false,
+  "github_app_user_connected": true,
+  "github_app_user_expires_at": "2026-04-21T22:10:00Z"
 }
 ```
 
-This returns the user's stored credential status and the org's `pr_authorship` setting so the frontend can determine which variant to render in a single call.
+The frontend should use `github_app_user_connected`, not `github_oauth`, to decide whether the next PR can be user-authored.
+
+### 3.11 Failure Modes
+
+PR authorship now has a few explicit failure classes:
+
+| Failure | Behavior |
+|---------|----------|
+| User never authorized the GitHub App | `user_preferred`: fall back to app. `user_required`: block and show connect CTA. |
+| Access token expired but refresh succeeds | Refresh in-line, continue. |
+| Access token expired and refresh fails | Disable credential, prompt reconnect. |
+| User lost repo/org access | Treat as auth failure for that repo; do not use stale cached access. |
+| Org uses SAML SSO and user lacks active SSO session | Show reconnect / reauthorize guidance. |
+| App no longer installed on repo owner | Surface installation problem; user token cannot bypass it. |
+
+The product should not promise "never authenticate again." The correct expectation is:
+
+- authorize on first `Create PR`
+- remain connected via silent refresh afterward
+- rarely reauthorize only if GitHub invalidates the credential or org policy requires it
+
+### 3.12 Migration Plan
+
+1. Keep `github_oauth` for login unchanged.
+2. Add `ProviderGitHubAppUser` and config parsing.
+3. Add GitHub App user-authorization endpoints and UI CTA.
+4. Add token refresh logic.
+5. Switch `PRService.resolveToken` to prefer `github_app_user`.
+6. Keep installation-token fallback for existing users.
+
+This is fully backward-compatible. Existing orgs continue using bot-authored PRs until a user explicitly authorizes the GitHub App for PR authorship.
+
+### 3.13 Security Properties
+
+Compared with expanding login OAuth to `repo`, this design is materially safer:
+
+- permissions remain fine-grained to the GitHub App
+- access is limited to accounts where the app is installed
+- tokens are short-lived and refreshable
+- authorization is bounded by both app and user privileges
+
+The main implementation responsibilities are:
+
+- encrypt refresh tokens at rest
+- refresh tokens atomically
+- disable revoked credentials quickly
+- avoid treating historical authorization as current org access
+
+### 3.14 Implementation Notes for This Repo
+
+Concrete code changes likely touch:
+
+- `internal/models/credentials.go`
+  add `ProviderGitHubAppUser` and `GitHubAppUserConfig`
+- `internal/api/handlers/github_status.go`
+  switch from OAuth-scope language to GitHub App user-auth language
+- new service in `internal/services/github/`
+  exchange + refresh GitHub App user tokens
+- `internal/services/github/pr.go`
+  replace `ProviderGitHubOAuth` lookup with `ProviderGitHubAppUser`
+- `docs/self-hosting/github-app-setup.md`
+  document enabling user authorization on the GitHub App
+
+The existing login OAuth handler in `internal/api/handlers/auth.go` should remain login-only.
 
 ---
 
@@ -423,7 +735,7 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 | Field | Source |
 |-------|--------|
-| PR title | `session.Title` (set by user or agent), falling back to first line of `ResultSummary`, falling back to `"Session {id[:8]}"` |
+| PR title | First-line `ResultSummary` when available, with minimal cleanup (trim/collapse whitespace, strip surrounding quotes, cap length); otherwise the cleaned `session.Title`, falling back to `"Session {id[:8]}"` |
 | PR body summary | `session.ResultSummary` |
 | Branch name | `143/{id[:8]}/{slugified-title}` — drop the `fix/` prefix for non-issue sessions |
 | Commit message | `session.Title` or `ResultSummary` first line |
@@ -433,22 +745,20 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 ```go
 func formatPRTitle(session *models.Session, issue *models.Issue) string {
-    // Issue-based sessions: keep current behavior
     if issue != nil {
         switch issue.Source {
         case models.IssueSourceLinear:
-            return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+            return fmt.Sprintf("%s: %s", issue.ExternalID, normalizePRTitleCandidate(issue.Title))
         default:
-            return fmt.Sprintf("fix: %s", issue.Title)
+            return fmt.Sprintf("fix: %s", bestPRTitleSubject(session, issue.Title))
         }
     }
 
-    // Issueless sessions: use session title
-    if session.Title != nil && *session.Title != "" {
-        return *session.Title
-    }
     if session.ResultSummary != nil && *session.ResultSummary != "" {
-        return firstLine(*session.ResultSummary)
+        return normalizePRTitleCandidate(firstLine(*session.ResultSummary))
+    }
+    if session.Title != nil && *session.Title != "" {
+        return normalizePRTitleCandidate(*session.Title)
     }
     return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
@@ -468,6 +778,8 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
     return fmt.Sprintf("143/%s/%s", short, slug)
 }
 ```
+
+`normalizePRTitleCandidate` is intentionally minimal. It collapses whitespace, trims surrounding quotes, strips trailing punctuation, and caps the final title length, but it does not try to paraphrase or reinterpret the title text. The LLM should generate the actual reviewer-facing phrasing; fallback logic should stay deterministic and simple.
 
 ### 5.4 Updated CreatePR Flow
 
@@ -516,13 +828,13 @@ Low-risk changes to unblock manually created sessions.
 
 ### Phase 3: User-Authored PRs
 
-1. Expand OAuth scopes to include `repo`
-2. Store user GitHub token in `user_credentials` on login
-3. Add `resolveToken` with user → app fallback
-4. Set commit author when using user token
-5. Add `pr_authorship` org setting
+1. Add `ProviderGitHubAppUser` and `GitHubAppUserConfig`
+2. Add GitHub App user-authorization connect/callback/disconnect endpoints
+3. Implement token exchange + refresh logic for GitHub App user access tokens
+4. Update `resolveToken` to prefer `github_app_user` over installation tokens
+5. Set commit author when using a user token
 6. Add UI indicator showing who the PR will be created as
-7. Handle token expiry/revocation gracefully (fall back to app, notify user)
+7. Handle token expiry/revocation gracefully (refresh, disable credential, fall back or block depending on org mode)
 
 ### Phase 4: Polish
 
@@ -539,9 +851,11 @@ Low-risk changes to unblock manually created sessions.
 
 | Method | Endpoint | Change |
 |--------|----------|--------|
-| `POST /api/v1/sessions/{id}/pr` | Add optional `draft` boolean in request body |
-| `GET /api/v1/users/me/github-status` | New — returns whether user has a valid GitHub token for PR creation |
-| `POST /api/v1/users/me/github/disconnect` | New — removes stored GitHub token |
+| `POST /api/v1/sessions/{id}/pr` | Add optional `draft`, `author_mode`, and `resume_token`; may return typed auth-intercept responses |
+| `GET /api/v1/users/me/github-status` | New — returns whether user has a valid GitHub App user token for PR creation |
+| `GET /api/v1/users/me/github-app/connect` | New — starts GitHub App user authorization for PR authorship |
+| `GET /api/v1/users/me/github-app/callback` | New — stores GitHub App user token after authorization |
+| `POST /api/v1/users/me/github-app/disconnect` | New — removes stored GitHub App user credential |
 
 ### New Org Settings Fields
 
@@ -556,15 +870,16 @@ Low-risk changes to unblock manually created sessions.
 
 ## 8. Security Considerations
 
-- **Token storage**: User GitHub tokens are encrypted at rest using the same AES-GCM scheme as other credentials in `user_credentials`
-- **Scope note**: The `repo` scope is broad but standard. We only use the token to create PRs in repos where the GitHub App is already installed — we never enumerate or access repos outside the 143 installation
-- **Token revocation**: If a user revokes 143's GitHub access, API calls fail with 401. The system catches this, falls back to app token, and marks the user credential as `revoked`
+- **Token storage**: GitHub App user access tokens and refresh tokens are encrypted at rest using the same AES-GCM scheme as other credentials in `user_credentials`
+- **Least privilege**: User-authored PRs rely on GitHub App user tokens, so access is limited to repos where the app is installed and bounded by both app and user privileges
+- **Token revocation**: If a user revokes app authorization or refresh fails, the system disables the credential, falls back to the installation token in `user_preferred`, and prompts reconnect in `user_required`
+- **Authorization drift**: The system should re-check installation/user access during PR creation rather than assuming an old authorization still implies current repo access
 - **Audit trail**: PR creation already logs `AuditActionSessionPRRequested`. Add a field indicating whether the PR was created as the user or the app
 
 ---
 
 ## 9. Migration
 
-- **Existing users**: No disruption. `pr_authorship` defaults to `user_preferred`, but no users have GitHub tokens stored yet, so all PRs continue using the app
-- **New OAuth scope**: On next login, users see the updated scope consent. Token is stored automatically
-- **Forced re-auth**: Optionally, orgs can set `pr_authorship: "user_required"` which prompts users to re-authorize with the new scope before they can create PRs
+- **Existing users**: No disruption. `pr_authorship` defaults to `user_preferred`, and users without `github_app_user` credentials continue creating PRs via the installation token
+- **New user consent**: Users explicitly authorize the GitHub App for PR authorship when they click the connect CTA; GitHub login remains unchanged
+- **Forced re-auth**: Optionally, orgs can set `pr_authorship: "user_required"` which blocks PR creation until the user authorizes the GitHub App

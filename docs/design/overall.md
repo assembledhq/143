@@ -25,7 +25,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Contextual PM steering lives on `Autopilot` as compact summaries edited in side sheets, while low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
 
 - Step 0: Connect repositories and build codebase context
-    - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access — no personal access tokens needed.
+    - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access, and can also mint user-to-server tokens when a human authorizes PR creation on their behalf. No personal access tokens are required.
     - For each connected repo, the system automatically builds a **Repository Context Package** — a structured body of knowledge including architecture docs (CLAUDE.md, AGENTS.md), coding conventions extracted from the codebase and past PR reviews, a feature-to-file map (which files own which features), test infrastructure knowledge (how to run tests, what patterns are used), and a dependency map (service boundaries, safe-to-change-in-isolation analysis).
     - The system actively helps teams build and maintain this context: auto-generating it from the codebase, suggesting updates when code changes via push webhooks, and measuring **context quality** (e.g. "your repo has 40% file coverage in context docs, agents working on undocumented areas fail 3x more").
     - This context package is injected into every agent run, giving agents deep understanding of the codebase before they start working. This is arguably the single most important factor in agent success.
@@ -41,11 +41,13 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
-    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit.
+    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, voice dictation, and repository-aware `@` mentions for files/directories without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit.
+    - Manual session `@` mentions are persisted as **structured input references** alongside the visible prompt text. The backend stores canonical reference metadata on the initial session message and lets each agent adapter translate those references into the downstream agent's native prompt/input format.
     - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Follow-up messages also resume paused sessions such as `awaiting_input`, `needs_human_guidance`, and completed terminal states from the saved snapshot when one still exists. Validation/PR creation only start when the user explicitly ends the session.
     - Snapshot persistence failures should be surfaced distinctly from true retention expiry. When the system cannot restore a prior sandbox because no snapshot was saved or the blob became unavailable, the UI should report that the snapshot is unavailable and prompt the user to send a new message to rebuild the sandbox, rather than implying the 30-day reaper expired it.
     - Multi-node deployments use shared object storage for session snapshots rather than node-local disk so worker-written snapshots can be hydrated later by API nodes; see [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
     - The inline code review surface should remain usable even on very long diff lines: comment composers should be visually compact, anchored near the commented line, and decoupled from the diff row's full scroll width so submit/cancel actions stay close to the text input.
+    - The session review surface is a structured code-review UI rather than a raw diff blob: parsed file/hunk rendering, inline comments, keyboard navigation, and repo browsing are part of the intended core loop. PR creation already uses snapshot-backed workspace pushes for higher fidelity. Planned improvements here are (a) **GitHub-style directional context expansion** so reviewers can move up or down through surrounding file context directly from the diff without leaving review mode, and (b) **branch-accurate diff snapshots** so the rendered diff is explicitly tied to the immutable commit the session branched from while still loading from a fast cached snapshot.
     - The agent runs in a sandboxed container and produces a code diff.
     - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore uses drain-before-deploy behavior, lease-based dead-worker recovery for in-flight jobs, and checkpoint-aware resume from the last committed turn after unplanned worker loss; see [51-worker-deploy-safety.md](51-worker-deploy-safety.md).
     - Optional live preview for sandbox output is served from an **isolated preview origin** using short-lived preview tokens, never from the main app origin. This prevents untrusted preview code from sharing the app's authenticated browser context. The feature is positioned as a no-local-setup review loop for supported repos, not as a full browser IDE, and relies on gateway-enforced browser-side controls such as CSP, service-worker blocking, and preview-session scoping.
@@ -62,8 +64,8 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         4. the fix includes a regression test that would have caught the original bug (required for Sentry errors and support tickets)
         5. the code passes all CI/CD checks and coverage is not reduced
 - Step 5: Open PR and ship
-    - The system opens a new PR on github, using whatever Github template already exists
-    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint
+    - The system opens a new PR on github, using whatever Github template already exists. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
+    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint, while keeping title cleanup minimal and relying on the LLM to generate the reviewer-facing phrasing when available
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
 - Step 6: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.
@@ -265,8 +267,9 @@ When an experiment outcome is `regression`:
 - **Database Driver**: `jackc/pgx` — fastest Go Postgres driver
 - **Database Access**: Direct pgx v5 — type-safe store functions with `CollectRows`/`RowToStructByName`, no ORM or codegen
 - **Migrations**: `golang-migrate/migrate`
-- **Logging**: `rs/zerolog` -> Mezmo (log aggregation)
-- **Monitoring**: Datadog (`DataDog/datadog-go` + `DataDog/dd-trace-go`) for metrics, APM, alerting
+- **Logging**: `rs/zerolog` -> Vector -> VictoriaLogs/Grafana
+- **Error Tracking**: Sentry for frontend exceptions today; backend exception capture should converge there as well
+- **Monitoring & Alerting**: Grafana is the operational control plane for logs, alerting, and notification routing. See [54-production-alerting.md](54-production-alerting.md)
 - **Container Management**: Docker SDK (`docker/docker`)
 
 ## Frontend: Next.js + React + shadcn/ui
@@ -290,8 +293,9 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 ## Logging & Monitoring
 
-- **Mezmo**: Primary log aggregation. Structured JSON logs shipped via Mezmo's ingestion API. Used for log search, alerting, and archival.
-- **Datadog**: Primary monitoring/observability. Custom metrics (HTTP, job queue, agent runs, cluster health), APM distributed tracing, pre-built dashboards, and alerting. Also used as a metrics source for Step 6 experiment evaluation (pull production latency/error rates to measure fix impact).
+- **VictoriaLogs + Grafana**: Primary centralized logging and operational alerting. Structured JSON logs are shipped by Vector and queried in Grafana. The logging stack tolerates missing warning/critical webhook URLs by falling back to disabled local sinks so observability deploys do not block on notification wiring. This is the current production observability backbone.
+- **Sentry**: Primary exception monitoring and developer-facing error triage. Frontend SDKs are already configured; backend exception capture should be added so Sentry becomes the system of record for application errors.
+- **Alerting model**: Page on aggregated service symptoms in Grafana; send exception issues from Sentry primarily to Slack unless they meet a paging threshold. See [54-production-alerting.md](54-production-alerting.md).
 
 # Build Order
 

@@ -71,6 +71,7 @@ export interface Integration {
   id: string;
   org_id: string;
   provider: string;
+  github_app_installed?: boolean;
   status: string;
   last_synced_at?: string;
   created_at: string;
@@ -133,7 +134,7 @@ export interface Session {
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
-  pr_creation_state: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
   pr_creation_error?: string;
   target_branch?: string;
   repository_id?: string;
@@ -240,8 +241,19 @@ export interface SessionMessage {
   role: 'user' | 'assistant';
   content: string;
   attachments?: string[];
+  references?: SessionInputReference[];
   token_usage?: Record<string, unknown>;
   created_at: string;
+}
+
+export type SessionInputReferenceKind = "file" | "directory" | "app" | "plugin";
+
+export interface SessionInputReference {
+  kind: SessionInputReferenceKind;
+  token?: string;
+  path?: string;
+  id?: string;
+  display: string;
 }
 
 export interface SessionQuestion {

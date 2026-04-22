@@ -30,6 +30,7 @@ const (
 	defaultGitHubAPI   = "https://api.github.com"
 	maxBranchSlugLen   = 60
 	maxLabelsToCreate  = 5
+	maxPRTitleLen      = 120
 	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
@@ -1050,6 +1051,11 @@ type GitHubBranch struct {
 	Protected bool   `json:"protected"`
 }
 
+type GitHubTreeEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
 // ListBranches returns the branches for a repository from the GitHub API.
 func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string) ([]GitHubBranch, error) {
 	var all []GitHubBranch
@@ -1071,6 +1077,70 @@ func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string)
 		page++
 	}
 	return all, nil
+}
+
+func (s *PRService) ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error) {
+	commitSHA, err := s.getRef(ctx, token, owner, repo, "heads/"+branch)
+	if err != nil {
+		return nil, fmt.Errorf("get branch ref: %w", err)
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/git/commits/%s", owner, repo, commitSHA)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get commit: %w", err)
+	}
+
+	var commit struct {
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if err := json.Unmarshal(body, &commit); err != nil {
+		return nil, fmt.Errorf("decode commit: %w", err)
+	}
+	if commit.Tree.SHA == "" {
+		return nil, fmt.Errorf("commit tree sha missing")
+	}
+
+	path = fmt.Sprintf("/repos/%s/%s/git/trees/%s?recursive=1", owner, repo, commit.Tree.SHA)
+	body, err = s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get tree: %w", err)
+	}
+
+	var tree struct {
+		Tree []GitHubTreeEntry `json:"tree"`
+	}
+	if err := json.Unmarshal(body, &tree); err != nil {
+		return nil, fmt.Errorf("decode tree: %w", err)
+	}
+
+	results := make([]models.RepositoryTreeEntry, 0, len(tree.Tree))
+	for _, entry := range tree.Tree {
+		results = append(results, models.RepositoryTreeEntry{
+			Path: entry.Path,
+			Type: models.RepositoryTreeEntryType(entry.Type),
+		})
+	}
+	return results, nil
+}
+
+func (s *PRService) getRef(ctx context.Context, token, owner, repo, ref string) (string, error) {
+	path := fmt.Sprintf("/repos/%s/%s/git/ref/%s", owner, repo, strings.TrimPrefix(ref, "refs/"))
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
+	}
+	return result.Object.SHA, nil
 }
 
 // prCreateConfig holds optional configuration for createPullRequest.
@@ -1196,15 +1266,56 @@ func slugify(s string) string {
 	return s
 }
 
-// firstLine returns the first non-empty line of s, truncated to 72 chars.
+// firstLine returns the first non-empty line of s.
 func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			if len(line) > 72 {
-				return line[:72]
-			}
 			return line
+		}
+	}
+	return ""
+}
+
+func normalizePRTitleCandidate(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\"'`")
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+
+	s = strings.TrimRight(s, ".!?")
+
+	return truncatePRTitle(s, maxPRTitleLen)
+}
+
+func truncatePRTitle(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+
+	truncated := strings.TrimSpace(s[:limit])
+	if idx := strings.LastIndex(truncated, " "); idx >= limit/2 {
+		truncated = truncated[:idx]
+	}
+	return strings.TrimRight(truncated, " ,:;-")
+}
+
+func bestPRTitleSubject(session *models.Session, fallback string) string {
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		if title := normalizePRTitleCandidate(firstLine(*session.ResultSummary)); title != "" {
+			return title
+		}
+	}
+	if fallback != "" {
+		if title := normalizePRTitleCandidate(fallback); title != "" {
+			return title
+		}
+	}
+	if session.Title != nil && *session.Title != "" {
+		if title := normalizePRTitleCandidate(*session.Title); title != "" {
+			return title
 		}
 	}
 	return ""
@@ -1226,22 +1337,29 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 }
 
 func formatPRTitle(session *models.Session, issue *models.Issue) string {
-	// Issue-based sessions: keep current behavior.
 	if issue != nil {
 		switch issue.Source {
 		case models.IssueSourceLinear:
-			return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+			title := normalizePRTitleCandidate(issue.Title)
+			if title == "" {
+				title = issue.Title
+			}
+			prefix := issue.ExternalID + ": "
+			return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
 		default:
-			return fmt.Sprintf("fix: %s", issue.Title)
+			title := bestPRTitleSubject(session, issue.Title)
+			if strings.HasPrefix(strings.ToLower(title), "fix: ") {
+				return truncatePRTitle(title, maxPRTitleLen)
+			}
+			if title != "" {
+				return "fix: " + truncatePRTitle(title, maxPRTitleLen-len("fix: "))
+			}
+			return fmt.Sprintf("fix: Session %s", session.ID.String()[:8])
 		}
 	}
 
-	// Issueless sessions: use session title or result summary.
-	if session.Title != nil && *session.Title != "" {
-		return *session.Title
-	}
-	if session.ResultSummary != nil && *session.ResultSummary != "" {
-		return firstLine(*session.ResultSummary)
+	if title := bestPRTitleSubject(session, ""); title != "" {
+		return title
 	}
 	return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
@@ -1497,6 +1615,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 
 	// 5. Parse response into title + body.
 	result := parsePRContentResponse(response)
+	result.Title = normalizePRTitleCandidate(result.Title)
 	if result.Title == "" && result.Body == "" {
 		return nil, fmt.Errorf("LLM returned empty PR content")
 	}

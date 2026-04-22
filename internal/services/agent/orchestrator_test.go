@@ -1153,6 +1153,73 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
+func TestRunAgent_ThreadsManualSessionReferencesToAdapter(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	runID := uuid.New()
+	description := "Investigate the session composer"
+	rawData := []byte(`{"manual_session":true,"references":[{"kind":"file","token":"@internal/api/handlers/sessions.go","path":"internal/api/handlers/sessions.go","display":"internal/api/handlers/sessions.go"},{"kind":"directory","token":"@frontend/src/app/(dashboard)/sessions/new","path":"frontend/src/app/(dashboard)/sessions/new","display":"frontend/src/app/(dashboard)/sessions/new"}]}`)
+
+	run := &models.Session{
+		ID:        runID,
+		IssueID:   issueID,
+		OrgID:     orgID,
+		AgentType: "claude_code",
+		Status:    "pending",
+		TokenMode: "low",
+	}
+
+	mockRuns := &mockSessionStore{}
+	mockIssues := &mockIssueStore{issue: models.Issue{
+		ID:          issueID,
+		OrgID:       orgID,
+		Source:      models.IssueSourceManual,
+		Title:       "Manual session",
+		Description: &description,
+		RawData:     rawData,
+	}}
+	mockRepos := &mockRepositoryStore{}
+	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
+	mockJobs := &mockJobStore{}
+	mockLogs := &mockSessionLogStore{}
+	mockQuestions := &mockSessionQuestionStore{}
+	mockDecisions := &mockDecisionLogStore{}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
+
+	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         sandboxProvider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
+		Sessions:         mockRuns,
+		SessionLogs:      mockLogs,
+		SessionQuestions: mockQuestions,
+		DecisionLog:      mockDecisions,
+		Issues:           mockIssues,
+		Repositories:     mockRepos,
+		Orgs:             mockOrgs,
+		Jobs:             mockJobs,
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-manual-ref-test"},
+				},
+			},
+		},
+		Logger: zerolog.Nop(),
+	})
+
+	err := orchestrator.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+	require.NotNil(t, capAdapter.captured, "adapter should capture input")
+	require.Len(t, capAdapter.captured.References, 2, "manual references should be threaded into agent input")
+	require.Equal(t, "internal/api/handlers/sessions.go", capAdapter.captured.References[0].Path, "file path should be preserved")
+	require.Equal(t, models.SessionInputReferenceKindDirectory, capAdapter.captured.References[1].Kind, "directory references should remain typed")
+}
+
 func TestRunAgent_FailedExecution(t *testing.T) {
 	t.Parallel()
 

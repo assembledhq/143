@@ -355,10 +355,14 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 func buildUserPrompt(input *agent.AgentInput) string {
 	// Manual sessions: pass through the user's raw message without any wrapping.
 	if input.Issue.Source == models.IssueSourceManual {
+		base := input.Issue.Title
 		if input.Issue.Description != nil {
-			return *input.Issue.Description
+			base = *input.Issue.Description
 		}
-		return input.Issue.Title
+		if len(input.References) == 0 {
+			return base
+		}
+		return buildManualPromptWithReferences(base, input.References)
 	}
 
 	var b strings.Builder
@@ -401,6 +405,32 @@ func buildUserPrompt(input *agent.AgentInput) string {
 		b.WriteString(fmt.Sprintf("- Reasoning: %s\n\n", input.ComplexityEstimate.Reasoning))
 	}
 
+	return b.String()
+}
+
+func buildManualPromptWithReferences(message string, references []models.SessionInputReference) string {
+	var b strings.Builder
+	b.WriteString(message)
+	b.WriteString("\n\n## Referenced context\n")
+	for _, reference := range references {
+		b.WriteString("- ")
+		if reference.Token != "" {
+			b.WriteString(reference.Token)
+		} else {
+			b.WriteString(reference.Display)
+		}
+		if reference.Path != "" && reference.Path != reference.Display {
+			b.WriteString(" (")
+			b.WriteString(reference.Path)
+			b.WriteString(")")
+		}
+		if reference.ID != "" {
+			b.WriteString(" [")
+			b.WriteString(reference.ID)
+			b.WriteString("]")
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 

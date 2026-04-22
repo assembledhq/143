@@ -80,6 +80,14 @@ type teamGitHubService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 }
 
+// teamRepositoryStore supplies repo-scoped fallbacks for GitHub App metadata.
+// Some orgs predate integration.config.installation_id but already have active
+// repo rows populated from a prior install sync; those repos still carry the
+// installation id we need for invite search.
+type teamRepositoryStore interface {
+	GetAnyInstallationIDByOrg(ctx context.Context, orgID uuid.UUID) (int64, error)
+}
+
 // TeamHandler serves the /api/v1/team/* endpoints.
 type TeamHandler struct {
 	users        teamUserStore
@@ -87,6 +95,7 @@ type TeamHandler struct {
 	sessions     teamSessionStore
 	invitations  teamInvitationStore
 	orgs         teamOrgStore
+	repositories teamRepositoryStore
 	integrations teamIntegrationStore
 	githubSvc    teamGitHubService
 	httpClient   *http.Client
@@ -101,6 +110,10 @@ type TeamHandler struct {
 func (h *TeamHandler) SetGitHubIntegration(integrations teamIntegrationStore, ghSvc teamGitHubService) {
 	h.integrations = integrations
 	h.githubSvc = ghSvc
+}
+
+func (h *TeamHandler) SetRepositoryStore(repositories teamRepositoryStore) {
+	h.repositories = repositories
 }
 
 // SetAuditEmitter injects the audit emitter for logging team events.
@@ -730,7 +743,7 @@ func (h *TeamHandler) SearchGitHubUsers(w http.ResponseWriter, r *http.Request) 
 // GitHub integration, or 0 if no usable integration exists.
 func (h *TeamHandler) getGitHubInstallationID(ctx context.Context, orgID uuid.UUID) (int64, error) {
 	if h.integrations == nil {
-		return 0, nil
+		return h.fallbackGitHubInstallationID(ctx, orgID)
 	}
 	integrations, err := h.integrations.ListByOrgAndProvider(ctx, orgID, string(models.IntegrationProviderGitHub))
 	if err != nil {
@@ -750,7 +763,21 @@ func (h *TeamHandler) getGitHubInstallationID(ctx context.Context, orgID uuid.UU
 			return cfg.InstallationID, nil
 		}
 	}
-	return 0, nil
+	return h.fallbackGitHubInstallationID(ctx, orgID)
+}
+
+func (h *TeamHandler) fallbackGitHubInstallationID(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	if h.repositories == nil {
+		return 0, nil
+	}
+	installationID, err := h.repositories.GetAnyInstallationIDByOrg(ctx, orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return installationID, nil
 }
 
 // searchGitHubUsers calls GitHub's REST user search and returns up to 10

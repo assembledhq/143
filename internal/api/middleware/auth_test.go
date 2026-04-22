@@ -247,6 +247,68 @@ func TestAuth_HeaderSelectsMembership(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+type identityRecorderResponseWriter struct {
+	*httptest.ResponseRecorder
+	orgID  uuid.UUID
+	userID uuid.UUID
+}
+
+func (w *identityRecorderResponseWriter) SetResolvedIdentity(orgID, userID uuid.UUID) {
+	w.orgID = orgID
+	w.userID = userID
+}
+
+func TestAuth_RecordsResolvedIdentityOnResponseWriter(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM auth_sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionCols).
+				AddRow(mockSessionRow(sessionID, testUserID, testOrgA, &testOrgA, "t", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(userCols).
+				AddRow(mockUserRow(testUserID, testOrgA, "admin", now)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(memberCols).
+				AddRow(testUserID, testOrgA, "admin", now),
+		)
+
+	stores := AuthStores{
+		Sessions:    db.NewAuthSessionStore(mock),
+		Users:       db.NewUserStore(mock),
+		Memberships: db.NewOrganizationMembershipStore(mock),
+	}
+
+	handler := Auth(stores, nil, zerolog.Nop())(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer t")
+	w := &identityRecorderResponseWriter{ResponseRecorder: httptest.NewRecorder()}
+
+	handler.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "auth middleware should preserve the successful response")
+	require.Equal(t, testOrgA, w.orgID, "auth middleware should record the resolved org identity on the response writer")
+	require.Equal(t, testUserID, w.userID, "auth middleware should record the resolved user identity on the response writer")
+	require.NoError(t, mock.ExpectationsWereMet(), "all auth store expectations should be met")
+}
+
 // TestAuth_HeaderForUnrelatedOrg_FallsThrough covers the graceful-degrade
 // path: an explicit X-Active-Org-ID for an org the user is not a member of
 // (e.g. the client still has a cached orgID after the user was removed)
