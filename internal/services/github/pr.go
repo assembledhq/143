@@ -30,6 +30,7 @@ const (
 	defaultGitHubAPI   = "https://api.github.com"
 	maxBranchSlugLen   = 60
 	maxLabelsToCreate  = 5
+	maxPRTitleLen      = 120
 	prTemplateCacheTTL = 24 * time.Hour // re-fetch repo PR template after this duration
 )
 
@@ -1265,15 +1266,56 @@ func slugify(s string) string {
 	return s
 }
 
-// firstLine returns the first non-empty line of s, truncated to 72 chars.
+// firstLine returns the first non-empty line of s.
 func firstLine(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			if len(line) > 72 {
-				return line[:72]
-			}
 			return line
+		}
+	}
+	return ""
+}
+
+func normalizePRTitleCandidate(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\"'`")
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+
+	s = strings.TrimRight(s, ".!?")
+
+	return truncatePRTitle(s, maxPRTitleLen)
+}
+
+func truncatePRTitle(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+
+	truncated := strings.TrimSpace(s[:limit])
+	if idx := strings.LastIndex(truncated, " "); idx >= limit/2 {
+		truncated = truncated[:idx]
+	}
+	return strings.TrimRight(truncated, " ,:;-")
+}
+
+func bestPRTitleSubject(session *models.Session, fallback string) string {
+	if session.ResultSummary != nil && *session.ResultSummary != "" {
+		if title := normalizePRTitleCandidate(firstLine(*session.ResultSummary)); title != "" {
+			return title
+		}
+	}
+	if fallback != "" {
+		if title := normalizePRTitleCandidate(fallback); title != "" {
+			return title
+		}
+	}
+	if session.Title != nil && *session.Title != "" {
+		if title := normalizePRTitleCandidate(*session.Title); title != "" {
+			return title
 		}
 	}
 	return ""
@@ -1295,22 +1337,29 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 }
 
 func formatPRTitle(session *models.Session, issue *models.Issue) string {
-	// Issue-based sessions: keep current behavior.
 	if issue != nil {
 		switch issue.Source {
 		case models.IssueSourceLinear:
-			return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+			title := normalizePRTitleCandidate(issue.Title)
+			if title == "" {
+				title = issue.Title
+			}
+			prefix := issue.ExternalID + ": "
+			return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
 		default:
-			return fmt.Sprintf("fix: %s", issue.Title)
+			title := bestPRTitleSubject(session, issue.Title)
+			if strings.HasPrefix(strings.ToLower(title), "fix: ") {
+				return truncatePRTitle(title, maxPRTitleLen)
+			}
+			if title != "" {
+				return "fix: " + truncatePRTitle(title, maxPRTitleLen-len("fix: "))
+			}
+			return fmt.Sprintf("fix: Session %s", session.ID.String()[:8])
 		}
 	}
 
-	// Issueless sessions: use session title or result summary.
-	if session.Title != nil && *session.Title != "" {
-		return *session.Title
-	}
-	if session.ResultSummary != nil && *session.ResultSummary != "" {
-		return firstLine(*session.ResultSummary)
+	if title := bestPRTitleSubject(session, ""); title != "" {
+		return title
 	}
 	return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
@@ -1566,6 +1615,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 
 	// 5. Parse response into title + body.
 	result := parsePRContentResponse(response)
+	result.Title = normalizePRTitleCandidate(result.Title)
 	if result.Title == "" && result.Body == "" {
 		return nil, fmt.Errorf("LLM returned empty PR content")
 	}

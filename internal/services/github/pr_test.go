@@ -216,10 +216,77 @@ func TestFormatPRTitle(t *testing.T) {
 			expect:  "Updated the login flow",
 		},
 		{
+			name: "non linear issue uses result summary when available",
+			session: models.Session{
+				ID:            uuid.New(),
+				ResultSummary: func() *string { s := "Aligned file ordering between file detail view and Changes sidebar."; return &s }(),
+			},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
+				Title:  "please make sure the ordering of the files in the file detail view and the files in the \"Changes\" section of the side menu match",
+			},
+			expect: "fix: Aligned file ordering between file detail view and Changes sidebar",
+		},
+		{
+			name: "issueless session prefers result summary over session title",
+			session: models.Session{
+				ID: uuid.New(),
+				Title: func() *string {
+					s := "please make sure the ordering of the files in the file detail view and the files in the \"Changes\" section of the side menu match"
+					return &s
+				}(),
+				ResultSummary: func() *string { s := "Aligned file ordering between file detail view and Changes sidebar."; return &s }(),
+			},
+			issue:  nil,
+			expect: "Aligned file ordering between file detail view and Changes sidebar",
+		},
+		{
+			name: "issueless session uses minimally sanitized title when no summary exists",
+			session: models.Session{
+				ID: uuid.New(),
+				Title: func() *string {
+					s := "  \"Keep file ordering consistent between detail view and Changes sidebar\"  "
+					return &s
+				}(),
+			},
+			issue:  nil,
+			expect: "Keep file ordering consistent between detail view and Changes sidebar",
+		},
+		{
+			name: "non linear issue preserves existing fix prefix",
+			session: models.Session{
+				ID:            uuid.New(),
+				ResultSummary: func() *string { s := "fix: Keep file ordering consistent"; return &s }(),
+			},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
+				Title:  "Ordering mismatch",
+			},
+			expect: "fix: Keep file ordering consistent",
+		},
+		{
+			name: "issueless session trims quotes and whitespace from title",
+			session: models.Session{
+				ID:    uuid.New(),
+				Title: func() *string { s := "  \"Refactor auth middleware\"  "; return &s }(),
+			},
+			issue:  nil,
+			expect: "Refactor auth middleware",
+		},
+		{
 			name:    "nil issue with no title or summary uses session ID",
 			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
 			issue:   nil,
 			expect:  "Session abcdef01",
+		},
+		{
+			name:    "non linear issue with empty derived title falls back to session id",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
+				Title:  "   ",
+			},
+			expect: "fix: Session abcdef01",
 		},
 	}
 
@@ -353,6 +420,12 @@ func TestFormatCommitMessage(t *testing.T) {
 			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
 			issue:   nil,
 			expect:  "Session abcdef01",
+		},
+		{
+			name:    "nil issue falls back to result summary first line",
+			session: models.Session{ID: uuid.New(), ResultSummary: func() *string { s := "Updated the login flow\n\nAdded coverage"; return &s }()},
+			issue:   nil,
+			expect:  "Updated the login flow",
 		},
 	}
 
@@ -939,6 +1012,62 @@ func TestFetchPRTemplate_FoundTemplate(t *testing.T) {
 	require.NotEmpty(t, path, "should return the matched template path")
 }
 
+func TestFetchPRTemplate_FallsBackToDirectoryTemplate(t *testing.T) {
+	t.Parallel()
+
+	templateContent := "## Default Template\n\nExplain the change."
+	encoded := base64.StdEncoding.EncodeToString([]byte(templateContent))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/contents/.github/PULL_REQUEST_TEMPLATE") && !strings.Contains(r.URL.Path, "default.md"):
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
+				{"name": "default.md", "path": ".github/PULL_REQUEST_TEMPLATE/default.md", "type": "file"},
+				{"name": "extra.txt", "path": ".github/PULL_REQUEST_TEMPLATE/extra.txt", "type": "file"},
+			}), "directory listing should encode successfully")
+		case strings.Contains(r.URL.Path, "/contents/.github/PULL_REQUEST_TEMPLATE/default.md"):
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+				"content":  encoded,
+				"encoding": "base64",
+			}), "default template should encode successfully")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, path := svc.fetchPRTemplate(context.Background(), "token", "owner", "repo", "main")
+	require.Equal(t, templateContent, content, "should return the default template from the directory fallback")
+	require.Equal(t, ".github/PULL_REQUEST_TEMPLATE/default.md", path, "should return the selected directory template path")
+}
+
+func TestFetchFileContent_RequestError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, ok := svc.fetchFileContent(context.Background(), "token", "owner", "repo", "main", ".github/pull_request_template.md")
+	require.False(t, ok, "fetchFileContent should report failure when the GitHub request fails")
+	require.Empty(t, content, "fetchFileContent should return empty content on request failure")
+}
+
 func TestGetOrFetchPRTemplate_NilCache(t *testing.T) {
 	t.Parallel()
 
@@ -1015,6 +1144,38 @@ func TestGeneratePRContent_WithLLM(t *testing.T) {
 	require.Contains(t, result.Body, "## Summary")
 	require.Contains(t, result.Body, "nil check")
 	require.Contains(t, result.Body, "143.dev", "should contain attribution footer")
+}
+
+func TestGeneratePRContent_MinimallySanitizesLLMTitle(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	summary := "Aligned file ordering between file detail view and Changes sidebar."
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>  \"Keep file ordering consistent between detail view and Changes sidebar\"  </pr_title>\n<pr_body>\n## Summary\n\nAligned file ordering between the two views.\n</pr_body>",
+	}
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+
+	result, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
+	require.NoError(t, err, "generatePRContent should succeed with a verbose LLM title")
+	require.Equal(t, "Keep file ordering consistent between detail view and Changes sidebar", result.Title, "generatePRContent should only apply minimal cleanup to LLM titles")
 }
 
 func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
@@ -1343,12 +1504,20 @@ func TestPRTemplatePaths(t *testing.T) {
 	require.GreaterOrEqual(t, len(prTemplatePaths), 5, "should check at least 5 conventional paths")
 }
 
-func TestFirstLine_LongLine(t *testing.T) {
+func TestFirstLine_ReturnsFullLine(t *testing.T) {
 	t.Parallel()
 
 	long := strings.Repeat("a", 100)
 	result := firstLine(long)
-	require.Len(t, result, 72, "firstLine should truncate to 72 chars")
+	require.Len(t, result, 100, "firstLine should return the full first non-empty line")
+}
+
+func TestNormalizePRTitleCandidate_TruncatesLongTitle(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("a", 140)
+	result := normalizePRTitleCandidate(long)
+	require.Len(t, result, 120, "normalizePRTitleCandidate should cap PR titles at 120 chars")
 }
 
 func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
