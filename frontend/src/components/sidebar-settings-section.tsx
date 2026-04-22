@@ -48,7 +48,7 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Integrations", icon: Plug, href: "/settings/integrations" },
       { label: "Coding agents", icon: Bot, href: "/settings/agent", adminOnly: true },
       { label: "LLM", icon: Sparkles, href: "/settings/llm" },
-      { label: "Autopilot settings", icon: Target, href: "/settings/autopilot" },
+      { label: "Autopilot", icon: Target, href: "/settings/autopilot" },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals" },
     ],
   },

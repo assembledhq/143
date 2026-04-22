@@ -44,7 +44,7 @@ export const staticActions: PaletteAction[] = [
   { id: "settings-integrations", label: "Integrations", icon: Plug, href: "/settings/integrations", group: "settings" },
   { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", requiredRole: "admin", group: "settings" },
   { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/settings/llm", group: "settings" },
-  { id: "settings-autopilot", label: "Autopilot settings", icon: Target, href: "/settings/autopilot", group: "settings" },
+  { id: "settings-autopilot", label: "Autopilot", icon: Target, href: "/settings/autopilot", group: "settings" },
   { id: "settings-evals", label: "Evals", icon: FlaskConical, href: "/settings/evals", group: "settings" },
   { id: "settings-team", label: "Team", icon: Users, href: "/settings/team", group: "settings" },
   { id: "settings-audit-log", label: "Audit log", icon: ScrollText, href: "/settings/audit-log", requiredRole: "admin", group: "settings" },
