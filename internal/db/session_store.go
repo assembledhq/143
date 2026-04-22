@@ -27,6 +27,15 @@ func NewSessionStore(db DBTX) *SessionStore {
 	return &SessionStore{db: db}
 }
 
+// lint:allow-no-orgid reason="transaction helper only; scoped methods still enforce org_id individually"
+func (s *SessionStore) Begin(ctx context.Context) (pgx.Tx, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return nil, fmt.Errorf("session store does not support transactions")
+	}
+	return txStarter.Begin(ctx)
+}
+
 type SessionFilters struct {
 	Statuses []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit    int

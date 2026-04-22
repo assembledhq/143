@@ -34,7 +34,7 @@ func TestSessionQuestionStore_Create_Success(t *testing.T) {
 	generatedID := uuid.New()
 
 	q := &models.SessionQuestion{
-		SessionID:   uuid.New(),
+		SessionID:    uuid.New(),
 		OrgID:        uuid.New(),
 		QuestionText: "Should we proceed?",
 		Options:      []string{"yes", "no"},
@@ -155,5 +155,58 @@ func TestSessionQuestionStore_Answer_Success(t *testing.T) {
 
 	err = store.Answer(context.Background(), orgID, id, "yes", userID)
 	require.NoError(t, err, "should answer question without error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionQuestionStore_AnswerLatestPendingBySession_Success(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionQuestionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	questionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	answer := "Option B"
+
+	mock.ExpectQuery("UPDATE session_questions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(questionColumns).
+				AddRow(
+					questionID, sessionID, orgID, "Should we proceed?", []string{"yes", "no"}, (*string)(nil),
+					(*string)(nil), &answer, &userID, &now, "answered", now,
+				),
+		)
+
+	question, err := store.AnswerLatestPendingBySession(context.Background(), orgID, sessionID, answer, userID)
+	require.NoError(t, err, "should answer latest pending question without error")
+	require.Equal(t, questionID, question.ID, "should return the answered question ID")
+	require.Equal(t, "answered", question.Status, "should return the updated question status")
+	require.Equal(t, answer, *question.AnswerText, "should persist the answer text")
+	require.Equal(t, userID, *question.AnsweredBy, "should persist the answering user")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionQuestionStore_AnswerLatestPendingBySession_NoPendingQuestion(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionQuestionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("UPDATE session_questions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(questionColumns))
+
+	_, err = store.AnswerLatestPendingBySession(context.Background(), orgID, sessionID, "Option B", userID)
+	require.Error(t, err, "should return an error when no pending question exists for the session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
