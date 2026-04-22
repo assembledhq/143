@@ -73,7 +73,7 @@ export default function AutopilotSettingsPage() {
       .map(([, { label, models }]) => ({ label, models }));
   }, [settings.agent_config, settings.default_agent_type]);
 
-  const scheduleHoursServer = settings.pm_schedule_hours ?? 4;
+  const scheduleHoursServer = settings.pm_schedule_hours ?? 24;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;
   const autonomyLevel = settings.autonomy_level ?? "auto_simple";
   const executionAggressiveness = String(settings.execution_aggressiveness ?? 2);

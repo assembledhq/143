@@ -254,7 +254,7 @@ const (
 	DefaultAgentAutonomy                            = AgentAutonomyAggressive
 	DefaultMinPriorityThreshold                     = 30.0
 	DefaultDefaultAgentType           AgentType     = AgentTypeCodex
-	DefaultPMScheduleHours                          = 4
+	DefaultPMScheduleHours                          = 24
 	DefaultPMModel                                  = PMModelSonnet
 	DefaultAuditRetentionDays                       = 90
 	DefaultContextRefreshIntervalDays               = 14
@@ -365,7 +365,7 @@ func (s OrgSize) PMScheduleHours() int {
 	case OrgSizeEnterprise:
 		return 1
 	default: // medium
-		return 4
+		return 24
 	}
 }
 

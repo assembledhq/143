@@ -432,7 +432,7 @@ export const handlers = [
           default_agent_type: 'claude_code',
           agent_config: {},
           autonomy_level: 'auto_simple',
-          pm_schedule_hours: 4,
+          pm_schedule_hours: 24,
           pm_model: 'claude-sonnet-4-5-20250929',
         },
       },

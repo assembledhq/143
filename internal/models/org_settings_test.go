@@ -274,7 +274,7 @@ func TestOrgSize_PMScheduleHours(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t, 6, OrgSizeSmall.PMScheduleHours(), "small orgs run PM less often")
-	require.Equal(t, 4, OrgSizeMedium.PMScheduleHours(), "medium matches previous default")
+	require.Equal(t, 24, OrgSizeMedium.PMScheduleHours(), "medium orgs should default to daily PM runs")
 	require.Equal(t, 2, OrgSizeLarge.PMScheduleHours(), "large orgs need more frequent PM")
 	require.Equal(t, 1, OrgSizeEnterprise.PMScheduleHours(), "enterprise orgs need hourly PM")
 }
@@ -368,7 +368,7 @@ func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
 
 	// With no org_size set, defaults should match medium profile (backward compatible)
 	require.Equal(t, 10, s.MaxConcurrentRuns, "default should match medium concurrent runs")
-	require.Equal(t, 4, s.PMScheduleHours, "default should match medium PM schedule")
+	require.Equal(t, 24, s.PMScheduleHours, "default should match medium PM schedule")
 	require.Equal(t, 100, s.ContextLimits.MaxOpenIssues, "default should match medium open issues")
 	require.Equal(t, 50_000, s.ContextLimits.PMMaxTokens, "default should match medium PM tokens")
 	require.Equal(t, 50_000, s.ContextLimits.AgentLowTokenMax, "default should match medium low tokens")
