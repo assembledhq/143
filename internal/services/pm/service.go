@@ -171,6 +171,37 @@ func (s *Service) pickAdapter(agentType models.AgentType) (agent.AgentAdapter, e
 	return adapter, nil
 }
 
+func (s *Service) finalizeSandboxEnv(agentType models.AgentType, env map[string]string) error {
+	if unknownPrefix := s.env.NarrowScopedCredentials(agentType, env); unknownPrefix != "" {
+		s.logger.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider_prefix", unknownPrefix).
+			Msg("pm: unrecognized Pi provider prefix, exporting all inherited provider keys to sandbox")
+	}
+	return s.env.CheckAuth(agentType, env)
+}
+
+func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox) error {
+	if agentType != models.AgentTypeCodex {
+		return nil
+	}
+
+	injected, err := s.env.InjectCodexAuth(ctx, orgID, sb)
+	if err != nil {
+		return &agent.AuthError{
+			AgentType: agentType,
+			Detail:    fmt.Sprintf("failed to prepare ChatGPT authentication for Codex: %v", err),
+		}
+	}
+	if !injected {
+		return &agent.AuthError{
+			AgentType: agentType,
+			Detail:    "No ChatGPT credentials are configured for Codex. Connect ChatGPT before running PM with Codex.",
+		}
+	}
+	return nil
+}
+
 func NewService(
 	issues issueStore,
 	sessions sessionStore,
@@ -370,7 +401,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}
 
-	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+	if err := s.finalizeSandboxEnv(agentType, sbCfg.Env); err != nil {
 		return nil, failSession("agent auth preflight", err)
 	}
 
@@ -378,6 +409,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if err != nil {
 		return nil, failSession("create sandbox", err)
 	}
+	exitReason := "completed"
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
 	sessionID := uuid.Nil
@@ -389,28 +421,29 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 	defer func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
 		}
 	}()
 
-	if agentType == models.AgentTypeCodex {
-		if _, err := s.env.InjectCodexAuth(ctx, orgID, sb); err != nil {
-			return nil, failSession("inject codex auth", err)
-		}
+	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb); err != nil {
+		exitReason = containerExitReason(ctx, err)
+		return nil, failSession("inject codex auth", err)
 	}
 
 	var token string
 	if s.github != nil {
 		ghToken, err := s.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
+			exitReason = containerExitReason(ctx, err)
 			return nil, failSession("get installation token", err)
 		}
 		token = ghToken
 	}
 	if err := s.sandbox.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, token); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("clone repo", err)
 	}
 
@@ -428,9 +461,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	contextJSON, err := json.Marshal(ctxBundle.pmContext)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("marshal pm context", err)
 	}
 	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("write context to sandbox", err)
 	}
 
@@ -471,16 +506,15 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	close(logCh)
 	logWg.Wait()
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("pm agent execution", err)
 	}
 
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		sessionErr := failSession("parse plan", err)
-		logOutput := result.Summary
-		if len(logOutput) > 2000 {
-			logOutput = logOutput[:2000] + "...(truncated)"
-		}
+		logOutput := excerpt(result.Summary, 2000)
 		sessionID := ""
 		if pmSession != nil {
 			sessionID = pmSession.ID.String()
@@ -511,9 +545,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	planModel, err := planToModel(plan, ctxBundle.productContext)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("serialize plan", err)
 	}
 	if err := s.plans.Create(ctx, planModel); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("persist plan", err)
 	}
 	plan.ID = planModel.ID
@@ -537,6 +573,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("execute plan", err)
 	}
 
@@ -606,6 +643,11 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 // from failSession when the error chain contains an AuthError. Returns the
 // persisted plan ID for log correlation, or uuid.Nil on failure.
 func (s *Service) persistFailedPlan(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, errMsg string) uuid.UUID {
+	if s.plans == nil {
+		s.logger.Error().Msg("failed to persist failed plan record: plan store not configured")
+		return uuid.Nil
+	}
+
 	now := time.Now()
 	plan := &models.PMPlan{
 		OrgID:         orgID,

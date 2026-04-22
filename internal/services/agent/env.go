@@ -326,6 +326,18 @@ func piResolvedModel(env map[string]string) string {
 	return models.PiModelClaudeOpus47
 }
 
+// NarrowScopedCredentials removes inherited credentials that are irrelevant for
+// the effective agent configuration. Today only Pi needs narrowing: it inherits
+// multiple provider keys up front, then keeps just the single provider required
+// by its resolved model. Returns the unknown provider prefix when the env could
+// not be narrowed (or "" when no warning is needed).
+func (e *AgentEnv) NarrowScopedCredentials(agentType models.AgentType, env map[string]string) string {
+	if agentType != models.AgentTypePi || env == nil {
+		return ""
+	}
+	return narrowPiProviderKeys(env)
+}
+
 // narrowPiProviderKeys strips inherited provider keys that don't match Pi's
 // resolved model. Called after ModelOverride is applied, so the env reflects
 // the *effective* model — a per-run override that flips Pi from Anthropic to

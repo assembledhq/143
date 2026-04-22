@@ -79,13 +79,14 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	if sbCfg.Env == nil {
 		sbCfg.Env = make(map[string]string)
 	}
-	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+	if err := s.finalizeSandboxEnv(agentType, sbCfg.Env); err != nil {
 		return fmt.Errorf("agent auth preflight: %w", err)
 	}
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	exitReason := "completed"
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
 	if s.usageTracker != nil {
@@ -93,32 +94,34 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	}
 	defer func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, orgID, uuid.Nil, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+			s.usageTracker.ContainerStopped(ctx, orgID, uuid.Nil, usageEventID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy project PM sandbox")
 		}
 	}()
 
-	if agentType == models.AgentTypeCodex {
-		if _, err := s.env.InjectCodexAuth(ctx, orgID, sb); err != nil {
-			return fmt.Errorf("inject codex auth: %w", err)
-		}
+	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb); err != nil {
+		exitReason = containerExitReason(ctx, err)
+		return fmt.Errorf("inject codex auth: %w", err)
 	}
 
 	var token string
 	if s.github != nil {
 		ghToken, err := s.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
+			exitReason = containerExitReason(ctx, err)
 			return fmt.Errorf("get installation token: %w", err)
 		}
 		token = ghToken
 	}
 	if err := s.sandbox.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, token); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("clone repo: %w", err)
 	}
 
 	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-project-context.json", contextJSON); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("write project context: %w", err)
 	}
 
@@ -143,12 +146,14 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
 	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("project pm agent execution: %w", err)
 	}
 
 	// Parse the result as a ProjectPlan.
 	pp, err := parseProjectPlan(result.Summary, projectID)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("parse project plan: %w", err)
 	}
 
@@ -173,11 +178,13 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	now := time.Now()
 	plan.CompletedAt = &now
 	if err := s.plans.Create(ctx, plan); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("persist project cycle plan: %w", err)
 	}
 
 	// Execute the project plan using existing infrastructure.
 	if err := s.executeProjectPlan(ctx, orgID, pp, settings, plan.ID); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return fmt.Errorf("execute project plan: %w", err)
 	}
 

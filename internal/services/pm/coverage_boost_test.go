@@ -25,11 +25,26 @@ func testAdapterMap(a agent.AgentAdapter) map[models.AgentType]agent.AgentAdapte
 	}
 }
 
-// testAgentEnv returns an AgentEnv with no upstream dependencies wired in —
-// Resolve returns an empty env, CheckAuth is a no-op for non-Amp/Pi agents,
-// and InjectCodexAuth short-circuits because CodexAuth is nil.
+type testCodexAuthProvider struct{}
+
+func (testCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	return &models.OpenAIChatGPTConfig{
+		AccessToken: "test-access-token",
+		IDToken:     "test-id-token",
+	}, nil
+}
+
+// testAgentEnv returns an AgentEnv with inert upstream dependencies wired in.
+// Resolve still returns an empty env for most tests, CheckAuth stays a no-op
+// for non-Amp/Pi agents, and Codex auth injection succeeds so tests that rely
+// on the platform default agent type do not fail before reaching their intended
+// assertion point.
 func testAgentEnv() *agent.AgentEnv {
-	return agent.NewAgentEnv(agent.AgentEnvDeps{Logger: zerolog.Nop()})
+	return agent.NewAgentEnv(agent.AgentEnvDeps{
+		CodexAuth: testCodexAuthProvider{},
+		Provider:  &pmSandboxMock{},
+		Logger:    zerolog.Nop(),
+	})
 }
 
 // --- buildProjectSummaries and buildProjectSummary ---

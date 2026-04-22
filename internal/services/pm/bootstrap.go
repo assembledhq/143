@@ -76,39 +76,35 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 		sbCfg.Env = make(map[string]string)
 	}
 	applyGitHubEnv(sbCfg.Env, ghToken, &repo)
-	if err := s.env.CheckAuth(agentType, sbCfg.Env); err != nil {
+	if err := s.finalizeSandboxEnv(agentType, sbCfg.Env); err != nil {
 		return nil, noop, fmt.Errorf("agent auth preflight: %w", err)
 	}
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, noop, fmt.Errorf("create sandbox: %w", err)
 	}
+	exitReason := "completed"
 	containerStartedAt := time.Now()
 	var usageEventID uuid.UUID
 	if s.usageTracker != nil {
 		usageEventID = s.usageTracker.ContainerStarted(ctx, params.orgID, uuid.Nil, sb, sbCfg, containerStartedAt)
 	}
-	if agentType == models.AgentTypeCodex {
-		if _, err := s.env.InjectCodexAuth(ctx, params.orgID, sb); err != nil {
-			if s.usageTracker != nil {
-				s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, "failed")
-			}
-			if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
-				s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox after codex auth failure")
-			}
-			return nil, noop, fmt.Errorf("inject codex auth: %w", err)
-		}
-	}
 	cleanup := func() {
 		if s.usageTracker != nil {
-			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, exitReason)
 		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox")
 		}
 	}
+	if err := s.injectRequiredAgentAuth(ctx, params.orgID, agentType, sb); err != nil {
+		exitReason = containerExitReason(ctx, err)
+		cleanup()
+		return nil, noop, fmt.Errorf("inject codex auth: %w", err)
+	}
 
 	if err := s.sandbox.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		cleanup()
 		return nil, noop, fmt.Errorf("clone repo: %w", err)
 	}
@@ -120,6 +116,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 		seedJSON = []byte("{}")
 	}
 	if err := s.sandbox.WriteFile(ctx, sb, bootstrapInputPath, seedJSON); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		cleanup()
 		return nil, noop, fmt.Errorf("write seed: %w", err)
 	}
@@ -132,6 +129,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	// Run any pre-execution setup (e.g. writing existing context doc).
 	if params.preExec != nil {
 		if err := params.preExec(ctx, sb); err != nil {
+			exitReason = containerExitReason(ctx, err)
 			cleanup()
 			return nil, noop, err
 		}
@@ -149,6 +147,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
 	if _, err := adapter.Execute(execCtx, sb, params.prompt, logCh); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		close(logCh)
 		logWg.Wait()
 		cleanup()
