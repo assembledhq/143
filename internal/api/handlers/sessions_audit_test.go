@@ -16,6 +16,10 @@ func TestSessionAuditSnapshot(t *testing.T) {
 
 	repoID := uuid.New()
 	userID := uuid.New()
+	parentSessionID := uuid.New()
+	pmPlanID := uuid.New()
+	projectTaskID := uuid.New()
+	automationRunID := uuid.New()
 	modelOverride := "gpt-5.2-codex"
 	targetBranch := "main"
 	title := "Fix login bug"
@@ -32,6 +36,10 @@ func TestSessionAuditSnapshot(t *testing.T) {
 		Title:             &title,
 		TargetBranch:      &targetBranch,
 		RepositoryID:      &repoID,
+		ParentSessionID:   &parentSessionID,
+		PMPlanID:          &pmPlanID,
+		ProjectTaskID:     &projectTaskID,
+		AutomationRunID:   &automationRunID,
 		CreatedAt:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 	}
 	issue := &models.Issue{
@@ -57,6 +65,10 @@ func TestSessionAuditSnapshot(t *testing.T) {
 	require.Equal(t, modelOverride, details["model_override"], "snapshot should include model override")
 	require.Equal(t, targetBranch, details["target_branch"], "snapshot should include target branch")
 	require.Equal(t, repoID.String(), details["repository_id"], "snapshot should include repository ID")
+	require.Equal(t, parentSessionID.String(), details["parent_session_id"], "snapshot should include parent session ID")
+	require.Equal(t, pmPlanID.String(), details["pm_plan_id"], "snapshot should include PM plan ID")
+	require.Equal(t, projectTaskID.String(), details["project_task_id"], "snapshot should include project task ID")
+	require.Equal(t, automationRunID.String(), details["automation_run_id"], "snapshot should include automation run ID")
 	require.Equal(t, userID.String(), details["triggered_by_user_id"], "snapshot should include triggering user ID")
 	require.Equal(t, true, details["manual_session"], "snapshot should include extra manual-session context")
 	require.Equal(t, 2, details["image_count"], "snapshot should include image attachment count")
