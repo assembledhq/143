@@ -1390,6 +1390,34 @@ func TestResolveToken_UserRequired_NoUser(t *testing.T) {
 	require.Contains(t, err.Error(), "org requires user GitHub auth")
 }
 
+func TestPRService_SetAppUserAuth(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{}
+	auth := &stubPRAppUserAuth{}
+	svc.SetAppUserAuth(auth)
+	require.Same(t, auth, svc.appUserAuth, "SetAppUserAuth should store the provided auth service")
+}
+
+func TestResolveToken_AuthorModeAppUsesInstallationToken(t *testing.T) {
+	t.Parallel()
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[1] = &cachedToken{
+		Token:     "app-token",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		logger:        zerolog.Nop(),
+	}
+
+	resolution, err := svc.resolveToken(context.Background(), &models.Session{ID: uuid.New(), OrgID: uuid.New()}, &models.Repository{InstallationID: 1}, models.OrgSettings{}, "app")
+	require.NoError(t, err, "resolveToken should accept explicit app author mode")
+	require.Equal(t, "app-token", resolution.Token, "resolveToken should use the installation token in app mode")
+	require.False(t, resolution.IsUserToken, "app mode should not report a user token")
+}
+
 func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationMissing(t *testing.T) {
 	t.Parallel()
 
@@ -1859,6 +1887,36 @@ func TestResolveToken_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing
 	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.Error(t, err, "user_required should fail when the user token cannot access the target repo")
 	require.Contains(t, err.Error(), "cannot access repo", "resolveToken should surface repo access failures for user-required auth")
+}
+
+func TestUserTokenCanAccessRepo_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid repo name", func(t *testing.T) {
+		t.Parallel()
+		svc := &PRService{httpClient: &http.Client{}, logger: zerolog.Nop()}
+		ok, err := svc.userTokenCanAccessRepo(context.Background(), "token", "/repo")
+		require.False(t, ok, "userTokenCanAccessRepo should reject malformed repo names")
+		require.Error(t, err, "userTokenCanAccessRepo should return an error for malformed repo names")
+	})
+
+	t.Run("server error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"message":"boom"}`))
+		}))
+		defer server.Close()
+
+		svc := &PRService{
+			baseURL:    server.URL,
+			httpClient: server.Client(),
+			logger:     zerolog.Nop(),
+		}
+		ok, err := svc.userTokenCanAccessRepo(context.Background(), "token", "owner/repo")
+		require.False(t, ok, "userTokenCanAccessRepo should not grant access on GitHub API failures")
+		require.Error(t, err, "userTokenCanAccessRepo should propagate unexpected API errors")
+	})
 }
 
 func TestValidateUserToken_ValidToken(t *testing.T) {

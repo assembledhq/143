@@ -19,17 +19,25 @@ import (
 // --- test doubles ---
 
 type stubGHCredentialStore struct {
-	cred *models.DecryptedUserCredential
-	err  error
+	cred        *models.DecryptedUserCredential
+	err         error
+	upsertFunc  func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig, bool) error
+	disableFunc func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error
 }
 
 func (s *stubGHCredentialStore) GetForUser(_ context.Context, _, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedUserCredential, error) {
 	return s.cred, s.err
 }
-func (s *stubGHCredentialStore) Upsert(_ context.Context, _, _ uuid.UUID, _ models.ProviderConfig, _ bool) error {
+func (s *stubGHCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error {
+	if s.upsertFunc != nil {
+		return s.upsertFunc(ctx, userID, orgID, cfg, isTeamDefault)
+	}
 	return nil
 }
-func (s *stubGHCredentialStore) Disable(_ context.Context, _, _ uuid.UUID, _ models.ProviderName) error {
+func (s *stubGHCredentialStore) Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error {
+	if s.disableFunc != nil {
+		return s.disableFunc(ctx, orgID, userID, provider)
+	}
 	return nil
 }
 
@@ -369,4 +377,213 @@ func TestGitHubStatusHandler_HandleConnectCallback_UsesStateScopedResumeCookie(t
 	require.NoError(t, parseErr, "redirect location should parse")
 	require.Equal(t, "/sessions/"+secondSessionID.String(), parsed.Path, "callback should resume the flow bound to the callback state")
 	require.Equal(t, secondResumeToken, parsed.Query().Get("resume_pr"), "callback should return the state-scoped resume token")
+}
+
+func TestGitHubStatusHandler_GetStatus_Unauthorized(t *testing.T) {
+	t.Parallel()
+
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "", "", "", "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+	rr := httptest.NewRecorder()
+
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "GetStatus should reject unauthenticated requests")
+}
+
+func TestGitHubStatusHandler_GetStatus_AppUserAuthError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "", "", "", "")
+	handler.SetAppUserAuth(&stubGitHubAppUserAuthService{
+		hasValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			return false, context.DeadlineExceeded
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "GetStatus should surface app-user auth check failures")
+}
+
+func TestGitHubStatusHandler_GetStatus_UsesAppUserAuthService(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	login := "octocat"
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "", "", "", "")
+	handler.SetAppUserAuth(&stubGitHubAppUserAuthService{
+		hasValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			return true, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID, GitHubLogin: &login})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "GetStatus should succeed")
+	var resp GitHubStatusResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response body should decode")
+	require.True(t, resp.Connected, "valid app user auth should mark the user connected")
+	require.True(t, resp.HasRepoScope, "valid app user auth should mark repo scope")
+	require.Equal(t, login, resp.GitHubLogin, "GetStatus should include the GitHub login when connected")
+}
+
+func TestGitHubStatusHandler_StartConnect_ResumeTokenRequiresAuthContext(t *testing.T) {
+	t.Parallel()
+
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev")
+	handler.SetPRAuthFlow("test-signing-key-32bytes-minimum-length")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/connect?resume_token=token", nil)
+	rr := httptest.NewRecorder()
+
+	handler.StartConnect(rr, req)
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "StartConnect should reject resume flows without an authenticated user")
+}
+
+func TestGitHubStatusHandler_StartConnect_ResumeTokenRequiresSigningKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/connect?resume_token=token", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.StartConnect(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "StartConnect should reject resume flows when PR auth signing is not configured")
+}
+
+func TestGitHubStatusHandler_StartConnect_InvalidResumeToken(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev")
+	handler.SetPRAuthFlow("test-signing-key-32bytes-minimum-length")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/connect?resume_token=bad-token", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.StartConnect(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "StartConnect should reject expired or invalid resume tokens")
+}
+
+func TestGitHubStatusHandler_HandleConnectCallback_NotConfigured(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/callback?state=ok&code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: githubPRConnectStateCookie, Value: "ok"})
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.HandleConnectCallback(rr, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "callback should fail fast when app user auth is unavailable")
+}
+
+func TestGitHubStatusHandler_HandleConnectCallback_ExchangeFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(&stubGHCredentialStore{}, &stubGHOrgReader{}, "test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev")
+	handler.SetAppUserAuth(&stubGitHubAppUserAuthService{
+		exchangeCodeFunc: func(context.Context, string) (*models.GitHubAppUserConfig, error) {
+			return nil, context.DeadlineExceeded
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/callback?state=ok&code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: githubPRConnectStateCookie, Value: "ok"})
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.HandleConnectCallback(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "callback should surface exchange failures")
+}
+
+func TestGitHubStatusHandler_Disconnect(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		user       *models.User
+		disableErr error
+		wantCode   int
+	}{
+		{
+			name:     "unauthorized",
+			wantCode: http.StatusUnauthorized,
+		},
+		{
+			name:       "disable failure",
+			user:       &models.User{ID: uuid.New(), OrgID: uuid.New()},
+			disableErr: context.DeadlineExceeded,
+			wantCode:   http.StatusInternalServerError,
+		},
+		{
+			name:     "success",
+			user:     &models.User{ID: uuid.New(), OrgID: uuid.New()},
+			wantCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewGitHubStatusHandler(&stubGHCredentialStore{
+				disableFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error {
+					return tt.disableErr
+				},
+			}, &stubGHOrgReader{}, "", "", "", "")
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/github/disconnect", nil)
+			if tt.user != nil {
+				ctx := middleware.WithUser(req.Context(), tt.user)
+				ctx = middleware.WithOrgID(ctx, tt.user.OrgID)
+				req = req.WithContext(ctx)
+			}
+			rr := httptest.NewRecorder()
+
+			handler.Disconnect(rr, req)
+
+			require.Equal(t, tt.wantCode, rr.Code, "Disconnect should return the expected status")
+		})
+	}
 }

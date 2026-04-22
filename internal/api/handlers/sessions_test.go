@@ -4020,6 +4020,197 @@ func TestSessionHandler_CreatePR_ReturnsAuthInterceptWhenUserCredentialMissing(t
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_CreatePR_InvalidAuthorMode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_InvalidAuthorMode"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle", (*string)(nil),
+				nil,
+				now,
+			)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"bogus"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "CreatePR should reject invalid author modes")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_PRAuthCheckerError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_PRAuthCheckerError"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetPRAuthCredentialChecker(&stubSessionPRAuthCredentialChecker{
+		hasValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			return false, context.DeadlineExceeded
+		},
+	})
+	handler.SetPRAuthFlow("test-signing-key-32bytes-minimum-length", "https://app.143.dev")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle", (*string)(nil),
+				nil,
+				now,
+			)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{"pr_authorship":"user_preferred"}`), now, now))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "CreatePR should surface PR auth checker failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_ResumeTokenRequiresSigningKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_ResumeTokenRequiresSigningKey"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle", (*string)(nil),
+				nil,
+				now,
+			)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{"pr_authorship":"user_preferred"}`), now, now))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"auto","resume_token":"resume"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "CreatePR should reject resume tokens when signing is not configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T) {
 	t.Parallel()
 

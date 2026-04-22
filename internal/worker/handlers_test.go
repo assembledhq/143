@@ -621,6 +621,45 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_ForwardsAuthorModeToPRService(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-author-mode"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Len(t, params, 1, "open_pr should forward a single author mode param when only author_mode is set")
+				require.Equal(t, "user", params[0].AuthorMode, "open_pr should forward author_mode to PR creation")
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","author_mode":"user"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr should succeed when author mode is forwarded to PR creation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOpenPRHandler_NonTerminalPRErrorsMarkFailedAndRetry(t *testing.T) {
 	t.Parallel()
 

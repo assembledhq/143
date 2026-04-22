@@ -240,3 +240,256 @@ func TestAppUserAuthService_GetValidCredential_MissingCredential(t *testing.T) {
 	_, err := svc.GetValidCredential(context.Background(), uuid.New(), uuid.New())
 	require.ErrorIs(t, err, ErrGitHubAppUserCredentialMissing, "missing credential should map to ErrGitHubAppUserCredentialMissing")
 }
+
+func TestNewAppUserAuthService_ConfiguresDefaultEndpoints(t *testing.T) {
+	t.Parallel()
+
+	svc := NewAppUserAuthService(nil, "client-id", "client-secret", "https://app.143.dev/", zerolog.Nop())
+	require.Equal(t, "https://app.143.dev/api/v1/users/me/github/callback", svc.redirectURI, "constructor should derive the callback URL from the base URL")
+	require.Equal(t, defaultGitHubOAuthBaseURL, svc.oauthBaseURL, "constructor should default the OAuth base URL")
+	require.Equal(t, defaultGitHubAPI, svc.apiBaseURL, "constructor should default the API base URL")
+
+	svc.SetOAuthBaseURL("https://github.example.com/")
+	svc.SetAPIBaseURL("https://api.github.example.com/")
+	require.Equal(t, "https://github.example.com", svc.oauthBaseURL, "SetOAuthBaseURL should trim trailing slashes")
+	require.Equal(t, "https://api.github.example.com", svc.apiBaseURL, "SetAPIBaseURL should trim trailing slashes")
+}
+
+func TestAppUserAuthService_HasValidCredential_PropagatesUnexpectedErrors(t *testing.T) {
+	t.Parallel()
+
+	svc := &AppUserAuthService{
+		credentials: &stubAppUserCredentialStore{
+			getFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (*models.DecryptedUserCredential, error) {
+				return nil, context.DeadlineExceeded
+			},
+		},
+		logger:        zerolog.Nop(),
+		now:           time.Now,
+		refreshWindow: githubAppUserRefreshWindow,
+	}
+
+	ok, err := svc.HasValidCredential(context.Background(), uuid.New(), uuid.New())
+	require.False(t, ok, "HasValidCredential should report false when the lookup fails")
+	require.Error(t, err, "HasValidCredential should propagate unexpected store failures")
+}
+
+func TestAppUserAuthService_GetValidCredential_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name      string
+		setup     func() *AppUserAuthService
+		expectErr error
+		errSubstr string
+	}{
+		{
+			name: "missing credential store",
+			setup: func() *AppUserAuthService {
+				return &AppUserAuthService{logger: zerolog.Nop(), now: time.Now, refreshWindow: githubAppUserRefreshWindow}
+			},
+			expectErr: ErrGitHubAppUserCredentialMissing,
+		},
+		{
+			name: "unexpected config type",
+			setup: func() *AppUserAuthService {
+				return &AppUserAuthService{
+					credentials: &stubAppUserCredentialStore{
+						getFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (*models.DecryptedUserCredential, error) {
+							return &models.DecryptedUserCredential{Config: models.GitHubOAuthConfig{AccessToken: "token"}}, nil
+						},
+					},
+					logger:        zerolog.Nop(),
+					now:           time.Now,
+					refreshWindow: githubAppUserRefreshWindow,
+				}
+			},
+			errSubstr: "unexpected github app user credential config type",
+		},
+		{
+			name: "validation request error",
+			setup: func() *AppUserAuthService {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte("boom"))
+				}))
+				t.Cleanup(server.Close)
+				return &AppUserAuthService{
+					credentials: &stubAppUserCredentialStore{
+						getFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (*models.DecryptedUserCredential, error) {
+							return &models.DecryptedUserCredential{Config: models.GitHubAppUserConfig{AccessToken: "ghu", ExpiresAt: time.Now().Add(time.Hour)}}, nil
+						},
+					},
+					apiBaseURL:    server.URL,
+					httpClient:    server.Client(),
+					logger:        zerolog.Nop(),
+					now:           time.Now,
+					refreshWindow: githubAppUserRefreshWindow,
+				}
+			},
+			errSubstr: "github user validation failed",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := tt.setup().GetValidCredential(context.Background(), orgID, userID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "GetValidCredential should return the expected sentinel error")
+				return
+			}
+			require.Error(t, err, "GetValidCredential should fail for this error path")
+			require.Contains(t, err.Error(), tt.errSubstr, "GetValidCredential should include the expected context")
+		})
+	}
+}
+
+func TestAppUserAuthService_RefreshStoredCredential_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	t.Run("missing refresh token disables credential", func(t *testing.T) {
+		t.Parallel()
+		disabled := false
+		svc := &AppUserAuthService{
+			credentials: &stubAppUserCredentialStore{
+				disableFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error {
+					disabled = true
+					return nil
+				},
+			},
+			logger: zerolog.Nop(),
+		}
+
+		_, err := svc.refreshStoredCredential(context.Background(), orgID, userID, models.GitHubAppUserConfig{})
+		require.ErrorIs(t, err, ErrGitHubAppUserCredentialMissing, "refreshStoredCredential should reject missing refresh tokens")
+		require.True(t, disabled, "refreshStoredCredential should disable unusable stored credentials")
+	})
+
+	t.Run("authorization lost disables credential", func(t *testing.T) {
+		t.Parallel()
+		disabled := false
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"revoked"}`))
+		}))
+		defer server.Close()
+
+		svc := &AppUserAuthService{
+			credentials: &stubAppUserCredentialStore{
+				disableFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error {
+					disabled = true
+					return nil
+				},
+			},
+			clientID:      "client-id",
+			clientSecret:  "client-secret",
+			oauthBaseURL:  server.URL,
+			httpClient:    server.Client(),
+			logger:        zerolog.Nop(),
+			now:           time.Now,
+			refreshWindow: githubAppUserRefreshWindow,
+		}
+
+		_, err := svc.refreshStoredCredential(context.Background(), orgID, userID, models.GitHubAppUserConfig{
+			AccessToken:           "ghu",
+			RefreshToken:          "ghr",
+			RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+		})
+		require.ErrorIs(t, err, ErrGitHubAppUserCredentialMissing, "authorization loss should map to missing credential")
+		require.True(t, disabled, "authorization loss should disable the stored credential")
+	})
+
+	t.Run("upsert failure returns error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"ghu_new","refresh_token":"ghr_new","token_type":"bearer","expires_in":3600}`))
+		}))
+		defer server.Close()
+
+		svc := &AppUserAuthService{
+			credentials: &stubAppUserCredentialStore{
+				upsertFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig, bool) error {
+					return context.DeadlineExceeded
+				},
+			},
+			clientID:      "client-id",
+			clientSecret:  "client-secret",
+			oauthBaseURL:  server.URL,
+			httpClient:    server.Client(),
+			logger:        zerolog.Nop(),
+			now:           time.Now,
+			refreshWindow: githubAppUserRefreshWindow,
+		}
+
+		_, err := svc.refreshStoredCredential(context.Background(), orgID, userID, models.GitHubAppUserConfig{
+			AccessToken:           "ghu",
+			RefreshToken:          "ghr",
+			RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+		})
+		require.Error(t, err, "refreshStoredCredential should return persistence failures")
+		require.Contains(t, err.Error(), "persist refreshed github app user credential", "refreshStoredCredential should include upsert context")
+	})
+}
+
+func TestAppUserAuthService_ExchangeCode_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not configured", func(t *testing.T) {
+		t.Parallel()
+		svc := &AppUserAuthService{}
+		_, err := svc.ExchangeCode(context.Background(), "auth-code")
+		require.Error(t, err, "ExchangeCode should fail when client credentials are missing")
+	})
+
+	t.Run("authorization lost", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"bad_verification_code","error_description":"expired code"}`))
+		}))
+		defer server.Close()
+
+		svc := &AppUserAuthService{
+			clientID:      "client-id",
+			clientSecret:  "client-secret",
+			oauthBaseURL:  server.URL,
+			httpClient:    server.Client(),
+			logger:        zerolog.Nop(),
+			now:           time.Now,
+			refreshWindow: githubAppUserRefreshWindow,
+		}
+		_, err := svc.ExchangeCode(context.Background(), "auth-code")
+		require.ErrorIs(t, err, ErrGitHubAppUserAuthorizationLost, "ExchangeCode should map revoked auth codes to authorization lost")
+	})
+
+	t.Run("missing access token", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token_type":"bearer"}`))
+		}))
+		defer server.Close()
+
+		svc := &AppUserAuthService{
+			clientID:      "client-id",
+			clientSecret:  "client-secret",
+			oauthBaseURL:  server.URL,
+			httpClient:    server.Client(),
+			logger:        zerolog.Nop(),
+			now:           time.Now,
+			refreshWindow: githubAppUserRefreshWindow,
+		}
+		_, err := svc.ExchangeCode(context.Background(), "auth-code")
+		require.Error(t, err, "ExchangeCode should require an access token in the response")
+		require.Contains(t, err.Error(), "missing access token", "ExchangeCode should surface the malformed response")
+	})
+}
