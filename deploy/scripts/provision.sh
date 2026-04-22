@@ -28,6 +28,8 @@ SSH_KEY="$3"
 REPROVISION="${4:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
+DISABLED_CRITICAL_WEBHOOK_URL="http://localhost:65535/disabled-critical"
 
 # Validate role
 case "$ROLE" in
@@ -87,8 +89,8 @@ if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
 fi
 if [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
-  : "${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:?GRAFANA_ALERTS_WARNING_WEBHOOK_URL is required for logging role (set it or add to .env.production.enc)}"
-  : "${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:?GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL is required for logging role (set it or add to .env.production.enc)}"
+  GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
+  GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
 fi
 if [ "$ROLE" != "db" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
