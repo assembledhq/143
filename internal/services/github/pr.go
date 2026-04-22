@@ -171,12 +171,70 @@ type tokenResolution struct {
 	User        *models.User // set when IsUserToken is true
 }
 
+func shouldRetryWithOrgInstallation(err error) bool {
+	var apiErr *githubAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
+	tryInstallation := func(installationID int64) (string, error) {
+		if installationID <= 0 {
+			return "", fmt.Errorf("repository %s has no github installation_id", repo.FullName)
+		}
+		token, err := s.tokenProvider.GetInstallationToken(ctx, installationID)
+		if err != nil {
+			return "", fmt.Errorf("get installation token for installation %d: %w", installationID, err)
+		}
+		return token, nil
+	}
+
+	var primaryErr error
+	if repo.InstallationID > 0 {
+		token, err := tryInstallation(repo.InstallationID)
+		if err == nil {
+			return token, nil
+		}
+		primaryErr = err
+		if !shouldRetryWithOrgInstallation(err) {
+			return "", err
+		}
+	} else {
+		primaryErr = fmt.Errorf("repository %s has no github installation_id", repo.FullName)
+	}
+
+	if s.repos == nil {
+		return "", primaryErr
+	}
+
+	fallbackInstallationID, err := s.repos.GetAnyInstallationIDByOrg(ctx, orgID)
+	if err != nil {
+		return "", primaryErr
+	}
+	if fallbackInstallationID <= 0 || fallbackInstallationID == repo.InstallationID {
+		return "", primaryErr
+	}
+
+	token, err := tryInstallation(fallbackInstallationID)
+	if err != nil {
+		return "", err
+	}
+
+	s.logger.Warn().
+		Str("org_id", orgID.String()).
+		Str("repo", repo.FullName).
+		Int64("repo_installation_id", repo.InstallationID).
+		Int64("fallback_installation_id", fallbackInstallationID).
+		Msg("using fallback GitHub installation for PR creation")
+
+	return token, nil
+}
+
 // resolveToken determines which GitHub token to use for PR creation.
 // Order: user's personal GitHub token → GitHub App installation token.
 func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (*tokenResolution, error) {
 	// If org is set to app_only, skip user token lookup.
 	if orgSettings.PRAuthorship == models.PRAuthorshipAppOnly {
-		token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+		token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
 		if err != nil {
 			return nil, fmt.Errorf("get installation token: %w", err)
 		}
@@ -216,7 +274,7 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 	}
 
 	// Fall back to app installation token.
-	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+	token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}

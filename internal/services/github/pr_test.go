@@ -1381,6 +1381,91 @@ func TestResolveToken_UserRequired_NoUser(t *testing.T) {
 	require.Contains(t, err.Error(), "org requires user GitHub auth")
 }
 
+func TestResolveToken_FallsBackToOrgInstallationWhenRepoInstallationMissing(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT installation_id FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id"}).AddRow(int64(2)))
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[2] = &cachedToken{
+		Token:     "fallback-token",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 0}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err, "resolveToken should recover when the repo row is missing installation_id")
+	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should use the org fallback installation token")
+	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repository fallback expectations should be met")
+}
+
+func TestResolveToken_FallsBackToOrgInstallationWhenRepoInstallationIsStale(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT installation_id FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id"}).AddRow(int64(2)))
+
+	tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "should create a GitHub service with a test private key")
+	tokenSvc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/app/installations/1/access_tokens":
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"message":"Not Found"}`)),
+					Header:     make(http.Header),
+				}, nil
+			case "/app/installations/2/access_tokens":
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Body:       io.NopCloser(strings.NewReader(`{"token":"fallback-token","expires_at":"2030-01-01T00:00:00Z"}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				return nil, errors.New("unexpected installation token request path")
+			}
+		}),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 1}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err, "resolveToken should recover when the repo installation_id is stale")
+	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should retry with the org fallback installation token")
+	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repository fallback expectations should be met")
+}
+
 func TestValidateUserToken_ValidToken(t *testing.T) {
 	t.Parallel()
 
