@@ -1533,6 +1533,7 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 
 	var auditDetails json.RawMessage
 	var auditLoadErr error
+	var snapshotKey *string
 	// Load the session once up front for archive auditing and snapshot cleanup.
 	if h.audit != nil || h.snapshotStore != nil {
 		session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)

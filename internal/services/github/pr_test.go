@@ -1332,9 +1332,9 @@ func TestBuildPushScript_Structure(t *testing.T) {
 		"https://x-access-token@github.com/owner/repo.git",
 	)
 
-	// Token path, askpass path, and commit-msg path must appear in the
+	// Input path, helper path, and commit-msg path must appear in the
 	// cleanup function so files are removed on exit.
-	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg' '/tmp/143-pr-token' '/tmp/143-pr-askpass.sh'; }")
+	require.Contains(t, script, "cleanup() { rm -f '/tmp/143-pr-commit-msg' '/tmp/143-pr-input' '/tmp/143-pr-helper.sh'; }")
 	require.Contains(t, script, "trap cleanup EXIT")
 
 	// Author identity is set via git config with quoted values.
@@ -1348,7 +1348,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	require.Contains(t, script, "git commit -F '/tmp/143-pr-commit-msg'")
 
 	// Push uses askpass + disables terminal prompt; branch and URL are quoted.
-	require.Contains(t, script, "GIT_ASKPASS='/tmp/143-pr-askpass.sh' GIT_TERMINAL_PROMPT=0")
+	require.Contains(t, script, "GIT_ASKPASS='/tmp/143-pr-helper.sh' GIT_TERMINAL_PROMPT=0")
 	require.Contains(t, script, "'https://x-access-token@github.com/owner/repo.git'")
 	require.Contains(t, script, "HEAD:refs/heads/'143/abc123/fix-typo'")
 

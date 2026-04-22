@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,23 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type archiveTestSnapshotStore struct {
+	deleted []string
+}
+
+func (s *archiveTestSnapshotStore) Save(context.Context, string, io.Reader) error {
+	return nil
+}
+
+func (s *archiveTestSnapshotStore) Load(context.Context, string, io.Writer) error {
+	return nil
+}
+
+func (s *archiveTestSnapshotStore) Delete(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	return nil
+}
 
 func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler {
 	t.Helper()
@@ -1661,8 +1679,10 @@ func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -4175,6 +4195,68 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 
 		require.Equal(t, http.StatusNotFound, w.Code)
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("cleans up snapshot when archiving session with snapshot key", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		snapshotStore := &archiveTestSnapshotStore{}
+		handler.SetSnapshotStore(snapshotStore)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		userID := uuid.New()
+		now := time.Now()
+		snapshotKey := "snapshots/session.tar.zst"
+
+		mock.ExpectQuery("SELECT .+ FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionColumns).AddRow(
+					sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+					nil, nil, nil, nil,
+					nil, false, &now, &now, nil,
+					nil, nil, nil, false,
+					nil, nil, nil, nil, nil,
+					nil, nil, nil, nil,
+					nil, nil, nil,
+					nil, 0, now, "saved", &snapshotKey,
+					nil, nil, nil, nil, nil, nil,
+					nil, nil,
+					nil,
+					"idle",
+					(*string)(nil),
+					nil,
+					now,
+				),
+			)
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("UPDATE sessions\\s+SET snapshot_key = NULL, sandbox_state = 'destroyed'").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should return 200 after snapshot cleanup")
+		require.Equal(t, []string{snapshotKey}, snapshotStore.deleted, "archive should delete the stored snapshot exactly once")
+		require.NoError(t, mock.ExpectationsWereMet(), "archive should satisfy all database expectations")
 	})
 }
 

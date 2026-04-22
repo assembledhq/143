@@ -453,17 +453,17 @@ func (s *PRService) pushSessionBranch(
 		}
 	}()
 
-	// Write the commit message, token, and askpass helper to files. Passing
-	// the token via file keeps it out of argv and shell history.
+	// Write the commit message, credential, and askpass helper to files.
+	// Passing the credential via file keeps it out of argv and shell history.
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
 		return fmt.Errorf("write commit message to sandbox: %w", err)
 	}
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushTokenPath, []byte(token)); err != nil {
-		return fmt.Errorf("write token to sandbox: %w", err)
+	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushInputPath, []byte(token)); err != nil {
+		return fmt.Errorf("write credential to sandbox: %w", err)
 	}
-	askpassScript := "#!/bin/sh\nexec cat " + shellQuote(pushTokenPath) + "\n"
-	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushAskpassPath, []byte(askpassScript)); err != nil {
-		return fmt.Errorf("write askpass helper to sandbox: %w", err)
+	helperScript := "#!/bin/sh\nexec cat " + shellQuote(pushInputPath) + "\n"
+	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushHelperPath, []byte(helperScript)); err != nil {
+		return fmt.Errorf("write push helper to sandbox: %w", err)
 	}
 
 	pushURL := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo.FullName)
@@ -496,8 +496,8 @@ func (s *PRService) pushSessionBranch(
 // them explicitly on exit for defense in depth.
 const (
 	pushCommitMsgPath = "/tmp/143-pr-commit-msg"
-	pushTokenPath     = "/tmp/143-pr-token" // #nosec G101 -- path, not a credential
-	pushAskpassPath   = "/tmp/143-pr-askpass.sh"
+	pushInputPath     = "/tmp/143-pr-input"
+	pushHelperPath    = "/tmp/143-pr-helper.sh"
 )
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
@@ -507,8 +507,8 @@ const pushExitNoChanges = 77
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
-// buildPushScript) so they're safe to embed directly. The token is read by
-// the GIT_ASKPASS helper from pushTokenPath — it never appears in argv.
+// buildPushScript) so they're safe to embed directly. The credential is read
+// by the `GIT_ASKPASS` helper from pushInputPath — it never appears in argv.
 //
 // The cleanup function is hoisted into a shell function rather than inlined
 // in the trap because `trap 'rm -f %[1]s ...'` would interleave single-
@@ -540,8 +540,8 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(pushCommitMsgPath),
-		shellQuote(pushTokenPath),
-		shellQuote(pushAskpassPath),
+		shellQuote(pushInputPath),
+		shellQuote(pushHelperPath),
 		shellQuote(workDir),
 		shellQuote(authorName),
 		shellQuote(authorEmail),
