@@ -83,6 +83,18 @@ func TestSetReviewCommentStore(t *testing.T) {
 	require.NotNil(t, svc.reviewComments, "SetReviewCommentStore should set the review comment store")
 }
 
+func TestSetIntegrationStore(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{}
+	require.Nil(t, svc.integrations, "integrations should be nil initially")
+
+	mockPool := newMockPool(t)
+	store := db.NewIntegrationStore(mockPool)
+	svc.SetIntegrationStore(store)
+	require.NotNil(t, svc.integrations, "SetIntegrationStore should set the integration store")
+}
+
 func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 	t.Parallel()
 

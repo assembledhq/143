@@ -1,6 +1,10 @@
 package api
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 
 	"github.com/assembledhq/143/internal/config"
@@ -49,4 +53,32 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 			require.NotNil(t, router, "NewRouter should construct a router when encryption key is unset")
 		})
 	}
+}
+
+func testRouterPrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err, "rsa key generation should not return an error")
+
+	block := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}
+	return string(pem.EncodeToMemory(block))
+}
+
+func TestNewRouter_GitHubAppConfigBuildsRouter(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		GitHubAppID:         143,
+		GitHubAppPrivateKey: testRouterPrivateKeyPEM(t),
+	}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "NewRouter should build successfully when GitHub App credentials are valid")
+	require.NotNil(t, router, "NewRouter should construct a router when GitHub App credentials are valid")
 }

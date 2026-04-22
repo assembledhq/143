@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -1379,6 +1380,344 @@ func TestResolveToken_UserRequired_NoUser(t *testing.T) {
 	_, err := svc.resolveToken(context.Background(), run, repo, settings)
 	require.Error(t, err, "should fail when user_required but no user token")
 	require.Contains(t, err.Error(), "org requires user GitHub auth")
+}
+
+func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationMissing(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	integrationID := uuid.New()
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, uuid.New(), "github", []byte(`{"installation_id":2}`), "active", nil, time.Now()))
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[2] = &cachedToken{
+		Token:     "fallback-token",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		integrations:  db.NewIntegrationStore(mock),
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 0, IntegrationID: integrationID}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err, "resolveToken should recover when the repo row is missing installation_id")
+	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should use the repository integration installation token")
+	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.NoError(t, mock.ExpectationsWereMet(), "all integration fallback expectations should be met")
+}
+
+func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationIsStale(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+			AddRow(integrationID, orgID, "github", []byte(`{"installation_id":2}`), "active", nil, time.Now()))
+
+	tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "should create a GitHub service with a test private key")
+	tokenSvc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/app/installations/1/access_tokens":
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader(`{"message":"Not Found"}`)),
+					Header:     make(http.Header),
+				}, nil
+			case "/app/installations/2/access_tokens":
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Body:       io.NopCloser(strings.NewReader(`{"token":"fallback-token","expires_at":"2030-01-01T00:00:00Z"}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				return nil, errors.New("unexpected installation token request path")
+			}
+		}),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		integrations:  db.NewIntegrationStore(mock),
+		logger:        zerolog.Nop(),
+	}
+
+	repo := &models.Repository{InstallationID: 1, IntegrationID: integrationID}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	require.NoError(t, err, "resolveToken should recover when the repo installation_id is stale")
+	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should retry with the repository integration installation token")
+	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.NoError(t, mock.ExpectationsWereMet(), "all integration fallback expectations should be met")
+}
+
+func TestIntegrationInstallationID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		integration *models.Integration
+		expected    int64
+		expectErr   bool
+	}{
+		{
+			name:      "nil integration",
+			expectErr: true,
+		},
+		{
+			name:        "empty config",
+			integration: &models.Integration{},
+			expectErr:   true,
+		},
+		{
+			name: "invalid config",
+			integration: &models.Integration{
+				Config: []byte(`{`),
+			},
+			expectErr: true,
+		},
+		{
+			name: "missing installation id",
+			integration: &models.Integration{
+				Config: []byte(`{"installation_id":0}`),
+			},
+			expectErr: true,
+		},
+		{
+			name: "valid installation id",
+			integration: &models.Integration{
+				Config: []byte(`{"installation_id":42}`),
+			},
+			expected: 42,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			installationID, err := integrationInstallationID(tt.integration)
+			if tt.expectErr {
+				require.Error(t, err, "integrationInstallationID should return an error for invalid integration config")
+				return
+			}
+
+			require.NoError(t, err, "integrationInstallationID should parse a valid installation id")
+			require.Equal(t, tt.expected, installationID, "integrationInstallationID should return the parsed installation id")
+		})
+	}
+}
+
+func TestGetInstallationTokenForRepo_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoName := "acme/repo"
+
+	tests := []struct {
+		name      string
+		repo      *models.Repository
+		setupSvc  func(t *testing.T) *PRService
+		wantError string
+	}{
+		{
+			name: "missing repo installation without integration store",
+			repo: &models.Repository{FullName: repoName},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				return &PRService{logger: zerolog.Nop()}
+			},
+			wantError: "has no github installation_id",
+		},
+		{
+			name: "primary non 404 error returns immediately",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Body:       io.NopCloser(strings.NewReader(`{"message":"bad credentials"}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, logger: zerolog.Nop()}
+			},
+			wantError: "returned 401",
+		},
+		{
+			name: "missing integration id after stale 404",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, integrations: db.NewIntegrationStore(newMockPool(t)), logger: zerolog.Nop()}
+			},
+			wantError: "returned 404",
+		},
+		{
+			name: "integration lookup failure returns primary error",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1, IntegrationID: uuid.New()},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				mock := newMockPool(t)
+				mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, integrations: db.NewIntegrationStore(mock), logger: zerolog.Nop()}
+			},
+			wantError: "returned 404",
+		},
+		{
+			name: "integration config parse failure returns primary error",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1, IntegrationID: uuid.New()},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				mock := newMockPool(t)
+				mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+						AddRow(uuid.New(), orgID, "github", []byte(`{`), "active", nil, time.Now()))
+
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, integrations: db.NewIntegrationStore(mock), logger: zerolog.Nop()}
+			},
+			wantError: "returned 404",
+		},
+		{
+			name: "same installation id returns primary error",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1, IntegrationID: uuid.New()},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				mock := newMockPool(t)
+				mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+						AddRow(uuid.New(), orgID, "github", []byte(`{"installation_id":1}`), "active", nil, time.Now()))
+
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, integrations: db.NewIntegrationStore(mock), logger: zerolog.Nop()}
+			},
+			wantError: "returned 404",
+		},
+		{
+			name: "fallback installation token failure is returned",
+			repo: &models.Repository{FullName: repoName, InstallationID: 1, IntegrationID: uuid.New()},
+			setupSvc: func(t *testing.T) *PRService {
+				t.Helper()
+				mock := newMockPool(t)
+				mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+						AddRow(uuid.New(), orgID, "github", []byte(`{"installation_id":2}`), "active", nil, time.Now()))
+
+				tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+				require.NoError(t, err, "should create a GitHub service with a test private key")
+				tokenSvc.httpClient = &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						switch req.URL.Path {
+						case "/app/installations/1/access_tokens":
+							return &http.Response{
+								StatusCode: http.StatusNotFound,
+								Body:       io.NopCloser(strings.NewReader(`{"message":"not found"}`)),
+								Header:     make(http.Header),
+							}, nil
+						case "/app/installations/2/access_tokens":
+							return &http.Response{
+								StatusCode: http.StatusUnauthorized,
+								Body:       io.NopCloser(strings.NewReader(`{"message":"bad credentials"}`)),
+								Header:     make(http.Header),
+							}, nil
+						default:
+							return nil, errors.New("unexpected installation token request path")
+						}
+					}),
+				}
+				return &PRService{tokenProvider: tokenSvc, integrations: db.NewIntegrationStore(mock), logger: zerolog.Nop()}
+			},
+			wantError: "installation 2",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := tt.setupSvc(t)
+			_, err := svc.getInstallationTokenForRepo(context.Background(), orgID, tt.repo)
+			require.Error(t, err, "getInstallationTokenForRepo should return an error for this path")
+			require.Contains(t, err.Error(), tt.wantError, "getInstallationTokenForRepo should preserve the expected error context")
+		})
+	}
 }
 
 func TestValidateUserToken_ValidToken(t *testing.T) {
