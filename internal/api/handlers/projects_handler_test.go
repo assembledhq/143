@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -487,27 +488,64 @@ func TestProjectHandler_Create_InvalidRepoID(t *testing.T) {
 func TestProjectHandler_Delete(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	t.Run("returns no content when project exists", func(t *testing.T) {
+		t.Parallel()
 
-	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
-	orgID := uuid.New()
-	projectID := uuid.New()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
 
-	mock.ExpectExec("UPDATE projects SET status").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+		orgID := uuid.New()
+		projectID := uuid.New()
+		repoID := uuid.New()
+		now := time.Now()
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+projectID.String(), nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
-	rr := httptest.NewRecorder()
+		mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(projectColumns()).AddRow(newProjectRow(projectID, orgID, repoID, models.ProjectStatusActive, now)...))
 
-	handler.Delete(rr, req)
+		mock.ExpectExec("UPDATE projects SET status").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	require.Equal(t, http.StatusNoContent, rr.Code)
-	require.NoError(t, mock.ExpectationsWereMet())
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+projectID.String(), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+		rr := httptest.NewRecorder()
+
+		handler.Delete(rr, req)
+
+		require.Equal(t, http.StatusNoContent, rr.Code, "delete should return no content when project exists")
+		require.NoError(t, mock.ExpectationsWereMet(), "delete should satisfy all database expectations")
+	})
+
+	t.Run("returns not found when project does not exist", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+		orgID := uuid.New()
+		projectID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM projects WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(pgx.ErrNoRows)
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+projectID.String(), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		req = req.WithContext(withProjectRouteParam(req.Context(), projectID))
+		rr := httptest.NewRecorder()
+
+		handler.Delete(rr, req)
+
+		require.Equal(t, http.StatusNotFound, rr.Code, "delete should return not found when project is missing")
+		require.Contains(t, rr.Body.String(), "NOT_FOUND", "delete should return the not found error code")
+		require.NoError(t, mock.ExpectationsWereMet(), "delete should satisfy all database expectations")
+	})
 }
 
 // --- TransitionStatus / Start / Pause / Resume tests ---

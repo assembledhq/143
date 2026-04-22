@@ -9,6 +9,7 @@ import (
 
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -139,6 +140,11 @@ func (h *OrganizationsHandler) emitOrgCreated(r *http.Request, userID uuid.UUID,
 		Action:       models.AuditActionOrganizationCreated,
 		ResourceType: models.AuditResourceOrganization,
 		ResourceID:   &resID,
+		Details: marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"organization_id": org.ID.String(),
+			"name":            org.Name,
+			"created_by":      userID.String(),
+		}),
 	}
 	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
 		params.RequestID = &reqID

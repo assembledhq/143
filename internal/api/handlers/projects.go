@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -285,7 +287,8 @@ func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projIDStr := project.ID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectCreated, models.AuditResourceProject, &projIDStr, nil, &project.ID, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectCreated, models.AuditResourceProject, &projIDStr, nil, &project.ID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), projectAuditSnapshot(&project)))
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Project]{Data: project})
 }
 
@@ -302,6 +305,7 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
 		return
 	}
+	before := project
 
 	var req struct {
 		Title              *string `json:"title"`
@@ -376,7 +380,12 @@ func (h *ProjectHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updatedProjIDStr := projectID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectUpdated, models.AuditResourceProject, &updatedProjIDStr, nil, &projectID, nil)
+	updateDetails := projectAuditSnapshot(&project)
+	if changes := projectAuditDiff(&before, &project); len(changes) > 0 {
+		updateDetails["changes"] = changes
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectUpdated, models.AuditResourceProject, &updatedProjIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), updateDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Project]{Data: project})
 }
 
@@ -385,6 +394,16 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+
+	project, err := h.projectStore.GetByID(r.Context(), orgID, projectID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "project not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to load project", err)
 		return
 	}
 
@@ -397,7 +416,15 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deletedProjIDStr := projectID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectDeleted, models.AuditResourceProject, &deletedProjIDStr, nil, &projectID, nil)
+	var deleteDetails map[string]any
+	if h.audit != nil {
+		deleteDetails = projectAuditSnapshot(&project)
+		deleteDetails["changes"] = map[string]any{
+			"status": auditChange(project.Status, models.ProjectStatusCompleted),
+		}
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectDeleted, models.AuditResourceProject, &deletedProjIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), deleteDetails))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -442,7 +469,11 @@ func (h *ProjectHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runNowProjIDStr := projectID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectRunTriggered, models.AuditResourceProject, &runNowProjIDStr, nil, &projectID, nil)
+	runDetails := projectAuditSnapshot(&project)
+	runDetails["job_id"] = jobID.String()
+	runDetails["job_type"] = models.JobTypeProjectCycle
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectRunTriggered, models.AuditResourceProject, &runNowProjIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), runDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
 		Data: map[string]string{"job_id": jobID.String()},
 	})
@@ -482,7 +513,12 @@ func (h *ProjectHandler) transitionStatus(w http.ResponseWriter, r *http.Request
 	}
 	if auditAction != "" {
 		transitionProjIDStr := projectID.String()
-		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceProject, &transitionProjIDStr, nil, &projectID, nil)
+		transitionDetails := projectAuditSnapshot(&project)
+		transitionDetails["changes"] = map[string]any{
+			"status": auditChange(project.Status, target),
+		}
+		emitUserAuditWithSession(h.audit, r, auditAction, models.AuditResourceProject, &transitionProjIDStr, nil, &projectID,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), transitionDetails))
 	}
 
 	project.Status = target
@@ -542,7 +578,8 @@ func (h *ProjectHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createTaskIDStr := task.ID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskCreated, models.AuditResourceProjectTask, &createTaskIDStr, nil, &projectID, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskCreated, models.AuditResourceProjectTask, &createTaskIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), projectTaskAuditSnapshot(&task)))
 
 	// Update project progress counts
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, projectID); err != nil {
@@ -574,6 +611,7 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "task not found")
 		return
 	}
+	before := task
 
 	var req struct {
 		Title        *string `json:"title"`
@@ -640,7 +678,12 @@ func (h *ProjectHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updateTaskIDStr := taskID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskUpdated, models.AuditResourceProjectTask, &updateTaskIDStr, nil, &projectID, nil)
+	taskDetails := projectTaskAuditSnapshot(&task)
+	if changes := projectTaskAuditDiff(&before, &task); len(changes) > 0 {
+		taskDetails["changes"] = changes
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskUpdated, models.AuditResourceProjectTask, &updateTaskIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), taskDetails))
 
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
@@ -678,7 +721,8 @@ func (h *ProjectHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deleteTaskIDStr := taskID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskDeleted, models.AuditResourceProjectTask, &deleteTaskIDStr, nil, &projectID, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskDeleted, models.AuditResourceProjectTask, &deleteTaskIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), projectTaskAuditSnapshot(&task)))
 
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")
@@ -715,6 +759,7 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	before := task
 	task.Status = models.ProjectTaskStatusPending
 	task.RetryCount++
 
@@ -724,7 +769,12 @@ func (h *ProjectHandler) RetryTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	retryTaskIDStr := taskID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskRetried, models.AuditResourceProjectTask, &retryTaskIDStr, nil, &projectID, nil)
+	retryDetails := projectTaskAuditSnapshot(&task)
+	if changes := projectTaskAuditDiff(&before, &task); len(changes) > 0 {
+		retryDetails["changes"] = changes
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionProjectTaskRetried, models.AuditResourceProjectTask, &retryTaskIDStr, nil, &projectID,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), retryDetails))
 
 	if err := h.projectStore.UpdateProgress(r.Context(), orgID, task.ProjectID); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to update project progress")

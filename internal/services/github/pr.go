@@ -509,12 +509,29 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 					Msg("failed to auto-archive session on PR close")
 			} else if s.audit != nil {
 				sessionIDStr := pr.SessionID.String()
+				details, marshalErr := json.Marshal(map[string]any{
+					"session_id":       sessionIDStr,
+					"pull_request_id":  pr.ID.String(),
+					"github_repo":      pr.GitHubRepo,
+					"github_pr_number": pr.GitHubPRNumber,
+					"merged":           event.PR.Merged,
+					"auto_archive":     true,
+					"changes": map[string]any{
+						"archived_at":         map[string]any{"before": nil, "after": "set"},
+						"archived_by_user_id": map[string]any{"before": nil, "after": nil},
+					},
+				})
+				if marshalErr != nil {
+					s.logger.Warn().Err(marshalErr).Str("session_id", sessionIDStr).Msg("failed to marshal auto-archive audit details")
+				}
 				s.audit.EmitWebhookAction(ctx, db.WebhookActionParams{
 					OrgID:        pr.OrgID,
 					ProviderName: "github",
 					Action:       models.AuditActionSessionArchived,
 					ResourceType: models.AuditResourceSession,
 					ResourceID:   &sessionIDStr,
+					Details:      details,
+					SessionID:    pr.SessionID,
 				})
 			}
 		}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -86,8 +87,9 @@ func (h *CredentialHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emitUserAudit(h.audit, r, models.AuditActionCredentialUpdated, models.AuditResourceCredential, &providerStr, nil)
 	summary := cfg.MaskedSummary()
+	emitUserAudit(h.audit, r, models.AuditActionCredentialUpdated, models.AuditResourceCredential, &providerStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), credentialAuditDetails(provider, &summary)))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CredentialSummary]{Data: summary})
 }
 
@@ -107,6 +109,7 @@ func (h *CredentialHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emitUserAudit(h.audit, r, models.AuditActionCredentialDeleted, models.AuditResourceCredential, &providerStr, nil)
+	emitUserAudit(h.audit, r, models.AuditActionCredentialDeleted, models.AuditResourceCredential, &providerStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), credentialAuditDetails(provider, nil)))
 	w.WriteHeader(http.StatusNoContent)
 }
