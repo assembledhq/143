@@ -19,6 +19,9 @@ describe("PendingAttachmentStrip", () => {
     await waitFor(() => {
       expect(screen.getByAltText("Preview of screenshot.png")).toBeInTheDocument();
     });
+
+    expect(screen.getByAltText("Preview of screenshot.png")).toHaveClass("max-h-[70vh]");
+    expect(screen.getByAltText("Preview of screenshot.png")).toHaveClass("max-w-[min(70vw,56rem)]");
   });
 
   it("opens a lightbox when clicking an image attachment", async () => {
