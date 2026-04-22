@@ -1,6 +1,7 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -65,12 +66,21 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
+type MentionPickerPosition = {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+  side: "top" | "bottom";
+};
+
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  const composerCardRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   // Synchronous guard: React Query's isPending flips on the next render, so
   // rapid Enter presses can all pass the isPending check in the same tick.
@@ -95,6 +105,7 @@ export function ManualSessionCreatePageContent() {
   const [caretPosition, setCaretPosition] = useState(0);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
+  const [mentionPickerPosition, setMentionPickerPosition] = useState<MentionPickerPosition | null>(null);
   const previousRepoIdRef = useRef<string>("");
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
@@ -291,6 +302,59 @@ export function ManualSessionCreatePageContent() {
     setReferences([]);
   }, [references, selectedRepoId]);
 
+  useEffect(() => {
+    if (!showMentionPicker) {
+      setMentionPickerPosition(null);
+      return;
+    }
+
+    function updateMentionPickerPosition() {
+      const composerCard = composerCardRef.current;
+      if (!composerCard) {
+        return;
+      }
+
+      const rect = composerCard.getBoundingClientRect();
+      const spacing = 12;
+      const viewportHeight = window.innerHeight;
+      const spaceAbove = rect.top - spacing;
+      const spaceBelow = viewportHeight - rect.bottom - spacing;
+      const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
+      const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
+      const top = side === "top"
+        ? Math.max(spacing, rect.top - Math.min(320, availableHeight) - spacing)
+        : Math.min(viewportHeight - spacing - Math.min(320, availableHeight), rect.bottom + spacing);
+
+      setMentionPickerPosition({
+        left: rect.left,
+        top,
+        width: rect.width,
+        maxHeight: Math.min(320, availableHeight),
+        side,
+      });
+    }
+
+    updateMentionPickerPosition();
+    window.addEventListener("resize", updateMentionPickerPosition);
+    window.addEventListener("scroll", updateMentionPickerPosition, true);
+
+    const composerCard = composerCardRef.current;
+    const resizeObserver = composerCard && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+        updateMentionPickerPosition();
+      })
+      : null;
+    if (composerCard && resizeObserver) {
+      resizeObserver.observe(composerCard);
+    }
+
+    return () => {
+      window.removeEventListener("resize", updateMentionPickerPosition);
+      window.removeEventListener("scroll", updateMentionPickerPosition, true);
+      resizeObserver?.disconnect();
+    };
+  }, [showMentionPicker, fileMentions.length, fileMentionsLoading]);
+
   function updateMessage(nextMessage: string, nextCaret: number) {
     setMessage(nextMessage);
     setReferences((previous) => syncReferencesWithMessage(nextMessage, previous));
@@ -449,44 +513,58 @@ export function ManualSessionCreatePageContent() {
 
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">
-        <div className="relative w-full max-w-3xl mx-auto">
-          {showMentionPicker && (
+        <div className="relative mx-auto w-full max-w-3xl">
+          {showMentionPicker && mentionPickerPosition && typeof document !== "undefined" && createPortal(
             <Card
-              data-testid="mention-picker"
-              className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden border-border/70 bg-background/95 shadow-lg backdrop-blur-sm"
+              className="fixed z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
+              data-side={mentionPickerPosition.side}
+              data-testid="mention-picker-overlay"
+              style={{
+                left: mentionPickerPosition.left,
+                top: mentionPickerPosition.top,
+                width: mentionPickerPosition.width,
+              }}
             >
               <CardContent className="p-2">
                 <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
                   Files and directories
                 </div>
-                {fileMentionsLoading && (
-                  <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
-                )}
-                {!fileMentionsLoading && fileMentions.length === 0 && (
-                  <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
-                )}
-                {!fileMentionsLoading && fileMentions.length > 0 && (
-                  <div className="max-h-[min(20rem,calc(100vh-16rem))] space-y-1 overflow-y-auto">
-                    {fileMentions.map((reference, index) => (
-                      <Button
-                        key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
-                        type="button"
-                        variant="ghost"
-                        className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => applyMention(reference)}
-                      >
-                        {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
-                        <span className="truncate text-xs">{reference.display}</span>
-                      </Button>
-                    ))}
-                  </div>
-                )}
+                <div aria-label="Mention suggestions" role="listbox">
+                  {fileMentionsLoading && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
+                  )}
+                  {!fileMentionsLoading && fileMentions.length === 0 && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
+                  )}
+                  {!fileMentionsLoading && fileMentions.length > 0 && (
+                    <div className="space-y-1 overflow-y-auto" style={{ maxHeight: mentionPickerPosition.maxHeight }}>
+                      {fileMentions.map((reference, index) => (
+                        <Button
+                          key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                          type="button"
+                          variant="ghost"
+                          aria-selected={index === selectedMentionIndex}
+                          className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => applyMention(reference)}
+                        >
+                          {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
+                          <span className="truncate text-xs">{reference.display}</span>
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </CardContent>
-            </Card>
+            </Card>,
+            document.body,
           )}
 
-          <Card className="w-full rounded-2xl border-border/60 bg-card shadow-lg dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
+          <Card
+            ref={composerCardRef}
+            className="w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]"
+            data-testid="manual-session-composer"
+          >
             <CardContent className="space-y-0 p-4">
               <Textarea
                 ref={messageInputRef}
@@ -533,205 +611,205 @@ export function ManualSessionCreatePageContent() {
                 aria-label="Manual session prompt"
               />
 
-              {references.length > 0 && (
-                <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
-                  {references.map((reference) => (
-                    <Badge
-                      key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
-                      variant="secondary"
-                      className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
+            {references.length > 0 && (
+              <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
+                {references.map((reference) => (
+                  <Badge
+                    key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                    variant="secondary"
+                    className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
+                  >
+                    {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+                    <span className="max-w-[18rem] truncate">{reference.display}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 rounded-full"
+                      aria-label={`Remove ${reference.display}`}
+                      onClick={() => removeReference(reference)}
                     >
-                      {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
-                      <span className="max-w-[18rem] truncate">{reference.display}</span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-5 w-5 rounded-full"
-                        aria-label={`Remove ${reference.display}`}
-                        onClick={() => removeReference(reference)}
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </Badge>
-                  ))}
-                </div>
-              )}
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </Badge>
+                ))}
+              </div>
+            )}
 
-              <PendingAttachmentStrip
-                attachments={attachments}
-                isUploading={isUploading}
-                onRemove={removeAttachment}
-                size="md"
-                className="pb-3"
+            <PendingAttachmentStrip
+              attachments={attachments}
+              isUploading={isUploading}
+              onRemove={removeAttachment}
+              size="md"
+              className="pb-3"
+            />
+
+            {showImageInput && (
+              <div className="flex items-center gap-2 pb-3">
+                <Input
+                  value={imageURL}
+                  onChange={(event) => setImageURL(event.target.value)}
+                  placeholder="https://example.com/screenshot.png"
+                  aria-label="Image URL"
+                />
+                <Button type="button" variant="outline" onClick={addImageURL}>
+                  Add
+                </Button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-1 pt-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
+                    <Plus className="h-5 w-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                    <Paperclip className="mr-2 h-4 w-4" />
+                    Upload files or photos
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                    <ImagePlus className="mr-2 h-4 w-4" />
+                    Add image URL
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Input
+                ref={uploadInputRef}
+                type="file"
+                accept="image/*,.pdf,.txt,.md,.json,.csv"
+                multiple
+                className="hidden"
+                onChange={onUploadChange}
               />
 
-              {showImageInput && (
-                <div className="flex items-center gap-2 pb-3">
-                  <Input
-                    value={imageURL}
-                    onChange={(event) => setImageURL(event.target.value)}
-                    placeholder="https://example.com/screenshot.png"
-                    aria-label="Image URL"
-                  />
-                  <Button type="button" variant="outline" onClick={addImageURL}>
-                    Add
-                  </Button>
-                </div>
-              )}
-
-              <div className="flex items-center gap-1 pt-2">
+              {repositories.length > 0 && (
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
-                      <Plus className="h-5 w-5" />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      <GitBranch className="h-3.5 w-3.5" />
+                      <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+                      <ChevronDown className="h-3 w-3 opacity-50" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                      <Paperclip className="mr-2 h-4 w-4" />
-                      Upload files or photos
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                      <ImagePlus className="mr-2 h-4 w-4" />
-                      Add image URL
-                    </DropdownMenuItem>
+                  <DropdownMenuContent align="start" className="w-72">
+                    {repositories.map((repo) => (
+                      <DropdownMenuItem
+                        key={repo.id}
+                        onClick={() => setSelectedRepoId(repo.id)}
+                        className={selectedRepoId === repo.id ? "font-medium" : ""}
+                      >
+                        <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="truncate">{repo.full_name}</span>
+                      </DropdownMenuItem>
+                    ))}
                   </DropdownMenuContent>
                 </DropdownMenu>
-                <Input
-                  ref={uploadInputRef}
-                  type="file"
-                  accept="image/*,.pdf,.txt,.md,.json,.csv"
-                  multiple
-                  className="hidden"
-                  onChange={onUploadChange}
-                />
+              )}
 
-                {repositories.length > 0 && (
+              {selectedRepo && (
+                branchesFailed ? (
+                  <div className="flex items-center gap-1">
+                    <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <Input
+                      value={selectedBranch}
+                      onChange={(e) => setSelectedBranch(e.target.value)}
+                      placeholder={selectedRepo.default_branch || "main"}
+                      className="h-7 w-36 text-xs px-2"
+                      aria-label="Target branch"
+                    />
+                  </div>
+                ) : (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
                         variant="ghost"
                         size="sm"
                         className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+                        aria-label="Target branch"
                       >
                         <GitBranch className="h-3.5 w-3.5" />
-                        <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
+                        <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
                         <ChevronDown className="h-3 w-3 opacity-50" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-72">
-                      {repositories.map((repo) => (
+                    <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
+                      {branchesLoading && (
+                        <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
+                      )}
+                      {!branchesLoading && branches.length === 0 && (
+                        <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
+                      )}
+                      {branches.map((branch) => (
                         <DropdownMenuItem
-                          key={repo.id}
-                          onClick={() => setSelectedRepoId(repo.id)}
-                          className={selectedRepoId === repo.id ? "font-medium" : ""}
+                          key={branch.name}
+                          onClick={() => setSelectedBranch(branch.name)}
+                          className={selectedBranch === branch.name ? "font-medium" : ""}
                         >
                           <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                          <span className="truncate">{repo.full_name}</span>
+                          <span className="truncate">{branch.name}</span>
                         </DropdownMenuItem>
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                )}
+                )
+              )}
 
-                {selectedRepo && (
-                  branchesFailed ? (
-                    <div className="flex items-center gap-1">
-                      <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      <Input
-                        value={selectedBranch}
-                        onChange={(e) => setSelectedBranch(e.target.value)}
-                        placeholder={selectedRepo.default_branch || "main"}
-                        className="h-7 w-36 text-xs px-2"
-                        aria-label="Target branch"
-                      />
-                    </div>
-                  ) : (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
-                          aria-label="Target branch"
-                        >
-                          <GitBranch className="h-3.5 w-3.5" />
-                          <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
-                          <ChevronDown className="h-3 w-3 opacity-50" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
-                        {branchesLoading && (
-                          <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
-                        )}
-                        {!branchesLoading && branches.length === 0 && (
-                          <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
-                        )}
-                        {branches.map((branch) => (
-                          <DropdownMenuItem
-                            key={branch.name}
-                            onClick={() => setSelectedBranch(branch.name)}
-                            className={selectedBranch === branch.name ? "font-medium" : ""}
-                          >
-                            <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                            <span className="truncate">{branch.name}</span>
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  )
-                )}
+              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">Default model</SelectItem>
+                  {modelGroups.map((group) => (
+                    <SelectGroup key={group.key}>
+                      <SelectLabel>{group.label}</SelectLabel>
+                      {group.models.map((model) => (
+                        <SelectItem key={model} value={model}>
+                          {model}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  ))}
+                </SelectContent>
+              </Select>
 
-                <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
-                  <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                    <SelectValue placeholder="Default model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__default__">Default model</SelectItem>
-                    {modelGroups.map((group) => (
-                      <SelectGroup key={group.key}>
-                        <SelectLabel>{group.label}</SelectLabel>
-                        {group.models.map((model) => (
-                          <SelectItem key={model} value={model}>
-                            {model}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                <div className="ml-auto flex items-center gap-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    onClick={toggleDictation}
-                    className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
-                    aria-label="Dictate"
-                  >
-                    <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    onClick={submitManualSession}
-                    disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
-                    className="h-8 w-8 rounded-full"
-                    aria-label="Start session"
-                  >
-                    <ArrowUp className="h-4 w-4" />
-                  </Button>
-                </div>
+              <div className="ml-auto flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={toggleDictation}
+                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                  aria-label="Dictate"
+                >
+                  <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  onClick={submitManualSession}
+                  disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                  className="h-8 w-8 rounded-full"
+                  aria-label="Start session"
+                >
+                  <ArrowUp className="h-4 w-4" />
+                </Button>
               </div>
+            </div>
 
-              {dictationError && (
-                <p className="pt-2 text-xs text-destructive">{dictationError}</p>
-              )}
-              {creationError && (
-                <p className="pt-2 text-xs text-destructive">{creationError}</p>
-              )}
+            {dictationError && (
+              <p className="pt-2 text-xs text-destructive">{dictationError}</p>
+            )}
+            {creationError && (
+              <p className="pt-2 text-xs text-destructive">{creationError}</p>
+            )}
             </CardContent>
           </Card>
         </div>
