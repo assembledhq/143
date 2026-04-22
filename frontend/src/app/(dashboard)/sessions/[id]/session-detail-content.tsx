@@ -895,27 +895,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     },
   });
-
-  const { data: prData } = useQuery({
-    queryKey: ["session", sessionId, "pr"],
-    queryFn: () => api.sessions.getPR(sessionId),
-  });
-  const hasPR = !!prData?.data;
-  const [prQueued, setPRQueued] = useState(false);
-  const createPRMutation = useMutation({
-    mutationFn: () => api.sessions.createPR(sessionId),
-    onSuccess: () => {
-      setPRQueued(true);
-      // Clear the queued banner after 30s if the PR hasn't appeared yet.
-      setTimeout(() => setPRQueued(false), 30_000);
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "pr"] });
-    },
-    onError: (err) => {
-      const msg = err instanceof Error ? err.message : "Failed to create PR";
-      toast.error(msg);
-    },
-  });
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
