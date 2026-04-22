@@ -1525,6 +1525,68 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionHandler_GetTimeline_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, now, "snapshotted", nil,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(messageColumns).
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(10), sessionID, orgID, nil, now.Add(-time.Minute), "output", "Done fixing", nil, 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/timeline", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetTimeline(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return expected status code")
+
+	var resp models.ListResponse[models.SessionTimelineEntry]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Len(t, resp.Data, 1, "duplicate final output log should be suppressed from fetched timeline")
+	require.Equal(t, models.SessionTimelineKindMessage, resp.Data[0].Kind, "assistant transcript should remain visible")
+	require.NotNil(t, resp.Data[0].Message, "timeline message entry should include message payload")
+	require.Equal(t, "Done fixing", resp.Data[0].Message.Content, "timeline should return the persisted assistant transcript")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	t.Parallel()
 

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
+import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Issue, Session, SessionLog, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, Session, SessionMessage, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 // Mock EventSource (not available in jsdom)
 class MockEventSource {
@@ -228,12 +229,20 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/messages', () => {
-        const msgs: SessionMessage[] = [
-          { id: 1, session_id: idleSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
-          { id: 2, session_id: idleSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'Done fixing', created_at: '2026-02-17T07:02:00Z' },
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        const timeline: SessionTimelineEntry[] = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:01:00Z',
+            message: { id: 1, session_id: idleSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+          },
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:02:00Z',
+            message: { id: 2, session_id: idleSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'Done fixing', created_at: '2026-02-17T07:02:00Z' },
+          },
         ];
-        return HttpResponse.json({ data: msgs, meta: {} } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
       }),
     );
 
@@ -243,6 +252,90 @@ describe('SessionDetailPage', () => {
     // Turn indicator shown in header and footer
     const turnElements = screen.getAllByText(/Turn 2/);
     expect(turnElements.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('suppresses duplicate final output log when timeline includes matching assistant transcript', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    const timeline: SessionTimelineEntry[] = [
+      {
+        kind: 'assistant_output',
+        created_at: '2026-02-17T07:01:00Z',
+        log: {
+          id: 10,
+          session_id: idleSession.id,
+          level: 'output',
+          message: 'I am checking the codebase first.',
+          metadata: null,
+          turn_number: 1,
+          created_at: '2026-02-17T07:01:00Z',
+        },
+      },
+      {
+        kind: 'log',
+        created_at: '2026-02-17T07:01:30Z',
+        log: {
+          id: 11,
+          session_id: idleSession.id,
+          level: 'debug',
+          message: 'hidden log 1',
+          metadata: null,
+          turn_number: 1,
+          created_at: '2026-02-17T07:01:30Z',
+        },
+      },
+      {
+        kind: 'log',
+        created_at: '2026-02-17T07:01:40Z',
+        log: {
+          id: 12,
+          session_id: idleSession.id,
+          level: 'info',
+          message: 'hidden log 2',
+          metadata: null,
+          turn_number: 1,
+          created_at: '2026-02-17T07:01:40Z',
+        },
+      },
+      {
+        kind: 'message',
+        created_at: '2026-02-17T07:02:00Z',
+        message: {
+          id: 20,
+          session_id: idleSession.id,
+          org_id: 'org-1',
+          turn_number: 1,
+          role: 'assistant',
+          content: 'Added the missing design doc.',
+          created_at: '2026-02-17T07:02:00Z',
+        },
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get('/api/v1/sessions/:id/messages', () => {
+        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    expect(await screen.findByText('I am checking the codebase first.')).toBeInTheDocument();
+    const duplicatedFinalMessages = await screen.findAllByText('Added the missing design doc.');
+    expect(duplicatedFinalMessages).toHaveLength(1);
+    expect(screen.getByText(/2 log entries/)).toBeInTheDocument();
   });
 
   it('shows empty message state when no messages', async () => {
@@ -328,35 +421,39 @@ describe('SessionDetailPage', () => {
       sandbox_state: 'running',
     };
 
-    let logFetchCount = 0;
+    let timelineFetchCount = 0;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/logs', () => {
-        logFetchCount += 1;
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        timelineFetchCount += 1;
         return HttpResponse.json({
-          data: logFetchCount >= 2
+          data: timelineFetchCount >= 2
             ? [{
-                id: 101,
-                session_id: runningSession.id,
-                level: 'error',
-                message: 'late log after reconnect',
-                metadata: null,
-                turn_number: 1,
+                kind: 'error',
                 created_at: '2026-02-17T07:03:00Z',
+                log: {
+                  id: 101,
+                  session_id: runningSession.id,
+                  level: 'error',
+                  message: 'late log after reconnect',
+                  metadata: null,
+                  turn_number: 1,
+                  created_at: '2026-02-17T07:03:00Z',
+                },
               }]
             : [],
           meta: {},
-        } satisfies ListResponse<SessionLog>);
+        } satisfies ListResponse<SessionTimelineEntry>);
       }),
     );
 
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
 
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(logFetchCount).toBe(1);
+    expect(timelineFetchCount).toBe(1);
     expect(MockEventSource.instances).toHaveLength(1);
 
     MockEventSource.instances[0].onerror?.(new Event('error'));
@@ -368,8 +465,68 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('late log after reconnect')).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(logFetchCount).toBeGreaterThanOrEqual(2);
+      expect(timelineFetchCount).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  it('preserves plan-mode styling for streamed output logs', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      id: 'session-running-plan-stream',
+      agent_type: 'claude_code',
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'running',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        const timeline: SessionTimelineEntry[] = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:01:00Z',
+            message: {
+              id: 101,
+              session_id: runningSession.id,
+              org_id: 'org-1',
+              turn_number: 1,
+              role: 'user',
+              content: '[PLAN_MODE]\nPlease propose an implementation plan.',
+              created_at: '2026-02-17T07:01:00Z',
+            },
+          },
+        ];
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+
+    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    await act(async () => {
+      MockEventSource.instances[0].onmessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            id: 501,
+            session_id: runningSession.id,
+            level: 'output',
+            message: 'Plan step 1',
+            metadata: null,
+            turn_number: 1,
+            created_at: '2026-02-17T07:02:00Z',
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText('Implementation Plan')).toBeInTheDocument();
+    expect(screen.getByText('Plan step 1')).toBeInTheDocument();
   });
 
   it('shows validation tab with check results for non-manual sessions', async () => {

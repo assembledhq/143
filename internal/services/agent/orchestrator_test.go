@@ -310,9 +310,14 @@ func (m *mockSessionStore) getFailureUpdates() []failureUpdate {
 
 // mockSessionLogStore implements agent.SessionLogStore.
 type mockSessionLogStore struct {
-	mu    sync.Mutex
-	logs  []models.SessionLog
-	count int
+	mu                   sync.Mutex
+	logs                 []models.SessionLog
+	count                int
+	markedTurnNumber     int
+	markedMessage        string
+	markedOrgID          uuid.UUID
+	markedSessionID      uuid.UUID
+	markDuplicateInvoked bool
 }
 
 func (m *mockSessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
@@ -327,6 +332,17 @@ func (m *mockSessionLogStore) getCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.count
+}
+
+func (m *mockSessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.markDuplicateInvoked = true
+	m.markedOrgID = orgID
+	m.markedSessionID = sessionID
+	m.markedTurnNumber = turnNumber
+	m.markedMessage = message
+	return nil
 }
 
 // mockSessionQuestionStore implements agent.SessionQuestionStore.
@@ -705,6 +721,34 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_MarksFinalOutputLogAsTranscriptDuplicate(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: "Final answer"}
+		return &agent.AgentResult{
+			Summary:  "Final answer",
+			ExitCode: 0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should complete successfully")
+	require.True(t, d.logs.markDuplicateInvoked, "RunAgent should mark the final output log as a transcript duplicate")
+	require.Equal(t, run.OrgID, d.logs.markedOrgID, "duplicate marker should use the session org")
+	require.Equal(t, run.ID, d.logs.markedSessionID, "duplicate marker should use the session id")
+	require.Equal(t, 1, d.logs.markedTurnNumber, "duplicate marker should tag the first turn")
+	require.Equal(t, "Final answer", d.logs.markedMessage, "duplicate marker should target the final assistant summary")
 }
 
 func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {

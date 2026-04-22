@@ -42,7 +42,7 @@ import { ChatTimeline } from "@/components/chat-timeline";
 import { api } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
-import { buildTimeline } from "@/lib/timeline";
+import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
@@ -546,7 +546,7 @@ function ReviewCommentInput({
         textareaRef.current.style.height = "auto";
       }
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
     },
   });
 
@@ -691,15 +691,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     return agentType?.models ?? [];
   }, [session.agent_type]);
 
-  const { data: messagesData } = useQuery({
-    queryKey: ["session", sessionId, "messages"],
-    queryFn: () => api.sessions.getMessages(sessionId),
-    refetchInterval: isRunning ? 3000 : false,
-  });
-
-  const { data: logsData } = useQuery({
-    queryKey: ["session", sessionId, "logs"],
-    queryFn: () => api.sessions.getLogs(sessionId),
+  const { data: timelineData } = useQuery({
+    queryKey: ["session", sessionId, "timeline"],
+    queryFn: () => api.sessions.getTimeline(sessionId),
     refetchInterval: isActive ? 3000 : false,
   });
 
@@ -712,25 +706,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     enabled: hasIssue,
   });
 
-  // Merge fetched logs with streamed logs, deduplicating by ID.
-  const allLogs = useMemo(() => {
-    const fetched = logsData?.data || [];
-    const idSet = new Set(fetched.map((l) => l.id));
-    const extra = streamedLogs.filter((l) => !idSet.has(l.id));
-    return [...fetched, ...extra];
-  }, [logsData?.data, streamedLogs]);
-
-  const messages = messagesData?.data;
-
-  // Prepend the issue description as a synthetic user message for turn 0
-  // so the initial prompt is visible in the timeline.
-  const allMessages = useMemo(() => {
+  const baseTimelineEntries = useMemo(() => {
+    const entries = buildTimelineFromResponse(timelineData?.data || []);
     const issueDescription = issueData?.data?.description;
-    const msgs = messages || [];
-    if (!issueDescription) return msgs;
-    // Only prepend if there's no user message for turn 0 already.
-    const hasTurn0UserMsg = msgs.some((m) => m.role === "user" && m.turn_number === 0);
-    if (hasTurn0UserMsg) return msgs;
+    if (!issueDescription) return entries;
+    const hasTurn0UserMsg = entries.some((entry) => entry.kind === "message" && entry.data.role === "user" && entry.data.turn_number === 0);
+    if (hasTurn0UserMsg) return entries;
     const syntheticMsg: SessionMessage = {
       id: -1,
       session_id: sessionId,
@@ -740,13 +721,59 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       content: issueDescription,
       created_at: session.created_at,
     };
-    return [syntheticMsg, ...msgs];
-  }, [messages, issueData?.data?.description, sessionId, session.org_id, session.created_at]);
+    return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
+  }, [timelineData?.data, issueData?.data?.description, sessionId, session.org_id, session.created_at]);
 
-  const timelineEntries = useMemo(
-    () => buildTimeline(allMessages, allLogs),
-    [allMessages, allLogs]
-  );
+  const timelineEntries = useMemo(() => {
+    const fetchedLogIds = new Set<number>();
+    const assistantTranscriptByTurn = new Map<number, Set<string>>();
+    const planModeSeedMessages: SessionMessage[] = [];
+
+    for (const entry of baseTimelineEntries) {
+      switch (entry.kind) {
+        case "message":
+          if (entry.data.role === "user" && entry.data.content.startsWith("[PLAN_MODE]\n")) {
+            planModeSeedMessages.push(entry.data);
+          }
+          if (entry.data.role === "assistant") {
+            const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
+            contents.add(entry.data.content);
+            assistantTranscriptByTurn.set(entry.data.turn_number, contents);
+          }
+          break;
+        case "plan_message": {
+          const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
+          contents.add(entry.data.content);
+          assistantTranscriptByTurn.set(entry.data.turn_number, contents);
+          break;
+        }
+        case "assistant_output":
+        case "error":
+        case "log":
+        case "plan_output":
+          fetchedLogIds.add(entry.data.id);
+          break;
+        case "tool_group":
+          fetchedLogIds.add(entry.toolUse.id);
+          if (entry.toolResult) {
+            fetchedLogIds.add(entry.toolResult.id);
+          }
+          break;
+      }
+    }
+
+    const overlayLogs = streamedLogs.filter((log) => {
+      if (fetchedLogIds.has(log.id)) return false;
+      if (log.level !== "output") return true;
+      if (log.metadata?.type === "tool_result") return true;
+      if (log.metadata?.type === "assistant_final" && log.metadata?.duplicate_of_transcript === true) return false;
+      return !assistantTranscriptByTurn.get(log.turn_number)?.has(log.message);
+    });
+
+    if (overlayLogs.length === 0) return baseTimelineEntries;
+    const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
+    return [...baseTimelineEntries, ...overlayEntries];
+  }, [baseTimelineEntries, streamedLogs]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -791,20 +818,19 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
-          queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+          queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         }
       });
 
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         queryClient.setQueryData(["session", sessionId], { data: updated });
         eventSource?.close();
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "logs"] });
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
       });
 
       eventSource.onerror = () => {
         eventSource?.close();
-        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "logs"] });
+        queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
 
         if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
           const delay =
@@ -878,7 +904,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
+      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
     },
   });
 

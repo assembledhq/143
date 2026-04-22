@@ -220,6 +220,16 @@ export interface SessionLog {
   created_at: string;
 }
 
+export interface SessionTimelineEntry {
+  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message';
+  created_at: string;
+  message?: SessionMessage;
+  log?: SessionLog;
+  tool_use?: SessionLog;
+  tool_result?: SessionLog;
+  turn_number?: number;
+}
+
 export interface SessionMessage {
   id: number;
   session_id: string;
