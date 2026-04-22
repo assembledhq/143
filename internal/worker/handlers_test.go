@@ -449,11 +449,13 @@ type mockPMService struct {
 	calledOrgID     uuid.UUID
 	calledProjectID uuid.UUID
 	trigger         models.PMTrigger
+	agentType       *models.AgentType
 }
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID
 	m.trigger = trigger
+	m.agentType = agentTypeOverride
 	return &pm.Plan{}, nil
 }
 
@@ -505,6 +507,24 @@ func TestPMAnalyzeHandler_UsesJobOrgID(t *testing.T) {
 	require.NoError(t, err, "pm_analyze handler should succeed")
 	require.Equal(t, orgID, pmSvc.calledOrgID, "should use org ID from job context")
 	require.Equal(t, models.PMTriggerCron, pmSvc.trigger, "should pass trigger through")
+}
+
+func TestPMAnalyzeHandler_PassesAgentTypeOverride(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	logger := zerolog.Nop()
+
+	pmSvc := &mockPMService{}
+	services := &Services{PM: pmSvc}
+	handler := newPMAnalyzeHandler(stores, services, logger)
+
+	err := handler(context.Background(), "pm_analyze", json.RawMessage(`{"org_id":"`+uuid.New().String()+`","trigger":"manual","agent_type":"pi"}`))
+	require.NoError(t, err, "pm_analyze handler should succeed when agent_type override is provided")
+	require.NotNil(t, pmSvc.agentType, "pm_analyze handler should pass the agent_type override to the PM service")
+	require.Equal(t, models.AgentTypePi, *pmSvc.agentType, "pm_analyze handler should pass through the parsed agent_type override")
+	require.Equal(t, models.PMTriggerManual, pmSvc.trigger, "pm_analyze handler should preserve the requested trigger with an agent_type override")
 }
 
 func TestProjectCycleHandler_InvalidJSON(t *testing.T) {

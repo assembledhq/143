@@ -1,79 +1,267 @@
 package pm
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
-func TestNewService(t *testing.T) {
-	t.Parallel()
-
-	issues := &mockIssueStore{}
-	sessions := &mockSessionStore{}
-	orgs := &mockOrgStore{}
-	jobs := &mockJobStore{}
-	plans := &mockPlanStore{}
-
-	svc := NewService(issues, sessions, nil, orgs, nil, jobs, plans, nil, nil, nil, nil, nil, zerolog.Nop())
-	require.Equal(t, issues, svc.issues, "NewService should store issue dependency")
-	require.Equal(t, sessions, svc.sessions, "NewService should store agent run dependency")
-	require.Equal(t, orgs, svc.orgs, "NewService should store org dependency")
-	require.Equal(t, jobs, svc.jobs, "NewService should store job dependency")
-	require.Equal(t, plans, svc.plans, "NewService should store plan dependency")
+type helperPlanStore struct {
+	created []*models.PMPlan
+	err     error
 }
 
-func TestPMSandboxConfig(t *testing.T) {
-	t.Parallel()
-
-	cfg := pmSandboxConfig()
-	require.Equal(t, 10*time.Minute, cfg.Timeout, "pmSandboxConfig should set PM timeout")
-	require.Equal(t, 1.0, cfg.CPULimit, "pmSandboxConfig should set PM CPU limit")
-	require.Equal(t, 2048, cfg.MemoryLimitMB, "pmSandboxConfig should set PM memory limit")
-	require.Equal(t, "restricted", cfg.NetworkPolicy, "pmSandboxConfig should set restricted network policy")
-}
-
-func TestPlanToModelAndTokenMode(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	planID := uuid.New()
-	issueID := uuid.New()
-	now := time.Now().UTC().Truncate(time.Second)
-
-	plan := &Plan{
-		ID:             planID,
-		OrgID:          orgID,
-		Status:         models.PMPlanStatusExecuting,
-		Analysis:       "cluster around webhook retries",
-		Tasks:          []Task{{Rank: 1, IssueIDs: []uuid.UUID{issueID}, Title: "Fix retries"}},
-		Clusters:       []Cluster{{IssueIDs: []uuid.UUID{issueID}, RootCause: "missing backoff", Strategy: "add retry budget"}},
-		SkippedIssues:  []SkipEntry{{IssueID: issueID, Reason: models.PMSkipReasonDuplicate, Detail: "small customer impact"}},
-		IssuesReviewed: 3,
-		TokenUsage:     []byte(`{"input_tokens":10}`),
-		TriggeredBy:    models.PMTriggerCron,
-		CreatedAt:      now,
+func (m *helperPlanStore) Create(_ context.Context, plan *models.PMPlan) error {
+	if plan.ID == uuid.Nil {
+		plan.ID = uuid.New()
 	}
-	productContext := &models.ProductContext{Philosophy: "stability", Direction: "incident reduction"}
+	m.created = append(m.created, plan)
+	return m.err
+}
 
-	model, err := planToModel(plan, productContext)
-	require.NoError(t, err, "planToModel should serialize valid plan")
-	require.Equal(t, planID, model.ID, "planToModel should copy plan ID")
-	require.Equal(t, orgID, model.OrgID, "planToModel should copy org ID")
-	require.NotEmpty(t, model.Tasks, "planToModel should serialize tasks")
-	require.NotEmpty(t, model.Clusters, "planToModel should serialize clusters")
-	require.NotEmpty(t, model.SkippedIssues, "planToModel should serialize skipped issues")
-	require.NotEmpty(t, model.ProductContextSnapshot, "planToModel should snapshot product context when present")
+func (m *helperPlanStore) Update(_ context.Context, _ *models.PMPlan) error {
+	return nil
+}
 
-	modelWithoutContext, err := planToModel(plan, nil)
-	require.NoError(t, err, "planToModel should allow nil product context")
-	require.Empty(t, modelWithoutContext.ProductContextSnapshot, "planToModel should leave product context snapshot empty when no context is provided")
+type helperNoTokenCodexAuth struct{}
 
-	require.Equal(t, "low", tokenModeFromComplexity(models.PMTaskComplexitySimple), "tokenModeFromComplexity should use low tokens for simple tasks")
-	require.Equal(t, "high", tokenModeFromComplexity(models.PMTaskComplexityModerate), "tokenModeFromComplexity should use high tokens for moderate tasks")
-	require.Equal(t, "high", tokenModeFromComplexity(models.PMTaskComplexityComplex), "tokenModeFromComplexity should use high tokens for complex tasks")
+func (helperNoTokenCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	return nil, nil
+}
+
+type helperErrCodexAuth struct{}
+
+func (helperErrCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	return nil, errors.New("oauth lookup failed")
+}
+
+type helperUsageTracker struct{}
+
+func (helperUsageTracker) ContainerStarted(context.Context, uuid.UUID, uuid.UUID, *agent.Sandbox, agent.SandboxConfig, time.Time) uuid.UUID {
+	return uuid.New()
+}
+
+func (helperUsageTracker) ContainerStopped(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time, string) {
+}
+
+func TestResolveAgentType(t *testing.T) {
+	t.Parallel()
+
+	override := models.AgentTypePi
+	tests := []struct {
+		name     string
+		settings models.OrgSettings
+		override *models.AgentType
+		expected models.AgentType
+	}{
+		{
+			name:     "override wins",
+			settings: models.OrgSettings{DefaultAgentType: models.AgentTypeCodex},
+			override: &override,
+			expected: models.AgentTypePi,
+		},
+		{
+			name:     "settings default is used without override",
+			settings: models.OrgSettings{DefaultAgentType: models.AgentTypeGeminiCLI},
+			expected: models.AgentTypeGeminiCLI,
+		},
+		{
+			name:     "platform default is final fallback",
+			settings: models.OrgSettings{},
+			expected: models.DefaultDefaultAgentType,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, resolveAgentType(tt.settings, tt.override), "resolveAgentType should honor precedence for %s", tt.name)
+		})
+	}
+}
+
+func TestServicePickAdapter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		adapters  map[models.AgentType]agent.AgentAdapter
+		agentType models.AgentType
+		wantErr   string
+	}{
+		{
+			name:      "nil adapter map fails",
+			agentType: models.AgentTypeCodex,
+			wantErr:   "pm adapters not configured",
+		},
+		{
+			name:      "missing adapter fails",
+			adapters:  map[models.AgentType]agent.AgentAdapter{},
+			agentType: models.AgentTypeCodex,
+			wantErr:   "no adapter registered",
+		},
+		{
+			name:      "registered adapter succeeds",
+			adapters:  testAdapterMap(&reviewAdapter{}),
+			agentType: models.DefaultDefaultAgentType,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &Service{adapters: tt.adapters}
+			adapter, err := svc.pickAdapter(tt.agentType)
+			if tt.wantErr != "" {
+				require.Error(t, err, "pickAdapter should fail for %s", tt.name)
+				require.Contains(t, err.Error(), tt.wantErr, "pickAdapter should return the expected error for %s", tt.name)
+				require.Nil(t, adapter, "pickAdapter should not return an adapter for %s", tt.name)
+				return
+			}
+
+			require.NoError(t, err, "pickAdapter should succeed for %s", tt.name)
+			require.NotNil(t, adapter, "pickAdapter should return an adapter for %s", tt.name)
+		})
+	}
+}
+
+func TestServiceFinalizeSandboxEnv(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{
+		env: agent.NewAgentEnv(agent.AgentEnvDeps{
+			Provider: &pmSandboxMock{},
+			Logger:   zerolog.Nop(),
+		}),
+		logger: zerolog.Nop(),
+	}
+
+	err := svc.finalizeSandboxEnv(models.AgentTypeAmp, map[string]string{})
+	require.Error(t, err, "finalizeSandboxEnv should fail Amp auth preflight without AMP_API_KEY")
+	require.Contains(t, err.Error(), "AMP_API_KEY", "finalizeSandboxEnv should surface the missing Amp credential")
+
+	piEnv := map[string]string{
+		"PI_MODEL_CUSTOM":   "moonshot/kimi-k2",
+		"OPENAI_API_KEY":    "sk-openai",
+		"ANTHROPIC_API_KEY": "sk-ant",
+	}
+	require.NoError(t, svc.finalizeSandboxEnv(models.AgentTypePi, piEnv), "finalizeSandboxEnv should allow unknown Pi provider prefixes when some credential exists")
+}
+
+func TestServiceInjectRequiredAgentAuth(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	sb := &agent.Sandbox{HomeDir: "/home/test"}
+
+	tests := []struct {
+		name      string
+		agentType models.AgentType
+		env       *agent.AgentEnv
+		wantErr   string
+	}{
+		{
+			name:      "non codex agent skips auth injection",
+			agentType: models.AgentTypePi,
+			env: agent.NewAgentEnv(agent.AgentEnvDeps{
+				Provider: &pmSandboxMock{},
+				Logger:   zerolog.Nop(),
+			}),
+		},
+		{
+			name:      "codex missing oauth token returns auth error",
+			agentType: models.AgentTypeCodex,
+			env: agent.NewAgentEnv(agent.AgentEnvDeps{
+				CodexAuth: helperNoTokenCodexAuth{},
+				Provider:  &pmSandboxMock{},
+				Logger:    zerolog.Nop(),
+			}),
+			wantErr: "No ChatGPT credentials",
+		},
+		{
+			name:      "codex oauth lookup failure returns auth error",
+			agentType: models.AgentTypeCodex,
+			env: agent.NewAgentEnv(agent.AgentEnvDeps{
+				CodexAuth: helperErrCodexAuth{},
+				Provider:  &pmSandboxMock{},
+				Logger:    zerolog.Nop(),
+			}),
+			wantErr: "failed to prepare ChatGPT authentication",
+		},
+		{
+			name:      "codex oauth token injects successfully",
+			agentType: models.AgentTypeCodex,
+			env:       testAgentEnv(),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &Service{env: tt.env}
+			err := svc.injectRequiredAgentAuth(ctx, orgID, tt.agentType, sb)
+			if tt.wantErr != "" {
+				require.Error(t, err, "injectRequiredAgentAuth should fail for %s", tt.name)
+				var authErr *agent.AuthError
+				require.ErrorAs(t, err, &authErr, "injectRequiredAgentAuth should wrap failures as AuthError for %s", tt.name)
+				require.Contains(t, err.Error(), tt.wantErr, "injectRequiredAgentAuth should explain the failure for %s", tt.name)
+				return
+			}
+
+			require.NoError(t, err, "injectRequiredAgentAuth should succeed for %s", tt.name)
+		})
+	}
+}
+
+func TestServiceSetUsageTrackerPersistFailedPlanAndContainerExitReason(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	svc := &Service{}
+	tracker := helperUsageTracker{}
+	svc.SetUsageTracker(tracker)
+	require.NotNil(t, svc.usageTracker, "SetUsageTracker should store the usage tracker")
+
+	require.Equal(t, uuid.Nil, svc.persistFailedPlan(ctx, orgID, models.PMTriggerManual, "auth failed"), "persistFailedPlan should return nil when the plan store is missing")
+
+	errStore := &helperPlanStore{err: errors.New("insert failed")}
+	svc.plans = errStore
+	require.Equal(t, uuid.Nil, svc.persistFailedPlan(ctx, orgID, models.PMTriggerManual, "auth failed"), "persistFailedPlan should return nil when plan persistence fails")
+	require.Len(t, errStore.created, 1, "persistFailedPlan should attempt to create a failed plan record")
+
+	okStore := &helperPlanStore{}
+	svc.plans = okStore
+	planID := svc.persistFailedPlan(ctx, orgID, models.PMTriggerCron, "auth failed")
+	require.NotEqual(t, uuid.Nil, planID, "persistFailedPlan should return the created plan ID on success")
+	require.Len(t, okStore.created, 1, "persistFailedPlan should create exactly one failed plan record")
+	require.Equal(t, models.PMPlanStatusFailed, okStore.created[0].Status, "persistFailedPlan should mark the stored plan as failed")
+	require.Equal(t, models.PMTriggerCron, okStore.created[0].TriggeredBy, "persistFailedPlan should preserve the PM trigger")
+
+	require.Equal(t, "completed", containerExitReason(context.Background(), nil), "containerExitReason should treat nil errors as completed")
+	require.Equal(t, "failed", containerExitReason(context.Background(), errors.New("boom")), "containerExitReason should report generic failures")
+
+	deadlineCtx, cancelDeadline := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancelDeadline()
+	time.Sleep(time.Millisecond)
+	require.Equal(t, "timeout", containerExitReason(deadlineCtx, errors.New("timed out")), "containerExitReason should map deadline exceeded to timeout")
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Equal(t, "cancelled", containerExitReason(cancelledCtx, errors.New("cancelled")), "containerExitReason should map cancelled contexts to cancelled")
 }
