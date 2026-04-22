@@ -133,6 +133,8 @@ export interface Session {
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
+  pr_creation_state: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_error?: string;
   target_branch?: string;
   repository_id?: string;
   error?: string;

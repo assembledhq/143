@@ -88,7 +88,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -100,7 +100,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -684,6 +684,54 @@ func (s *SessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID 
 		"id":            sessionID,
 		"org_id":        orgID,
 		"sandbox_state": state,
+	})
+	return err
+}
+
+// UpdatePRCreationState transitions pr_creation_state and sets/clears
+// pr_creation_error atomically. The error is only preserved in the `failed`
+// state — any other transition clears it so a prior failure doesn't leak into
+// the next attempt's UI. Pass errMsg == "" in all non-failed transitions.
+//
+// `succeeded` is terminal: this function refuses to transition out of it so
+// a late worker retry can't flip a real PR back to `failed` or `pushing`.
+// Transitioning `idle -> queued` from a `succeeded` state (e.g. after the PR
+// was deleted upstream) is intentionally not supported here — the session
+// row should be treated as done.
+func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, sessionID uuid.UUID, state models.PRCreationState, errMsg string) error {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	var errArg any
+	if state == models.PRCreationStateFailed && errMsg != "" {
+		errArg = errMsg
+	} else {
+		errArg = nil
+	}
+	query := `UPDATE sessions
+		SET pr_creation_state = @state, pr_creation_error = @err
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND pr_creation_state <> 'succeeded'`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+		"state":  string(state),
+		"err":    errArg,
+	})
+	return err
+}
+
+// ClearSnapshotKey NULLs the snapshot_key column and transitions sandbox_state
+// to 'destroyed'. Called after the snapshot file has been removed from storage
+// — on PR merge, session archive, or reaper expiry. Idempotent: calling it on
+// a row that already has snapshot_key NULL is a no-op.
+func (s *SessionStore) ClearSnapshotKey(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions
+		SET snapshot_key = NULL, sandbox_state = 'destroyed'
+		WHERE id = @id AND org_id = @org_id AND snapshot_key IS NOT NULL`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
 	})
 	return err
 }

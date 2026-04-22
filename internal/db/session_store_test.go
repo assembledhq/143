@@ -24,7 +24,7 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -52,8 +52,10 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,      // diff_history
 		nil,      // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
-		nil, // automation_run_id
-		nil, // deleted_at
+		nil,            // automation_run_id
+		"idle",         // pr_creation_state
+		(*string)(nil), // pr_creation_error
+		nil,            // deleted_at
 		createdAt,
 	}
 }
@@ -111,6 +113,82 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	sessions, err := store.ListByOrg(context.Background(), orgID, SessionFilters{})
 	require.NoError(t, err, "ListByOrg without RepositoryID should not return an error")
 	require.Len(t, sessions, 1, "should return one session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdatePRCreationState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     models.PRCreationState
+		errMsg    string
+		expectErr bool
+	}{
+		{
+			name:   "failed state stores error message",
+			state:  models.PRCreationStateFailed,
+			errMsg: "push failed",
+		},
+		{
+			name:  "queued state clears error message",
+			state: models.PRCreationStateQueued,
+		},
+		{
+			name:      "invalid state returns validation error",
+			state:     models.PRCreationState("bogus"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+
+			if !tt.expectErr {
+				mock.ExpectExec("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.UpdatePRCreationState(context.Background(), orgID, sessionID, tt.state, tt.errMsg)
+			if tt.expectErr {
+				require.Error(t, err, "UpdatePRCreationState should reject invalid enum values")
+				require.Contains(t, err.Error(), "invalid PRCreationState", "UpdatePRCreationState should surface enum validation failures")
+				return
+			}
+
+			require.NoError(t, err, "UpdatePRCreationState should persist valid state transitions")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ClearSnapshotKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ClearSnapshotKey(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ClearSnapshotKey should update the row without error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

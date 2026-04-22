@@ -644,7 +644,9 @@ var sessionRowColumns = []string{
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
 	"repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id",
+	"pr_creation_state", "pr_creation_error",
+	"deleted_at", "created_at",
 }
 
 func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
@@ -662,7 +664,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		// the stale-ID guard falls through to hydrate/expired.
 		"running", nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil, time.Now(),
+		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
 	}
 }
 
@@ -682,7 +684,7 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 		0, time.Now(),
 		"running", snapshotKey, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil, time.Now(),
+		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
 	}
 }
 
@@ -701,7 +703,7 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 		0, time.Now(),
 		sandboxState, snapshotKey, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil, time.Now(),
+		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
 	}
 }
 

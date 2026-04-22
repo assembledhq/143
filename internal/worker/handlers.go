@@ -123,11 +123,15 @@ type MemoryReinforcer interface {
 	ReinforceMemories(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error
 }
 
+type prCreator interface {
+	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+}
+
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    orchestratorService
 	Validation      *validation.Service
-	PR              *ghservice.PRService
+	PR              prCreator
 	Failure         *agent.FailureService
 	SandboxProvider agent.SandboxProvider
 	Prioritization  *prioritization.Service
@@ -960,7 +964,10 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 	}
 }
 
-// open_pr handler creates a GitHub PR from a completed agent run.
+// open_pr handler creates a GitHub PR from a completed agent run by pushing
+// the restored sandbox snapshot to GitHub. Drives the session's
+// pr_creation_state through pushing -> succeeded/failed so the UI can reflect
+// progress without needing to poll PR rows.
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -991,12 +998,63 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			Str("org_id", orgID.String()).
 			Msg("starting open_pr job")
 
+		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStatePushing, ""); err != nil {
+			logger.Error().Err(err).Msg("failed to mark PR creation as pushing")
+		}
+
 		var params []ghservice.CreatePRParams
 		if input.Draft != nil {
 			params = append(params, ghservice.CreatePRParams{Draft: input.Draft})
 		}
-		_, err = services.PR.CreatePR(ctx, &run, params...)
-		return err
+
+		_, createErr := services.PR.CreatePR(ctx, &run, params...)
+		if createErr != nil {
+			// Always log the raw error — only a curated subset is shown in
+			// the UI, so the worker log is the source of truth for ops.
+			logger.Error().Err(createErr).
+				Str("session_id", runID.String()).
+				Msg("open_pr failed")
+			msg := userFacingPRError(createErr)
+			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+			}
+			if shouldDeadLetterPRError(createErr) {
+				return &FatalError{Err: createErr}
+			}
+			return createErr
+		}
+
+		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
+			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
+		}
+		return nil
+	}
+}
+
+// userFacingPRError collapses an internal error into a short string safe for
+// surfacing in the UI. Sentinel errors get curated messages; everything else
+// resolves to a generic fallback so low-level details (API paths, exit codes,
+// tokens in wrapped errors) can't leak to the browser. The raw error is
+// logged separately by the caller.
+func userFacingPRError(err error) string {
+	switch {
+	case errors.Is(err, ghservice.ErrSnapshotExpired):
+		return "Session state expired — re-run to create a PR."
+	case errors.Is(err, ghservice.ErrNoChanges):
+		return "No changes to push."
+	default:
+		return "PR creation failed — see session logs for details."
+	}
+}
+
+func shouldDeadLetterPRError(err error) bool {
+	switch {
+	case errors.Is(err, ghservice.ErrSnapshotExpired):
+		return true
+	case errors.Is(err, ghservice.ErrNoChanges):
+		return true
+	default:
+		return false
 	}
 }
 
