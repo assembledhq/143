@@ -162,6 +162,16 @@ func (h *SessionReviewCommentHandler) Create(w http.ResponseWriter, r *http.Requ
 			ResourceType: models.AuditResourceSessionReviewComment,
 			ResourceID:   &resID,
 			SessionID:    &sessionID,
+			Details: marshalAuditDetails(h.logger, map[string]any{
+				"review_comment_id": comment.ID.String(),
+				"session_id":        sessionID.String(),
+				"file_path":         comment.FilePath,
+				"line_number":       comment.LineNumber,
+				"diff_side":         comment.DiffSide,
+				"pass_number":       comment.PassNumber,
+				"body_length":       len(comment.Body),
+				"resolved":          comment.Resolved,
+			}),
 		})
 	}
 
@@ -234,6 +244,19 @@ func (h *SessionReviewCommentHandler) Update(w http.ResponseWriter, r *http.Requ
 			ResourceType: models.AuditResourceSessionReviewComment,
 			ResourceID:   &resID,
 			SessionID:    &sid,
+			Details: marshalAuditDetails(h.logger, map[string]any{
+				"review_comment_id": comment.ID.String(),
+				"session_id":        sid.String(),
+				"file_path":         comment.FilePath,
+				"line_number":       comment.LineNumber,
+				"diff_side":         comment.DiffSide,
+				"pass_number":       comment.PassNumber,
+				"body_length":       len(comment.Body),
+				"changes": map[string]any{
+					"body_length": auditChange(len(existing.Body), len(comment.Body)),
+					"resolved":    auditChange(existing.Resolved, comment.Resolved),
+				},
+			}),
 		})
 	}
 
@@ -279,6 +302,16 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 			ResourceType: models.AuditResourceSessionReviewComment,
 			ResourceID:   &resID,
 			SessionID:    &sessionID,
+			Details: marshalAuditDetails(h.logger, map[string]any{
+				"review_comment_id": existing.ID.String(),
+				"session_id":        sessionID.String(),
+				"file_path":         existing.FilePath,
+				"line_number":       existing.LineNumber,
+				"diff_side":         existing.DiffSide,
+				"pass_number":       existing.PassNumber,
+				"body_length":       len(existing.Body),
+				"resolved":          existing.Resolved,
+			}),
 		})
 	}
 

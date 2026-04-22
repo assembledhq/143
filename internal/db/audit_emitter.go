@@ -137,6 +137,8 @@ func (e *AuditEmitter) EmitWebhookAction(ctx context.Context, params WebhookActi
 		Details:      params.Details,
 		RequestID:    params.RequestID,
 		IPAddress:    params.IPAddress,
+		SessionID:    params.SessionID,
+		ProjectID:    params.ProjectID,
 	}
 	if err := e.store.Create(ctx, entry); err != nil {
 		e.logger.Warn().Err(err).
@@ -155,4 +157,6 @@ type WebhookActionParams struct {
 	Details      json.RawMessage
 	RequestID    *string
 	IPAddress    *netip.Prefix
+	SessionID    *uuid.UUID
+	ProjectID    *uuid.UUID
 }

@@ -579,7 +579,13 @@ func (h *TeamHandler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revokedIDStr := invID.String()
-	emitUserAudit(h.audit, r, models.AuditActionTeamInvitationRevoked, models.AuditResourceInvitation, &revokedIDStr, nil)
+	emitUserAudit(h.audit, r, models.AuditActionTeamInvitationRevoked, models.AuditResourceInvitation, &revokedIDStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"invitation_id": invID.String(),
+			"changes": map[string]any{
+				"status": auditChange("pending", "revoked"),
+			},
+		}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
