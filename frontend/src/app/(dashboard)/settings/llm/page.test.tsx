@@ -87,6 +87,10 @@ describe("LLMPage", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /LLM/i, level: 1 })).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/Configure the app-level LLMs used for extra features like PR descriptions/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/These models are separate from the coding agents configured on the Agent page/i)).toBeInTheDocument();
   });
 
   it("renders provider keys section", async () => {
@@ -103,6 +107,9 @@ describe("LLMPage", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Default model" })).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/Choose the default model for app features like PR descriptions, titles, validation, and project generation/i),
+    ).toBeInTheDocument();
   });
 
   it("shows the platform-LLM alert when no platform provider is configured", async () => {
