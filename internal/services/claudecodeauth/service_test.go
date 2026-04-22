@@ -556,6 +556,38 @@ func TestRefreshTokenByID_PreservesRefreshTokenWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenByID_RejectsEmptyAccessToken(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"","refresh_token":"new-refresh","expires_in":3600,"scope":"user:profile"}`))
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	newSub, err := svc.RefreshTokenByID(context.Background(), orgID, credID)
+	require.Nil(t, newSub, "RefreshTokenByID should not return a subscription when the refresh response omits access_token")
+	require.Error(t, err, "RefreshTokenByID should fail closed when the refresh response omits access_token")
+	require.Contains(t, err.Error(), "empty access_token", "RefreshTokenByID should surface the empty access_token error")
+
+	storedCred, getErr := store.GetByID(context.Background(), orgID, credID)
+	require.NoError(t, getErr, "GetByID should return the seeded credential after a failed refresh")
+
+	storedCfg, ok := storedCred.Config.(models.AnthropicConfig)
+	require.True(t, ok, "stored credential should remain an AnthropicConfig after a failed refresh")
+	require.NotNil(t, storedCfg.Subscription, "stored credential should still include its subscription after a failed refresh")
+	require.Equal(t, "old-access", storedCfg.Subscription.AccessToken, "failed refresh should preserve the previously stored access token")
+	require.Equal(t, "old-refresh", storedCfg.Subscription.RefreshToken, "failed refresh should preserve the previously stored refresh token")
+}
+
 func TestRefreshTokenByID_RefreshTokenReused(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
