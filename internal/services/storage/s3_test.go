@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,6 +23,8 @@ type snapshotMockS3Client struct {
 	getBody        []byte
 	getErr         error
 }
+
+var snapshotStoreTestHooksMu sync.Mutex
 
 func (m *snapshotMockS3Client) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	m.putInput = params
@@ -52,6 +56,9 @@ func (m *snapshotMockS3Client) HeadBucket(ctx context.Context, params *s3.HeadBu
 func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
 	t.Parallel()
 
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	client := &snapshotMockS3Client{getBody: []byte("snapshot-bytes")}
 	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
 
@@ -61,6 +68,8 @@ func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
 	require.Equal(t, "snapshot-bucket", aws.ToString(client.putInput.Bucket), "Save should target the configured bucket")
 	require.Equal(t, "sessions/snapshots/org-1/session-1/workspace.tar.zst", aws.ToString(client.putInput.Key), "Save should prepend the configured prefix to snapshot keys")
 	require.Equal(t, s3types.ServerSideEncryptionAes256, client.putInput.ServerSideEncryption, "Save should enable AES256 server-side encryption")
+	require.NotNil(t, client.putInput.ContentLength, "Save should declare the snapshot content length for S3-compatible backends")
+	require.EqualValues(t, len("snapshot-bytes"), aws.ToInt64(client.putInput.ContentLength), "Save should set ContentLength to the uploaded byte size")
 
 	var loaded bytes.Buffer
 	err = store.Load(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", &loaded)
@@ -78,6 +87,9 @@ func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
 func TestS3SnapshotStore_LoadNotFoundWrapsSnapshotSentinel(t *testing.T) {
 	t.Parallel()
 
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	client := &snapshotMockS3Client{getErr: &s3types.NoSuchKey{}}
 	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
 
@@ -85,4 +97,84 @@ func TestS3SnapshotStore_LoadNotFoundWrapsSnapshotSentinel(t *testing.T) {
 	err := store.Load(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", &loaded)
 	require.Error(t, err, "Load should return an error when the object does not exist")
 	require.True(t, errors.Is(err, ErrSnapshotNotFound), "Load should wrap ErrSnapshotNotFound for missing snapshot objects")
+}
+
+func TestS3SnapshotStore_SaveSetsContentLengthForStreamingReader(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
+	client := &snapshotMockS3Client{}
+	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
+
+	reader := io.NopCloser(bytes.NewBufferString("streamed-snapshot"))
+	err := store.Save(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", reader)
+	require.NoError(t, err, "Save should upload snapshots from streaming readers without error")
+	require.NotNil(t, client.putInput, "Save should issue a PutObject request")
+	require.NotNil(t, client.putInput.ContentLength, "Save should compute ContentLength even for streaming readers")
+	require.EqualValues(t, len("streamed-snapshot"), aws.ToInt64(client.putInput.ContentLength), "Save should set ContentLength to the streamed byte size")
+}
+
+func TestS3SnapshotStore_SaveReturnsTempFileCreationError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
+	origCreateTemp := createSnapshotTempFile
+	createSnapshotTempFile = func(dir, pattern string) (*os.File, error) {
+		return nil, errors.New("disk full")
+	}
+	t.Cleanup(func() {
+		createSnapshotTempFile = origCreateTemp
+	})
+
+	store := NewS3SnapshotStore(&snapshotMockS3Client{}, "snapshot-bucket", "sessions")
+
+	err := store.Save(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", bytes.NewReader([]byte("snapshot-bytes")))
+	require.Error(t, err, "Save should return an error when temp file creation fails")
+	require.Contains(t, err.Error(), "create temp snapshot file snapshots/org-1/session-1/workspace.tar.zst", "Save should identify temp file creation failures")
+}
+
+func TestS3SnapshotStore_SaveReturnsCopyError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
+	origCopy := copySnapshotToTemp
+	copySnapshotToTemp = func(dst io.Writer, src io.Reader) (int64, error) {
+		return 0, errors.New("read failed")
+	}
+	t.Cleanup(func() {
+		copySnapshotToTemp = origCopy
+	})
+
+	store := NewS3SnapshotStore(&snapshotMockS3Client{}, "snapshot-bucket", "sessions")
+
+	err := store.Save(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", bytes.NewReader([]byte("snapshot-bytes")))
+	require.Error(t, err, "Save should return an error when buffering the snapshot fails")
+	require.Contains(t, err.Error(), "buffer snapshot snapshots/org-1/session-1/workspace.tar.zst", "Save should identify snapshot buffering failures")
+}
+
+func TestS3SnapshotStore_SaveReturnsRewindError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
+	origRewind := rewindSnapshotTempFile
+	rewindSnapshotTempFile = func(f *os.File) (int64, error) {
+		return 0, errors.New("seek failed")
+	}
+	t.Cleanup(func() {
+		rewindSnapshotTempFile = origRewind
+	})
+
+	store := NewS3SnapshotStore(&snapshotMockS3Client{}, "snapshot-bucket", "sessions")
+
+	err := store.Save(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", bytes.NewReader([]byte("snapshot-bytes")))
+	require.Error(t, err, "Save should return an error when rewinding the temp file fails")
+	require.Contains(t, err.Error(), "rewind snapshot snapshots/org-1/session-1/workspace.tar.zst", "Save should identify snapshot rewind failures")
 }
