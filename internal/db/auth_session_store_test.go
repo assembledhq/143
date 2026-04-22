@@ -24,9 +24,9 @@ var sessionColumns = []string{
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
-	"repository_id", "diff_stats", "diff_history", "input_manifest",
+	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error",
+	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"deleted_at", "created_at",
 }
 
@@ -48,6 +48,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,      // snapshot_key
 		nil,      // target_branch
 		nil,      // working_branch
+		nil,      // base_commit_sha
 		nil,      // repository_id
 		nil,      // diff_stats
 		nil,      // diff_history
@@ -56,6 +57,8 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,            // automation_run_id
 		"idle",         // pr_creation_state
 		(*string)(nil), // pr_creation_error
+		nil,            // diff_collected_at
+		nil,            // latest_diff_snapshot_id
 		nil,            // deleted_at
 		now,            // created_at
 	}

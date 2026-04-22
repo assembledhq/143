@@ -24,7 +24,7 @@ import (
 type mockFileReader struct {
 	listDirFn     func(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error)
 	readFileFn    func(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
-	readContextFn func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error)
+	readContextFn func(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (sandbox.FileContextResult, error)
 }
 
 func (m *mockFileReader) ListDir(ctx context.Context, containerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
@@ -41,11 +41,11 @@ func (m *mockFileReader) ReadFile(ctx context.Context, containerID, workDir, fil
 	return "", false, nil
 }
 
-func (m *mockFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]sandbox.FileLine, error) {
+func (m *mockFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (sandbox.FileContextResult, error) {
 	if m.readContextFn != nil {
 		return m.readContextFn(ctx, containerID, workDir, filePath, line, above, below)
 	}
-	return nil, nil
+	return sandbox.FileContextResult{}, nil
 }
 
 func newTestSessionFileHandler(t *testing.T, mock pgxmock.PgxPoolIface, fr sandbox.FileReader) *SessionFileHandler {
@@ -78,7 +78,7 @@ var sessionColumnsForFiles = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
 func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, containerID *string) {
@@ -96,13 +96,15 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 				nil, nil, nil, nil, // pm_plan_id through pm_reasoning
 				nil, nil, nil, // project_task_id, model_override, triggered_by_user_id
 				nil, 0, now, "running", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-				nil, nil, nil, // target_branch, working_branch, repository_id
+				nil, nil, nil, nil, // target_branch, working_branch, base_commit_sha, repository_id
 				nil, nil, // diff_stats, diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
 				nil,            // automation_run_id
 				"idle",         // pr_creation_state
 				(*string)(nil), // pr_creation_error
+				nil,            // diff_collected_at
+				nil,            // latest_diff_snapshot_id
 				nil,            // deleted_at
 				now,            // created_at
 			),
@@ -362,31 +364,48 @@ func TestSessionFileHandler_GetFileContext(t *testing.T) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
 			fileReader: &mockFileReader{
-				readContextFn: func(_ context.Context, _, _, _ string, line, above, below int) ([]sandbox.FileLine, error) {
+				readContextFn: func(_ context.Context, _, _, _ string, line, above, below int) (sandbox.FileContextResult, error) {
 					require.Equal(t, 10, line)
 					require.Equal(t, 3, above)
 					require.Equal(t, 3, below)
-					return []sandbox.FileLine{
-						{Number: 7, Content: "line 7"},
-						{Number: 8, Content: "line 8"},
-						{Number: 9, Content: "line 9"},
-						{Number: 10, Content: "line 10"},
-						{Number: 11, Content: "line 11"},
-						{Number: 12, Content: "line 12"},
-						{Number: 13, Content: "line 13"},
+					return sandbox.FileContextResult{
+						Lines: []sandbox.FileLine{
+							{Number: 7, Content: "line 7"},
+							{Number: 8, Content: "line 8"},
+							{Number: 9, Content: "line 9"},
+							{Number: 10, Content: "line 10"},
+							{Number: 11, Content: "line 11"},
+							{Number: 12, Content: "line 12"},
+							{Number: 13, Content: "line 13"},
+						},
+						StartLine:    7,
+						EndLine:      13,
+						HasMoreAbove: true,
+						HasMoreBelow: true,
+						TotalLines:   20,
 					}, nil
 				},
 			},
 			expectedCode: http.StatusOK,
 			checkBody: func(t *testing.T, body []byte) {
 				type contextResponse struct {
-					Lines []sandbox.FileLine `json:"lines"`
+					Lines        []sandbox.FileLine `json:"lines"`
+					StartLine    int                `json:"start_line"`
+					EndLine      int                `json:"end_line"`
+					HasMoreAbove bool               `json:"has_more_above"`
+					HasMoreBelow bool               `json:"has_more_below"`
+					TotalLines   int                `json:"total_lines"`
 				}
 				var resp models.SingleResponse[contextResponse]
-				require.NoError(t, json.Unmarshal(body, &resp))
-				require.Len(t, resp.Data.Lines, 7)
-				require.Equal(t, 7, resp.Data.Lines[0].Number)
-				require.Equal(t, 13, resp.Data.Lines[6].Number)
+				require.NoError(t, json.Unmarshal(body, &resp), "response body should unmarshal")
+				require.Len(t, resp.Data.Lines, 7, "handler should return all requested context lines")
+				require.Equal(t, 7, resp.Data.Lines[0].Number, "response should include the first requested line number")
+				require.Equal(t, 13, resp.Data.Lines[6].Number, "response should include the last requested line number")
+				require.Equal(t, 7, resp.Data.StartLine, "response should report the returned start line")
+				require.Equal(t, 13, resp.Data.EndLine, "response should report the returned end line")
+				require.True(t, resp.Data.HasMoreAbove, "response should indicate additional lines exist above the window")
+				require.True(t, resp.Data.HasMoreBelow, "response should indicate additional lines exist below the window")
+				require.Equal(t, 20, resp.Data.TotalLines, "response should report the total line count")
 			},
 		},
 		{
@@ -405,10 +424,10 @@ func TestSessionFileHandler_GetFileContext(t *testing.T) {
 				setupSessionMock(mock, orgID, sessionID, &containerID)
 			},
 			fileReader: &mockFileReader{
-				readContextFn: func(_ context.Context, _, _, _ string, _, above, below int) ([]sandbox.FileLine, error) {
+				readContextFn: func(_ context.Context, _, _, _ string, _, above, below int) (sandbox.FileContextResult, error) {
 					require.Equal(t, 100, above, "above should be capped at 100")
 					require.Equal(t, 100, below, "below should be capped at 100")
-					return []sandbox.FileLine{}, nil
+					return sandbox.FileContextResult{}, nil
 				},
 			},
 			expectedCode: http.StatusOK,

@@ -1,6 +1,6 @@
 # Design: Accurate, Navigable Session Diffs
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-04-22
 
 > Unifies two gaps in the current review surface: GitHub-style movement through surrounding file context and diff snapshots that are explicitly tied to the immutable branch basis for the session.
 

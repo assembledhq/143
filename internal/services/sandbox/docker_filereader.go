@@ -171,10 +171,10 @@ func isNotFoundStderr(stderr string) bool {
 }
 
 // ReadFileContext returns lines around a specific line number.
-func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]FileLine, error) {
+func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (FileContextResult, error) {
 	absPath := resolvePathInWorkDir(workDir, filePath)
 	if err := validateExecPath(absPath); err != nil {
-		return nil, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
+		return FileContextResult{}, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
 	}
 
 	startLine := line - above
@@ -187,14 +187,14 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 	argv := []string{"sed", "-n", fmt.Sprintf("%d,%dp", startLine, endLine), absPath}
 	stdout, stderrOut, exitCode, err := d.execCmd(ctx, containerID, workDir, argv)
 	if err != nil {
-		return nil, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
+		return FileContextResult{}, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
 	}
 	if exitCode != 0 {
 		trimmed := strings.TrimSpace(stderrOut)
 		if isNotFoundStderr(trimmed) {
-			return nil, fmt.Errorf("read context %s:%d: %w", filePath, line, ErrFileNotFound)
+			return FileContextResult{}, fmt.Errorf("read context %s:%d: %w", filePath, line, ErrFileNotFound)
 		}
-		return nil, fmt.Errorf("read context %s:%d: %s", filePath, line, trimmed)
+		return FileContextResult{}, fmt.Errorf("read context %s:%d: %s", filePath, line, trimmed)
 	}
 
 	var lines []FileLine
@@ -209,7 +209,38 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 		})
 	}
 
-	return lines, nil
+	totalLines := 0
+	for _, lineContent := range strings.Split(stdout, "\n") {
+		_ = lineContent
+	}
+
+	countStdout, countStderr, countExitCode, countErr := d.execCmd(ctx, containerID, workDir, []string{"awk", "END{print NR}", absPath})
+	if countErr != nil {
+		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, countErr)
+	}
+	if countExitCode != 0 {
+		trimmed := strings.TrimSpace(countStderr)
+		if isNotFoundStderr(trimmed) {
+			return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, ErrFileNotFound)
+		}
+		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %s", filePath, line, trimmed)
+	}
+	if _, scanErr := fmt.Sscanf(strings.TrimSpace(countStdout), "%d", &totalLines); scanErr != nil {
+		return FileContextResult{}, fmt.Errorf("parse line count %s:%d: %w", filePath, line, scanErr)
+	}
+
+	result := FileContextResult{
+		Lines:      lines,
+		TotalLines: totalLines,
+	}
+	if len(lines) > 0 {
+		result.StartLine = lines[0].Number
+		result.EndLine = lines[len(lines)-1].Number
+		result.HasMoreAbove = result.StartLine > 1
+		result.HasMoreBelow = result.EndLine < totalLines
+	}
+
+	return result, nil
 }
 
 // resolvePathInWorkDir joins the workDir and a relative path, ensuring
