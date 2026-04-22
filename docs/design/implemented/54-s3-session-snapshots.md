@@ -1,6 +1,6 @@
 # Design: S3-Backed Session Snapshot Storage
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-04-21
 
 ## 1. Motivation
 
@@ -56,19 +56,20 @@ S3-compatible object storage is the simplest fit.
 - `storage.FileSnapshotStore` exists in [internal/services/storage/file.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/services/storage/file.go).
 - Snapshot save/load/delete is already abstracted throughout the agent and preview codepaths.
 
-### 4.2 Missing wiring
+### 4.2 Implemented wiring
 
-What does **not** exist yet:
+The runtime now includes:
 
 - config fields for snapshot S3 selection
-- startup wiring that chooses file vs S3
-- support for custom S3 endpoints or path-style access for snapshots
-- deployment config for snapshot object-store credentials
+- startup wiring that chooses file vs S3 explicitly
+- support for custom S3 endpoints and path-style access for snapshots
 - startup logs that clearly indicate which snapshot backend is active
+
+Deployment credentials and per-environment rollout still need to be supplied operationally, but the application wiring is complete.
 
 ### 4.3 Existing upload pattern
 
-Uploads already have optional S3 support in [internal/api/router.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/api/router.go), but that implementation is not sufficient to copy directly:
+Uploads already have optional S3 support in [internal/api/router.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/api/router.go), but that implementation was not sufficient to copy directly:
 
 - it does not currently use `UPLOAD_S3_ENDPOINT`
 - it does not expose path-style config
@@ -112,20 +113,7 @@ Separate config avoids accidental coupling and makes rollout reversible.
 
 ### 5.2 Store selection at startup
 
-Replace the unconditional:
-
-```go
-apiSnapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
-```
-
-in [cmd/server/main.go](/Users/wangjohn/.codex/worktrees/ac7f/143/cmd/server/main.go) with a helper:
-
-```go
-snapshotStore, err := buildSnapshotStore(cfg, logger)
-if err != nil {
-    logger.Fatal().Err(err).Msg("failed to initialize snapshot store")
-}
-```
+`cmd/server/main.go` now builds a single snapshot store via a helper and injects that same instance into both API and worker paths.
 
 The selected store is still shared by:
 
@@ -137,7 +125,7 @@ This preserves the existing “construct once, inject everywhere” model.
 
 ### 5.3 Shared S3 client builder
 
-Add a small shared helper, likely in `internal/services/storage/s3_client.go` or similar, that builds an AWS SDK client with:
+The runtime now uses a small shared helper in `internal/services/storage/s3_client.go` that builds an AWS SDK client with:
 
 - region
 - optional endpoint override
@@ -273,7 +261,7 @@ This avoids a race where the object store deletes a snapshot before the applicat
 
 ### Phase 1: Code wiring
 
-Implement:
+Completed:
 
 - config fields
 - shared snapshot-store builder
@@ -281,7 +269,7 @@ Implement:
 - startup logging for snapshot backend selection
 - tests
 
-Keep deployment config unchanged; file store remains the default.
+File store remains the default when `SNAPSHOT_S3_BUCKET` is unset.
 
 ### Phase 2: Provision object storage
 
@@ -385,7 +373,7 @@ That prevents a split-brain deployment where one node writes to file while anoth
 
 ## 11. Observability
 
-Add startup logs:
+The runtime now emits startup logs with:
 
 - snapshot backend: `file` or `s3`
 - bucket
@@ -393,7 +381,7 @@ Add startup logs:
 - endpoint host when set
 - path-style flag
 
-Add metrics or structured logs for:
+Structured logs should continue to distinguish:
 
 - snapshot save failures
 - snapshot load failures
@@ -412,19 +400,19 @@ The important operational distinction is:
 
 ### Code
 
-1. Add `SNAPSHOT_S3_*` fields to [internal/config/config.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/config/config.go).
-2. Add a snapshot-store builder used by [cmd/server/main.go](/Users/wangjohn/.codex/worktrees/ac7f/143/cmd/server/main.go).
-3. Add a shared S3 client builder that supports endpoint override and path-style.
-4. Wire `storage.NewS3SnapshotStore(...)` when snapshot S3 config is present.
-5. Keep `storage.NewFileSnapshotStore(...)` as fallback for local/dev.
-6. Add startup status logs for the chosen snapshot backend.
+1. Add `SNAPSHOT_S3_*` fields to [internal/config/config.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/config/config.go). Done.
+2. Add a snapshot-store builder used by [cmd/server/main.go](/Users/wangjohn/.codex/worktrees/ac7f/143/cmd/server/main.go). Done.
+3. Add a shared S3 client builder that supports endpoint override and path-style. Done.
+4. Wire `storage.NewS3SnapshotStore(...)` when snapshot S3 config is present. Done.
+5. Keep `storage.NewFileSnapshotStore(...)` as fallback for local/dev. Done.
+6. Add startup status logs for the chosen snapshot backend. Done.
 
 ### Tests
 
-1. Config parsing tests for new env vars.
-2. Store-selection tests for file vs S3.
-3. S3 endpoint/path-style tests.
-4. Snapshot startup failure tests when S3 config is invalid.
+1. Config parsing tests for new env vars. Done.
+2. Store-selection tests for file vs S3. Done.
+3. S3 endpoint/path-style tests. Done.
+4. Snapshot startup failure tests when S3 config is invalid. Done.
 
 ### Deploy
 
@@ -435,7 +423,93 @@ The important operational distinction is:
 
 ---
 
-## 13. Recommended Defaults
+## 13. Bucket Provisioning Instructions
+
+The application-side work is complete, but production still needs a real bucket or bucket-equivalent prefix.
+
+### 13.1 AWS S3
+
+Recommended production shape:
+
+- bucket name: dedicated, e.g. `143-prod-session-snapshots`
+- region: explicit, e.g. `us-west-2`
+- prefix: `sessions`
+- default encryption: SSE-S3 (`AES256`)
+- lifecycle expiration: 35 to 45 days
+- block all public access: enabled
+
+Example AWS CLI flow:
+
+```bash
+export AWS_REGION=us-west-2
+export SNAPSHOT_BUCKET=143-prod-session-snapshots
+
+aws s3api create-bucket \
+  --bucket "$SNAPSHOT_BUCKET" \
+  --region "$AWS_REGION" \
+  --create-bucket-configuration LocationConstraint="$AWS_REGION"
+
+aws s3api put-public-access-block \
+  --bucket "$SNAPSHOT_BUCKET" \
+  --public-access-block-configuration \
+  'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+
+aws s3api put-bucket-encryption \
+  --bucket "$SNAPSHOT_BUCKET" \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+```
+
+Optional lifecycle safety net:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket "$SNAPSHOT_BUCKET" \
+  --lifecycle-configuration \
+  '{"Rules":[{"ID":"expire-session-snapshots","Status":"Enabled","Filter":{"Prefix":"sessions/"},"Expiration":{"Days":40}}]}'
+```
+
+Application env for AWS:
+
+```bash
+SNAPSHOT_S3_BUCKET=143-prod-session-snapshots
+SNAPSHOT_S3_PREFIX=sessions
+SNAPSHOT_S3_REGION=us-west-2
+SNAPSHOT_S3_USE_PATH_STYLE=false
+```
+
+Leave `SNAPSHOT_S3_ENDPOINT` unset for AWS.
+
+### 13.2 S3-Compatible Providers
+
+For R2, MinIO, or similar providers:
+
+- keep a dedicated bucket when possible
+- set `SNAPSHOT_S3_ENDPOINT` to the provider endpoint
+- set `SNAPSHOT_S3_USE_PATH_STYLE=true` only when the provider requires it
+- keep `SNAPSHOT_S3_PREFIX=sessions`
+
+Example env:
+
+```bash
+SNAPSHOT_S3_BUCKET=143-session-snapshots
+SNAPSHOT_S3_PREFIX=sessions
+SNAPSHOT_S3_REGION=auto
+SNAPSHOT_S3_ENDPOINT=https://<account-or-cluster-endpoint>
+SNAPSHOT_S3_USE_PATH_STYLE=true
+```
+
+### 13.3 Rollout Checklist
+
+1. Provision the bucket and lifecycle rule before changing runtime env.
+2. Add `SNAPSHOT_S3_*` to both worker and API environments.
+3. Roll workers and APIs in one coordinated window.
+4. Verify startup logs report `backend=s3` with the expected bucket, prefix, endpoint host, and path-style flag.
+5. Start a manual session, wait for it to snapshot, then resume it from a different node boundary to verify cross-node hydrate.
+
+---
+
+## 14. Recommended Defaults
 
 For production:
 
@@ -451,9 +525,9 @@ For local development:
 
 ---
 
-## 14. Decision Summary
+## 15. Decision Summary
 
-We should adopt S3-backed snapshot storage because the current local-disk model is not correct for multi-node app/worker deployments. The repo already has the right abstraction and an S3 implementation; the missing work is startup wiring, config, deployment, and operator-safe rollout.
+We adopted S3-backed snapshot storage because the local-disk model was not correct for multi-node app/worker deployments. The repo already had the right abstraction and an S3 implementation; this change completed the missing startup wiring, config, prefix handling, and operator-visible startup behavior.
 
 The design intentionally keeps:
 
