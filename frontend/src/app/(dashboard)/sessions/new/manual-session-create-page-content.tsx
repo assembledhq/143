@@ -449,59 +449,18 @@ export function ManualSessionCreatePageContent() {
 
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">
-        <Card className="w-full max-w-3xl mx-auto border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
-          <CardContent className="space-y-0 p-4">
-            <Textarea
-              ref={messageInputRef}
-              value={message}
-              onChange={(event) => {
-                updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
-                resizeMessageInput();
-              }}
-              onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onKeyDown={(event) => {
-                if (showMentionPicker && fileMentions.length > 0) {
-                  if (event.key === "ArrowDown") {
-                    event.preventDefault();
-                    setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
-                    return;
-                  }
-                  if (event.key === "ArrowUp") {
-                    event.preventDefault();
-                    setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
-                    return;
-                  }
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    applyMention(fileMentions[selectedMentionIndex]);
-                    return;
-                  }
-                }
-                if (showMentionPicker && event.key === "Escape") {
-                  event.preventDefault();
-                  setMentionDismissed(true);
-                  return;
-                }
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submitManualSession();
-                }
-              }}
-              placeholder="Tell the agent what to do..."
-              rows={1}
-              disabled={createManualSessionMutation.isPending}
-              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
-              aria-label="Manual session prompt"
-            />
-
-            {showMentionPicker && (
-              <Card className="mb-3 overflow-hidden border-border/70 shadow-sm">
-                <CardContent className="p-2">
-                  <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                    Files and directories
-                  </div>
+        <div className="relative mx-auto w-full max-w-3xl">
+          {showMentionPicker && (
+            <Card
+              className="absolute inset-x-0 bottom-[calc(100%+12px)] z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
+              data-side="top"
+              data-testid="mention-picker-overlay"
+            >
+              <CardContent className="p-2">
+                <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                  Files and directories
+                </div>
+                <div aria-label="Mention suggestions" role="listbox">
                   {fileMentionsLoading && (
                     <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
                   )}
@@ -509,12 +468,13 @@ export function ManualSessionCreatePageContent() {
                     <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
                   )}
                   {!fileMentionsLoading && fileMentions.length > 0 && (
-                    <div className="space-y-1">
+                    <div className="max-h-80 space-y-1 overflow-y-auto">
                       {fileMentions.map((reference, index) => (
                         <Button
                           key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
                           type="button"
                           variant="ghost"
+                          aria-selected={index === selectedMentionIndex}
                           className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => applyMention(reference)}
@@ -525,9 +485,60 @@ export function ManualSessionCreatePageContent() {
                       ))}
                     </div>
                   )}
-                </CardContent>
-              </Card>
-            )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <Card
+            className="w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]"
+            data-testid="manual-session-composer"
+          >
+            <CardContent className="space-y-0 p-4">
+              <Textarea
+                ref={messageInputRef}
+                value={message}
+                onChange={(event) => {
+                  updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
+                  resizeMessageInput();
+                }}
+                onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onKeyDown={(event) => {
+                  if (showMentionPicker && fileMentions.length > 0) {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
+                      return;
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
+                      return;
+                    }
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      applyMention(fileMentions[selectedMentionIndex]);
+                      return;
+                    }
+                  }
+                  if (showMentionPicker && event.key === "Escape") {
+                    event.preventDefault();
+                    setMentionDismissed(true);
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    submitManualSession();
+                  }
+                }}
+                placeholder="Tell the agent what to do..."
+                rows={1}
+                disabled={createManualSessionMutation.isPending}
+                className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
+                aria-label="Manual session prompt"
+              />
 
             {references.length > 0 && (
               <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
@@ -728,8 +739,9 @@ export function ManualSessionCreatePageContent() {
             {creationError && (
               <p className="pt-2 text-xs text-destructive">{creationError}</p>
             )}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   );
