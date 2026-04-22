@@ -1216,83 +1216,9 @@ func normalizePRTitleCandidate(s string) string {
 		return ""
 	}
 
-	lower := strings.ToLower(s)
-	for _, prefix := range []string{
-		"please make sure ",
-		"please ",
-		"can you ",
-		"could you ",
-		"help me ",
-		"make sure ",
-	} {
-		if strings.HasPrefix(lower, prefix) {
-			s = strings.TrimSpace(s[len(prefix):])
-			lower = strings.ToLower(s)
-			break
-		}
-	}
-
-	replacements := []struct {
-		old string
-		new string
-	}{
-		{`"changes"`, "Changes"},
-		{`the "changes" section of the side menu`, "Changes sidebar"},
-		{"the changes section of the side menu", "Changes sidebar"},
-		{"the side menu", "sidebar"},
-		{"file detail view and the files in the Changes sidebar", "file detail view and Changes sidebar"},
-		{"the file detail view and the files in the Changes sidebar", "file detail view and Changes sidebar"},
-		{"the file detail view", "file detail view"},
-		{"the files in the ", ""},
-	}
-	lower = strings.ToLower(s)
-	for _, replacement := range replacements {
-		if strings.Contains(lower, replacement.old) {
-			start := strings.Index(lower, replacement.old)
-			s = s[:start] + replacement.new + s[start+len(replacement.old):]
-			lower = strings.ToLower(s)
-		}
-	}
-
-	if strings.Contains(lower, "ordering of the files in file detail view") && strings.Contains(lower, "changes sidebar") {
-		return "Align file ordering between file detail view and Changes sidebar"
-	}
-
-	if strings.HasPrefix(lower, "the ordering of ") {
-		s = "ordering of " + s[len("the ordering of "):]
-		lower = strings.ToLower(s)
-	}
-	if strings.HasPrefix(lower, "ordering of ") && strings.Contains(lower, "match") {
-		s = strings.Replace(s, "ordering of ", "Align ", 1)
-		s = strings.TrimSuffix(s, " match")
-		s = strings.TrimSuffix(s, " matches")
-		lower = strings.ToLower(s)
-	}
-
 	s = strings.TrimRight(s, ".!?")
-	s = rewritePRTitleVerb(s)
 
 	return truncatePRTitle(s, maxPRTitleLen)
-}
-
-func rewritePRTitleVerb(s string) string {
-	replacements := map[string]string{
-		"Fixed ":       "Fix ",
-		"Updated ":     "Update ",
-		"Added ":       "Add ",
-		"Improved ":    "Improve ",
-		"Refactored ":  "Refactor ",
-		"Removed ":     "Remove ",
-		"Aligned ":     "Align ",
-		"Ensured ":     "Ensure ",
-		"Implemented ": "Implement ",
-	}
-	for old, newValue := range replacements {
-		if strings.HasPrefix(s, old) {
-			return newValue + strings.TrimSpace(strings.TrimPrefix(s, old))
-		}
-	}
-	return s
 }
 
 func truncatePRTitle(s string, limit int) string {

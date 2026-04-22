@@ -423,7 +423,7 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 | Field | Source |
 |-------|--------|
-| PR title | First-line `ResultSummary` when available, normalized into a concise review-ready title; otherwise a normalized `session.Title`, falling back to `"Session {id[:8]}"` |
+| PR title | First-line `ResultSummary` when available, with minimal cleanup (trim/collapse whitespace, strip surrounding quotes, cap length); otherwise the cleaned `session.Title`, falling back to `"Session {id[:8]}"` |
 | PR body summary | `session.ResultSummary` |
 | Branch name | `143/{id[:8]}/{slugified-title}` — drop the `fix/` prefix for non-issue sessions |
 | Commit message | `session.Title` or `ResultSummary` first line |
@@ -467,7 +467,7 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 }
 ```
 
-`normalizePRTitleCandidate` is responsible for collapsing whitespace, trimming prompt-like framing such as "please make sure...", rewriting common past-tense summary openings into imperative PR titles, and capping the final title length. The goal is that PR titles describe the shipped change, not the raw support ticket phrasing or the original agent prompt.
+`normalizePRTitleCandidate` is intentionally minimal. It collapses whitespace, trims surrounding quotes, strips trailing punctuation, and caps the final title length, but it does not try to paraphrase or reinterpret the title text. The LLM should generate the actual reviewer-facing phrasing; fallback logic should stay deterministic and simple.
 
 ### 5.4 Updated CreatePR Flow
 

@@ -213,10 +213,10 @@ func TestFormatPRTitle(t *testing.T) {
 			name:    "nil issue falls back to result summary first line",
 			session: models.Session{ID: uuid.New(), ResultSummary: &summaryText},
 			issue:   nil,
-			expect:  "Update the login flow",
+			expect:  "Updated the login flow",
 		},
 		{
-			name: "non linear issue prefers concise result summary over verbose issue title",
+			name: "non linear issue uses result summary when available",
 			session: models.Session{
 				ID:            uuid.New(),
 				ResultSummary: func() *string { s := "Aligned file ordering between file detail view and Changes sidebar."; return &s }(),
@@ -225,10 +225,10 @@ func TestFormatPRTitle(t *testing.T) {
 				Source: models.IssueSource("support"),
 				Title:  "please make sure the ordering of the files in the file detail view and the files in the \"Changes\" section of the side menu match",
 			},
-			expect: "fix: Align file ordering between file detail view and Changes sidebar",
+			expect: "fix: Aligned file ordering between file detail view and Changes sidebar",
 		},
 		{
-			name: "issueless session prefers concise result summary over prompt-like session title",
+			name: "issueless session prefers result summary over session title",
 			session: models.Session{
 				ID: uuid.New(),
 				Title: func() *string {
@@ -238,19 +238,28 @@ func TestFormatPRTitle(t *testing.T) {
 				ResultSummary: func() *string { s := "Aligned file ordering between file detail view and Changes sidebar."; return &s }(),
 			},
 			issue:  nil,
-			expect: "Align file ordering between file detail view and Changes sidebar",
+			expect: "Aligned file ordering between file detail view and Changes sidebar",
 		},
 		{
-			name: "issueless session normalizes prompt-like title when no summary exists",
+			name: "issueless session uses minimally sanitized title when no summary exists",
 			session: models.Session{
 				ID: uuid.New(),
 				Title: func() *string {
-					s := "please make sure the ordering of the files in the file detail view and the files in the \"Changes\" section of the side menu match"
+					s := "  \"Keep file ordering consistent between detail view and Changes sidebar\"  "
 					return &s
 				}(),
 			},
 			issue:  nil,
-			expect: "Align file ordering between file detail view and Changes sidebar",
+			expect: "Keep file ordering consistent between detail view and Changes sidebar",
+		},
+		{
+			name: "issueless session trims quotes and whitespace from title",
+			session: models.Session{
+				ID:    uuid.New(),
+				Title: func() *string { s := "  \"Refactor auth middleware\"  "; return &s }(),
+			},
+			issue:  nil,
+			expect: "Refactor auth middleware",
 		},
 		{
 			name:    "nil issue with no title or summary uses session ID",
@@ -937,7 +946,7 @@ func TestGeneratePRContent_WithLLM(t *testing.T) {
 	require.Contains(t, result.Body, "143.dev", "should contain attribution footer")
 }
 
-func TestGeneratePRContent_NormalizesVerboseLLMTitle(t *testing.T) {
+func TestGeneratePRContent_MinimallySanitizesLLMTitle(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -954,7 +963,7 @@ func TestGeneratePRContent_NormalizesVerboseLLMTitle(t *testing.T) {
 	}
 
 	mockLLM := &mockLLMClient{
-		response: "<pr_title>please make sure the ordering of the files in the file detail view and the files in the \"Changes\" section of the side menu match</pr_title>\n<pr_body>\n## Summary\n\nAligned file ordering between the two views.\n</pr_body>",
+		response: "<pr_title>  \"Keep file ordering consistent between detail view and Changes sidebar\"  </pr_title>\n<pr_body>\n## Summary\n\nAligned file ordering between the two views.\n</pr_body>",
 	}
 
 	svc := &PRService{
@@ -966,7 +975,7 @@ func TestGeneratePRContent_NormalizesVerboseLLMTitle(t *testing.T) {
 
 	result, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), uuid.New(), run, nil)
 	require.NoError(t, err, "generatePRContent should succeed with a verbose LLM title")
-	require.Equal(t, "Align file ordering between file detail view and Changes sidebar", result.Title, "generatePRContent should normalize verbose LLM titles")
+	require.Equal(t, "Keep file ordering consistent between detail view and Changes sidebar", result.Title, "generatePRContent should only apply minimal cleanup to LLM titles")
 }
 
 func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
