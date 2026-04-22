@@ -1225,14 +1225,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	var body struct {
-		Message       string   `json:"message"`
-		Images        []string `json:"images"`
-		AgentType     string   `json:"agent_type"`
-		Model         string   `json:"model"`
-		AutonomyLevel string   `json:"autonomy_level"`
-		TokenMode     string   `json:"token_mode"`
-		RepositoryID  string   `json:"repository_id"`
-		Branch        string   `json:"branch"`
+		Message       string                         `json:"message"`
+		Images        []string                       `json:"images"`
+		References    []models.SessionInputReference `json:"references"`
+		AgentType     string                         `json:"agent_type"`
+		Model         string                         `json:"model"`
+		AutonomyLevel string                         `json:"autonomy_level"`
+		TokenMode     string                         `json:"token_mode"`
+		RepositoryID  string                         `json:"repository_id"`
+		Branch        string                         `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1243,6 +1244,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if body.Message == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
+	}
+	for _, reference := range body.References {
+		if err := reference.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REFERENCES", err.Error())
+			return
+		}
 	}
 
 	// Resolve repository for the manual session so the orchestrator can
@@ -1337,6 +1344,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	rawData, err := json.Marshal(map[string]any{
 		"manual_session": true,
 		"images":         body.Images,
+		"references":     body.References,
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENCODE_FAILED", "failed to encode manual session context", err)
@@ -1400,6 +1408,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(body.Images) > 0 {
 			initMsg.Attachments = body.Images
+		}
+		if len(body.References) > 0 {
+			initMsg.References = body.References
 		}
 		if err := h.messageStore.Create(r.Context(), initMsg); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to create initial session message — continuing without it")

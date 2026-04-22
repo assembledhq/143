@@ -706,6 +706,123 @@ func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
 	require.Equal(t, "application/vnd.github+json", capturedAccept, "Accept header should be set to GitHub JSON media type")
 }
 
+func TestListRepositoryTree(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		handlers func(t *testing.T) *http.ServeMux
+		want     []models.RepositoryTreeEntry
+		wantErr  string
+	}{
+		{
+			name: "returns recursive repository tree",
+			handlers: func(t *testing.T) *http.ServeMux {
+				t.Helper()
+
+				mux := http.NewServeMux()
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/ref/heads/main", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"object": map[string]string{"sha": "commit-sha"},
+					})
+					require.NoError(t, err, "mock server should encode branch ref response")
+				})
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/commits/commit-sha", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"tree": map[string]string{"sha": "tree-sha"},
+					})
+					require.NoError(t, err, "mock server should encode commit response")
+				})
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/trees/tree-sha", func(w http.ResponseWriter, r *http.Request) {
+					require.Equal(t, "recursive=1", r.URL.RawQuery, "tree requests should request a recursive listing")
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"tree": []map[string]string{
+							{"path": "internal/api/handlers/sessions.go", "type": "blob"},
+							{"path": "frontend/src/app", "type": "tree"},
+						},
+					})
+					require.NoError(t, err, "mock server should encode tree response")
+				})
+				return mux
+			},
+			want: []models.RepositoryTreeEntry{
+				{Path: "internal/api/handlers/sessions.go", Type: models.RepositoryTreeEntryTypeFile},
+				{Path: "frontend/src/app", Type: models.RepositoryTreeEntryTypeDirectory},
+			},
+		},
+		{
+			name: "fails when commit tree sha is missing",
+			handlers: func(t *testing.T) *http.ServeMux {
+				t.Helper()
+
+				mux := http.NewServeMux()
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/ref/heads/main", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"object": map[string]string{"sha": "commit-sha"},
+					})
+					require.NoError(t, err, "mock server should encode branch ref response")
+				})
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/commits/commit-sha", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{"tree": map[string]string{}})
+					require.NoError(t, err, "mock server should encode empty commit tree response")
+				})
+				return mux
+			},
+			wantErr: "commit tree sha missing",
+		},
+		{
+			name: "fails when tree payload is invalid",
+			handlers: func(t *testing.T) *http.ServeMux {
+				t.Helper()
+
+				mux := http.NewServeMux()
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/ref/heads/main", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"object": map[string]string{"sha": "commit-sha"},
+					})
+					require.NoError(t, err, "mock server should encode branch ref response")
+				})
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/commits/commit-sha", func(w http.ResponseWriter, r *http.Request) {
+					err := json.NewEncoder(w).Encode(map[string]any{
+						"tree": map[string]string{"sha": "tree-sha"},
+					})
+					require.NoError(t, err, "mock server should encode commit response")
+				})
+				mux.HandleFunc("GET /repos/testorg/testrepo/git/trees/tree-sha", func(w http.ResponseWriter, r *http.Request) {
+					_, err := w.Write([]byte("{"))
+					require.NoError(t, err, "mock server should write malformed tree payload")
+				})
+				return mux
+			},
+			wantErr: "decode tree: unexpected end of JSON input",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handlers(t))
+			defer server.Close()
+
+			svc := &PRService{
+				baseURL:    server.URL,
+				httpClient: server.Client(),
+				logger:     zerolog.Nop(),
+			}
+
+			tree, err := svc.ListRepositoryTree(context.Background(), "test-token", "testorg", "testrepo", "main")
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr, "ListRepositoryTree should surface the expected failure")
+				return
+			}
+
+			require.NoError(t, err, "ListRepositoryTree should return the repository tree")
+			require.Equal(t, tt.want, tree, "ListRepositoryTree should map GitHub tree entries into repository tree entries")
+		})
+	}
+}
+
 func TestFormatPRBody_WithIssue(t *testing.T) {
 	t.Parallel()
 

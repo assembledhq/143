@@ -712,6 +712,37 @@ func TestBuildUserPrompt_ManualSessionReturnsRawMessage(t *testing.T) {
 	require.NotContains(t, prompt, "Severity")
 }
 
+func TestBuildUserPrompt_ManualSessionAppendsCanonicalReferences(t *testing.T) {
+	t.Parallel()
+
+	msg := "Investigate the session composer"
+	input := &agent.AgentInput{
+		Issue: &models.Issue{
+			Title:       "Manual session",
+			Source:      models.IssueSourceManual,
+			Description: &msg,
+		},
+		References: []models.SessionInputReference{
+			{
+				Kind:    models.SessionInputReferenceKindFile,
+				Token:   "@internal/api/handlers/sessions.go",
+				Path:    "internal/api/handlers/sessions.go",
+				Display: "sessions.go",
+			},
+			{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "github",
+				Display: "GitHub",
+			},
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Contains(t, prompt, "## Referenced context", "manual prompts with references should append a canonical reference section")
+	require.Contains(t, prompt, "- @internal/api/handlers/sessions.go (internal/api/handlers/sessions.go)", "manual prompts should render token and canonical path when display differs")
+	require.Contains(t, prompt, "- GitHub [github]", "manual prompts should render id-backed references without requiring a token")
+}
+
 // ---------------------------------------------------------------------------
 // extractFileHints
 // ---------------------------------------------------------------------------

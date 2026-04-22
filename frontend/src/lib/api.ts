@@ -211,6 +211,15 @@ export const api = {
     branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
   },
+  sessionComposer: {
+    files: (repositoryId: string, branch: string, query: string) => {
+      const searchParams = new URLSearchParams({ repository_id: repositoryId, q: query });
+      if (branch) {
+        searchParams.set("branch", branch);
+      }
+      return get<import('./types').ListResponse<import('./types').SessionInputReference>>(`/api/v1/session-composer/files?${searchParams.toString()}`);
+    },
+  },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
       const searchParams = new URLSearchParams();
@@ -293,7 +302,7 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),

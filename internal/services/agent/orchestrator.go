@@ -455,6 +455,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Issue:         issue,
 		RepoURL:       repoURL,
 		RepoBranch:    branch,
+		References:    manualSessionReferences(issue),
 		TokenMode:     run.TokenMode,
 		ContextLimits: contextLimits,
 	}
@@ -1519,6 +1520,28 @@ func (o *Orchestrator) buildResumeContext(session *models.Session, issue *models
 	b.WriteString(latestUserMessage)
 
 	return b.String()
+}
+
+func manualSessionReferences(issue *models.Issue) []models.SessionInputReference {
+	if issue == nil || issue.Source != models.IssueSourceManual || len(issue.RawData) == 0 {
+		return nil
+	}
+
+	var payload struct {
+		References []models.SessionInputReference `json:"references"`
+	}
+	if err := json.Unmarshal(issue.RawData, &payload); err != nil {
+		return nil
+	}
+
+	references := make([]models.SessionInputReference, 0, len(payload.References))
+	for _, reference := range payload.References {
+		if err := reference.Validate(); err != nil {
+			continue
+		}
+		references = append(references, reference)
+	}
+	return references
 }
 
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
