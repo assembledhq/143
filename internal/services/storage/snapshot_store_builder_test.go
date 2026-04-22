@@ -26,6 +26,7 @@ func TestBuildSnapshotStore_FallsBackToFileStore(t *testing.T) {
 	require.Equal(t, "/tmp/snapshots", info.StorageDir, "BuildSnapshotStore metadata should include the local snapshot directory")
 }
 
+//nolint:paralleltest // overrides package-level test hooks for isolated builder wiring assertions
 func TestBuildSnapshotStore_UsesS3Config(t *testing.T) {
 	origLoader := loadAWSConfig
 	origConstructor := newS3ClientFromConfig
@@ -99,6 +100,7 @@ func TestBuildSnapshotStore_InvalidS3EndpointFails(t *testing.T) {
 	require.Error(t, err, "BuildSnapshotStore should fail fast when S3 is enabled with an invalid endpoint")
 }
 
+//nolint:paralleltest // overrides package-level test hooks for isolated startup probe assertions
 func TestBuildSnapshotStore_S3ProbeFailureFails(t *testing.T) {
 	origLoader := loadAWSConfig
 	origConstructor := newS3ClientFromConfig
