@@ -151,7 +151,7 @@ export default function AutomationsPage() {
     refetchInterval: 10000,
   });
 
-  const automations = data?.data ?? [];
+  const automations = useMemo(() => data?.data ?? [], [data?.data]);
   const enabled = useMemo(() => automations.filter((a) => a.enabled), [automations]);
   const paused = useMemo(() => automations.filter((a) => !a.enabled), [automations]);
 
