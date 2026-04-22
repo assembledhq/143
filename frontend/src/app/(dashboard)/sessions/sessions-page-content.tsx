@@ -270,6 +270,7 @@ export function SessionsPageContent() {
   });
 
   const members = useMemo(() => membersData?.data ?? [], [membersData?.data]);
+  const isPendingScope = !showDecisions && (!isResolved || isLoading);
 
   const firstPage = useMemo(() => listData?.data ?? [], [listData?.data]);
   const firstPageCursor = listData?.meta?.next_cursor || undefined;
@@ -373,19 +374,19 @@ export function SessionsPageContent() {
       {showDecisions && <DecisionsView />}
 
       {/* ── Loading / error / empty states ─────────────────────────── */}
-      {!showDecisions && isLoading && (
+      {isPendingScope && (
         <div className="py-16 text-center text-xs text-muted-foreground">
           Loading sessions...
         </div>
       )}
 
-      {!showDecisions && error && (
+      {!isPendingScope && !showDecisions && error && (
         <div className="py-16 text-center text-xs text-muted-foreground">
           Failed to load sessions. Make sure the backend is running.
         </div>
       )}
 
-      {!showDecisions && !isLoading && !error && counts?.all === 0 && (
+      {!isPendingScope && !showDecisions && !error && counts?.all === 0 && (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
@@ -408,7 +409,7 @@ export function SessionsPageContent() {
       )}
 
       {/* ── Data table ─────────────────────────────────────────────── */}
-      {!showDecisions && !isLoading && !error && counts?.all !== 0 && (
+      {!isPendingScope && !showDecisions && !error && counts?.all !== 0 && (
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground">
