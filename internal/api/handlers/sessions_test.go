@@ -1541,16 +1541,27 @@ func TestSessionHandler_GetTimeline_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).AddRow(
-				sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
+				sessionID, uuid.New(), orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
-				nil, false, &now, nil, nil,
+				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
 				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil, // triggered_by_user_id
-				nil, 1, now, "snapshotted", nil,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
+				nil,                             // triggered_by_user_id
+				nil, 1, now, "snapshotted", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
 			),
 		)
 	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
