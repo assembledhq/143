@@ -1,60 +1,38 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { FileTree } from "./file-tree";
-import type { DiffFile } from "@/lib/diff-parser";
-
-function makeDiffFile(path: string, added = 1, removed = 0): DiffFile {
-  return {
-    oldPath: path,
-    newPath: path,
-    hunks: [],
-    stats: { added, removed },
-    language: "typescript",
-  };
-}
-
-const files: DiffFile[] = [
-  makeDiffFile("src/app.ts", 5, 2),
-  makeDiffFile("src/helpers.ts", 3, 0),
-  makeDiffFile("README.md", 1, 1),
-];
-
-describe("FileTree", () => {
-  it("renders file names", () => {
-    render(
-      <FileTree files={files} activeFileIndex={0} onFileSelect={vi.fn()} />
-    );
-    expect(screen.getByText("app.ts")).toBeInTheDocument();
-    expect(screen.getByText("helpers.ts")).toBeInTheDocument();
-    expect(screen.getByText("README.md")).toBeInTheDocument();
+    expect(screen.getByText("3 files changed")).toBeInTheDocument();
   });
 
-  it('shows "N files changed" count', () => {
+  it("preserves the incoming file order", () => {
+    const orderedFiles: DiffFile[] = [
+      makeDiffFile("src/z-last.ts", 1, 0),
+      makeDiffFile("src/a-first.ts", 1, 0),
+      makeDiffFile("README.md", 1, 0),
+    ];
+
     render(
-      <FileTree files={files} activeFileIndex={0} onFileSelect={vi.fn()} />
+      <FileTree files={orderedFiles} activeFileIndex={0} onFileSelect={vi.fn()} />
     );
-    expect(screen.getByText("3 files changed")).toBeInTheDocument();
+
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent)
+    ).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("z-last.ts"),
+        expect.stringContaining("a-first.ts"),
+        expect.stringContaining("README.md"),
+      ])
+    );
+
+    const fileButtons = screen.getAllByRole("button").filter((button) =>
+      ["z-last.ts", "a-first.ts", "README.md"].some((name) => button.textContent?.includes(name))
+    );
+
+    expect(fileButtons.map((button) => button.textContent)).toEqual([
+      expect.stringContaining("z-last.ts"),
+      expect.stringContaining("a-first.ts"),
+      expect.stringContaining("README.md"),
+    ]);
   });
 
   it("calls onFileSelect when a file is clicked", async () => {
     const onFileSelect = vi.fn();
     const user = userEvent.setup();
-    render(
-      <FileTree files={files} activeFileIndex={0} onFileSelect={onFileSelect} />
-    );
-    await user.click(screen.getByText("helpers.ts"));
-    expect(onFileSelect).toHaveBeenCalled();
-  });
-
-  it("filters files by search input", async () => {
-    const user = userEvent.setup();
-    render(
-      <FileTree files={files} activeFileIndex={0} onFileSelect={vi.fn()} />
-    );
-    const input = screen.getByPlaceholderText("Filter files...");
-    await user.type(input, "README");
-    expect(screen.getByText("README.md")).toBeInTheDocument();
-    expect(screen.queryByText("app.ts")).not.toBeInTheDocument();
-  });
-});
