@@ -151,7 +151,7 @@ export function SessionSidebar() {
   const params = useParams();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { currentUserFilter, triggeredByUserId, setUserFilter } = useSessionUserFilter();
+  const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
   const [search, setSearch] = useState("");
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -208,6 +208,7 @@ export function SessionSidebar() {
   const { data: listData, isLoading } = useQuery({
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId, trimmedSearch],
     queryFn: () => api.sessions.list(listParams),
+    enabled: isResolved,
     refetchInterval: isPaginated ? false : 10000,
   });
 
@@ -220,6 +221,7 @@ export function SessionSidebar() {
         repository_id: repo ?? undefined,
         triggered_by_user_id: triggeredByUserId,
       }),
+    enabled: isResolved,
     refetchInterval: 10000,
   });
 
@@ -383,13 +385,13 @@ export function SessionSidebar() {
             <OptimisticSessionRow key={os.id} session={os} />
           ))}
 
-        {isLoading && (
+        {(!isResolved || isLoading) && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
-        {!isLoading && displayedSessions.length === 0 && showDefaultEmptyState && (
+        {isResolved && !isLoading && displayedSessions.length === 0 && showDefaultEmptyState && (
           <div className="space-y-3 px-2 py-3">
             <NoReposWarning showDisconnectedState compact />
             <div className="px-2 py-5 text-center text-xs text-muted-foreground">
@@ -398,7 +400,7 @@ export function SessionSidebar() {
           </div>
         )}
 
-        {!isLoading && displayedSessions.length === 0 && !showDefaultEmptyState && (
+        {isResolved && !isLoading && displayedSessions.length === 0 && !showDefaultEmptyState && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             No sessions match this filter.
           </div>

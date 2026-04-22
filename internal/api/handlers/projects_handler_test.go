@@ -149,6 +149,48 @@ func TestProjectHandler_List_InvalidRepositoryID(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "INVALID_REPOSITORY_ID")
 }
 
+func TestProjectHandler_List_WithCreatedBy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	handler := NewProjectHandler(db.NewProjectStore(mock), nil, nil, nil, nil)
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ AND created_by").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(projectColumns()))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by="+userID.String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "List should accept created_by filter")
+	require.Contains(t, rr.Body.String(), `"data":[]`, "List should return an empty list response")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestProjectHandler_List_InvalidCreatedBy(t *testing.T) {
+	t.Parallel()
+
+	handler := NewProjectHandler(nil, nil, nil, nil, nil)
+	orgID := uuid.New()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects?created_by=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "List should reject an invalid created_by filter")
+	require.Contains(t, rr.Body.String(), "INVALID_USER_ID", "List should surface the created_by validation error")
+}
+
 // --- Get handler tests ---
 
 func TestProjectHandler_Get_NotFound(t *testing.T) {
