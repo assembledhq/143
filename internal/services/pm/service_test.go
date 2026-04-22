@@ -110,12 +110,12 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.NoError(t, err, "should marshal settings")
 
 	svc := &Service{
-		issues:    &mockIssueStore{},
+		issues:   &mockIssueStore{},
 		sessions: &mockSessionStore{},
-		orgs:      &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
-		jobs:      &mockJobStore{},
-		plans:     &mockPlanStore{},
-		logger:    zerolog.Nop(),
+		orgs:     &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		jobs:     &mockJobStore{},
+		plans:    &mockPlanStore{},
+		logger:   zerolog.Nop(),
 	}
 
 	plan := &Plan{
@@ -171,12 +171,12 @@ func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
 	require.NoError(t, err, "should marshal settings")
 
 	svc := &Service{
-		issues:    &mockIssueStore{},
+		issues:   &mockIssueStore{},
 		sessions: &mockSessionStore{},
-		orgs:      &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
-		jobs:      &mockJobStore{},
-		plans:     &mockPlanStore{},
-		logger:    zerolog.Nop(),
+		orgs:     &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		jobs:     &mockJobStore{},
+		plans:    &mockPlanStore{},
+		logger:   zerolog.Nop(),
 	}
 
 	plan := &Plan{
@@ -225,11 +225,12 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 		orgs:        &failingOrgStore{}, // gatherContext will fail on GetByID
 		repos:       &mockRepoStore{repos: []models.Repository{{ID: repoID, Status: "active"}}},
 		sandbox:     &mockSandbox{},
-		adapter:     &mockAdapter{},
+		adapters:    testAdapterMap(&mockAdapter{}),
+		env:         testAgentEnv(),
 		logger:      zerolog.Nop(),
 	}
 
-	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.Error(t, err, "Analyze should fail")
 	require.Contains(t, err.Error(), "gather context")
 

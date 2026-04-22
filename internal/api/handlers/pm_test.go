@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,36 @@ func TestPMHandler_AnalyzeEnqueuesJob(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rr.Code, "should return accepted")
 	require.Contains(t, rr.Body.String(), jobID.String(), "response should include job ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPMHandler_AnalyzeEnqueuesJobWithAgentTypeOverride(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobStore := db.NewJobStore(mock)
+	planStore := db.NewPMPlanStore(mock)
+	decisionLogStore := db.NewPMDecisionLogStore(mock)
+	handler := NewPMHandler(planStore, decisionLogStore, jobStore, nil)
+
+	orgID := uuid.New()
+	jobID := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pm/analyze", bytes.NewBufferString(`{"agent_type":"pi"}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.Analyze(rr, req)
+
+	require.Equal(t, http.StatusAccepted, rr.Code, "should return accepted when agent_type override is provided")
+	require.Contains(t, rr.Body.String(), jobID.String(), "response should include job ID when agent_type override is provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met for agent_type override")
 }
 
 func TestPMHandler_ListPlans(t *testing.T) {
