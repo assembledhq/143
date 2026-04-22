@@ -1549,10 +1549,10 @@ func TestIntegrationInstallationID(t *testing.T) {
 		},
 	}
 
-		for _, tt := range tests {
-			tt := tt
-			t.Run(tt.name, func(t *testing.T) {
-				t.Parallel()
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
 			installationID, err := integrationInstallationID(tt.integration)
 			if tt.expectErr {
@@ -1751,9 +1751,9 @@ func TestGetInstallationTokenForRepo_ErrorPaths(t *testing.T) {
 			svc := tt.setupSvc(t)
 			_, err := svc.getInstallationTokenForRepo(context.Background(), orgID, tt.repo)
 			require.Error(t, err, "getInstallationTokenForRepo should return an error for this path")
-				require.Contains(t, err.Error(), tt.wantError, "getInstallationTokenForRepo should preserve the expected error context")
-			})
-		}
+			require.Contains(t, err.Error(), tt.wantError, "getInstallationTokenForRepo should preserve the expected error context")
+		})
+	}
 
 }
 
