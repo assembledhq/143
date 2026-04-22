@@ -1,14 +1,11 @@
 "use client";
 
-import { type ReactNode, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
-  Bot,
   Check,
   CheckCircle2,
-  KeyRound,
-  Layers3,
   Plus,
   Shield,
   Trash2,
@@ -177,58 +174,6 @@ export default function AgentPage() {
     selectedAgent.key === "codex" || selectedAgent.key === "claude_code";
   const selectedHasCredentialSettings =
     selectedAgent.envVars.length > 0 || Boolean(selectedTeamDefault);
-
-  const activeSubscriptions = selectedSubscriptions.filter((sub) => sub.status === "active");
-  const needsAttentionSubscriptions = selectedSubscriptions.filter(
-    (sub) => sub.status === "pending_auth" || sub.status === "invalid",
-  );
-
-  const credentialSourcesLabel = selectedAgent.inheritsProviderKeys
-    ? "Inherited provider keys"
-    : selectedSupportsSubscriptions
-      ? activeSubscriptions.length > 0 && selectedHasFallbackCredential
-        ? "Subscriptions + API key"
-        : activeSubscriptions.length > 0
-          ? "Subscriptions"
-          : selectedHasFallbackCredential
-            ? "API key"
-            : "Not configured"
-      : selectedHasFallbackCredential
-        ? "API key"
-        : "Not configured";
-
-  const executionRouteLabel = selectedAgent.inheritsProviderKeys
-    ? "Uses configured Anthropic, OpenAI, and Gemini credentials"
-    : selectedSupportsSubscriptions
-      ? activeSubscriptions.length > 0 && selectedHasFallbackCredential
-        ? "Subscriptions first, API key fallback"
-        : activeSubscriptions.length > 0
-          ? "Round-robin across subscriptions"
-          : selectedHasFallbackCredential
-            ? "API key only"
-            : "No credential sources configured"
-      : selectedHasFallbackCredential
-        ? "API key only"
-        : "API key required";
-
-  const healthLabel = selectedSupportsSubscriptions
-    ? activeSubscriptions.length > 0 || needsAttentionSubscriptions.length > 0
-      ? [
-          activeSubscriptions.length > 0 ? `${activeSubscriptions.length} active` : null,
-          needsAttentionSubscriptions.length > 0
-            ? `${needsAttentionSubscriptions.length} needs attention`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ")
-      : selectedHasFallbackCredential
-        ? "Fallback only configured"
-        : "No credentials configured"
-    : selectedAgent.inheritsProviderKeys
-      ? "Uses other configured providers"
-      : selectedHasFallbackCredential
-        ? "Configured"
-        : "Needs setup";
 
   const summaryRows = selectedSubscriptions.filter((sub) => sub.status !== "disabled");
 
@@ -414,7 +359,6 @@ export default function AgentPage() {
                       key={agent.key}
                       value={agent.key}
                       label={agent.label}
-                      description={agent.description}
                       selected={defaultAgentType === agent.key}
                     />
                   ))}
@@ -435,7 +379,6 @@ export default function AgentPage() {
                       </Badge>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">{selectedAgent.description}</p>
                   {selectedModel && (
                     <p className="text-xs text-muted-foreground">
                       Default model: <span className="font-mono text-foreground">{selectedModel}</span>
@@ -444,24 +387,6 @@ export default function AgentPage() {
                   {selectedAgent.note && (
                     <p className="text-xs text-muted-foreground">{selectedAgent.note}</p>
                   )}
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-3">
-                  <SummaryCard
-                    icon={<Layers3 className="h-4 w-4 text-muted-foreground" />}
-                    title="Credential sources"
-                    value={credentialSourcesLabel}
-                  />
-                  <SummaryCard
-                    icon={<Bot className="h-4 w-4 text-muted-foreground" />}
-                    title="Execution route"
-                    value={executionRouteLabel}
-                  />
-                  <SummaryCard
-                    icon={<CheckCircle2 className="h-4 w-4 text-muted-foreground" />}
-                    title="Health"
-                    value={healthLabel}
-                  />
                 </div>
 
                 {selectedSupportsSubscriptions ? (
@@ -503,9 +428,6 @@ export default function AgentPage() {
                   ) : (
                     <Card className="border-dashed border-border/80 shadow-none">
                       <CardContent className="space-y-4 py-8">
-                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/60 ring-1 ring-border/60">
-                          <SparklesFallbackIcon />
-                        </div>
                         <div className="space-y-1">
                           <p className="text-sm font-semibold">
                             No {selectedAgent.label} subscriptions connected yet
@@ -545,9 +467,6 @@ export default function AgentPage() {
                 ) : (
                   <Card className="border-dashed border-border/80 shadow-none">
                     <CardContent className="space-y-3 py-8">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted/60 ring-1 ring-border/60">
-                        <KeyRound className="h-5 w-5 text-muted-foreground" />
-                      </div>
                       <div className="space-y-1">
                         <p className="text-sm font-semibold">
                           {selectedAgent.inheritsProviderKeys
@@ -965,28 +884,6 @@ export default function AgentPage() {
   );
 }
 
-function SummaryCard({
-  icon,
-  title,
-  value,
-}: {
-  icon: ReactNode;
-  title: string;
-  value: string;
-}) {
-  return (
-    <Card className="shadow-none">
-      <CardContent className="space-y-2">
-        <div className="flex items-center gap-2 text-muted-foreground">
-          {icon}
-          <p className="text-xs font-medium uppercase tracking-wider">{title}</p>
-        </div>
-        <p className="text-sm font-medium text-foreground">{value}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
 function SubscriptionSummaryTable({ subscriptions }: { subscriptions: DisplaySubscription[] }) {
   return (
     <Table>
@@ -1099,10 +996,6 @@ function SubscriptionStatusBadge({ status }: { status: string }) {
     );
   }
   return <Badge variant="outline">{status}</Badge>;
-}
-
-function SparklesFallbackIcon() {
-  return <Layers3 className="h-5 w-5 text-muted-foreground" />;
 }
 
 function formatRelativeTimestamp(value?: string): string {

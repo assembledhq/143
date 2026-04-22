@@ -105,6 +105,9 @@ describe("AgentPage", () => {
     expect(await screen.findByText("Available coding agents")).toBeInTheDocument();
     expect(screen.getByText("Selected agent")).toBeInTheDocument();
     expect(screen.getByText("Execution")).toBeInTheDocument();
+    expect(screen.queryByText("OpenAI Codex (GPT-5 models)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Anthropic Claude (Opus, Sonnet, Haiku)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Google Gemini (Pro, Flash)")).not.toBeInTheDocument();
   });
 
   it("hides organization and execution sections for non-admins", async () => {
@@ -161,10 +164,9 @@ describe("AgentPage", () => {
   it("treats a team default as a configured API-key fallback", async () => {
     renderWithProviders(<AgentPage />);
 
-    expect(await screen.findByText("API key")).toBeInTheDocument();
-    expect(screen.getByText("API key only")).toBeInTheDocument();
-    expect(screen.getByText("Fallback only configured")).toBeInTheDocument();
+    expect(await screen.findByText("Team default set")).toBeInTheDocument();
     expect(screen.getByText("API key fallback is configured via team default.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage API key & settings" })).toBeInTheDocument();
   });
 
   it("shows a credential summary and subscription table when Codex has subscriptions and an API key", async () => {
@@ -210,10 +212,10 @@ describe("AgentPage", () => {
 
     renderWithProviders(<AgentPage />);
 
-    expect(await screen.findByText("Subscriptions + API key")).toBeInTheDocument();
-    expect(screen.getByText("Subscriptions first, API key fallback")).toBeInTheDocument();
+    expect(await screen.findByText("Default model:")).toBeInTheDocument();
     expect(screen.getByText("Team A")).toBeInTheDocument();
     expect(screen.getByText("Team B")).toBeInTheDocument();
+    expect(screen.getByText(/API key fallback:/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Manage subscriptions" })).toBeInTheDocument();
   });
 
