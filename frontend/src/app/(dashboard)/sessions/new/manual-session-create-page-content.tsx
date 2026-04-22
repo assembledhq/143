@@ -569,6 +569,7 @@ export function ManualSessionCreatePageContent() {
               <Textarea
                 ref={messageInputRef}
                 value={message}
+                autoFocus
                 onChange={(event) => {
                   updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
                   resizeMessageInput();
