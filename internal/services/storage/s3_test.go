@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +23,8 @@ type snapshotMockS3Client struct {
 	getBody        []byte
 	getErr         error
 }
+
+var snapshotStoreTestHooksMu sync.Mutex
 
 func (m *snapshotMockS3Client) PutObject(_ context.Context, params *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	m.putInput = params
@@ -51,6 +54,11 @@ func (m *snapshotMockS3Client) HeadBucket(ctx context.Context, params *s3.HeadBu
 }
 
 func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	client := &snapshotMockS3Client{getBody: []byte("snapshot-bytes")}
 	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
 
@@ -77,6 +85,11 @@ func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
 }
 
 func TestS3SnapshotStore_LoadNotFoundWrapsSnapshotSentinel(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	client := &snapshotMockS3Client{getErr: &s3types.NoSuchKey{}}
 	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
 
@@ -87,6 +100,11 @@ func TestS3SnapshotStore_LoadNotFoundWrapsSnapshotSentinel(t *testing.T) {
 }
 
 func TestS3SnapshotStore_SaveSetsContentLengthForStreamingReader(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	client := &snapshotMockS3Client{}
 	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
 
@@ -99,6 +117,11 @@ func TestS3SnapshotStore_SaveSetsContentLengthForStreamingReader(t *testing.T) {
 }
 
 func TestS3SnapshotStore_SaveReturnsTempFileCreationError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	origCreateTemp := createSnapshotTempFile
 	createSnapshotTempFile = func(dir, pattern string) (*os.File, error) {
 		return nil, errors.New("disk full")
@@ -115,6 +138,11 @@ func TestS3SnapshotStore_SaveReturnsTempFileCreationError(t *testing.T) {
 }
 
 func TestS3SnapshotStore_SaveReturnsCopyError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	origCopy := copySnapshotToTemp
 	copySnapshotToTemp = func(dst io.Writer, src io.Reader) (int64, error) {
 		return 0, errors.New("read failed")
@@ -131,6 +159,11 @@ func TestS3SnapshotStore_SaveReturnsCopyError(t *testing.T) {
 }
 
 func TestS3SnapshotStore_SaveReturnsRewindError(t *testing.T) {
+	t.Parallel()
+
+	snapshotStoreTestHooksMu.Lock()
+	t.Cleanup(snapshotStoreTestHooksMu.Unlock)
+
 	origRewind := rewindSnapshotTempFile
 	rewindSnapshotTempFile = func(f *os.File) (int64, error) {
 		return 0, errors.New("seek failed")
