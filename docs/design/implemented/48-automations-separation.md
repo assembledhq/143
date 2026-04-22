@@ -546,21 +546,37 @@ This is the key differentiator. Specifics:
 
 ### 9.1 Storage and delivery
 
-Templates are **hardcoded in the frontend** for v1 — stored as a JSON array in `frontend/src/lib/automation-templates.ts`. Each template defines `name`, `goal`, `default_schedule`, and `default_scope`. No database storage, no user-created templates (yet).
+Templates are **hardcoded in the frontend** for v1 — stored in `frontend/src/lib/automation-templates.ts`. They remain a UX convenience rather than a backend data model, but the client-side shape is now richer than the original MVP. Each template includes:
+
+- `name` + `category`
+- short summary text for selection UI
+- a fully structured `goal` prompt
+- expected outcomes / tags for browse surfaces
+- default cadence
+
+The prompt body is intentionally written more like a good engineering issue than a slogan. Each built-in template includes explicit sections such as:
+
+- `What to do`
+- `Output requirements`
+- `Verification`
+
+This matches how current coding-agent products publicly recommend reusable prompts: concrete scope, expected deliverable, and a way for the agent to check its work.
 
 **Why frontend-only:** Templates are a UX convenience, not a data model concept. Keeping them client-side means we can iterate on wording/selection without migrations. If we later want user-created templates or an org template library, we'd add a `automation_templates` table — but that's a v2 concern.
 
 ### 9.2 Built-in templates
 
-| Template | Default cadence | Goal |
-|----------|----------------|------|
-| Find flaky tests | Daily | Identify flaky tests from recent failures, reproduce nondeterminism, propose deterministic fixes |
-| Security sweep | Weekly | Review recent changes for concrete security vulnerabilities, propose remediations |
-| Codebase maintenance | Every 3 days | Identify high-leverage maintenance opportunities that reduce operational risk |
-| Backlog triage | Daily | Analyze current issues, prioritize by impact/urgency, cluster related items |
-| Documentation freshness | Weekly | Find stale or missing docs for recently changed code, update or flag them |
+The default library now spans multiple categories instead of only five short starters:
 
-Templates pre-fill name, goal, and schedule. User picks a repo and clicks create.
+| Category | Examples |
+|----------|----------|
+| Reliability | Find flaky tests, CI failure triage, Performance regression sweep |
+| Security | Security sweep, Dependency drift review |
+| Maintenance | Codebase maintenance, Dead code cleanup |
+| Planning | Backlog triage |
+| Documentation | Documentation freshness, API contract audit |
+
+On `/automations/new`, the UI shows a small featured subset for fast starts. A dedicated `/automations/templates` page exposes the broader catalog with category browsing, expected outcomes, and full prompt previews for users who want deeper template selection.
 
 ## 10. Implementation Phases
 

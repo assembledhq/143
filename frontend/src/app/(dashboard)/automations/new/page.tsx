@@ -1,10 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Loader2 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -25,18 +27,26 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { cn } from "@/lib/utils";
-import { automationTemplates } from "@/lib/automation-templates";
+import {
+  automationTemplates,
+  featuredAutomationTemplateIDs,
+  getAutomationTemplate,
+} from "@/lib/automation-templates";
 
 export default function NewAutomationPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
 
   // Form state
-  const [name, setName] = useState("");
-  const [goal, setGoal] = useState("");
+  const [name, setName] = useState(initialTemplate?.name ?? "");
+  const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
   const [scope, setScope] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
-  const [intervalValue, setIntervalValue] = useState(1);
-  const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">("days");
+  const [intervalValue, setIntervalValue] = useState(initialTemplate?.defaultInterval ?? 1);
+  const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">(
+    initialTemplate?.defaultUnit ?? "days",
+  );
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranch, setBaseBranch] = useState("main");
   const [priority, setPriority] = useState(50);
@@ -53,7 +63,7 @@ export default function NewAutomationPage() {
   const repoId = selectedRepoId || repos[0]?.id || "";
 
   const applyTemplate = (templateId: string) => {
-    const t = automationTemplates.find((t) => t.id === templateId);
+    const t = getAutomationTemplate(templateId);
     if (!t) return;
     setName(t.name);
     setGoal(t.goal);
@@ -95,6 +105,10 @@ export default function NewAutomationPage() {
   const canSubmit =
     name.trim().length > 0 && goal.trim().length > 0 && repoId.length > 0;
 
+  const featuredTemplates = automationTemplates.filter((template) =>
+    featuredAutomationTemplateIDs.includes(template.id),
+  );
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
@@ -104,28 +118,61 @@ export default function NewAutomationPage() {
         />
 
         {/* Templates */}
-        <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">
-            Start from a template
-          </Label>
-          <div className="flex flex-wrap gap-2">
-            {automationTemplates.map((t) => {
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <Label className="text-xs text-muted-foreground">
+              Start from a template
+            </Label>
+            <Button asChild variant="ghost" size="sm" className="h-7 px-2 text-xs">
+              <Link href="/automations/templates">Browse all templates</Link>
+            </Button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {featuredTemplates.map((t) => {
               const Icon = t.icon;
               return (
-                <Button
+                <Card
                   key={t.id}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => applyTemplate(t.id)}
                   className={cn(
-                    "rounded-full h-7 px-3 text-xs",
+                    "transition-colors",
                     name === t.name && "border-primary bg-primary/5"
                   )}
                 >
-                  <Icon className="h-3.5 w-3.5 mr-1.5" />
-                  {t.name}
-                </Button>
+                  <CardHeader className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <div className="rounded-md border border-border bg-muted/50 p-2">
+                        <Icon className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <CardTitle className="text-sm">{t.name}</CardTitle>
+                        <CardDescription className="line-clamp-2">
+                          {t.summary}
+                        </CardDescription>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      {t.tags.slice(0, 3).map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => applyTemplate(t.id)}
+                    >
+                      Use template
+                    </Button>
+                  </CardContent>
+                </Card>
               );
             })}
           </div>
