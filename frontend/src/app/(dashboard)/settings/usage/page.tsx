@@ -27,7 +27,6 @@ export default function UsagePage() {
     s.setSeconds(0, 0);
     e.setSeconds(0, 0);
     return { start: formatDateForApi(s), end: formatDateForApi(e) };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only recompute when preset changes
   }, [preset]);
 
   // If a specific day is clicked, narrow the breakdown to that day.

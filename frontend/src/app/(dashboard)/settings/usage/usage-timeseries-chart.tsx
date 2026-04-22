@@ -30,7 +30,6 @@ import {
   formatCost,
   metricOptions,
   type MetricKey,
-  type DailyBucket,
 } from "./usage-helpers";
 
 interface UsageTimeseriesChartProps {
