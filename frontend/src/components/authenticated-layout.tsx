@@ -43,6 +43,7 @@ import { CreateSessionDialog } from "@/components/create-session-dialog";
 
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
+const APP_SIDEBAR_WIDTH_CLASS = "w-[236px]";
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -173,7 +174,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   if (showLoadingSkeleton) {
     return (
       <div className="flex h-screen">
-        <aside className="w-[260px] border-r border-border bg-sidebar flex flex-col">
+        <aside
+          className={cn(
+            APP_SIDEBAR_WIDTH_CLASS,
+            "border-r border-border bg-sidebar flex flex-col"
+          )}
+        >
           <div className="px-4 py-4">
             <div className="h-5 w-20 rounded bg-muted animate-pulse" />
           </div>
@@ -216,7 +222,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   return (
     <div className="flex h-screen">
-      <aside className="w-[260px] border-r border-border/50 bg-sidebar flex flex-col relative">
+      <aside
+        className={cn(
+          APP_SIDEBAR_WIDTH_CLASS,
+          "border-r border-border/50 bg-sidebar flex flex-col relative"
+        )}
+      >
         {/* Header: org switcher + actions */}
         <div className="relative flex items-center justify-between px-4 py-3.5">
           <div className="flex items-center min-w-0 flex-1">
