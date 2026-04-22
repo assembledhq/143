@@ -178,3 +178,73 @@ func TestComposeTimeline_EmitsPlanEntries(t *testing.T) {
 	require.Equal(t, models.SessionTimelineKindPlanOutput, result[1].Kind, "plan output log should be marked for plan rendering")
 	require.Equal(t, models.SessionTimelineKindPlanMessage, result[2].Kind, "assistant transcript should be marked as a plan message")
 }
+
+func TestComposeTimeline_EmitsStandaloneToolUseGroup(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.ID = 1
+			log.Metadata = []byte(`{"tool":"Read"}`)
+		}, "2026-01-01T00:00:01Z", "tool_use", "using tool: Read"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "standalone tool_use logs should still produce a timeline entry")
+	require.Equal(t, models.SessionTimelineKindToolGroup, result[0].Kind, "tool_use logs should render as tool groups")
+	require.NotNil(t, result[0].ToolUse, "tool group should include the tool_use payload")
+	require.Nil(t, result[0].ToolResult, "tool group should not invent a tool result")
+}
+
+func TestComposeTimeline_EmitsErrorAndGenericLogEntries(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.ID = 1
+		}, "2026-01-01T00:00:01Z", "error", "something failed"),
+		makeLog(t, func(log *models.SessionLog) {
+			log.ID = 2
+			log.Level = "debug"
+		}, "2026-01-01T00:00:02Z", "debug", "hidden detail"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 2, "error and non-visible logs should both be returned")
+	require.Equal(t, models.SessionTimelineKindError, result[0].Kind, "error logs should render as error entries")
+	require.Equal(t, models.SessionTimelineKindLog, result[1].Kind, "non-visible logs should render as generic log entries")
+}
+
+func TestComposeTimeline_IgnoresAssistantMessagesWithoutMatchingTurnLogs(t *testing.T) {
+	t.Parallel()
+
+	messages := []models.SessionMessage{
+		makeMessage(t, nil, "2026-01-01T00:00:03Z"),
+	}
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.ID = 2
+			log.TurnNumber = 2
+		}, "2026-01-01T00:00:02Z", "output", "assistant reply"),
+	}
+
+	result := Compose(messages, logs)
+	require.Len(t, result, 2, "logs from other turns should not be suppressed")
+	require.Equal(t, models.SessionTimelineKindAssistantOutput, result[0].Kind, "other-turn output should remain visible")
+	require.Equal(t, models.SessionTimelineKindMessage, result[1].Kind, "assistant message should remain visible")
+}
+
+func TestComposeTimeline_TreatsInvalidMetadataAsVisibleOutput(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.ID = 1
+			log.Metadata = []byte(`{"type":`)
+		}, "2026-01-01T00:00:01Z", "output", "assistant reply"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "invalid metadata should not drop the log")
+	require.Equal(t, models.SessionTimelineKindAssistantOutput, result[0].Kind, "invalid metadata should fall back to visible assistant output")
+}

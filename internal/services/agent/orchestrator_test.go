@@ -318,6 +318,7 @@ type mockSessionLogStore struct {
 	markedOrgID          uuid.UUID
 	markedSessionID      uuid.UUID
 	markDuplicateInvoked bool
+	markDuplicateErr     error
 }
 
 func (m *mockSessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
@@ -342,7 +343,7 @@ func (m *mockSessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Conte
 	m.markedSessionID = sessionID
 	m.markedTurnNumber = turnNumber
 	m.markedMessage = message
-	return nil
+	return m.markDuplicateErr
 }
 
 // mockSessionQuestionStore implements agent.SessionQuestionStore.
@@ -367,13 +368,17 @@ func (m *mockSessionQuestionStore) getQuestions() []models.SessionQuestion {
 }
 
 type mockSessionMessageStore struct {
-	mu       sync.Mutex
-	messages []models.SessionMessage
+	mu        sync.Mutex
+	messages  []models.SessionMessage
+	createErr error
 }
 
 func (m *mockSessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.createErr != nil {
+		return m.createErr
+	}
 	if msg.ID == 0 {
 		msg.ID = int64(len(m.messages) + 1)
 	}
@@ -749,6 +754,76 @@ func TestRunAgent_MarksFinalOutputLogAsTranscriptDuplicate(t *testing.T) {
 	require.Equal(t, run.ID, d.logs.markedSessionID, "duplicate marker should use the session id")
 	require.Equal(t, 1, d.logs.markedTurnNumber, "duplicate marker should tag the first turn")
 	require.Equal(t, "Final answer", d.logs.markedMessage, "duplicate marker should target the final assistant summary")
+}
+
+func TestRunAgent_ContinuesWhenAssistantMessageCreateFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.createErr = errors.New("persist failed")
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  "Final answer",
+			ExitCode: 0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should continue when assistant message persistence fails for an interactive turn")
+	require.False(t, d.logs.markDuplicateInvoked, "RunAgent should not attempt duplicate marking when assistant message persistence fails")
+}
+
+func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.logs.markDuplicateErr = errors.New("update failed")
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: "Final answer"}
+		return &agent.AgentResult{
+			Summary:  "Final answer",
+			ExitCode: 0,
+		}, nil
+	}
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		CodexAuth:        d.codexAuth,
+		ClaudeCodeAuth:   d.claudeCodeAuth,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Cancels:          d.cancels,
+		Logger:           logger,
+	})
+
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should tolerate duplicate marker failures")
+	require.Contains(t, buf.String(), "failed to mark assistant output log as transcript duplicate", "RunAgent should log the duplicate marker failure")
 }
 
 func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
