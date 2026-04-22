@@ -2593,6 +2593,126 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			expectedCode: http.StatusCreated,
 			expectedBody: "Continue working on this",
 		},
+		{
+			name: "sends message to awaiting input session via ClaimForResume",
+			body: `{"message":"Here is the clarification"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "Here is the clarification",
+		},
+		{
+			name: "sends message to needs human guidance session via ClaimForResume",
+			body: `{"message":"Please refine the fix"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "needs_human_guidance", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("UPDATE sessions SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "snapshotted", stringPtr("snapshots/test"),
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "Please refine the fix",
+		},
 	}
 
 	for _, tt := range tests {

@@ -952,7 +952,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if claimErr != nil {
 		claimed, claimErr = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
 		if claimErr != nil {
-			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, or completed to send a message")
+			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
 			return
 		}
 		revertStatus = session.Status // preserve original status for revert

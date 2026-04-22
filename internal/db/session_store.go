@@ -408,15 +408,16 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
 }
 
-// ClaimForResume atomically transitions a terminal session to running so it
-// can be resumed with a follow-up message. Used when a user sends a message
-// to a completed/failed/cancelled/pr_created session.
+// ClaimForResume atomically transitions a resumable paused session to running
+// so it can continue from a follow-up message. Used when a user sends a
+// message to a completed/failed/cancelled/pr_created session, or to a paused
+// session waiting on guidance/input.
 // Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running', completed_at = NULL, last_activity_at = now()
-		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled')
+		WHERE id = @id AND org_id = @org_id AND status IN ('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance')
 		  AND sandbox_state != 'destroyed'
 		RETURNING ` + sessionSelectColumns
 
