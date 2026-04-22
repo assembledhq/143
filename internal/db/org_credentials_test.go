@@ -134,6 +134,34 @@ func TestOrgCredentialStore_Get(t *testing.T) {
 	}
 }
 
+// TestOrgCredentialStore_Get_FiltersLabelEmpty asserts the contract that
+// Get returns only the singleton label=” row. Providers that mix an
+// API-key row (label=”) with labeled subscription rows (label!=”)
+// depend on this filter so resolveProviderConfig doesn't accidentally
+// return a subscription row when an API key is expected. If this test
+// ever breaks, audit every Get caller in the repo before relaxing the
+// filter.
+func TestOrgCredentialStore_Get_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	// The SQL must include `label = ''` — this regex enforces it.
+	mock.ExpectQuery(`SELECT .* FROM org_credentials .* label = ''`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(credColumns).
+			AddRow(uuid.New(), uuid.New(), "anthropic", "", crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`)), "active", nil, nil, nil, time.Now(), time.Now()))
+
+	store := NewOrgCredentialStore(mock, nil)
+	cred, err := store.Get(context.Background(), uuid.New(), models.ProviderAnthropic)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Empty(t, cred.Label, "Get must return only the singleton label='' row")
+	require.NoError(t, mock.ExpectationsWereMet(), "Get query must filter on label = ''")
+}
+
 func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +262,34 @@ func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	require.False(t, openaiSummary.Configured, "openai should not be configured")
 }
 
+func TestOrgCredentialStore_ListSummaries_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*label = ''`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(credColumns))
+
+	summaries, err := store.ListSummaries(context.Background(), uuid.New())
+	require.NoError(t, err, "ListSummaries should not return an error")
+
+	var anthropicSummary *models.CredentialSummary
+	for i := range summaries {
+		if summaries[i].Provider == models.ProviderAnthropic {
+			anthropicSummary = &summaries[i]
+			break
+		}
+	}
+	require.NotNil(t, anthropicSummary, "summaries should include Anthropic")
+	require.False(t, anthropicSummary.Configured, "labeled subscription rows must not make Anthropic API key appear configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "ListSummaries query must filter to label = ''")
+}
+
 func TestOrgCredentialStore_Disable(t *testing.T) {
 	t.Parallel()
 
@@ -281,6 +337,24 @@ func TestOrgCredentialStore_Disable(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestOrgCredentialStore_Disable_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+
+	mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label = ''`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.Disable(context.Background(), uuid.New(), models.ProviderAnthropic)
+	require.NoError(t, err, "Disable should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "Disable query must filter to label = ''")
 }
 
 func TestOrgCredentialStore_UpdateStatus(t *testing.T) {
@@ -359,6 +433,178 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 			require.NotNil(t, cred, "ClaimNextRoundRobin should return a credential")
 			require.Equal(t, models.ProviderOpenAIChatGPT, cred.Provider, "credential should have correct provider")
 			require.Equal(t, "active", cred.Status, "returned credential should be active")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns labeled active credential",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				configData := crypto.DevEncrypt([]byte(`{"subscription":{"access_token":"a","refresh_token":"r","expires_at":"2030-01-01T00:00:00Z"}}`))
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns).
+						AddRow(uuid.New(), uuid.New(), "anthropic", "team-a", configData, "active", nil, nil, nil, time.Now(), time.Now()))
+			},
+		},
+		{
+			name: "no labeled active credentials",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(credColumns))
+			},
+			expectErr: true,
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			cred, err := store.ClaimNextLabeledRoundRobin(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "ClaimNextLabeledRoundRobin should return an error")
+				return
+			}
+			require.NoError(t, err, "ClaimNextLabeledRoundRobin should not return an error")
+			require.NotNil(t, cred, "ClaimNextLabeledRoundRobin should return a credential")
+			require.NotEmpty(t, cred.Label, "claimed credential should have a non-empty label")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestOrgCredentialStore_HasActiveLabeled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		setupMock  func(mock pgxmock.PgxPoolIface)
+		wantExists bool
+		expectErr  bool
+	}{
+		{
+			name: "returns true when labeled row exists",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+			},
+			wantExists: true,
+		},
+		{
+			name: "returns false when no labeled row exists",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+			},
+			wantExists: false,
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*label != ''.*status = 'active'`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			exists, err := store.HasActiveLabeled(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "HasActiveLabeled should return an error")
+				return
+			}
+			require.NoError(t, err, "HasActiveLabeled should not return an error")
+			require.Equal(t, tt.wantExists, exists, "HasActiveLabeled should return expected existence")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestOrgCredentialStore_DisableLabeled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "disables labeled rows",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label != ''`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+			},
+		},
+		{
+			name: "db error",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label != ''`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(fmt.Errorf("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "creating mock pool should not error")
+			defer mock.Close()
+
+			store := NewOrgCredentialStore(mock, nil)
+			tt.setupMock(mock)
+
+			err = store.DisableLabeled(context.Background(), uuid.New(), models.ProviderAnthropic)
+			if tt.expectErr {
+				require.Error(t, err, "DisableLabeled should return an error")
+				return
+			}
+			require.NoError(t, err, "DisableLabeled should not return an error")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

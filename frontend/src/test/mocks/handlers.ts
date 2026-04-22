@@ -458,6 +458,14 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/settings/codex-auth/subscriptions', () => {
+    return HttpResponse.json({ data: [] });
+  }),
+
+  http.get('/api/v1/settings/claude-code-auth/subscriptions', () => {
+    return HttpResponse.json({ data: [] });
+  }),
+
   http.get('/api/v1/integrations', () => {
     return HttpResponse.json({
       data: [],
