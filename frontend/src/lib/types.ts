@@ -896,6 +896,11 @@ export interface FileLine {
 
 export interface FileContextResponse {
   lines: FileLine[];
+  start_line: number;
+  end_line: number;
+  has_more_above: boolean;
+  has_more_below: boolean;
+  total_lines: number;
 }
 
 // --- Eval types ---

@@ -81,6 +81,7 @@ type SessionStore interface {
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
+	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
@@ -654,6 +655,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("clone repo: %w", err)
 		}
 
+		baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to capture base commit sha")
+		} else if baseCommitSHA != "" {
+			if sandbox.Metadata == nil {
+				sandbox.Metadata = make(map[string]string)
+			}
+			sandbox.Metadata["base_commit_sha"] = baseCommitSHA
+			run.BaseCommitSHA = &baseCommitSHA
+			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
+				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
+			}
+		}
+
 		// 8b. Create a working branch so the agent operates on a separate
 		// branch from the start, keeping the base branch clean.
 		workingBranch := formatWorkingBranch(run, issue)
@@ -772,7 +787,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	// Store the successful result.
-	runResult := o.buildRunResult(result)
+	runResult := o.buildRunResult(run, result)
 	status := "completed"
 	isInteractive := o.isInteractiveSession(issue) && snapshotKey != ""
 
@@ -1333,7 +1348,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotKey == "" && session.SnapshotKey != nil {
 		snapshotKey = *session.SnapshotKey
 	}
-	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(result), agentSessionID, snapshotKey); err != nil {
+	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, turnNumber, o.buildRunResult(session, result), agentSessionID, snapshotKey); err != nil {
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
@@ -1755,7 +1770,7 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 }
 
 // buildRunResult converts an AgentResult into the DB update struct.
-func (o *Orchestrator) buildRunResult(result *AgentResult) *models.SessionResult {
+func (o *Orchestrator) buildRunResult(run *models.Session, result *AgentResult) *models.SessionResult {
 	tokenUsage, err := json.Marshal(result.TokenUsage)
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to marshal token usage")
@@ -1770,7 +1785,22 @@ func (o *Orchestrator) buildRunResult(result *AgentResult) *models.SessionResult
 		ResultSummary:       strPtr(result.Summary),
 		Diff:                strPtr(result.Diff),
 		Error:               strPtr(result.Error),
+		DiffBaseCommitSHA:   run.BaseCommitSHA,
+		DiffCollectedAt:     timePtr(time.Now().UTC()),
+		DiffSource:          "turn_complete",
 	}
+}
+
+func (o *Orchestrator) captureBaseCommitSHA(ctx context.Context, sandbox *Sandbox) (string, error) {
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, "git rev-parse HEAD", &stdout, &stderr)
+	if err != nil {
+		return "", fmt.Errorf("capture base commit sha: %w", err)
+	}
+	if exitCode != 0 {
+		return "", fmt.Errorf("capture base commit sha: exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // enqueueJob is a helper that enqueues a job and logs errors without failing the caller.
@@ -2136,6 +2166,10 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func timePtr(t time.Time) *time.Time {
+	return &t
 }
 
 // ResolveSessionTimeout returns the per-session wall-clock timeout for the

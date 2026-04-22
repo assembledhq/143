@@ -8,7 +8,7 @@ import { useFileHighlighting } from "@/lib/syntax-highlighter";
 import { FileDiffHeader } from "./file-diff-header";
 import { DiffHunk } from "./diff-hunk";
 import { SplitDiffHunk } from "./split-diff-hunk";
-import { ContextExpander } from "./context-expander";
+import { ContextExpander, type ContextExpandResult } from "./context-expander";
 import type { ViewMode } from "./review-toolbar";
 
 interface ActiveCommentLine {
@@ -21,6 +21,7 @@ interface FileDiffSectionProps {
   file: DiffFile;
   viewMode: ViewMode;
   sessionId?: string;
+  fileContextMeta?: Record<string, { totalLines: number }>;
   /** When true, syntax highlighting is enabled for this file. Defaults to true. */
   isActive?: boolean;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
@@ -33,27 +34,56 @@ interface FileDiffSectionProps {
   onBrowseFile?: (filePath: string) => void;
 }
 
-/**
- * Compute hidden line count between two consecutive hunks.
- */
-function hiddenLinesBetweenHunks(
-  prevHunk: DiffFile["hunks"][number],
-  nextHunk: DiffFile["hunks"][number]
-): number {
-  let prevEnd = 0;
-  for (const line of prevHunk.lines) {
-    if (line.oldLineNumber != null) {
-      prevEnd = line.oldLineNumber;
-    }
+type GapKind = "top" | "middle" | "bottom";
+
+interface ContextGapState {
+  kind: GapKind;
+  key: string;
+  hiddenStart: number;
+  hiddenEnd: number;
+  lineDelta: number;
+  visibleStart?: number;
+  visibleEnd?: number;
+  lines: DiffLine[];
+}
+
+function getFirstVisibleOldLine(hunk: DiffFile["hunks"][number]): number | null {
+  for (const line of hunk.lines) {
+    if (line.oldLineNumber != null) return line.oldLineNumber;
   }
-  let nextStart = 0;
-  for (const line of nextHunk.lines) {
-    if (line.oldLineNumber != null) {
-      nextStart = line.oldLineNumber;
-      break;
-    }
+  return null;
+}
+
+function getLastVisibleOldLine(hunk: DiffFile["hunks"][number]): number | null {
+  let lineNumber: number | null = null;
+  for (const line of hunk.lines) {
+    if (line.oldLineNumber != null) lineNumber = line.oldLineNumber;
   }
-  return nextStart > prevEnd ? nextStart - prevEnd - 1 : 0;
+  return lineNumber;
+}
+
+function getFirstVisibleNewLine(hunk: DiffFile["hunks"][number]): number | null {
+  for (const line of hunk.lines) {
+    if (line.newLineNumber != null) return line.newLineNumber;
+  }
+  return null;
+}
+
+function getLastVisibleNewLine(hunk: DiffFile["hunks"][number]): number | null {
+  let lineNumber: number | null = null;
+  for (const line of hunk.lines) {
+    if (line.newLineNumber != null) lineNumber = line.newLineNumber;
+  }
+  return lineNumber;
+}
+
+function toDiffLines(lines: FileLine[], lineDelta: number): DiffLine[] {
+  return lines.map((line) => ({
+    type: "context" as const,
+    content: line.content,
+    oldLineNumber: line.number - lineDelta,
+    newLineNumber: line.number,
+  }));
 }
 
 export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
@@ -61,6 +91,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     file,
     viewMode,
     sessionId,
+    fileContextMeta,
     isActive = true,
     commentsByLine,
     activeCommentLine,
@@ -100,22 +131,41 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       return maps;
     }, [highlighted, file.hunks]);
 
-    // Track expanded context lines per gap (keyed by hunk index).
-    const [expandedGaps, setExpandedGaps] = useState<Map<number, DiffLine[]>>(new Map());
+    const [gapStates, setGapStates] = useState<Map<string, ContextGapState>>(new Map());
 
-    // Factory that returns a callback for a specific gap index.
-    const makeHandleContextExpand = useCallback((gapIndex: number) => {
-      return (lines: FileLine[]) => {
-        // Convert FileLine[] to DiffLine[] (context lines with both old and new line numbers).
-        const diffLines: DiffLine[] = lines.map((l) => ({
-          type: "context" as const,
-          content: l.content,
-          oldLineNumber: l.number,
-          newLineNumber: l.number,
-        }));
-        setExpandedGaps((prev) => {
+    const buildGapState = useCallback((kind: GapKind, key: string, hiddenStart: number, hiddenEnd: number, lineDelta: number) => {
+      const existing = gapStates.get(key);
+      if (existing) return existing;
+      return { kind, key, hiddenStart, hiddenEnd, lineDelta, lines: [] } as ContextGapState;
+    }, [gapStates]);
+
+    const makeHandleContextExpand = useCallback((gap: ContextGapState) => {
+      return (direction: "above" | "below" | "all", lines: FileLine[], meta: ContextExpandResult) => {
+        const diffLines = toDiffLines(lines, gap.lineDelta);
+        setGapStates((prev) => {
           const next = new Map(prev);
-          next.set(gapIndex, diffLines);
+          const existing = next.get(gap.key) ?? gap;
+          let mergedLines = existing.lines;
+          if (direction === "above") {
+            mergedLines = [...diffLines, ...existing.lines];
+          } else if (direction === "below") {
+            mergedLines = [...existing.lines, ...diffLines];
+          } else {
+            mergedLines = diffLines;
+          }
+
+          next.set(gap.key, {
+            ...existing,
+            lines: mergedLines,
+            visibleStart:
+              existing.visibleStart != null
+                ? Math.min(existing.visibleStart, meta.startLine)
+                : meta.startLine,
+            visibleEnd:
+              existing.visibleEnd != null
+                ? Math.max(existing.visibleEnd, meta.endLine)
+                : meta.endLine,
+          });
           return next;
         });
       };
@@ -141,6 +191,96 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
       onDeleteComment,
     }), [file.newPath, commentsByLine, activeCommentLine, onAddComment, handleAddComment, onSubmitComment, onCancelComment, onUpdateComment, onDeleteComment]);
 
+    const renderGap = useCallback((gap: ContextGapState) => {
+      const gapState = gapStates.get(gap.key) ?? gap;
+      const hiddenLineCount = gapState.hiddenEnd - gapState.hiddenStart + 1;
+      if (hiddenLineCount <= 0) return null;
+
+      const expandedHunk = gapState.lines.length > 0 ? {
+        oldStart: gapState.lines[0].oldLineNumber ?? 0,
+        oldCount: gapState.lines.length,
+        newStart: gapState.lines[0].newLineNumber ?? 0,
+        newCount: gapState.lines.length,
+        header: "",
+        lines: gapState.lines,
+      } : null;
+
+      return (
+        <div key={gap.key}>
+          <ContextExpander
+            kind={gap.kind}
+            hiddenLineCount={hiddenLineCount}
+            sessionId={sessionId}
+            filePath={file.newPath}
+            hiddenStart={gap.hiddenStart}
+            hiddenEnd={gap.hiddenEnd}
+            visibleStart={gapState.visibleStart}
+            visibleEnd={gapState.visibleEnd}
+            onExpand={makeHandleContextExpand(gapState)}
+          />
+          {expandedHunk ? (
+            viewMode === "split" ? (
+              <SplitDiffHunk hunk={expandedHunk} {...commonHunkProps} />
+            ) : (
+              <DiffHunk hunk={expandedHunk} {...commonHunkProps} />
+            )
+          ) : null}
+        </div>
+      );
+    }, [commonHunkProps, file.newPath, gapStates, makeHandleContextExpand, sessionId, viewMode]);
+
+    const sections = useMemo(() => {
+      const items: Array<{ type: "gap"; gap: ContextGapState } | { type: "hunk"; index: number; hunk: DiffFile["hunks"][number] }> = [];
+      if (file.hunks.length === 0) return items;
+
+      const firstStart = getFirstVisibleOldLine(file.hunks[0]);
+      const firstNewStart = getFirstVisibleNewLine(file.hunks[0]);
+      if (firstStart != null && firstNewStart != null && firstNewStart > 1) {
+        items.push({
+          type: "gap",
+          gap: buildGapState("top", `${file.newPath}:top`, 1, firstNewStart - 1, firstNewStart - firstStart),
+        });
+      }
+
+      file.hunks.forEach((hunk, i) => {
+        items.push({ type: "hunk", index: i, hunk });
+        if (i === file.hunks.length - 1) return;
+        const currentEnd = getLastVisibleOldLine(hunk);
+        const currentNewEnd = getLastVisibleNewLine(hunk);
+        const nextStart = getFirstVisibleOldLine(file.hunks[i + 1]);
+        const nextNewStart = getFirstVisibleNewLine(file.hunks[i + 1]);
+        if (
+          currentEnd != null &&
+          currentNewEnd != null &&
+          nextStart != null &&
+          nextNewStart != null &&
+          nextNewStart - currentNewEnd > 1
+        ) {
+          items.push({
+            type: "gap",
+            gap: buildGapState(
+              "middle",
+              `${file.newPath}:middle:${i}`,
+              currentNewEnd + 1,
+              nextNewStart - 1,
+              nextNewStart - nextStart,
+            ),
+          });
+        }
+      });
+
+      const totalLines = fileContextMeta?.[file.newPath]?.totalLines;
+      const lastEnd = getLastVisibleOldLine(file.hunks[file.hunks.length - 1]);
+      const lastNewEnd = getLastVisibleNewLine(file.hunks[file.hunks.length - 1]);
+      if (totalLines != null && lastEnd != null && lastNewEnd != null && totalLines > lastNewEnd) {
+        items.push({
+          type: "gap",
+          gap: buildGapState("bottom", `${file.newPath}:bottom`, lastNewEnd + 1, totalLines, lastNewEnd - lastEnd),
+        });
+      }
+      return items;
+    }, [buildGapState, file.hunks, file.newPath, fileContextMeta]);
+
     return (
       <div ref={ref} className="border border-border rounded-lg">
         <FileDiffHeader
@@ -151,63 +291,28 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
         />
         <div className="overflow-x-auto">
         <div className="min-w-fit">
-        {file.hunks.map((hunk, i) => {
+        {sections.map((section) => {
+          if (section.type === "gap") {
+            return renderGap(section.gap);
+          }
+
           const hunkEl =
             viewMode === "split" ? (
               <SplitDiffHunk
-                key={i}
-                hunk={hunk}
-                highlightedLines={hunkHighlightMaps?.[i]}
+                key={section.index}
+                hunk={section.hunk}
+                highlightedLines={hunkHighlightMaps?.[section.index]}
                 {...commonHunkProps}
               />
             ) : (
               <DiffHunk
-                key={i}
-                hunk={hunk}
-                highlightedLines={hunkHighlightMaps?.[i]}
+                key={section.index}
+                hunk={section.hunk}
+                highlightedLines={hunkHighlightMaps?.[section.index]}
                 {...commonHunkProps}
               />
             );
-
-          if (i === 0) return hunkEl;
-
-          const hidden = hiddenLinesBetweenHunks(file.hunks[i - 1], hunk);
-          // Compute the start line for context expansion (last old line of previous hunk)
-          const prevHunkLines = file.hunks[i - 1].lines;
-          let expandStartLine = 0;
-          for (const l of prevHunkLines) {
-            if (l.oldLineNumber != null) expandStartLine = l.oldLineNumber;
-          }
-
-          const expandedLines = expandedGaps.get(i);
-
-          return (
-            <div key={i}>
-              {hidden > 0 && !expandedLines && (
-                <ContextExpander
-                  hiddenLineCount={hidden}
-                  sessionId={sessionId}
-                  filePath={file.newPath}
-                  startLine={expandStartLine}
-                  onExpand={makeHandleContextExpand(i)}
-                />
-              )}
-              {expandedLines && expandedLines.length > 0 && (
-                viewMode === "split" ? (
-                  <SplitDiffHunk
-                    hunk={{ oldStart: expandedLines[0].oldLineNumber ?? 0, oldCount: expandedLines.length, newStart: expandedLines[0].newLineNumber ?? 0, newCount: expandedLines.length, header: "", lines: expandedLines }}
-                    {...commonHunkProps}
-                  />
-                ) : (
-                  <DiffHunk
-                    hunk={{ oldStart: expandedLines[0].oldLineNumber ?? 0, oldCount: expandedLines.length, newStart: expandedLines[0].newLineNumber ?? 0, newCount: expandedLines.length, header: "", lines: expandedLines }}
-                    {...commonHunkProps}
-                  />
-                )
-              )}
-              {hunkEl}
-            </div>
-          );
+          return <div key={section.index}>{hunkEl}</div>;
         })}
         </div>
         </div>

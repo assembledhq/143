@@ -26,6 +26,11 @@ type mockDockerClient struct {
 	inspectResp container.ExecInspect
 	inspectErr  error
 
+	createResps  []container.ExecCreateResponse
+	attachResps  []types.HijackedResponse
+	inspectResps []container.ExecInspect
+	callIndex    int
+
 	// lastExecOptions captures the last ExecOptions passed to
 	// ContainerExecCreate so tests can assert on Env, Cmd, etc.
 	lastExecOptions container.ExecOptions
@@ -33,14 +38,26 @@ type mockDockerClient struct {
 
 func (m *mockDockerClient) ContainerExecCreate(_ context.Context, _ string, cfg container.ExecOptions) (container.ExecCreateResponse, error) {
 	m.lastExecOptions = cfg
+	if len(m.createResps) > 0 {
+		resp := m.createResps[m.callIndex]
+		return resp, m.createErr
+	}
 	return m.createResp, m.createErr
 }
 
 func (m *mockDockerClient) ContainerExecAttach(_ context.Context, _ string, _ container.ExecAttachOptions) (types.HijackedResponse, error) {
+	if len(m.attachResps) > 0 {
+		return m.attachResps[m.callIndex], m.attachErr
+	}
 	return m.attachResp, m.attachErr
 }
 
 func (m *mockDockerClient) ContainerExecInspect(_ context.Context, _ string) (container.ExecInspect, error) {
+	if len(m.inspectResps) > 0 {
+		resp := m.inspectResps[m.callIndex]
+		m.callIndex++
+		return resp, m.inspectErr
+	}
 	return m.inspectResp, m.inspectErr
 }
 
@@ -117,6 +134,24 @@ func newMockClientWithStderr(stderr string, exitCode int) *mockDockerClient {
 		inspectResp: container.ExecInspect{
 			ExitCode: exitCode,
 		},
+	}
+}
+
+func newMockSequenceClient(stdouts []string, exitCodes []int) *mockDockerClient {
+	createResps := make([]container.ExecCreateResponse, len(stdouts))
+	attachResps := make([]types.HijackedResponse, len(stdouts))
+	inspectResps := make([]container.ExecInspect, len(stdouts))
+	for i := range stdouts {
+		var buf bytes.Buffer
+		buf.Write(dockerStdoutFrame(stdouts[i]))
+		createResps[i] = container.ExecCreateResponse{ID: fmt.Sprintf("exec-%d", i)}
+		attachResps[i] = newHijackedResponse(buf.Bytes())
+		inspectResps[i] = container.ExecInspect{ExitCode: exitCodes[i]}
+	}
+	return &mockDockerClient{
+		createResps:  createResps,
+		attachResps:  attachResps,
+		inspectResps: inspectResps,
 	}
 }
 
@@ -309,18 +344,21 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		client    *mockDockerClient
-		filePath  string
-		line      int
-		above     int
-		below     int
-		expected  []FileLine
-		expectErr bool
+		name             string
+		client           *mockDockerClient
+		filePath         string
+		line             int
+		above            int
+		below            int
+		expected         []FileLine
+		expectedTotal    int
+		expectedHasAbove bool
+		expectedHasBelow bool
+		expectErr        bool
 	}{
 		{
 			name:     "extracts line range",
-			client:   newMockClient("line 8\nline 9\nline 10\nline 11\nline 12\n", 0),
+			client:   newMockSequenceClient([]string{"line 8\nline 9\nline 10\nline 11\nline 12\n", "12 /workspace/main.go\n"}, []int{0, 0}),
 			filePath: "main.go",
 			line:     10,
 			above:    2,
@@ -332,10 +370,12 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 				{Number: 11, Content: "line 11"},
 				{Number: 12, Content: "line 12"},
 			},
+			expectedTotal:    12,
+			expectedHasAbove: true,
 		},
 		{
 			name:     "clamps start line to 1",
-			client:   newMockClient("line 1\nline 2\nline 3\n", 0),
+			client:   newMockSequenceClient([]string{"line 1\nline 2\nline 3\n", "3 /workspace/main.go\n"}, []int{0, 0}),
 			filePath: "main.go",
 			line:     2,
 			above:    5,
@@ -345,6 +385,23 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 				{Number: 2, Content: "line 2"},
 				{Number: 3, Content: "line 3"},
 			},
+			expectedTotal:    3,
+			expectedHasBelow: false,
+		},
+		{
+			name:     "counts final line without trailing newline",
+			client:   newMockSequenceClient([]string{"line 2\nline 3", "3\n"}, []int{0, 0}),
+			filePath: "main.go",
+			line:     2,
+			above:    0,
+			below:    1,
+			expected: []FileLine{
+				{Number: 2, Content: "line 2"},
+				{Number: 3, Content: "line 3"},
+			},
+			expectedTotal:    3,
+			expectedHasAbove: true,
+			expectedHasBelow: false,
 		},
 		{
 			name:      "returns error on non-zero exit code",
@@ -373,13 +430,18 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 			t.Parallel()
 
 			reader := NewDockerFileReader(tt.client)
-			lines, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", tt.filePath, tt.line, tt.above, tt.below)
+			result, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", tt.filePath, tt.line, tt.above, tt.below)
 			if tt.expectErr {
 				require.Error(t, err, "ReadFileContext should return an error")
 				return
 			}
 			require.NoError(t, err, "ReadFileContext should not return an error")
-			require.Equal(t, tt.expected, lines, "ReadFileContext should return the expected lines")
+			require.Equal(t, tt.expected, result.Lines, "ReadFileContext should return the expected lines")
+			require.Equal(t, tt.expected[0].Number, result.StartLine, "ReadFileContext should report the returned start line")
+			require.Equal(t, tt.expected[len(tt.expected)-1].Number, result.EndLine, "ReadFileContext should report the returned end line")
+			require.Equal(t, tt.expectedTotal, result.TotalLines, "ReadFileContext should report the file's total logical line count")
+			require.Equal(t, tt.expectedHasAbove, result.HasMoreAbove, "ReadFileContext should report whether more lines exist above the window")
+			require.Equal(t, tt.expectedHasBelow, result.HasMoreBelow, "ReadFileContext should report whether more lines exist below the window")
 		})
 	}
 }

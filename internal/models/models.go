@@ -180,6 +180,7 @@ type Session struct {
 	SnapshotKey    *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
 	TargetBranch   *string         `db:"target_branch" json:"target_branch,omitempty"`
 	WorkingBranch  *string         `db:"working_branch" json:"working_branch,omitempty"`
+	BaseCommitSHA  *string         `db:"base_commit_sha" json:"base_commit_sha,omitempty"`
 	RepositoryID   *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
 	DiffStats      json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
 	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
@@ -193,10 +194,12 @@ type Session struct {
 	// PRCreationState drives the Create PR button's state machine. It is
 	// orthogonal to Status — a session can be `completed` with pr_creation_state
 	// `idle` (ready for user to click Create PR), `pushing` (in flight), etc.
-	PRCreationState PRCreationState `db:"pr_creation_state" json:"pr_creation_state"`
-	PRCreationError *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
-	DeletedAt       *time.Time      `db:"deleted_at" json:"-"`
-	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
+	PRCreationState      PRCreationState `db:"pr_creation_state" json:"pr_creation_state"`
+	PRCreationError      *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
+	DiffCollectedAt      *time.Time      `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
+	LatestDiffSnapshotID *uuid.UUID      `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
+	DeletedAt            *time.Time      `db:"deleted_at" json:"-"`
+	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.
@@ -215,6 +218,28 @@ type SessionResult struct {
 	Diff                *string         `json:"diff,omitempty"`
 	Error               *string         `json:"error,omitempty"`
 	FailureCategory     *string         `json:"failure_category,omitempty"`
+	DiffBaseCommitSHA   *string         `json:"-"`
+	DiffHeadCommitSHA   *string         `json:"-"`
+	DiffCollectedAt     *time.Time      `json:"-"`
+	DiffSource          string          `json:"-"`
+}
+
+type SessionDiffSnapshot struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	SessionID      uuid.UUID `db:"session_id" json:"session_id"`
+	OrgID          uuid.UUID `db:"org_id" json:"org_id"`
+	TurnNumber     int       `db:"turn_number" json:"turn_number"`
+	SequenceNumber int       `db:"sequence_number" json:"sequence_number"`
+	Source         string    `db:"source" json:"source"`
+	BaseCommitSHA  string    `db:"base_commit_sha" json:"base_commit_sha"`
+	HeadCommitSHA  *string   `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
+	WorkingBranch  *string   `db:"working_branch" json:"working_branch,omitempty"`
+	TargetBranch   *string   `db:"target_branch" json:"target_branch,omitempty"`
+	Diff           string    `db:"diff" json:"diff"`
+	FilesChanged   int       `db:"files_changed" json:"files_changed"`
+	LinesAdded     int       `db:"lines_added" json:"lines_added"`
+	LinesRemoved   int       `db:"lines_removed" json:"lines_removed"`
+	CapturedAt     time.Time `db:"captured_at" json:"captured_at"`
 }
 
 // Validation represents validation results for an agent run.

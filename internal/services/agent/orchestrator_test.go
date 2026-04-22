@@ -216,6 +216,10 @@ func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessi
 	return nil
 }
 
+func (m *mockSessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error {
+	return nil
+}
+
 func (m *mockSessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
 	return nil
 }

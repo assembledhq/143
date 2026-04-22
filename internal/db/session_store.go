@@ -88,7 +88,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -100,7 +100,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, deleted_at, created_at`
+	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -139,6 +139,23 @@ func computeDiffStatsForResult(result *models.SessionResult) json.RawMessage {
 		return nil
 	}
 	return models.ComputeDiffStats(*result.Diff)
+}
+
+type diffStatsPayload struct {
+	Added        int `json:"added"`
+	Removed      int `json:"removed"`
+	FilesChanged int `json:"files_changed"`
+}
+
+func parseDiffStatsPayload(raw json.RawMessage) diffStatsPayload {
+	if len(raw) == 0 {
+		return diffStatsPayload{}
+	}
+	var payload diffStatsPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return diffStatsPayload{}
+	}
+	return payload
 }
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
@@ -363,6 +380,26 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 // sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status string, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
+	if !shouldPersistDiffSnapshot(result) {
+		return s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
+	}
+
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
+		return err
+	}
+	if err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runID uuid.UUID, status string, result *models.SessionResult, diffStats json.RawMessage) error {
 
 	query := `
 		UPDATE sessions
@@ -376,11 +413,13 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
 		    result_summary = @result_summary, diff = @diff, error = @error,
+		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
+		    diff_collected_at = @diff_collected_at,
 		    diff_stats = @diff_stats,
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	_, err := db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                   runID,
 		"org_id":               orgID,
 		"status":               status,
@@ -391,6 +430,8 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"base_commit_sha":      result.DiffBaseCommitSHA,
+		"diff_collected_at":    result.DiffCollectedAt,
 		"diff_stats":           diffStats,
 	})
 	return err
@@ -617,6 +658,26 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 // a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	diffStats := computeDiffStatsForResult(result)
+	if !shouldPersistDiffSnapshot(result) {
+		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats)
+	}
+
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+		return err
+	}
+	if err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string, diffStats json.RawMessage) error {
 
 	query := `
 		UPDATE sessions
@@ -626,11 +687,13 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		    confidence_score = @confidence_score, confidence_reasoning = @confidence_reasoning,
 		    risk_factors = @risk_factors, token_usage = @token_usage,
 		    result_summary = @result_summary, diff = @diff, error = @error,
+		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
+		    diff_collected_at = @diff_collected_at,
 		    diff_stats = @diff_stats,
 		    diff_history = ` + diffHistoryAppendSQL("@current_turn::int") + `
 		WHERE id = @id AND org_id = @org_id`
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	_, err := db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                   sessionID,
 		"org_id":               orgID,
 		"current_turn":         turn,
@@ -643,7 +706,83 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 		"result_summary":       result.ResultSummary,
 		"diff":                 result.Diff,
 		"error":                result.Error,
+		"base_commit_sha":      result.DiffBaseCommitSHA,
+		"diff_collected_at":    result.DiffCollectedAt,
 		"diff_stats":           diffStats,
+	})
+	return err
+}
+
+func shouldPersistDiffSnapshot(result *models.SessionResult) bool {
+	return result != nil && result.Diff != nil && result.DiffBaseCommitSHA != nil && *result.DiffBaseCommitSHA != ""
+}
+
+func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) error {
+	stats := parseDiffStatsPayload(diffStats)
+	source := result.DiffSource
+	if source == "" {
+		source = "turn_complete"
+	}
+	capturedAt := time.Now().UTC()
+	if result.DiffCollectedAt != nil {
+		capturedAt = result.DiffCollectedAt.UTC()
+	}
+
+	var snapshotID uuid.UUID
+	insertQuery := `
+		INSERT INTO session_diff_snapshots (
+			session_id, org_id, turn_number, sequence_number, source,
+			base_commit_sha, head_commit_sha, working_branch, target_branch, diff,
+			files_changed, lines_added, lines_removed, captured_at
+		)
+		SELECT
+			@session_id, @org_id, @turn_number, 1, @source,
+			@base_commit_sha, @head_commit_sha, working_branch, target_branch, @diff,
+			@files_changed, @lines_added, @lines_removed, @captured_at
+		FROM sessions
+		WHERE id = @session_id AND org_id = @org_id
+		RETURNING id`
+
+	if err := db.QueryRow(ctx, insertQuery, pgx.NamedArgs{
+		"session_id":      sessionID,
+		"org_id":          orgID,
+		"turn_number":     turn,
+		"source":          source,
+		"base_commit_sha": *result.DiffBaseCommitSHA,
+		"head_commit_sha": result.DiffHeadCommitSHA,
+		"diff":            *result.Diff,
+		"files_changed":   stats.FilesChanged,
+		"lines_added":     stats.Added,
+		"lines_removed":   stats.Removed,
+		"captured_at":     capturedAt,
+	}).Scan(&snapshotID); err != nil {
+		return fmt.Errorf("insert session diff snapshot: %w", err)
+	}
+
+	_, err := db.Exec(ctx, `
+		UPDATE sessions
+		SET latest_diff_snapshot_id = @snapshot_id,
+		    diff_collected_at = @captured_at
+		WHERE id = @session_id AND org_id = @org_id`,
+		pgx.NamedArgs{
+			"snapshot_id": snapshotID,
+			"captured_at": capturedAt,
+			"session_id":  sessionID,
+			"org_id":      orgID,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update session latest diff snapshot: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error {
+	query := `UPDATE sessions SET base_commit_sha = @base_commit_sha WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"base_commit_sha": baseCommitSHA,
 	})
 	return err
 }
