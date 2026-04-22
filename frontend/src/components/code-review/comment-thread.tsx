@@ -64,6 +64,7 @@ const SingleComment = memo(function SingleComment({
       <CommentInput
         initialValue={comment.body}
         submitLabel="Save"
+        className="mx-2"
         onSubmit={(body) => {
           onUpdate(comment.id, { body });
           setEditing(false);
