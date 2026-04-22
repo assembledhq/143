@@ -108,6 +108,15 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.RepositoryID = repoID
 	}
 
+	if createdByStr := r.URL.Query().Get("created_by"); createdByStr != "" {
+		createdBy, err := uuid.Parse(createdByStr)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid created_by")
+			return
+		}
+		filters.CreatedBy = createdBy
+	}
+
 	projects, err := h.projectStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list projects", err)
