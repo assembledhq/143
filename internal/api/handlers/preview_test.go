@@ -775,7 +775,7 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPreviewHandler_StartPreview_SnapshotExpired_NoSnapshot(t *testing.T) {
+func TestPreviewHandler_StartPreview_SnapshotUnavailable_NoSnapshot(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -786,7 +786,9 @@ func TestPreviewHandler_StartPreview_SnapshotExpired_NoSnapshot(t *testing.T) {
 	userID := uuid.New()
 	sessionID := uuid.New()
 
-	// Session row with no container + no snapshot → acquireSandbox must return SNAPSHOT_EXPIRED.
+	// Session row with no container + no snapshot, but not destroyed by the
+	// reaper, means the sandbox was never saved successfully. Surface that as a
+	// distinct unavailable state instead of "expired".
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -807,10 +809,10 @@ func TestPreviewHandler_StartPreview_SnapshotExpired_NoSnapshot(t *testing.T) {
 
 	h.StartPreview(w, req)
 
-	require.Equal(t, http.StatusGone, w.Code, "no container + no snapshot must return 410")
+	require.Equal(t, http.StatusConflict, w.Code, "no container + no snapshot must return 409")
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	require.Equal(t, "SNAPSHOT_EXPIRED", resp.Error.Code)
+	require.Equal(t, "SNAPSHOT_UNAVAILABLE", resp.Error.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
