@@ -680,7 +680,7 @@ func TestUserFacingPRError(t *testing.T) {
 		{
 			name: "generic fallback",
 			err:  errors.New("boom"),
-			want: "PR creation failed — see session logs for details.",
+			want: "Check GitHub access or repo permissions and try again.",
 		},
 	}
 

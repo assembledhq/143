@@ -1043,7 +1043,7 @@ func userFacingPRError(err error) string {
 	case errors.Is(err, ghservice.ErrNoChanges):
 		return "No changes to push."
 	default:
-		return "PR creation failed — see session logs for details."
+		return "Check GitHub access or repo permissions and try again."
 	}
 }
 
