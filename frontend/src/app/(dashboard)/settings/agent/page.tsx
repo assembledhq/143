@@ -68,8 +68,6 @@ import type {
 // `internal/models/org_settings.go`. The server clamps on save, so UI drift
 // is visible (values snap) rather than corrupting state.
 const DEFAULT_EXECUTION_SETTINGS = {
-  autonomy_level: "auto_simple" as const,
-  execution_aggressiveness: 2,
   max_concurrent_runs: 5,
   max_session_duration_seconds: 25 * 60,
 };
@@ -140,10 +138,6 @@ export default function AgentPage() {
 
   const defaultAgentType = orgSettings.default_agent_type ?? "codex";
   const agentConfig = orgSettings.agent_config ?? {};
-  const autonomyLevel = orgSettings.autonomy_level ?? DEFAULT_EXECUTION_SETTINGS.autonomy_level;
-  const aggressiveness = String(
-    orgSettings.execution_aggressiveness ?? DEFAULT_EXECUTION_SETTINGS.execution_aggressiveness,
-  );
   const maxConcurrentServer = orgSettings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
   const serverSessionSeconds = orgSettings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds;
   const serverSessionMinutes = Math.round(serverSessionSeconds / 60);
@@ -680,68 +674,13 @@ export default function AgentPage() {
                 Execution
               </h2>
               <p className="text-xs text-muted-foreground mt-1">
-                Control how the coding agent runs across your organization.
+                Control run limits for coding agents across your organization.
               </p>
             </div>
 
             <Card>
               <CardContent>
                 <div className="space-y-6">
-                  <div className="space-y-3">
-                    <Label>Autonomy level</Label>
-                    <RadioGroup
-                      value={autonomyLevel}
-                      onValueChange={(v) =>
-                        autosave.save({
-                          settings: {
-                            autonomy_level: v as "manual" | "auto_simple" | "auto_all",
-                          },
-                        })
-                      }
-                      className="grid grid-cols-3 gap-3"
-                    >
-                      {[
-                        { value: "manual", label: "Manual", description: "Admin triggers all runs" },
-                        { value: "auto_simple", label: "Auto (simple)", description: "Auto-run simple issues" },
-                        { value: "auto_all", label: "Auto (all)", description: "Auto-run all eligible" },
-                      ].map((option) => (
-                        <RadioCard
-                          key={option.value}
-                          value={option.value}
-                          label={option.label}
-                          description={option.description}
-                          selected={autonomyLevel === option.value}
-                        />
-                      ))}
-                    </RadioGroup>
-                  </div>
-
-                  <div className="space-y-3">
-                    <Label>Execution aggressiveness</Label>
-                    <RadioGroup
-                      value={aggressiveness}
-                      onValueChange={(v) =>
-                        autosave.save({ settings: { execution_aggressiveness: parseInt(v, 10) } })
-                      }
-                      className="grid grid-cols-4 gap-3"
-                    >
-                      {[
-                        { value: "1", label: "Conservative", description: "Minimal changes" },
-                        { value: "2", label: "Moderate", description: "Balanced approach" },
-                        { value: "3", label: "Aggressive", description: "More changes" },
-                        { value: "4", label: "Maximum", description: "Full autonomy" },
-                      ].map((option) => (
-                        <RadioCard
-                          key={option.value}
-                          value={option.value}
-                          label={option.label}
-                          description={option.description}
-                          selected={aggressiveness === option.value}
-                        />
-                      ))}
-                    </RadioGroup>
-                  </div>
-
                   <div className="space-y-2">
                     <Label htmlFor="max-concurrent">Max concurrent runs</Label>
                     <Input
