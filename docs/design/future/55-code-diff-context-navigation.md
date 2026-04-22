@@ -83,7 +83,7 @@ Current limitations:
 - Replacing the repo explorer.
 - Rendering entire large files by default.
 - Building a full editor with arbitrary scrolling through unchanged files.
-- Supporting context expansion for sessions with no sandbox container.
+- Rehydrating or recreating expired session sandboxes purely to support context expansion.
 - Running a live `git diff` on every diff page render.
 - Reworking PR creation away from snapshot-backed workspace pushes.
 
@@ -113,6 +113,7 @@ Expected behavior:
 - After expanding part of a gap, keep controls visible until the gap is fully revealed.
 - Expanded context lines should render exactly like existing context lines in unified and split views, including line numbers and comment affordances.
 - Session detail should be able to expose, at minimum, the diff capture timestamp and the immutable base commit used to compute the cached patch.
+- If a session has no live sandbox or restorable snapshot, the diff should still render from cached patch data, provenance metadata should still be shown, and context expanders should render in a disabled state with explicit copy such as `Additional file context unavailable for this session`.
 
 ## Recommended Technical Design
 
@@ -126,6 +127,26 @@ Keep the current fast load path:
 But change the contract of the cached diff so it means:
 
 > the session workspace state compared against the immutable `base_commit_sha` recorded when the workspace was created
+
+Authoritative semantics:
+
+- `base_commit_sha` is the exact commit checked out immediately after clone and before any agent edits. It is not recomputed later from `merge-base`, and it does not drift if the target branch moves.
+- The collector compares the current workspace against that recorded commit, so local commits created later in the session remain part of the diff.
+- Staged and unstaged tracked-file changes are included.
+- Untracked files must also be included in the authoritative review diff. The collector should materialize them into the snapshot as synthetic additions so the UI and PR review surface do not silently omit new files.
+- Ignored files are excluded.
+- Submodule pointer changes, if they appear, should be represented as ordinary git diff output and not expanded with file-context APIs.
+
+Reference cases:
+
+| Workspace state | Included in authoritative diff? | Notes |
+|---|---|---|
+| Modified tracked file, unstaged | Yes | Standard patch against `base_commit_sha` |
+| Modified tracked file, staged | Yes | Same visible result as unstaged |
+| Local commit created after session start | Yes | Comparison remains against recorded `base_commit_sha` |
+| New untracked file | Yes | Must appear as a file addition in cached review diff |
+| Deleted tracked file | Yes | Standard deletion patch |
+| Ignored/generated file | No | Excluded from review diff |
 
 That implies:
 
@@ -181,6 +202,16 @@ Add a new `session_diff_snapshots` table with:
 
 This preserves the fast cache on `sessions` while creating a durable, queryable history model.
 
+Migration and linkage details:
+
+- `sessions.base_commit_sha`, `sessions.diff_collected_at`, and `sessions.latest_diff_snapshot_id` should all be nullable in the first migration.
+- Create `session_diff_snapshots` first with a normal foreign key to `sessions(id)`.
+- Add `sessions.latest_diff_snapshot_id` afterward as a nullable foreign key to `session_diff_snapshots(id)`.
+- Use `ON DELETE CASCADE` from `session_diff_snapshots.session_id -> sessions.id` so snapshot rows disappear when the session is deleted.
+- Use `ON DELETE SET NULL` for `sessions.latest_diff_snapshot_id -> session_diff_snapshots.id` so the session row can survive partial cleanup or backfill mistakes without violating integrity.
+- Backfill order should be: add columns and table, dual-write new rows for fresh sessions, optionally backfill historical snapshots, then populate `latest_diff_snapshot_id` for rows where a snapshot exists.
+- `sessions.latest_diff_snapshot_id` should not become required; historical rows and partially migrated rows may legitimately have cached `sessions.diff` without a typed snapshot row.
+
 ### 3. Build gaps explicitly for top, middle, and bottom
 
 `FileDiffSection` should stop treating context expansion as "special rendering between hunk i-1 and hunk i". Instead it should derive a render sequence:
@@ -222,6 +253,11 @@ git diff --find-renames --binary <base_commit_sha> -- .
 ```
 
 This gives the existing UI a parseable patch while making the semantics explicit and stable even if local commits appear in the workspace later.
+
+Implementation note:
+
+- Plain `git diff <base_commit_sha> -- .` does not capture untracked files by itself, so the collector must explicitly detect and append untracked-file additions to the authoritative diff artifact.
+- The service should own that normalization logic so adapters and worker helpers cannot drift.
 
 ### 5. Extend the API response to include range metadata
 
@@ -275,6 +311,13 @@ Expanded lines become part of the review surface, so they should inherit the exi
 - active comment input should still render under expanded lines
 
 This is already mostly compatible with the existing `DiffLine` shape; the main work is to ensure expanded ranges continue to reuse `DiffHunk` / `SplitDiffHunk` rendering paths.
+
+Anchor model:
+
+- Comments on expanded unchanged lines should be anchored by `(file_path, side, line_number)` rather than by hunk-relative position.
+- `side` should match GitHub-style semantics: unchanged context can be anchored on the right/new side by default, while deleted lines remain left/old side anchors.
+- If a cached diff is later refreshed and the exact anchor line no longer exists, the comment should remain attached to the prior diff snapshot rather than silently rebinding to a different line.
+- The UI may show such comments as historical or outdated after refresh, but it should not mutate their anchor in place.
 
 ### 8. Keep hunk keyboard navigation stable
 
@@ -398,27 +441,43 @@ Possible optimizations:
 
 ## Testing Requirements
 
+### Phase 1 ownership
+
+Backend:
+
+- migration tests for `base_commit_sha`, `diff_collected_at`, `latest_diff_snapshot_id`, and `session_diff_snapshots`
+- store tests for writing latest snapshot metadata onto `sessions`
+- service tests for authoritative diff collection against `base_commit_sha`
+- service tests covering tracked edits, deletions, local commits, and untracked file inclusion
+- compatibility tests proving existing session payloads still populate `diff`, `diff_stats`, and `diff_history`
+
+### Phase 2-3 ownership
+
 Frontend:
 
 - `context-expander` tests for directional fetch requests
 - `file-diff-section` tests for top, middle, and bottom gaps
 - split and unified rendering tests for expanded context
-- tests for repeated expansion and "show all"
-- tests that comments still attach to expanded lines
+- tests for repeated expansion and `Show all`
+- tests that comments still attach to expanded lines and preserve `(file_path, side, line_number)` anchors
 
 Backend:
 
-- store tests for the new `base_commit_sha` and latest snapshot metadata
-- migration tests for `session_diff_snapshots`
-- service tests for authoritative diff collection against `base_commit_sha`
-- handler and file-reader tests for richer file-context metadata
-- compatibility tests proving existing session payloads still populate `diff`, `diff_stats`, and `diff_history`
-
-Backend:
-
-- handler tests for new metadata response fields
+- handler tests for richer file-context metadata response fields
 - file-reader tests for start-of-file and end-of-file ranges
-- tests for very small files and large requested windows
+- tests for very small files, large requested windows, and sessions where context expansion is unavailable because no sandbox can be read
+
+### Phase 4-5 ownership
+
+Backend:
+
+- handler tests for dedicated session diff metadata responses
+- resolver tests if PR-adjacent workspace abstraction is introduced
+
+Frontend:
+
+- tests for provenance metadata display
+- tests for disabled expander UX when only cached diff data is available
 
 ## Risks
 
@@ -442,6 +501,7 @@ The backend already has the critical primitive: read arbitrary file line windows
 
 The lowest-risk sequence is:
 
-1. Rework middle-gap expansion to be directional and repeatable.
-2. Add top and bottom gaps with metadata support.
-3. Polish keyboard behavior and caching afterward.
+1. Establish accurate cached diff provenance first so the review surface has one authoritative diff contract before new navigation behavior is layered on top.
+2. Rework middle-gap expansion to be directional and repeatable against that stable cached diff.
+3. Add top and bottom gaps with metadata support.
+4. Migrate richer metadata and cleanup paths after both provenance and navigation are stable.
