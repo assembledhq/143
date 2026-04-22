@@ -162,6 +162,7 @@ export default function IntegrationsPage() {
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
+  const githubConnected = Boolean(githubIntegration);
   const sentryIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "sentry" && integration.status === "active"
   );
@@ -194,7 +195,7 @@ export default function IntegrationsPage() {
           description="Connect external services to your organization."
         />
       <AllIntegrationCards
-        githubConnected={Boolean(githubIntegration)}
+        githubConnected={githubConnected}
         githubRepos={githubRepos}
         onDisconnectRepo={(id) => disconnectRepoMutation.mutate(id)}
         onReconnectRepo={(id) => reconnectRepoMutation.mutate(id)}

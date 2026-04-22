@@ -209,7 +209,8 @@ export function SetupChecklist() {
   const slackIntegration = integrations.find((integration) => integration.provider === "slack" && integration.status === "active");
   const notionIntegration = integrations.find((integration) => integration.provider === "notion" && integration.status === "active");
 
-  const githubReady = Boolean(githubIntegration) && repositories.length > 0;
+  const githubConnected = Boolean(githubIntegration);
+  const githubReady = githubConnected && repositories.length > 0;
 
   return (
     <div id="autopilot-setup" className="space-y-6">
@@ -220,7 +221,7 @@ export function SetupChecklist() {
       <StepSection step={2} title="Connect integrations" completed={githubReady}>
         <div className="space-y-3">
           <SourceControlIntegrationCard
-            githubConnected={Boolean(githubIntegration)}
+            githubConnected={githubConnected}
             githubRepos={githubRepos}
             onConnectGitHub={() => api.integrations.loginGitHub()}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}

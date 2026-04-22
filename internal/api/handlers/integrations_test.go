@@ -92,6 +92,50 @@ func TestIntegrationHandler_ListIntegrations_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestIntegrationHandler_ListIntegrations_DerivesGitHubAppInstalled(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(uuid.New(), orgID, "github", []byte(`{}`), "active", nil, now).
+		AddRow(uuid.New(), orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now).
+		AddRow(uuid.New(), orgID, "linear", []byte(`{}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListIntegrations(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "list integrations should succeed")
+
+	var resp struct {
+		Data []struct {
+			Provider           string `json:"provider"`
+			GitHubAppInstalled *bool  `json:"github_app_installed,omitempty"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "list integrations response should decode")
+	require.Len(t, resp.Data, 3, "list integrations should return every integration row")
+	require.NotNil(t, resp.Data[0].GitHubAppInstalled, "github integrations should include derived app-installed status")
+	require.Equal(t, false, *resp.Data[0].GitHubAppInstalled, "github integration without installation_id should report not installed")
+	require.NotNil(t, resp.Data[1].GitHubAppInstalled, "github integrations with installation_id should include derived app-installed status")
+	require.Equal(t, true, *resp.Data[1].GitHubAppInstalled, "github integration with installation_id should report installed")
+	require.Nil(t, resp.Data[2].GitHubAppInstalled, "non-github integrations should not include github app status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all integration-store expectations should be met")
+}
+
 func TestIntegrationHandler_ListIntegrations_DBError(t *testing.T) {
 	t.Parallel()
 
@@ -116,6 +160,42 @@ func TestIntegrationHandler_ListIntegrations_DBError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code, "should return 500 on DB error")
 	require.Contains(t, w.Body.String(), "LIST_FAILED")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_DisconnectIntegration_DisconnectsGitHubRepos(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.repoStore = db.NewRepositoryStore(mock)
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(integrationID, orgID, "github", []byte(`{"installation_id":12345}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+	mock.ExpectExec("UPDATE integrations SET status = @status WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE repositories SET status = 'disconnected', updated_at = now\\(\\) WHERE org_id = @org_id AND integration_id = @integration_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/github/disconnect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.DisconnectIntegration(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "disconnect integration should succeed")
+	require.NoError(t, mock.ExpectationsWereMet(), "disconnect integration should also disconnect github repos")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

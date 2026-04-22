@@ -15,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   codexAuthMock: vi.fn().mockResolvedValue({ data: { status: "pending" } }),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
   repositoriesListMock: vi.fn().mockResolvedValue({ data: [] }),
+  sourceControlCardMock: vi.fn((props: unknown) => {
+    void props;
+    return <div data-testid="source-control-card" />;
+  }),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -59,7 +63,7 @@ vi.mock("@/components/no-repos-warning", () => ({
 }));
 
 vi.mock("@/components/integration-connection-cards", () => ({
-  SourceControlIntegrationCard: () => <div data-testid="source-control-card" />,
+  SourceControlIntegrationCard: (props: unknown) => mocks.sourceControlCardMock(props),
   AdditionalIntegrationCards: () => <div data-testid="additional-cards" />,
 }));
 
@@ -92,6 +96,20 @@ describe("SetupChecklist", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Codex")).toBeInTheDocument();
+    });
+  });
+
+  it("treats oauth-only github integrations as connected", async () => {
+    mocks.integrationsListMock.mockResolvedValueOnce({
+      data: [{ id: "int-1", provider: "github", status: "active", github_app_installed: false }],
+    });
+
+    renderWithProviders(<SetupChecklist />);
+
+    await waitFor(() => {
+      expect(mocks.sourceControlCardMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ githubConnected: true })
+      );
     });
   });
 });

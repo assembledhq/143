@@ -191,6 +191,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
+	teamHandler.SetRepositoryStore(repoStore)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {

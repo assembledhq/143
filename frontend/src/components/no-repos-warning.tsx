@@ -41,6 +41,10 @@ export function NoReposWarning() {
       (i) => i.provider === "github" && i.status === "active"
     )
   );
+  const githubIntegration = integrationsResp?.data?.find(
+    (i) => i.provider === "github" && i.status === "active"
+  );
+  const githubAppInstalled = Boolean(githubIntegration?.github_app_installed);
   const repos = reposResp?.data ?? [];
   const hasRepos = repos.length > 0;
 
@@ -50,11 +54,11 @@ export function NoReposWarning() {
   const needsReinstall = isReinstallError(syncError);
 
   useEffect(() => {
-    autoSyncIfNeeded(hasGitHub, hasRepos);
-  }, [hasGitHub, hasRepos, autoSyncIfNeeded]);
+    autoSyncIfNeeded(githubAppInstalled, hasRepos);
+  }, [githubAppInstalled, hasRepos, autoSyncIfNeeded]);
 
   // Don't render if GitHub isn't connected or repos exist (and no recent sync result to show)
-  if (!hasGitHub || (hasRepos && !syncResult)) return null;
+  if (!hasGitHub || (hasRepos && !syncResult && githubAppInstalled)) return null;
 
   // After a successful sync that found repos, show success briefly then hide
   if (syncResult && syncResult.repos_synced > 0 && hasRepos) {
