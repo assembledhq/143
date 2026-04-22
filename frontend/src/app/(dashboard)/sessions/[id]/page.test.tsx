@@ -1007,7 +1007,7 @@ describe('SessionDetailPage', () => {
   });
 
   it('shows the PR authorship modal and falls back to app mode when requested', async () => {
-    const requestBodies: Array<Record<string, unknown> | undefined> = [];
+    const requestBodies: unknown[] = [];
 
     const sessionWithDiff: Session = {
       ...mockSessions[0],
@@ -1073,7 +1073,7 @@ describe('SessionDetailPage', () => {
   });
 
   it('auto-resumes PR creation after GitHub auth callback', async () => {
-    const requestBodies: Array<Record<string, unknown> | undefined> = [];
+    const requestBodies: unknown[] = [];
 
     const sessionWithDiff: Session = {
       ...mockSessions[0],

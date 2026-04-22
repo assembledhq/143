@@ -1812,7 +1812,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       className="h-7 text-xs gap-1.5"
                       disabled={disabled}
                       title={title}
-                      onClick={() => createPRMutation.mutate()}
+                      onClick={() => createPRMutation.mutate(undefined)}
                     >
                       {spinning ? (
                         <Loader2 className="h-3 w-3 animate-spin" />

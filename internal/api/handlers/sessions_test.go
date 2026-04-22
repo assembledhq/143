@@ -3966,7 +3966,7 @@ func TestSessionHandler_CreatePR_ReturnsAuthInterceptWhenUserCredentialMissing(t
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -3983,7 +3983,7 @@ func TestSessionHandler_CreatePR_ReturnsAuthInterceptWhenUserCredentialMissing(t
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4041,7 +4041,7 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4058,7 +4058,7 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4125,7 +4125,7 @@ func TestSessionHandler_CreatePR_InvalidStoredCredentialTriggersAuthIntercept(t 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4142,7 +4142,7 @@ func TestSessionHandler_CreatePR_InvalidStoredCredentialTriggersAuthIntercept(t 
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4194,7 +4194,7 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4211,7 +4211,7 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4265,7 +4265,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutGitHubAppUserAuthFailsFast(t
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4282,7 +4282,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutGitHubAppUserAuthFailsFast(t
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4341,7 +4341,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutCheckerIgnoresStoredGitHubAp
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4358,7 +4358,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutCheckerIgnoresStoredGitHubAp
 				"idle", (*string)(nil),
 				nil,
 				now,
-			),
+			)...),
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
