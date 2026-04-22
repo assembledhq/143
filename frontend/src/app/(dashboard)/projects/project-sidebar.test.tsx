@@ -13,6 +13,17 @@ vi.mock('next/link', () => ({
 }));
 
 let mockPathname = '/projects';
+const mockAuthState: {
+  isAuthenticated: boolean;
+  user: { id: string } | null;
+  isLoading: boolean;
+  logout: ReturnType<typeof vi.fn>;
+} = {
+  isAuthenticated: true,
+  user: { id: 'user-1' },
+  isLoading: false,
+  logout: vi.fn(),
+};
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
@@ -22,12 +33,16 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
-  useAuth: () => ({ isAuthenticated: true, user: { id: 'user-1' }, isLoading: false, logout: vi.fn() }),
+  useAuth: () => mockAuthState,
 }));
 
 describe('ProjectSidebar', () => {
   beforeEach(() => {
     mockPathname = '/projects';
+    mockAuthState.isAuthenticated = true;
+    mockAuthState.user = { id: 'user-1' };
+    mockAuthState.isLoading = false;
+    mockAuthState.logout = vi.fn();
   });
 
   it('shows loading state initially', () => {
@@ -96,8 +111,65 @@ describe('ProjectSidebar', () => {
       }),
     );
 
-    renderWithProviders(<ProjectSidebar />);
+    renderWithProviders(<ProjectSidebar />, { searchParams: { user: 'all' } });
     expect(await screen.findByText('No projects yet')).toBeInTheDocument();
+  });
+
+  it('shows filtered empty state when Mine has no matching projects', async () => {
+    server.use(
+      http.get('*/api/v1/projects', ({ request }) => {
+        const createdBy = new URL(request.url).searchParams.get('created_by');
+        if (createdBy === 'user-1') {
+          return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
+        }
+        return HttpResponse.json({
+          data: [{
+            id: 'proj-team',
+            org_id: 'org-1',
+            repository_id: 'repo-1',
+            title: 'Teammate Project',
+            goal: 'Owned by someone else',
+            status: 'active',
+            priority: 50,
+            execution_mode: 'sequential',
+            max_concurrent: 1,
+            auto_merge: false,
+            base_branch: 'main',
+            total_tasks: 0,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            proposed_by_pm: false,
+            created_at: '2026-02-17T07:00:00Z',
+            updated_at: '2026-02-17T07:00:00Z',
+          }],
+          meta: {},
+        } satisfies ListResponse<Project>);
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+
+    expect(await screen.findByText('No projects match this filter.')).toBeInTheDocument();
+  });
+
+  it('does not fetch projects until the Mine scope can resolve the current user', async () => {
+    mockAuthState.isAuthenticated = false;
+    mockAuthState.user = null;
+    mockAuthState.isLoading = true;
+
+    let requestCount = 0;
+    server.use(
+      http.get('*/api/v1/projects', () => {
+        requestCount += 1;
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(requestCount).toBe(0);
+    expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
   it('shows status filter tabs', async () => {

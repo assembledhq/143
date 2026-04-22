@@ -18,11 +18,12 @@ export const userFilterLabel = ownerScopeLabel;
 export const userFilterParamForMember = ownerScopeParamForMember;
 
 export function useSessionUserFilter() {
-  const { currentUserFilter, currentUser, scopedUserId, setUserFilter } = useOwnerScopeFilter();
+  const { currentUserFilter, currentUser, scopedUserId, isResolved, setUserFilter } = useOwnerScopeFilter();
 
   return {
     currentUserFilter,
     triggeredByUserId: scopedUserId,
+    isResolved,
     user: currentUser,
     setUserFilter,
   };

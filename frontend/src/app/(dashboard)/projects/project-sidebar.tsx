@@ -36,7 +36,7 @@ export function ProjectSidebar() {
   const params = useParams();
   const pathname = usePathname();
   const selectedId = params?.id as string | undefined;
-  const { currentUserFilter, createdByUserId, setUserFilter } = useProjectUserFilter();
+  const { currentUserFilter, createdByUserId, isResolved, setUserFilter } = useProjectUserFilter();
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
@@ -44,6 +44,7 @@ export function ProjectSidebar() {
   const { data, isLoading } = useQuery({
     queryKey: ["projects", activeFilter, repo, currentUserFilter, createdByUserId],
     queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined, created_by: createdByUserId }),
+    enabled: isResolved,
     refetchInterval: 10000,
   });
 
@@ -142,15 +143,15 @@ export function ProjectSidebar() {
           </Link>
         )}
 
-        {isLoading && (
+        {(!isResolved || isLoading) && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
             Loading...
           </div>
         )}
 
-        {!isLoading && displayedProjects.length === 0 && (
+        {isResolved && !isLoading && displayedProjects.length === 0 && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-            {allProjects.length === 0 ? (
+            {allProjects.length === 0 && currentUserFilter === "all" ? (
               <div className="space-y-2">
                 <FolderKanban className="h-5 w-5 mx-auto text-muted-foreground/40" />
                 <p>No projects yet</p>

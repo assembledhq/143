@@ -196,7 +196,7 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
-  const { currentUserFilter, triggeredByUserId, setUserFilter } = useSessionUserFilter();
+  const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -249,7 +249,7 @@ export function SessionsPageContent() {
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, triggeredByUserId],
     queryFn: () => api.sessions.list(listParams),
     refetchInterval: isPaginated || showDecisions ? false : 10000,
-    enabled: !showDecisions,
+    enabled: !showDecisions && isResolved,
   });
 
   // Tab badge counts.
@@ -261,7 +261,7 @@ export function SessionsPageContent() {
         triggered_by_user_id: triggeredByUserId,
       }),
     refetchInterval: showDecisions ? false : 10000,
-    enabled: !showDecisions,
+    enabled: !showDecisions && isResolved,
   });
 
   const { data: membersData } = useQuery({

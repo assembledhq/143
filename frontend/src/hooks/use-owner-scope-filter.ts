@@ -38,16 +38,18 @@ export function ownerScopeParamForMember(
 }
 
 export function useOwnerScopeFilter() {
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
   const [userFilter, setUserFilter] = useQueryState("user", parseAsString);
 
   const currentUserFilter = resolveOwnerScope(userFilter);
   const userId = deriveScopedUserId(currentUserFilter, user);
+  const isResolved = currentUserFilter !== "mine" || !!user || !isLoading;
 
   return {
     currentUserFilter,
     currentUser: user,
     scopedUserId: userId,
+    isResolved,
     setUserFilter,
   };
 }
