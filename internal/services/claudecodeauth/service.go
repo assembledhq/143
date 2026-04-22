@@ -670,6 +670,9 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("parse refresh response: %w", err)
 	}
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("refresh response returned empty access_token")
+	}
 
 	newSub := &models.AnthropicSubscription{
 		AccessToken:   tokenResp.AccessToken,
