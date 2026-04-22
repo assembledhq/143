@@ -61,6 +61,8 @@ func TestS3SnapshotStore_UsesConfiguredPrefix(t *testing.T) {
 	require.Equal(t, "snapshot-bucket", aws.ToString(client.putInput.Bucket), "Save should target the configured bucket")
 	require.Equal(t, "sessions/snapshots/org-1/session-1/workspace.tar.zst", aws.ToString(client.putInput.Key), "Save should prepend the configured prefix to snapshot keys")
 	require.Equal(t, s3types.ServerSideEncryptionAes256, client.putInput.ServerSideEncryption, "Save should enable AES256 server-side encryption")
+	require.NotNil(t, client.putInput.ContentLength, "Save should declare the snapshot content length for S3-compatible backends")
+	require.EqualValues(t, len("snapshot-bytes"), aws.ToInt64(client.putInput.ContentLength), "Save should set ContentLength to the uploaded byte size")
 
 	var loaded bytes.Buffer
 	err = store.Load(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", &loaded)
@@ -85,4 +87,18 @@ func TestS3SnapshotStore_LoadNotFoundWrapsSnapshotSentinel(t *testing.T) {
 	err := store.Load(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", &loaded)
 	require.Error(t, err, "Load should return an error when the object does not exist")
 	require.True(t, errors.Is(err, ErrSnapshotNotFound), "Load should wrap ErrSnapshotNotFound for missing snapshot objects")
+}
+
+func TestS3SnapshotStore_SaveSetsContentLengthForStreamingReader(t *testing.T) {
+	t.Parallel()
+
+	client := &snapshotMockS3Client{}
+	store := NewS3SnapshotStore(client, "snapshot-bucket", "sessions")
+
+	reader := io.NopCloser(bytes.NewBufferString("streamed-snapshot"))
+	err := store.Save(context.Background(), "snapshots/org-1/session-1/workspace.tar.zst", reader)
+	require.NoError(t, err, "Save should upload snapshots from streaming readers without error")
+	require.NotNil(t, client.putInput, "Save should issue a PutObject request")
+	require.NotNil(t, client.putInput.ContentLength, "Save should compute ContentLength even for streaming readers")
+	require.EqualValues(t, len("streamed-snapshot"), aws.ToInt64(client.putInput.ContentLength), "Save should set ContentLength to the streamed byte size")
 }

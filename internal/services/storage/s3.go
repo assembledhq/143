@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -48,10 +49,32 @@ func (s *S3SnapshotStore) fullKey(key string) string {
 }
 
 func (s *S3SnapshotStore) Save(ctx context.Context, key string, reader io.Reader) error {
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	// Some S3-compatible providers reject chunked uploads without an explicit
+	// Content-Length header. Snapshot streams come from an io.Pipe-backed tar
+	// process, so stage them to a temp file first so we can upload with a known
+	// byte size.
+	tmp, err := os.CreateTemp("", "session-snapshot-*.tar.zst")
+	if err != nil {
+		return fmt.Errorf("create temp snapshot file %s: %w", key, err)
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	size, err := io.Copy(tmp, reader)
+	if err != nil {
+		return fmt.Errorf("buffer snapshot %s: %w", key, err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind snapshot %s: %w", key, err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:               aws.String(s.bucket),
 		Key:                  aws.String(s.fullKey(key)),
-		Body:                 reader,
+		Body:                 tmp,
+		ContentLength:        aws.Int64(size),
 		ServerSideEncryption: s3types.ServerSideEncryptionAes256,
 	})
 	if err != nil {

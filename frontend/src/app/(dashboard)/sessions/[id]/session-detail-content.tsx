@@ -1456,7 +1456,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
+  const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && !isRunning;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -1708,7 +1710,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   );
                 }
                 const prState = session.pr_creation_state;
-                const showPRAction = canCreatePR || queueingPR || creatingPR || finalizingPR || prState === "failed";
+                const showPRAction =
+                  canCreatePR || showExpiredPRAction || queueingPR || creatingPR || finalizingPR || prState === "failed";
                 if (!showPRAction) return null;
                 const snapshotExpired = !session.snapshot_key;
                 const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;

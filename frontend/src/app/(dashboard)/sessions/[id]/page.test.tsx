@@ -825,6 +825,35 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
+  it('shows disabled Create PR button with snapshot expiry explanation when diff exists but snapshot is missing', async () => {
+    const sessionWithMissingSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithMissingSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
+    expect(createPRButton).toBeDisabled();
+    expect(createPRButton).toHaveAttribute('title', 'Session state expired — re-run to create a PR.');
+  });
+
   it('does not show Create PR button when session is running', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
