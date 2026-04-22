@@ -238,21 +238,16 @@ func (h *SessionFileHandler) GetFileContext(w http.ResponseWriter, r *http.Reque
 		below = 100
 	}
 
-	lines, err := h.fileReader.ReadFileContext(r.Context(), containerID, workDir, cleanPath, line, above, below)
+	contextResult, err := h.fileReader.ReadFileContext(r.Context(), containerID, workDir, cleanPath, line, above, below)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("path", cleanPath).Int("line", line).Msg("failed to read file context")
 		writeError(w, r, http.StatusNotFound, "FILE_NOT_FOUND", "file not found or line out of range")
 		return
 	}
 
-	if lines == nil {
-		lines = []sandbox.FileLine{}
+	if contextResult.Lines == nil {
+		contextResult.Lines = []sandbox.FileLine{}
 	}
 
-	type contextResponse struct {
-		Lines []sandbox.FileLine `json:"lines"`
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[contextResponse]{
-		Data: contextResponse{Lines: lines},
-	})
+	writeJSON(w, http.StatusOK, models.SingleResponse[sandbox.FileContextResult]{Data: contextResult})
 }

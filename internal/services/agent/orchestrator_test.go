@@ -142,6 +142,7 @@ type mockSessionStore struct {
 	statusUpdates    []string
 	resultUpdates    []resultUpdate
 	turnUpdates      []turnUpdate
+	baseCommitSHAs   []string
 	failureUpdates   []failureUpdate
 	countRunningErr  error
 	acquireHoldFn    func(proposedContainerID string) (string, error)
@@ -213,6 +214,13 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.baseCommitSHAs = append(m.baseCommitSHAs, baseCommitSHA)
 	return nil
 }
 
@@ -305,6 +313,14 @@ func (m *mockSessionStore) getFailureUpdates() []failureUpdate {
 	defer m.mu.Unlock()
 	out := make([]failureUpdate, len(m.failureUpdates))
 	copy(out, m.failureUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getBaseCommitSHAs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.baseCommitSHAs))
+	copy(out, m.baseCommitSHAs)
 	return out
 }
 
@@ -1473,6 +1489,113 @@ func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
 
 	// Sandbox was created so Destroy must be called.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "abc123\n")
+		}
+		return 0, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+	require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
+	require.NotNil(t, run.BaseCommitSHA, "RunAgent should populate the in-memory session base commit sha")
+	require.Equal(t, "abc123", *run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+}
+
+func TestRunAgent_BaseCommitCaptureNonZeroExitDoesNotFailRun(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stderr, "fatal")
+			return 1, nil
+		}
+		return 0, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should continue when base commit capture fails")
+	require.Nil(t, run.BaseCommitSHA, "RunAgent should leave BaseCommitSHA unset when capture fails")
+	require.Empty(t, d.sessions.getBaseCommitSHAs(), "RunAgent should not persist a base commit when capture fails")
+}
+
+func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	agentSessionID := "existing-agent-session"
+	snapshotKey := "existing-snapshot"
+	session.Status = string(models.SessionStatusIdle)
+	session.AgentSessionID = &agentSessionID
+	session.SnapshotKey = &snapshotKey
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		TurnNumber: 2,
+		Role:       models.MessageRoleUser,
+		Content:    "Please continue the work.",
+	}}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{
+		snapshotKey: []byte("restored-snapshot"),
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, "Please continue the work.", prompt.UserMessage, "ContinueSession should use the latest user message")
+		return &agent.AgentResult{
+			Summary:             "done",
+			Diff:                "--- a/main.go\n+++ b/main.go\n",
+			ConfidenceScore:     0.8,
+			ConfidenceReasoning: "looks good",
+			RiskFactors:         []string{"low"},
+			TokenUsage:          agent.TokenUsage{InputTokens: 1, OutputTokens: 2, TotalCostUSD: 0.01},
+			AgentSessionID:      "",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "ContinueSession should succeed")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should persist exactly one turn update")
+	require.Equal(t, 2, updates[0].turn, "ContinueSession should increment the turn number")
+	require.Equal(t, agentSessionID, updates[0].agentSessionID, "ContinueSession should reuse the existing agent session id when the adapter does not return one")
+	require.NotEmpty(t, updates[0].snapshotKey, "ContinueSession should persist a snapshot key")
+	require.NotNil(t, updates[0].result, "ContinueSession should build a session result for UpdateTurnComplete")
+	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
 }
 
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {

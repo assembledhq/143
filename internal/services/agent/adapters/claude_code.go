@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/sessiondiff"
 )
 
 const (
@@ -694,24 +695,5 @@ func tryExtractConfidence(text string, result *agent.AgentResult) {
 // Returns an empty string (not an error) when the workspace is not a git repository,
 // which happens when no repository was configured for the issue.
 func collectDiff(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) (string, error) {
-	// Check if the workspace is a git repository before attempting diff.
-	var checkStdout, checkStderr bytes.Buffer
-	checkExit, err := provider.Exec(ctx, sandbox, "git rev-parse --is-inside-work-tree", &checkStdout, &checkStderr)
-	if err != nil {
-		return "", fmt.Errorf("check git repo: %w", err)
-	}
-	if checkExit != 0 {
-		// Not a git repository — no diff to collect.
-		return "", nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	exitCode, err := provider.Exec(ctx, sandbox, "git diff", &stdout, &stderr)
-	if err != nil {
-		return "", fmt.Errorf("exec git diff: %w", err)
-	}
-	if exitCode != 0 {
-		return "", fmt.Errorf("git diff exited with code %d: %s", exitCode, stderr.String())
-	}
-	return stdout.String(), nil
+	return sessiondiff.Collect(ctx, provider, sandbox)
 }

@@ -73,7 +73,29 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+}
+
+func sessionTestRow(values ...interface{}) []interface{} {
+	switch len(values) {
+	case len(sessionColumns):
+		return values
+	case len(sessionColumns) - 3:
+		row := make([]interface{}, 0, len(sessionColumns))
+		row = append(row, values[:39]...)
+		row = append(row, nil) // base_commit_sha
+		row = append(row, values[39:48]...)
+		row = append(row, nil) // diff_collected_at
+		row = append(row, nil) // latest_diff_snapshot_id
+		row = append(row, values[48:]...)
+		return row
+	default:
+		panic(fmt.Sprintf("sessionTestRow received %d values, want %d or %d", len(values), len(sessionColumns), len(sessionColumns)-3))
+	}
+}
+
+func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
+	return rows.AddRow(sessionTestRow(values...)...)
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -94,7 +116,7 @@ func TestSessionHandler_List(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, false, &now, &now, nil,
@@ -182,7 +204,7 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ repository_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -280,7 +302,7 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND status = ANY").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "pending", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -374,7 +396,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND \\(last_activity_at, id\\) <").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -423,7 +445,7 @@ func TestSessionHandler_List_EmitsCursorWhenFull(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -603,7 +625,7 @@ func TestSessionHandler_Get(t *testing.T) {
 				mock.ExpectQuery("SELECT").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -1386,7 +1408,7 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -1478,7 +1500,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -1745,7 +1767,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -1774,7 +1796,7 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -1865,7 +1887,7 @@ func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -2197,7 +2219,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -2261,7 +2283,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -2449,7 +2471,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2493,7 +2515,7 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, &now, nil,
@@ -2579,7 +2601,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2608,7 +2630,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2654,7 +2676,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2703,7 +2725,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2749,7 +2771,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2782,7 +2804,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "pending", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2822,7 +2844,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2854,7 +2876,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2887,7 +2909,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "completed", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2920,7 +2942,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2965,7 +2987,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -2989,7 +3011,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3026,7 +3048,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3053,7 +3075,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3106,7 +3128,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3133,7 +3155,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3172,7 +3194,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "needs_human_guidance", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3199,7 +3221,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3238,7 +3260,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3265,7 +3287,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3310,7 +3332,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "awaiting_input", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3342,7 +3364,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3366,7 +3388,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3405,7 +3427,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "idle", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3429,7 +3451,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
 							nil, nil, nil, nil,
 							nil, false, &now, nil, nil,
@@ -3759,7 +3781,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -3837,7 +3859,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -3906,7 +3928,7 @@ func TestSessionHandler_CreatePR_SnapshotExpired(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -3971,7 +3993,7 @@ func TestSessionHandler_CreatePR_InFlightRejectsDuplicateSubmit(t *testing.T) {
 			mock.ExpectQuery("SELECT .+ FROM sessions").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(
-					pgxmock.NewRows(sessionColumns).AddRow(
+					addSessionRow(pgxmock.NewRows(sessionColumns),
 						sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 						nil, nil, nil, nil,
 						nil, false, &now, &now, nil,
@@ -4027,7 +4049,7 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4096,7 +4118,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4164,7 +4186,7 @@ func TestSessionHandler_CreatePR_SucceededWithoutStoredPRRejectsRetry(t *testing
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4257,7 +4279,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -4329,7 +4351,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -4385,7 +4407,7 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "idle", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -4465,7 +4487,7 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "running", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, nil, nil,
@@ -4607,7 +4629,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
-				pgxmock.NewRows(sessionColumns).AddRow(
+				addSessionRow(pgxmock.NewRows(sessionColumns),
 					sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 					nil, nil, nil, nil,
 					nil, false, &now, &now, nil,
@@ -4708,7 +4730,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
-				pgxmock.NewRows(sessionColumns).AddRow(
+				addSessionRow(pgxmock.NewRows(sessionColumns),
 					sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
 					nil, nil, nil, nil,
 					nil, false, &now, &now, nil,
