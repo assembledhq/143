@@ -93,20 +93,28 @@ describe("buildTimeline", () => {
     expect(result[2].kind).toBe("message");
   });
 
-  it("filters legacy merged assistant message when it duplicates output logs", () => {
-    // Old sessions have a SessionMessage whose content is the join of all output logs.
+  it("suppresses exact duplicate output log when assistant transcript exists", () => {
     const messages = [
-      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "Analyzing...\nFound the issue." }),
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "Found the issue." }),
     ];
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "Analyzing..." }),
       makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "Found the issue." }),
     ];
     const result = buildTimeline(messages, logs);
-    // The merged message is filtered out; only individual logs are shown
+    // The duplicate output log is suppressed in favor of the assistant message.
     expect(result).toHaveLength(2);
     expect(result[0].kind).toBe("assistant_output");
-    expect(result[1].kind).toBe("assistant_output");
+    expect(result[1].kind).toBe("message");
+  });
+
+  it("treats assistant_final output logs as visible output", () => {
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text", metadata: { type: "assistant_final" } }),
+    ];
+    const result = buildTimeline([], logs);
+    expect(result).toHaveLength(1);
+    expect(result[0].kind).toBe("assistant_output");
   });
 
   it("keeps output-level logs with metadata.type as log entries", () => {

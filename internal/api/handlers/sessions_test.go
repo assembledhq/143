@@ -1547,6 +1547,211 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionHandler_GetTimeline_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(
+				pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                             // triggered_by_user_id
+				nil, 1, now, "snapshotted", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(messageColumns).
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, nil, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(10), sessionID, orgID, nil, now.Add(-time.Minute), "output", "Done fixing", nil, 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/timeline", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetTimeline(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return expected status code")
+
+	var resp models.ListResponse[models.SessionTimelineEntry]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Len(t, resp.Data, 1, "duplicate final output log should be suppressed from fetched timeline")
+	require.Equal(t, models.SessionTimelineKindMessage, resp.Data[0].Kind, "assistant transcript should remain visible")
+	require.NotNil(t, resp.Data[0].Message, "timeline message entry should include message payload")
+	require.Equal(t, "Done fixing", resp.Data[0].Message.Content, "timeline should return the persisted assistant transcript")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_GetTimeline_Errors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		sessionID    string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID)
+		expectedCode int
+	}{
+		{
+			name:         "invalid session id",
+			sessionID:    "not-a-uuid",
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name:      "session not found",
+			sessionID: uuid.New().String(),
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			expectedCode: http.StatusNotFound,
+		},
+		{
+			name:      "message listing failure",
+			sessionID: uuid.New().String(),
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(
+							pgxmock.NewRows(sessionColumns),
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "supervised", "standard",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", nil,
+							nil, nil, nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name:      "log listing failure",
+			sessionID: uuid.New().String(),
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(
+							pgxmock.NewRows(sessionColumns),
+							sessionID, uuid.New(), orgID, "claude-code", "completed", "supervised", "standard",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "snapshotted", nil,
+							nil, nil, nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							now,
+						),
+					)
+				mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(messageColumns))
+				mock.ExpectQuery("SELECT .+ FROM session_logs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("boom"))
+			},
+			expectedCode: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionUUID := uuid.New()
+			if tt.sessionID != "not-a-uuid" {
+				sessionUUID = uuid.MustParse(tt.sessionID)
+			}
+			handler := newSessionHandler(t, mock)
+			if tt.setupMock != nil {
+				tt.setupMock(mock, orgID, sessionUUID)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+tt.sessionID+"/timeline", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", tt.sessionID)
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.GetTimeline(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "GetTimeline should return the expected status code")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 	t.Parallel()
 

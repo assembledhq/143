@@ -33,9 +33,9 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 
 	log := &models.SessionLog{
 		SessionID: uuid.New(),
-		Level:      "info",
-		Message:    "started execution",
-		Metadata:   json.RawMessage(`{"step": 1}`),
+		Level:     "info",
+		Message:   "started execution",
+		Metadata:  json.RawMessage(`{"step": 1}`),
 	}
 
 	mock.ExpectQuery("INSERT INTO session_logs").
@@ -127,6 +127,59 @@ func TestSessionLogStore_ListByRunIDSince_Success(t *testing.T) {
 	require.Equal(t, "info", logs[0].Level, "returned log entry should have the correct level")
 	require.Equal(t, "doing something", logs[0].Message, "returned log entry should have the correct message")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_MarkAssistantTranscriptDuplicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID)
+		expectErr string
+	}{
+		{
+			name: "success",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				mock.ExpectExec("UPDATE session_logs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), 3, "Final answer").
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "database error",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				mock.ExpectExec("UPDATE session_logs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), 3, "Final answer").
+					WillReturnError(context.DeadlineExceeded)
+			},
+			expectErr: "mark assistant transcript duplicate",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool without error")
+			defer mock.Close()
+
+			store := NewSessionLogStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			tt.setupMock(mock, orgID, sessionID)
+
+			err = store.MarkAssistantTranscriptDuplicate(context.Background(), orgID, sessionID, 3, "Final answer")
+			if tt.expectErr != "" {
+				require.Error(t, err, "MarkAssistantTranscriptDuplicate should return an error")
+				require.Contains(t, err.Error(), tt.expectErr, "MarkAssistantTranscriptDuplicate should wrap the store error")
+			} else {
+				require.NoError(t, err, "MarkAssistantTranscriptDuplicate should not return an error")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestSessionLogStore_ListByThread(t *testing.T) {
