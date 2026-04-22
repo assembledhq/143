@@ -1,6 +1,8 @@
 # Design Doc 51: Worker Deploy Safety For Long-Running Sessions
 
-> **Status:** Phase 1-2 implemented; Phase 3 proposed | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+>
+> **Implementation notes:** Job leases, fencing tokens, draining workers, and dead-worker recovery are implemented. Durable per-session executors and intra-turn checkpointing remain future work.
 
 ## Summary
 

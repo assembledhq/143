@@ -1,8 +1,8 @@
 # 49 — Automation Notifications & Failure Alerting
 
-> **Status:** Not Implemented | **Date:** 2026-04-18
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 >
-> **Depends on:** [48-automations-separation.md](48-automations-separation.md) (automations + automation_runs data model), [future/22-notifications.md](future/22-notifications.md) (notification infrastructure — events, router, channels, preferences)
+> **Depends on:** [48-automations-separation.md](../implemented/48-automations-separation.md) (automations + automation_runs data model), [22-notifications.md](22-notifications.md) (notification infrastructure — events, router, channels, preferences)
 
 ---
 

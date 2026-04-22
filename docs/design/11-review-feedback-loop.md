@@ -1,6 +1,6 @@
 # Design: PR Review Feedback -> Agent Improvement Loop
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 
 This document describes how 143.dev captures human PR review feedback and uses it to improve future agent runs — creating a flywheel where every human review makes every future agent run better.
 
@@ -179,7 +179,7 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *AgentInput
     if input.RevisionContext != nil {
         // Sanitize review comments before injecting into prompt to prevent
         // prompt injection via malicious review comments.
-        // See 20-security-architecture.md for the full defense model.
+        // See implemented/20-security-architecture.md for the full defense model.
         sanitizedFeedback := SanitizeReviewComment(input.RevisionContext.FormattedFeedback)
 
         prompt.UserPrompt += fmt.Sprintf(`
@@ -248,7 +248,7 @@ Configurable per org in `organizations.settings`:
 | `auto_apply` | `off`, `prompt`, `auto` | `off`: never re-run. `prompt`: notify admin, wait for approval. `auto`: re-run automatically. |
 | `max_revisions` | int (default: 2) | Maximum revision runs per PR to prevent infinite loops |
 
-**Security constraints on auto-apply** (see [20-security-architecture.md](20-security-architecture.md)):
+**Security constraints on auto-apply** (see [20-security-architecture.md](implemented/20-security-architecture.md)):
 - Review comments are sanitized before injection into revision prompts to prevent prompt injection.
 - `max_revisions` cap prevents infinite revision loops.
 - `wrong_approach` category comments are excluded from auto-apply by default (they can cause large-scoped changes).

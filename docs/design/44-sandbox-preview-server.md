@@ -1,6 +1,8 @@
 # Design: Sandbox Preview Server
 
-> **Status:** Draft | **Last reviewed:** 2026-03-23
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+>
+> **Implementation notes:** Core preview tables, store/service layer, API handlers, frontend session preview flows, and repo preview guidance are implemented. Remaining work is in tightening full deployment coverage and finishing the outer edges of the design.
 
 This document describes how 143.dev can expose a live preview of code running inside a sandbox without giving untrusted preview content the same browser origin as the main app.
 

@@ -1,6 +1,8 @@
 # Design Doc 36: Self-Hosted Docker Infrastructure
 
-> **Status:** Proposed | **Last reviewed:** 2026-04-04
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+>
+> **Implementation notes:** Multi-node Docker Compose deployment artifacts exist (`docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml`, `docker-compose.logging.yml`), along with `deploy/cloud-init/*` templates and `deploy/scripts/{provision,deploy}.sh`. Later-phase items in this design, including dedicated Redis rollout and autoscaling, remain future work.
 
 ## Context
 

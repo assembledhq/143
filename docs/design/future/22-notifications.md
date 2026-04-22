@@ -1,6 +1,6 @@
 # Design: Notification System
 
-> **Status:** Not Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 >
 > **Implementation notes:** No `notifications` table, no notification handler, no `/api/v1/notifications` endpoints, no notification service or delivery channels, no SSE hub, no digest generation jobs.
 
@@ -780,9 +780,9 @@ func (d *DigestWorker) GenerateWeeklyDigest(ctx context.Context, org *models.Org
 - `run.question` events are emitted when an agent pauses for input in guided mode
 - Escalation rule auto-skips unanswered questions after 4 hours
 
-**First-Run Experience (doc 21)**:
-- First-run success triggers `run.completed.pr_opened` with onboarding-specific formatting
-- The "What's next?" prompt in the first-run success state is handled by the onboarding system, not notifications
+**Onboarding / activation flows**:
+- Initial success milestones can trigger `run.completed.pr_opened` with onboarding-specific formatting
+- The "What's next?" prompt in an initial success state is handled by the onboarding/product UX, not notifications
 
 **Database Schema (doc 01)**:
 - New `notifications` table

@@ -1,6 +1,8 @@
 # Design: Centralized Logging with VictoriaLogs
 
-> **Status:** Proposed | **Last reviewed:** 2026-04-14
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+>
+> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, and `make logs` / `make logs-query` are implemented. Dashboard and alert curation remain follow-up operational work.
 
 Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, with Vector collectors on the app and worker servers.
 
