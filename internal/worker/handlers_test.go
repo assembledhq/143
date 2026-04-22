@@ -34,7 +34,8 @@ var workerSessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
 }
 
 func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
@@ -93,7 +94,8 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, now,
 	}
 }
 
@@ -528,19 +530,6 @@ func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger mo
 	return &pm.Plan{}, nil
 }
 
-var workerSessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
-	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
-	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
-	"parent_session_id", "revision_context", "error", "result_summary", "diff",
-	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
-	"model_override", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
-}
-
 func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey *string) []any {
 	return []any{
 		sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
@@ -724,12 +713,6 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 	}
 }
 
-func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
-	m.calledOrgID = orgID
-	m.trigger = trigger
-	m.agentType = agentTypeOverride
-	return &pm.Plan{}, nil
-}
 func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {
 	m.calledOrgID = orgID
 	m.calledProjectID = projectID
