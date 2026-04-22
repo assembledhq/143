@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
+	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -1106,6 +1107,50 @@ func (h *SessionHandler) ListMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionMessage]{Data: messages})
+}
+
+// GetTimeline handles GET /sessions/{id}/timeline — returns the server-owned session timeline.
+func (h *SessionHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	_, err = h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	var messages []models.SessionMessage
+	if h.messageStore != nil {
+		messages, err = h.messageStore.ListBySession(r.Context(), orgID, sessionID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list messages", err)
+			return
+		}
+	}
+	if messages == nil {
+		messages = []models.SessionMessage{}
+	}
+
+	logs, err := h.logStore.ListByRunID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list logs", err)
+		return
+	}
+	if logs == nil {
+		logs = []models.SessionLog{}
+	}
+
+	timeline := sessiontimeline.Compose(messages, logs)
+	if timeline == nil {
+		timeline = []models.SessionTimelineEntry{}
+	}
+
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineEntry]{Data: timeline})
 }
 
 // EndSession handles POST /sessions/{id}/end — explicitly ends an idle session.

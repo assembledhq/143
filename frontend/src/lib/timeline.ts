@@ -1,4 +1,4 @@
-import type { SessionMessage, SessionLog } from "./types";
+import type { SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry } from "./types";
 
 /** Prefix added by the backend when a message is sent in plan mode. */
 export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
@@ -12,6 +12,40 @@ export type TimelineEntry =
   | { kind: "plan_output"; data: SessionLog; turnNumber: number }
   | { kind: "plan_message"; data: SessionMessage; turnNumber: number };
 
+function isAssistantFinalMetadata(metadata: SessionLog["metadata"] | null | undefined): boolean {
+  return metadata?.type === "assistant_final";
+}
+
+function isVisibleAssistantOutput(log: SessionLog): boolean {
+  return log.level === "output" && (!log.metadata || !log.metadata.type || isAssistantFinalMetadata(log.metadata));
+}
+
+function duplicateOutputLogIds(messages: SessionMessage[], logs: SessionLog[]): Set<number> {
+  const visibleByTurnAndContent = new Map<number, Map<string, SessionLog[]>>();
+  for (const log of logs) {
+    if (!isVisibleAssistantOutput(log)) continue;
+    const turnMap = visibleByTurnAndContent.get(log.turn_number) ?? new Map<string, SessionLog[]>();
+    const group = turnMap.get(log.message) ?? [];
+    group.push(log);
+    turnMap.set(log.message, group);
+    visibleByTurnAndContent.set(log.turn_number, turnMap);
+  }
+
+  const duplicateIDs = new Set<number>();
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    const candidates = visibleByTurnAndContent.get(msg.turn_number)?.get(msg.content) ?? [];
+    if (candidates.length === 0) continue;
+    const marked = candidates.filter((candidate) => candidate.metadata?.duplicate_of_transcript === true && isAssistantFinalMetadata(candidate.metadata));
+    const suppress = marked.length > 0 ? marked : candidates;
+    for (const log of suppress) {
+      duplicateIDs.add(log.id);
+    }
+  }
+
+  return duplicateIDs;
+}
+
 /**
  * Merges SessionMessage and SessionLog arrays into a unified timeline
  * sorted by created_at, with tool_use/tool_result pairing. Legacy merged
@@ -21,30 +55,7 @@ export function buildTimeline(
   messages: SessionMessage[],
   logs: SessionLog[]
 ): TimelineEntry[] {
-  // For backward compatibility with older sessions where the backend merged
-  // all assistant text blocks into one SessionMessage: if the message content
-  // equals the concatenation of the turn's output logs, filter out the message
-  // to avoid showing duplicate content. For new sessions (where the message
-  // only contains the result event text), both are kept.
-  const outputLogsByTurn = new Map<number, string[]>();
-  for (const log of logs) {
-    if (log.level === "output" && (!log.metadata || !log.metadata.type)) {
-      const parts = outputLogsByTurn.get(log.turn_number) ?? [];
-      parts.push(log.message);
-      outputLogsByTurn.set(log.turn_number, parts);
-    }
-  }
-
-  const filteredMessages = messages.filter((msg) => {
-    if (msg.role !== "assistant") return true;
-    const parts = outputLogsByTurn.get(msg.turn_number);
-    if (!parts || parts.length === 0) return true;
-    // If the message content is the concatenation of all output logs for this
-    // turn, it's a legacy merged message — filter it out so the individual
-    // logs show instead.
-    const merged = parts.join("\n");
-    return msg.content !== merged;
-  });
+  const suppressedLogIds = duplicateOutputLogIds(messages, logs);
 
   // Detect which turn numbers are plan mode turns by checking user messages
   // for the plan mode prefix.
@@ -61,12 +72,14 @@ export function buildTimeline(
     | { source: "log"; ts: string; data: SessionLog };
 
   const items: Tagged[] = [
-    ...filteredMessages.map(
+    ...messages.map(
       (m) => ({ source: "message" as const, ts: m.created_at, data: m })
     ),
-    ...logs.map(
+    ...logs
+      .filter((l) => !suppressedLogIds.has(l.id))
+      .map(
       (l) => ({ source: "log" as const, ts: l.created_at, data: l })
-    ),
+      ),
   ];
 
   items.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -121,7 +134,7 @@ export function buildTimeline(
 
     // output-level logs without metadata type are assistant text responses
     // (e.g. agent_message from Codex CLI). Show them as visible output.
-    if (log.level === "output" && (!log.metadata || !log.metadata.type)) {
+    if (isVisibleAssistantOutput(log)) {
       // If this output belongs to a plan mode turn, mark it as plan output.
       if (planModeTurns.has(log.turn_number)) {
         entries.push({ kind: "plan_output", data: log, turnNumber: log.turn_number });
@@ -138,4 +151,27 @@ export function buildTimeline(
   }
 
   return entries;
+}
+
+export function timelineEntryFromResponse(entry: SessionTimelineResponseEntry): TimelineEntry {
+  switch (entry.kind) {
+    case "message":
+      return { kind: "message", data: entry.message! };
+    case "assistant_output":
+      return { kind: "assistant_output", data: entry.log! };
+    case "tool_group":
+      return { kind: "tool_group", toolUse: entry.tool_use!, toolResult: entry.tool_result };
+    case "error":
+      return { kind: "error", data: entry.log! };
+    case "log":
+      return { kind: "log", data: entry.log! };
+    case "plan_output":
+      return { kind: "plan_output", data: entry.log!, turnNumber: entry.turn_number! };
+    case "plan_message":
+      return { kind: "plan_message", data: entry.message!, turnNumber: entry.turn_number! };
+  }
+}
+
+export function buildTimelineFromResponse(entries: SessionTimelineResponseEntry[]): TimelineEntry[] {
+  return entries.map(timelineEntryFromResponse);
 }

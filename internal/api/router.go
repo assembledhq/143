@@ -513,6 +513,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 			r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 			r.Get("/api/v1/sessions/{id}/messages", sessionHandler.ListMessages)
+			r.Get("/api/v1/sessions/{id}/timeline", sessionHandler.GetTimeline)
 			r.Get("/api/v1/sessions/{id}/threads", sessionThreadHandler.ListThreads)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 			r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)

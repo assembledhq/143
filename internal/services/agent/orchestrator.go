@@ -2135,7 +2135,22 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 		}
 		assistantMsg.TokenUsage = tokenJSON
 	}
-	return o.sessionMessages.Create(ctx, assistantMsg)
+	if err := o.sessionMessages.Create(ctx, assistantMsg); err != nil {
+		return err
+	}
+	if marker, ok := o.agentRunLogs.(interface {
+		MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error
+	}); ok && result.Summary != "" {
+		if err := marker.MarkAssistantTranscriptDuplicate(ctx, orgID, sessionID, turnNumber, result.Summary); err != nil {
+			o.logger.Warn().
+				Err(err).
+				Str("session_id", sessionID.String()).
+				Str("org_id", orgID.String()).
+				Int("turn_number", turnNumber).
+				Msg("failed to mark assistant output log as transcript duplicate")
+		}
+	}
+	return nil
 }
 
 // tokenLimitForMode returns the max token limit based on the session's token mode.
