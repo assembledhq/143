@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, RefreshCw, Check } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useGitHubRepoSync } from "@/hooks/use-github-repo-sync";
+import { cn } from "@/lib/utils";
 
 /** Error codes that mean the user needs to reinstall the GitHub App. */
 const REINSTALL_ERROR_CODES = new Set([
@@ -25,7 +28,15 @@ function isReinstallError(err: unknown): boolean {
   );
 }
 
-export function NoReposWarning() {
+interface NoReposWarningProps {
+  showDisconnectedState?: boolean;
+  compact?: boolean;
+}
+
+export function NoReposWarning({
+  showDisconnectedState = false,
+  compact = false,
+}: NoReposWarningProps) {
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
@@ -57,8 +68,36 @@ export function NoReposWarning() {
     autoSyncIfNeeded(githubAppInstalled, hasRepos);
   }, [githubAppInstalled, hasRepos, autoSyncIfNeeded]);
 
-  // Don't render if GitHub isn't connected or repos exist (and no recent sync result to show)
-  if (!hasGitHub || (hasRepos && !syncResult && githubAppInstalled)) return null;
+  if (!hasGitHub) {
+    if (!showDisconnectedState) return null;
+
+    return (
+      <div
+        className={cn(
+          "rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3",
+          compact ? "space-y-3" : "flex items-start gap-3",
+        )}
+      >
+        <div className={cn("flex gap-3", compact && "items-start")}>
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="min-w-0 flex-1">
+            <Badge variant="secondary" className="mb-2">
+              GitHub setup required
+            </Badge>
+            <p className="text-xs text-amber-700 dark:text-amber-300">
+              Connect GitHub before creating sessions or projects. Until a repository is linked, the agent won&apos;t have any code to work with.
+            </p>
+          </div>
+        </div>
+        <Button size="sm" variant="outline" asChild className={cn("gap-1.5", compact && "w-full")}>
+          <Link href="/settings/integrations">Open integrations</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  // Don't render if repos exist (and no recent sync result to show)
+  if (hasRepos && !syncResult && githubAppInstalled) return null;
 
   // After a successful sync that found repos, show success briefly then hide
   if (syncResult && syncResult.repos_synced > 0 && hasRepos) {
