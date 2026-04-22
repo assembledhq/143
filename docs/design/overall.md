@@ -54,7 +54,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore uses drain-before-deploy behavior, lease-based dead-worker recovery for in-flight jobs, and checkpoint-aware resume from the last committed turn after unplanned worker loss; see [51-worker-deploy-safety.md](51-worker-deploy-safety.md).
     - Optional live preview for sandbox output is served from an **isolated preview origin** using short-lived preview tokens, never from the main app origin. This prevents untrusted preview code from sharing the app's authenticated browser context. The feature is positioned as a no-local-setup review loop for supported repos, not as a full browser IDE, and relies on gateway-enforced browser-side controls such as CSP, service-worker blocking, and preview-session scoping.
     - Preview recycle state is persisted with the preview lifecycle record rather than held only in worker memory so long-lived previews can be safely recycled after API restarts or deploys.
-    - Agent runtime credentials are loaded from org-scoped encrypted credentials (`org_credentials`) rather than process `.env` defaults, so each org can manage Codex/Claude/Gemini auth independently.
+- Agent runtime credentials should be managed as visible, ordered auth stacks rather than hidden single-provider settings. The long-term settings UX is a prioritized list of coding agent auths with an explicit default and fallback order across personal and organization scopes; see [future/57-coding-agent-settings-rethink.md](future/57-coding-agent-settings-rethink.md).
     - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.
     - If the agent asks a clarifying question during execution, the run pauses and the question surfaces in the Fix Queue. The user can answer in the UI, provide guidance, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
     - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](implemented/17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
@@ -490,9 +490,9 @@ The main 143.dev container includes:
 # Dashboard onboarding UX
 
 - The Overview dashboard keeps users in setup context when configuring coding agents.
-- In the "Connect your coding agent" card, the **Settings** action opens an in-place modal for common agent edits (default agent selection and provider credentials).
-- The modal includes a secondary path to advanced agent settings at `/settings/agents` for deeper configuration.
-- The UX goal is fast in-flow completion first, with a clear handoff to advanced controls when needed.
+- In the "Connect your coding agent" card, the primary follow-up path should lead into a clean coding-agent settings surface centered on a prioritized auth table, not a maze of per-provider forms.
+- The settings model should make the effective default and fallback order visible at a glance while still supporting fast in-flow add-auth actions from onboarding.
+- The UX goal is fast in-flow completion first, with a clear handoff to a system-level control surface when deeper configuration is needed.
 
 # **Why 143?**
 
