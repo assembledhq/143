@@ -17,6 +17,7 @@ import { SessionOwnerToggle } from "./session-owner-toggle";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
+import { NoReposWarning } from "@/components/no-repos-warning";
 import type { SessionListItem } from "@/lib/types";
 import {
   workingSet,
@@ -287,6 +288,8 @@ export function SessionSidebar() {
   const counts = countsData?.data;
 
   const isNewSession = pathname === "/sessions/new";
+  const showDefaultEmptyState =
+    currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
@@ -386,11 +389,18 @@ export function SessionSidebar() {
           </div>
         )}
 
-        {!isLoading && displayedSessions.length === 0 && (
+        {!isLoading && displayedSessions.length === 0 && showDefaultEmptyState && (
+          <div className="space-y-3 px-2 py-3">
+            <NoReposWarning showDisconnectedState compact />
+            <div className="px-2 py-5 text-center text-xs text-muted-foreground">
+              No sessions yet
+            </div>
+          </div>
+        )}
+
+        {!isLoading && displayedSessions.length === 0 && !showDefaultEmptyState && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
-            {currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0)
-              ? "No sessions yet"
-              : "No sessions match this filter."}
+            No sessions match this filter.
           </div>
         )}
 
