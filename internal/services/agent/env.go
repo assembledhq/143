@@ -532,7 +532,7 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 	// sandbox user's home dir (see RunAgent's sandbox setup) so the Codex
 	// CLI resolves ~/.codex/auth.json to this path.
 	authDir := path.Join(sandbox.HomeDir, ".codex")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
 
 	var mkdirOut, mkdirErr bytes.Buffer
 	exitCode, err := e.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)

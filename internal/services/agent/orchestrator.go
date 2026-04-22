@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -204,11 +205,11 @@ type Orchestrator struct {
 	jobs              JobStore
 	github            GitHubTokenProvider
 	claudeCodeAuth    ClaudeCodeAuthProvider // can be nil
-	credentials       CredentialProvider    // can be nil — disables integration-skills doc generation
-	memory            MemoryService         // can be nil
-	snapshots         storage.SnapshotStore // can be nil — multi-turn disabled if nil
-	usageTracker      UsageRecorder         // can be nil — billing tracking disabled if nil
-	env               *AgentEnv             // owns env resolution, auth pre-flight, Codex auth injection
+	credentials       CredentialProvider     // can be nil — disables integration-skills doc generation
+	memory            MemoryService          // can be nil
+	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
+	env               *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -282,15 +283,15 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		projectTasks:      cfg.ProjectTasks,
 		automationRuns:    cfg.AutomationRuns,
 		issues:            cfg.Issues,
-			repositories:      cfg.Repositories,
-			orgs:              cfg.Orgs,
-			jobs:              cfg.Jobs,
-			github:            cfg.GitHub,
-			claudeCodeAuth:    cfg.ClaudeCodeAuth,
-			credentials:       cfg.Credentials,
-			memory:            cfg.Memory,
-			snapshots:         cfg.Snapshots,
-			usageTracker:      cfg.UsageTracker,
+		repositories:      cfg.Repositories,
+		orgs:              cfg.Orgs,
+		jobs:              cfg.Jobs,
+		github:            cfg.GitHub,
+		claudeCodeAuth:    cfg.ClaudeCodeAuth,
+		credentials:       cfg.Credentials,
+		memory:            cfg.Memory,
+		snapshots:         cfg.Snapshots,
+		usageTracker:      cfg.UsageTracker,
 		env:               env,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
@@ -1320,14 +1321,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
-		// Inject auth credentials into the sandbox.
-		switch session.AgentType {
-		case models.AgentTypeCodex:
-			injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
-			if err != nil {
-				return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
-			}
-			if !injected {
+	// Inject auth credentials into the sandbox.
+	switch session.AgentType {
+	case models.AgentTypeCodex:
+		injected, err := o.env.InjectCodexAuth(ctx, session.OrgID, sandbox)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
+		}
+		if !injected {
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	case models.AgentTypeClaudeCode:
