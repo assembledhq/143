@@ -338,9 +338,20 @@ export function ManualSessionCreatePageContent() {
     window.addEventListener("resize", updateMentionPickerPosition);
     window.addEventListener("scroll", updateMentionPickerPosition, true);
 
+    const composerCard = composerCardRef.current;
+    const resizeObserver = composerCard && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(() => {
+        updateMentionPickerPosition();
+      })
+      : null;
+    if (composerCard && resizeObserver) {
+      resizeObserver.observe(composerCard);
+    }
+
     return () => {
       window.removeEventListener("resize", updateMentionPickerPosition);
       window.removeEventListener("scroll", updateMentionPickerPosition, true);
+      resizeObserver?.disconnect();
     };
   }, [showMentionPicker, fileMentions.length, fileMentionsLoading]);
 

@@ -459,6 +459,98 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
+  it('repositions the mention picker when the composer resizes', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'directory',
+            token: '@internal/services',
+            path: 'internal/services',
+            display: 'internal/services',
+          },
+        ],
+      })),
+    );
+
+    let resizeObserverCallback: ResizeObserverCallback | null = null;
+    const disconnectMock = vi.fn();
+    const originalResizeObserver = window.ResizeObserver;
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        disconnectMock();
+      }
+    }
+    window.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const composerCard = screen.getByTestId('manual-session-composer');
+    let rect = {
+      x: 0,
+      y: 420,
+      width: 600,
+      height: 120,
+      top: 420,
+      right: 600,
+      bottom: 540,
+      left: 0,
+      toJSON: () => ({}),
+    };
+    vi.spyOn(composerCard, 'getBoundingClientRect').mockImplementation(() => rect);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @serv');
+
+    const overlay = await screen.findByTestId('mention-picker-overlay');
+    expect(overlay).toHaveStyle({ left: '0px', width: '600px' });
+
+    rect = {
+      ...rect,
+      width: 720,
+      right: 760,
+      left: 40,
+      x: 40,
+    };
+
+    act(() => {
+      resizeObserverCallback?.([], {} as ResizeObserver);
+    });
+
+    await waitFor(() => {
+      expect(overlay).toHaveStyle({ left: '40px', width: '720px' });
+    });
+
+    window.ResizeObserver = originalResizeObserver;
+  });
+
   it('drops the selected reference chip when the inserted mention token is edited', async () => {
     const user = userEvent.setup();
 
