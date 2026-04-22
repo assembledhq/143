@@ -423,7 +423,7 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 | Field | Source |
 |-------|--------|
-| PR title | `session.Title` (set by user or agent), falling back to first line of `ResultSummary`, falling back to `"Session {id[:8]}"` |
+| PR title | First-line `ResultSummary` when available, normalized into a concise review-ready title; otherwise a normalized `session.Title`, falling back to `"Session {id[:8]}"` |
 | PR body summary | `session.ResultSummary` |
 | Branch name | `143/{id[:8]}/{slugified-title}` — drop the `fix/` prefix for non-issue sessions |
 | Commit message | `session.Title` or `ResultSummary` first line |
@@ -433,22 +433,20 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 ```go
 func formatPRTitle(session *models.Session, issue *models.Issue) string {
-    // Issue-based sessions: keep current behavior
     if issue != nil {
         switch issue.Source {
         case models.IssueSourceLinear:
-            return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+            return fmt.Sprintf("%s: %s", issue.ExternalID, normalizePRTitleCandidate(issue.Title))
         default:
-            return fmt.Sprintf("fix: %s", issue.Title)
+            return fmt.Sprintf("fix: %s", bestPRTitleSubject(session, issue.Title))
         }
     }
 
-    // Issueless sessions: use session title
-    if session.Title != nil && *session.Title != "" {
-        return *session.Title
-    }
     if session.ResultSummary != nil && *session.ResultSummary != "" {
-        return firstLine(*session.ResultSummary)
+        return normalizePRTitleCandidate(firstLine(*session.ResultSummary))
+    }
+    if session.Title != nil && *session.Title != "" {
+        return normalizePRTitleCandidate(*session.Title)
     }
     return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
@@ -468,6 +466,8 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
     return fmt.Sprintf("143/%s/%s", short, slug)
 }
 ```
+
+`normalizePRTitleCandidate` is responsible for collapsing whitespace, trimming prompt-like framing such as "please make sure...", rewriting common past-tense summary openings into imperative PR titles, and capping the final title length. The goal is that PR titles describe the shipped change, not the raw support ticket phrasing or the original agent prompt.
 
 ### 5.4 Updated CreatePR Flow
 
