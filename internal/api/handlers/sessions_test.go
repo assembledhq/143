@@ -1568,7 +1568,7 @@ func TestSessionHandler_GetTimeline_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(messageColumns).
-				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, now),
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, nil, now),
 		)
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
