@@ -179,26 +179,6 @@ func marshalOrgSettingsForReview(t *testing.T, settings models.OrgSettings) []by
 	return data
 }
 
-func newReviewService(t *testing.T, settings models.OrgSettings, sandbox *reviewSandboxProvider, env *agent.AgentEnv, adapters map[models.AgentType]agent.AgentAdapter) *Service {
-	t.Helper()
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	return &Service{
-		issues:      &mockIssueStore{},
-		sessions:    &mockSessionStore{},
-		orgs:        &mockOrgStore{org: models.Organization{ID: orgID, Settings: marshalOrgSettingsForReview(t, settings)}},
-		repos:       &mockRepoStore{repos: []models.Repository{{ID: repoID, Status: "active", DefaultBranch: "main"}}},
-		sandbox:     sandbox,
-		adapters:    adapters,
-		env:         env,
-		plans:       &recordingPlanStore{},
-		logger:      zerolog.Nop(),
-		github:      nil,
-		pmDocuments: nil,
-	}
-}
-
 func TestAnalyze_CodexRequiresInjectedAuth(t *testing.T) {
 	t.Parallel()
 
