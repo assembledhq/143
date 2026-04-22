@@ -22,14 +22,14 @@ How this was validated.
 <output_format>
 Respond using exactly this XML structure. Place the PR title inside <pr_title> and the full PR body (markdown) inside <pr_body>. Do not include any text outside these tags.
 
-<pr_title>a concise PR title, under 72 characters</pr_title>
+<pr_title>a concise PR title, under 120 characters</pr_title>
 <pr_body>
 the PR body as markdown
 </pr_body>
 </output_format>
 
 <guidelines>
-- Keep the title under 72 characters. Use imperative mood (e.g., "Fix null pointer in auth middleware").
+- Keep the title under 120 characters. Use imperative mood (e.g., "Fix null pointer in auth middleware").
 - Explain the "why", not just the "what" — the diff already shows the "what".
 - Do not mention the agent, AI, or automation in the title or body.
 - If an issue is provided, reference it naturally in the summary.
