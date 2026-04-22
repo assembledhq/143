@@ -131,10 +131,15 @@ type Config struct {
 	UploadMaxAge     time.Duration `env:"UPLOAD_MAX_AGE"    envDefault:"2160h"` // 90 days
 
 	// Interactive session snapshots
-	SnapshotStorageDir    string        `env:"SNAPSHOT_STORAGE_DIR"    envDefault:".data/snapshots"`
-	SessionMaxIdleAge     time.Duration `env:"SESSION_MAX_IDLE_AGE"    envDefault:"2h"`
-	SessionReaperInterval time.Duration `env:"SESSION_REAPER_INTERVAL" envDefault:"5m"`
-	SessionMaxSnapshotAge time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
+	SnapshotStorageDir     string        `env:"SNAPSHOT_STORAGE_DIR"         envDefault:".data/snapshots"`
+	SnapshotS3Bucket       string        `env:"SNAPSHOT_S3_BUCKET"`
+	SnapshotS3Prefix       string        `env:"SNAPSHOT_S3_PREFIX"           envDefault:"snapshots"`
+	SnapshotS3Region       string        `env:"SNAPSHOT_S3_REGION"           envDefault:"us-east-1"`
+	SnapshotS3Endpoint     string        `env:"SNAPSHOT_S3_ENDPOINT"`
+	SnapshotS3UsePathStyle bool          `env:"SNAPSHOT_S3_USE_PATH_STYLE"   envDefault:"false"`
+	SessionMaxIdleAge      time.Duration `env:"SESSION_MAX_IDLE_AGE"         envDefault:"2h"`
+	SessionReaperInterval  time.Duration `env:"SESSION_REAPER_INTERVAL"      envDefault:"5m"`
+	SessionMaxSnapshotAge  time.Duration `env:"SESSION_MAX_SNAPSHOT_AGE" envDefault:"720h"` // 30 days
 	// SessionMaxRunningAge is the safety-net cutoff after which the reaper
 	// fails sessions stuck in "running". Must be at or above
 	// reaper.minRunningAgeFloor (max per-org timeout + handler cleanup

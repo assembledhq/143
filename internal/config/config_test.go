@@ -82,6 +82,25 @@ func TestLoad_LLMConfig(t *testing.T) {
 }
 
 //nolint:paralleltest // uses t.Setenv
+func TestLoad_SnapshotS3Config(t *testing.T) {
+	t.Setenv("SNAPSHOT_STORAGE_DIR", "/var/lib/143/snapshots")
+	t.Setenv("SNAPSHOT_S3_BUCKET", "session-snapshots")
+	t.Setenv("SNAPSHOT_S3_PREFIX", "sessions")
+	t.Setenv("SNAPSHOT_S3_REGION", "us-west-2")
+	t.Setenv("SNAPSHOT_S3_ENDPOINT", "https://r2.example.com")
+	t.Setenv("SNAPSHOT_S3_USE_PATH_STYLE", "true")
+
+	cfg := Load()
+
+	require.Equal(t, "/var/lib/143/snapshots", cfg.SnapshotStorageDir, "Load should read SNAPSHOT_STORAGE_DIR from the environment")
+	require.Equal(t, "session-snapshots", cfg.SnapshotS3Bucket, "Load should read SNAPSHOT_S3_BUCKET from the environment")
+	require.Equal(t, "sessions", cfg.SnapshotS3Prefix, "Load should read SNAPSHOT_S3_PREFIX from the environment")
+	require.Equal(t, "us-west-2", cfg.SnapshotS3Region, "Load should read SNAPSHOT_S3_REGION from the environment")
+	require.Equal(t, "https://r2.example.com", cfg.SnapshotS3Endpoint, "Load should read SNAPSHOT_S3_ENDPOINT from the environment")
+	require.True(t, cfg.SnapshotS3UsePathStyle, "Load should parse SNAPSHOT_S3_USE_PATH_STYLE from the environment")
+}
+
+//nolint:paralleltest // uses t.Setenv
 func TestPlatformLLMConfig_PropagatesGeminiFields(t *testing.T) {
 	t.Setenv("PLATFORM_LLM_MODEL", "gpt-5.4-nano")
 	t.Setenv("GEMINI_API_KEY", "AIza-test-key")
