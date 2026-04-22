@@ -3,6 +3,7 @@ package pm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -17,6 +18,18 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 )
+
+// resolveAgentType returns the agent type the PM should run under.
+// Priority: explicit override (per-run) → settings.DefaultAgentType → platform default.
+func resolveAgentType(settings models.OrgSettings, override *models.AgentType) models.AgentType {
+	if override != nil && *override != "" {
+		return *override
+	}
+	if settings.DefaultAgentType != "" {
+		return settings.DefaultAgentType
+	}
+	return models.DefaultDefaultAgentType
+}
 
 type issueStore interface {
 	GetByID(ctx context.Context, orgID, issueID uuid.UUID) (models.Issue, error)
@@ -135,11 +148,58 @@ type Service struct {
 	credentials       credentialStore   // nil-safe
 	skills            SkillsBuilder     // nil-safe: bootstrap disabled if nil
 	sandbox           agent.SandboxProvider
-	adapter           agent.AgentAdapter
+	adapters          map[models.AgentType]agent.AgentAdapter
+	env               *agent.AgentEnv
+	usageTracker      agent.UsageRecorder // nil-safe: container billing disabled if nil
 	github            agent.GitHubTokenProvider
 	internalAPIURL    string // base URL for internal API (e.g. "http://server:8080/api/v1/internal")
 	internalAPISecret string // signing secret for internal API tokens
 	logger            zerolog.Logger
+}
+
+// pickAdapter returns the adapter for the org's default agent type. Returns an
+// error when the adapter map is missing the requested type so callers fail fast
+// with a readable message instead of a nil-dereference mid-run.
+func (s *Service) pickAdapter(agentType models.AgentType) (agent.AgentAdapter, error) {
+	if s.adapters == nil {
+		return nil, fmt.Errorf("pm adapters not configured")
+	}
+	adapter, ok := s.adapters[agentType]
+	if !ok || adapter == nil {
+		return nil, fmt.Errorf("no adapter registered for agent type %q", agentType)
+	}
+	return adapter, nil
+}
+
+func (s *Service) finalizeSandboxEnv(agentType models.AgentType, env map[string]string) error {
+	if unknownPrefix := s.env.NarrowScopedCredentials(agentType, env); unknownPrefix != "" {
+		s.logger.Warn().
+			Str("agent_type", string(agentType)).
+			Str("provider_prefix", unknownPrefix).
+			Msg("pm: unrecognized Pi provider prefix, exporting all inherited provider keys to sandbox")
+	}
+	return s.env.CheckAuth(agentType, env)
+}
+
+func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, sb *agent.Sandbox) error {
+	if agentType != models.AgentTypeCodex {
+		return nil
+	}
+
+	injected, err := s.env.InjectCodexAuth(ctx, orgID, sb)
+	if err != nil {
+		return &agent.AuthError{
+			AgentType: agentType,
+			Detail:    fmt.Sprintf("failed to prepare ChatGPT authentication for Codex: %v", err),
+		}
+	}
+	if !injected {
+		return &agent.AuthError{
+			AgentType: agentType,
+			Detail:    "No ChatGPT credentials are configured for Codex. Connect ChatGPT before running PM with Codex.",
+		}
+	}
+	return nil
 }
 
 func NewService(
@@ -152,7 +212,8 @@ func NewService(
 	plans planStore,
 	decisionLog decisionLogStore,
 	sandbox agent.SandboxProvider,
-	adapter agent.AgentAdapter,
+	adapters map[models.AgentType]agent.AgentAdapter,
+	env *agent.AgentEnv,
 	github agent.GitHubTokenProvider,
 	logger zerolog.Logger,
 ) *Service {
@@ -166,7 +227,8 @@ func NewService(
 		plans:        plans,
 		decisionLog:  decisionLog,
 		sandbox:      sandbox,
-		adapter:      adapter,
+		adapters:     adapters,
+		env:          env,
 		github:       github,
 		logger:       logger,
 	}
@@ -200,6 +262,12 @@ func (s *Service) SetSessionLogStore(store sessionLogStore) {
 func (s *Service) SetInternalAPI(url, secret string) {
 	s.internalAPIURL = url
 	s.internalAPISecret = secret
+}
+
+// SetUsageTracker injects the container usage recorder for billing. Nil-safe:
+// if not called, PM sandbox usage is not tracked.
+func (s *Service) SetUsageTracker(ut agent.UsageRecorder) {
+	s.usageTracker = ut
 }
 
 // SetSkillsBuilder injects the skills builder for bootstrap/refresh agent prompts.
@@ -239,9 +307,9 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 	return repo, nil
 }
 
-func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
-	if s.adapter == nil || s.sandbox == nil {
-		return nil, fmt.Errorf("pm adapter or sandbox not configured")
+func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*Plan, error) {
+	if s.sandbox == nil || s.env == nil {
+		return nil, fmt.Errorf("pm sandbox or env helper not configured")
 	}
 	if err := trigger.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid trigger: %w", err)
@@ -271,6 +339,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	// the session record and writing a session log entry (matching the manual-session
 	// pattern so failures are visible in the UI). It returns a wrapped error for the
 	// caller to return directly, avoiding duplicate format strings at each call site.
+	//
+	// When the cause is an AuthError, a failed plan record is also persisted so
+	// the UI can show an actionable message in the plan history rather than only
+	// surfacing the error via the job's last_error column.
 	failSession := func(stage string, cause error) error {
 		errMsg := fmt.Sprintf("%s: %v", stage, cause)
 		if pmSession != nil {
@@ -280,7 +352,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
 				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
-			// Write an error-level session log so the failure appears in the activity stream.
 			if s.sessionLogs != nil {
 				log := &models.SessionLog{
 					SessionID: pmSession.ID,
@@ -293,6 +364,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 				}
 			}
 		}
+		var authErr *agent.AuthError
+		if errors.As(cause, &authErr) {
+			s.persistFailedPlan(ctx, orgID, trigger, errMsg)
+		}
 		return fmt.Errorf("%s: %w", stage, cause)
 	}
 
@@ -301,15 +376,17 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return nil, failSession("gather context", err)
 	}
 
+	agentType := resolveAgentType(ctxBundle.settings, agentTypeOverride)
+	adapter, err := s.pickAdapter(agentType)
+	if err != nil {
+		return nil, failSession("pick adapter", err)
+	}
+
 	sbCfg := pmSandboxConfig()
+	sbCfg.Env = s.env.Resolve(ctx, orgID, agentType, nil)
 	if sbCfg.Env == nil {
 		sbCfg.Env = make(map[string]string)
 	}
-
-	// Inject Anthropic credentials so the Claude Code CLI inside the sandbox
-	// can authenticate. Without this the CLI prints "Not logged in · Please
-	// run /login" and the agent produces no plan.
-	s.applyClaudeCodeEnv(ctx, orgID, sbCfg.Env)
 
 	// Inject internal API credentials so the PM agent can create issues.
 	if s.internalAPIURL != "" && s.internalAPISecret != "" {
@@ -324,25 +401,49 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		}
 	}
 
+	if err := s.finalizeSandboxEnv(agentType, sbCfg.Env); err != nil {
+		return nil, failSession("agent auth preflight", err)
+	}
+
 	sb, err := s.sandbox.Create(ctx, sbCfg)
 	if err != nil {
 		return nil, failSession("create sandbox", err)
 	}
+	exitReason := "completed"
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	sessionID := uuid.Nil
+	if pmSession != nil {
+		sessionID = pmSession.ID
+	}
+	if s.usageTracker != nil {
+		usageEventID = s.usageTracker.ContainerStarted(ctx, orgID, sessionID, sb, sbCfg, containerStartedAt)
+	}
 	defer func() {
+		if s.usageTracker != nil {
+			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, containerStartedAt, exitReason)
+		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
 		}
 	}()
 
+	if err := s.injectRequiredAgentAuth(ctx, orgID, agentType, sb); err != nil {
+		exitReason = containerExitReason(ctx, err)
+		return nil, failSession("inject codex auth", err)
+	}
+
 	var token string
 	if s.github != nil {
 		ghToken, err := s.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
+			exitReason = containerExitReason(ctx, err)
 			return nil, failSession("get installation token", err)
 		}
 		token = ghToken
 	}
 	if err := s.sandbox.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, token); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("clone repo", err)
 	}
 
@@ -360,9 +461,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	contextJSON, err := json.Marshal(ctxBundle.pmContext)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("marshal pm context", err)
 	}
 	if err := s.sandbox.WriteFile(ctx, sb, "/workspace/.pm-context.json", contextJSON); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("write context to sandbox", err)
 	}
 
@@ -399,20 +502,19 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}()
 
 	execCtx := adapters.WithSandboxProvider(ctx, s.sandbox)
-	result, err := s.adapter.Execute(execCtx, sb, prompt, logCh)
+	result, err := adapter.Execute(execCtx, sb, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("pm agent execution", err)
 	}
 
 	plan, err := parsePlan(result.Summary)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		sessionErr := failSession("parse plan", err)
-		logOutput := result.Summary
-		if len(logOutput) > 2000 {
-			logOutput = logOutput[:2000] + "...(truncated)"
-		}
+		logOutput := excerpt(result.Summary, 2000)
 		sessionID := ""
 		if pmSession != nil {
 			sessionID = pmSession.ID.String()
@@ -443,9 +545,11 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 
 	planModel, err := planToModel(plan, ctxBundle.productContext)
 	if err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("serialize plan", err)
 	}
 	if err := s.plans.Create(ctx, planModel); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("persist plan", err)
 	}
 	plan.ID = planModel.ID
@@ -469,6 +573,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	}
 
 	if err := s.executePlan(ctx, orgID, plan, ctxBundle.settings, ctxBundle.productContext); err != nil {
+		exitReason = containerExitReason(ctx, err)
 		return nil, failSession("execute plan", err)
 	}
 
@@ -532,30 +637,46 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 	}
 }
 
-// applyClaudeCodeEnv fetches Anthropic credentials from the org credential
-// store and writes ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL into env. Safe to
-// call when no credential store is configured or no credential is set — the
-// env map is left unchanged and the caller surfaces the downstream failure.
-func (s *Service) applyClaudeCodeEnv(ctx context.Context, orgID uuid.UUID, env map[string]string) {
-	if s.credentials == nil || env == nil {
-		return
+// persistFailedPlan creates a minimal plan record with status=failed so auth
+// and other early failures appear in the plan history. The Analysis field
+// carries the error message, giving the UI something actionable to show. Called
+// from failSession when the error chain contains an AuthError. Returns the
+// persisted plan ID for log correlation, or uuid.Nil on failure.
+func (s *Service) persistFailedPlan(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, errMsg string) uuid.UUID {
+	if s.plans == nil {
+		s.logger.Error().Msg("failed to persist failed plan record: plan store not configured")
+		return uuid.Nil
 	}
-	cred, err := s.credentials.Get(ctx, orgID, models.ProviderAnthropic)
-	if err != nil || cred == nil {
-		s.logger.Warn().Err(err).Msg("no Anthropic credential configured for PM agent — Claude Code CLI will fail to authenticate")
-		return
+
+	now := time.Now()
+	plan := &models.PMPlan{
+		OrgID:         orgID,
+		Status:        models.PMPlanStatusFailed,
+		Analysis:      errMsg,
+		Tasks:         []byte("[]"),
+		Clusters:      []byte("[]"),
+		SkippedIssues: []byte("[]"),
+		TriggeredBy:   trigger,
+		CompletedAt:   &now,
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok {
-		s.logger.Warn().Msg("Anthropic credential has unexpected config type")
-		return
+	if err := s.plans.Create(ctx, plan); err != nil {
+		s.logger.Error().Err(err).Msg("failed to persist failed plan record")
+		return uuid.Nil
 	}
-	if cfg.APIKey != "" {
-		env["ANTHROPIC_API_KEY"] = cfg.APIKey
+	return plan.ID
+}
+
+func containerExitReason(ctx context.Context, err error) string {
+	if err == nil {
+		return "completed"
 	}
-	if cfg.BaseURL != "" {
-		env["ANTHROPIC_BASE_URL"] = cfg.BaseURL
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr == context.DeadlineExceeded {
+			return "timeout"
+		}
+		return "cancelled"
 	}
+	return "failed"
 }
 
 func pmSandboxConfig() agent.SandboxConfig {

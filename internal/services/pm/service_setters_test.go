@@ -18,7 +18,7 @@ import (
 func TestSetPMDocumentStore(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 	require.Nil(t, svc.pmDocuments, "pmDocuments should be nil before SetPMDocumentStore")
 
 	store := &mockPMDocStore{}
@@ -29,7 +29,7 @@ func TestSetPMDocumentStore(t *testing.T) {
 func TestSetSlackStores(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 	require.Nil(t, svc.integrations, "integrations should be nil before SetSlackStores")
 	require.Nil(t, svc.credentials, "credentials should be nil before SetSlackStores")
 
@@ -43,7 +43,7 @@ func TestSetSlackStores(t *testing.T) {
 func TestSetSkillsBuilder(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 	require.Nil(t, svc.skills, "skills should be nil before SetSkillsBuilder")
 
 	sb := &mockSkillsBuilder{result: "# Skills doc"}
@@ -54,7 +54,7 @@ func TestSetSkillsBuilder(t *testing.T) {
 func TestSetProjectStores_ViaNewService(t *testing.T) {
 	t.Parallel()
 
-	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc := NewService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 	require.Nil(t, svc.projects, "projects should be nil before SetProjectStores")
 	require.Nil(t, svc.projectTasks, "projectTasks should be nil before SetProjectStores")
 	require.Nil(t, svc.projectCycles, "projectCycles should be nil before SetProjectStores")
@@ -100,16 +100,17 @@ func TestRunBootstrap_NoAdapter(t *testing.T) {
 	svc := &Service{logger: zerolog.Nop()}
 	err := svc.RunBootstrap(context.Background(), uuid.New())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "pm adapter or sandbox not configured")
+	require.Contains(t, err.Error(), "pm sandbox or env helper not configured")
 }
 
 func TestRunBootstrap_NoPMDocStore(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &mockAdapter{},
-		sandbox: &mockSandbox{},
-		logger:  zerolog.Nop(),
+		adapters: testAdapterMap(&mockAdapter{}),
+		env:      testAgentEnv(),
+		sandbox:  &mockSandbox{},
+		logger:   zerolog.Nop(),
 	}
 	err := svc.RunBootstrap(context.Background(), uuid.New())
 	require.Error(t, err)
@@ -122,16 +123,17 @@ func TestRunRefresh_NoAdapter(t *testing.T) {
 	svc := &Service{logger: zerolog.Nop()}
 	err := svc.RunRefresh(context.Background(), uuid.New())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "pm adapter or sandbox not configured")
+	require.Contains(t, err.Error(), "pm sandbox or env helper not configured")
 }
 
 func TestRunRefresh_NoPMDocStore(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &mockAdapter{},
-		sandbox: &mockSandbox{},
-		logger:  zerolog.Nop(),
+		adapters: testAdapterMap(&mockAdapter{}),
+		env:      testAgentEnv(),
+		sandbox:  &mockSandbox{},
+		logger:   zerolog.Nop(),
 	}
 	err := svc.RunRefresh(context.Background(), uuid.New())
 	require.Error(t, err)
@@ -142,7 +144,8 @@ func TestRunRefresh_NoExistingDoc(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter:     &mockAdapter{},
+		adapters:    testAdapterMap(&mockAdapter{}),
+		env:         testAgentEnv(),
 		sandbox:     &mockSandbox{},
 		pmDocuments: &mockPMDocStore{getByOrgST: map[string]models.PMDocument{}},
 		logger:      zerolog.Nop(),

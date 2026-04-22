@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -41,13 +42,23 @@ func NewPMHandler(planStore *db.PMPlanStore, decisionLogStore *db.PMDecisionLogS
 	return &PMHandler{planStore: planStore, decisionLogStore: decisionLogStore, jobStore: jobStore, orgStore: orgStore}
 }
 
-// Analyze enqueues a PM analysis job.
+// Analyze enqueues a PM analysis job. Accepts an optional agent_type in the
+// request body to override the org's default agent for this run only.
 func (h *PMHandler) Analyze(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var body struct {
+		AgentType string `json:"agent_type"`
+	}
+	// Best-effort decode — empty body is fine (all fields are optional).
+	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	payload := map[string]string{
 		"org_id":  orgID.String(),
 		"trigger": string(models.PMTriggerManual),
+	}
+	if body.AgentType != "" {
+		payload["agent_type"] = body.AgentType
 	}
 	jobID, err := h.jobStore.Enqueue(r.Context(), orgID, "default", models.JobTypePMAnalyze, payload, 5, nil)
 	if err != nil {

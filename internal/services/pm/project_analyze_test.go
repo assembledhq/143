@@ -125,7 +125,8 @@ func TestAnalyzeProject_ProjectNotFound(t *testing.T) {
 
 	projectID := uuid.New()
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      testAdapterMap(&mockAdapter{}),
+		env:           testAgentEnv(),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(), // empty store
 		projectTasks:  &mockProjectTaskStore{},
@@ -148,7 +149,8 @@ func TestAnalyzeProject_ProjectNotActive(t *testing.T) {
 		Status: models.ProjectStatusDraft,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      testAdapterMap(&mockAdapter{}),
+		env:           testAgentEnv(),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -188,7 +190,8 @@ func TestAnalyzeProject_RepoNotFound(t *testing.T) {
 		Status:       models.ProjectStatusActive,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      testAdapterMap(&mockAdapter{}),
+		env:           testAgentEnv(),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -219,7 +222,8 @@ func TestAnalyzeProject_OrgNotFound(t *testing.T) {
 		Status: models.ProjectStatusActive,
 	}
 	svc := &Service{
-		adapter:       &mockAdapter{},
+		adapters:      testAdapterMap(&mockAdapter{}),
+		env:           testAgentEnv(),
 		sandbox:       &mockSandbox{},
 		projects:      newMockProjectStore(project),
 		projectTasks:  &mockProjectTaskStore{},
@@ -245,9 +249,10 @@ func TestAnalyzeProject_NilProjectStores(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{
-		adapter: &mockAdapter{},
-		sandbox: &mockSandbox{},
-		logger:  zerolog.Nop(),
+		adapters: testAdapterMap(&mockAdapter{}),
+		env:      testAgentEnv(),
+		sandbox:  &mockSandbox{},
+		logger:   zerolog.Nop(),
 	}
 	err := svc.AnalyzeProject(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err, "AnalyzeProject should fail when project stores are nil")

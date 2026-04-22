@@ -1,0 +1,579 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/models"
+)
+
+type envCredentialProvider struct {
+	creds map[models.ProviderName]*models.DecryptedCredential
+	errs  map[models.ProviderName]error
+}
+
+func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	if err, ok := m.errs[provider]; ok {
+		return nil, err
+	}
+	if cred, ok := m.creds[provider]; ok {
+		return cred, nil
+	}
+	return nil, nil
+}
+
+type envUserCredentialProvider struct {
+	personal map[models.ProviderName]*models.DecryptedUserCredential
+	team     map[models.ProviderName]*models.DecryptedUserCredential
+}
+
+func (m *envUserCredentialProvider) GetForUser(_ context.Context, _, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
+	if cred, ok := m.personal[provider]; ok {
+		return cred, nil
+	}
+	return nil, nil
+}
+
+func (m *envUserCredentialProvider) GetTeamDefault(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
+	if cred, ok := m.team[provider]; ok {
+		return cred, nil
+	}
+	return nil, nil
+}
+
+type envOrgStore struct {
+	org   models.Organization
+	err   error
+	calls int
+}
+
+func (m *envOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+	m.calls++
+	if m.err != nil {
+		return models.Organization{}, m.err
+	}
+	return m.org, nil
+}
+
+type envCodexAuthProvider struct {
+	token *models.OpenAIChatGPTConfig
+	err   error
+}
+
+func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.token, nil
+}
+
+type envSandboxProvider struct {
+	execExitCode   int
+	execErr        error
+	writeErrByPath map[string]error
+	writes         map[string][]byte
+	commands       []string
+}
+
+func (m *envSandboxProvider) Name() string { return "env-sandbox" }
+
+func (m *envSandboxProvider) Create(_ context.Context, _ SandboxConfig) (*Sandbox, error) {
+	return &Sandbox{ID: "unused", HomeDir: "/home/test", WorkDir: "/workspace"}, nil
+}
+
+func (m *envSandboxProvider) CloneRepo(_ context.Context, _ *Sandbox, _, _, _ string) error {
+	return nil
+}
+
+func (m *envSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, _, stderr io.Writer) (int, error) {
+	m.commands = append(m.commands, cmd)
+	if m.execErr != nil {
+		return 0, m.execErr
+	}
+	if m.execExitCode != 0 && stderr != nil {
+		_, _ = io.WriteString(stderr, "mkdir failed")
+	}
+	return m.execExitCode, nil
+}
+
+func (m *envSandboxProvider) ReadFile(_ context.Context, _ *Sandbox, _ string) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *envSandboxProvider) WriteFile(_ context.Context, _ *Sandbox, path string, data []byte) error {
+	if err := m.writeErrByPath[path]; err != nil {
+		return err
+	}
+	if m.writes == nil {
+		m.writes = make(map[string][]byte)
+	}
+	m.writes[path] = append([]byte(nil), data...)
+	return nil
+}
+
+func (m *envSandboxProvider) Destroy(_ context.Context, _ *Sandbox) error { return nil }
+
+func (m *envSandboxProvider) IsAlive(_ context.Context, _ *Sandbox) (bool, error) { return true, nil }
+
+func (m *envSandboxProvider) ConnectionInfo(_ context.Context, _ *Sandbox) (*SandboxConnectionInfo, error) {
+	return nil, nil
+}
+
+func (m *envSandboxProvider) Snapshot(_ context.Context, _ *Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+
+func (m *envSandboxProvider) Restore(_ context.Context, _ *Sandbox, _ io.Reader) error { return nil }
+
+func (m *envSandboxProvider) ExecStream(_ context.Context, _ *Sandbox, _ string, _ func([]byte), _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func marshalAgentSettings(t *testing.T, settings models.OrgSettings) json.RawMessage {
+	t.Helper()
+
+	raw, err := json.Marshal(settings)
+	require.NoError(t, err, "marshalAgentSettings should serialize org settings")
+	return raw
+}
+
+func TestAuthErrorError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      *AuthError
+		expected string
+	}{
+		{
+			name:     "includes agent type when present",
+			err:      &AuthError{AgentType: models.AgentTypeCodex, Detail: "missing token"},
+			expected: "agent auth failed (codex): missing token",
+		},
+		{
+			name:     "omits agent type when empty",
+			err:      &AuthError{Detail: "missing token"},
+			expected: "agent auth failed: missing token",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.err.Error(), "AuthError.Error should format the expected message")
+		})
+	}
+}
+
+func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name      string
+		agentType models.AgentType
+		userCreds *envUserCredentialProvider
+		orgCreds  *envCredentialProvider
+		expected  map[string]string
+	}{
+		{
+			name:      "claude uses personal credential and integration tokens",
+			agentType: models.AgentTypeClaudeCode,
+			userCreds: &envUserCredentialProvider{
+				personal: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant", BaseURL: "https://anthropic.example"}},
+				},
+			},
+			orgCreds: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderSentry: {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
+					models.ProviderLinear: {Config: models.LinearConfig{AccessToken: "linear-token"}},
+					models.ProviderNotion: {Config: models.NotionConfig{AccessToken: "notion-token"}},
+				},
+			},
+			expected: map[string]string{
+				"ANTHROPIC_API_KEY":   "sk-ant",
+				"ANTHROPIC_BASE_URL":  "https://anthropic.example",
+				"SENTRY_AUTH_TOKEN":   "sentry-token",
+				"SENTRY_ORG_SLUG":     "assembled",
+				"LINEAR_ACCESS_TOKEN": "linear-token",
+				"NOTION_ACCESS_TOKEN": "notion-token",
+			},
+		},
+		{
+			name:      "codex uses team default openai config and disables nested sandbox",
+			agentType: models.AgentTypeCodex,
+			userCreds: &envUserCredentialProvider{
+				team: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderOpenAI: {Config: models.OpenAIConfig{APIKey: "sk-openai", BaseURL: "https://openai.example"}},
+				},
+			},
+			orgCreds: &envCredentialProvider{},
+			expected: map[string]string{
+				"OPENAI_API_KEY":                "sk-openai",
+				"OPENAI_BASE_URL":               "https://openai.example",
+				"CODEX_UNSAFE_ALLOW_NO_SANDBOX": "1",
+			},
+		},
+		{
+			name:      "gemini falls back to org credential",
+			agentType: models.AgentTypeGeminiCLI,
+			userCreds: &envUserCredentialProvider{},
+			orgCreds: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderGemini: {Config: models.GeminiConfig{APIKey: "gem-key", Model: "gemini-2.5-pro"}},
+				},
+			},
+			expected: map[string]string{
+				"GEMINI_API_KEY": "gem-key",
+				"GEMINI_MODEL":   "gemini-2.5-pro",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				Credentials:     tt.orgCreds,
+				UserCredentials: tt.userCreds,
+				Provider:        &envSandboxProvider{},
+				Logger:          zerolog.Nop(),
+			})
+
+			got := env.Resolve(ctx, orgID, tt.agentType, &userID)
+			for key, expected := range tt.expected {
+				require.Equal(t, expected, got[key], "Resolve should export %s for %s", key, tt.agentType)
+			}
+		})
+	}
+}
+
+func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	cache := NewOrgSettingsCache(time.Minute)
+	store := &envOrgStore{
+		org: models.Organization{
+			ID: orgID,
+			Settings: marshalAgentSettings(t, models.OrgSettings{
+				AgentConfig: models.AgentEnvConfig{
+					string(models.AgentTypeAmp): {
+						"AMP_API_KEY": "amp-from-settings",
+					},
+					string(models.AgentTypePi): {
+						"PI_MODEL": "openai/gpt-5.1",
+					},
+				},
+			}),
+		},
+	}
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials: &envCredentialProvider{
+			creds: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+				models.ProviderOpenAI:    {Config: models.OpenAIConfig{APIKey: "sk-openai"}},
+				models.ProviderGemini:    {Config: models.GeminiConfig{APIKey: "sk-gem"}},
+			},
+		},
+		Orgs:             store,
+		OrgSettingsCache: cache,
+		Provider:         &envSandboxProvider{},
+		Logger:           zerolog.Nop(),
+	})
+
+	ampEnv := env.Resolve(ctx, orgID, models.AgentTypeAmp, nil)
+	require.Equal(t, "amp-from-settings", ampEnv["AMP_API_KEY"], "Resolve should apply AMP agent_config overrides from org settings")
+
+	piEnv := env.Resolve(ctx, orgID, models.AgentTypePi, nil)
+	require.Equal(t, "openai/gpt-5.1", piEnv["PI_MODEL"], "Resolve should apply PI model overrides from org settings")
+	require.Equal(t, "sk-ant", piEnv["ANTHROPIC_API_KEY"], "Resolve should inherit Anthropic credentials for Pi")
+	require.Equal(t, "sk-openai", piEnv["OPENAI_API_KEY"], "Resolve should inherit OpenAI credentials for Pi")
+	require.Equal(t, "sk-gem", piEnv["GEMINI_API_KEY"], "Resolve should inherit Gemini credentials for Pi")
+
+	_ = env.Resolve(ctx, orgID, models.AgentTypePi, nil)
+	require.Equal(t, 1, store.calls, "Resolve should use the org settings cache after the first load")
+}
+
+func TestAgentEnvLoadAgentConfigFailures(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	tests := []struct {
+		name string
+		env  *AgentEnv
+	}{
+		{
+			name: "missing org store returns no overrides",
+			env: NewAgentEnv(AgentEnvDeps{
+				Provider: &envSandboxProvider{},
+				Logger:   zerolog.Nop(),
+			}),
+		},
+		{
+			name: "org lookup error returns no overrides",
+			env: NewAgentEnv(AgentEnvDeps{
+				Orgs:     &envOrgStore{err: errors.New("db down")},
+				Provider: &envSandboxProvider{},
+				Logger:   zerolog.Nop(),
+			}),
+		},
+		{
+			name: "settings parse error returns no overrides",
+			env: NewAgentEnv(AgentEnvDeps{
+				Orgs: &envOrgStore{org: models.Organization{
+					ID:       orgID,
+					Settings: json.RawMessage(`{"default_agent_type":`),
+				}},
+				Provider: &envSandboxProvider{},
+				Logger:   zerolog.Nop(),
+			}),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config, ok := tt.env.loadAgentConfig(ctx, orgID, models.AgentTypeAmp)
+			require.False(t, ok, "loadAgentConfig should report no config for %s", tt.name)
+			require.Nil(t, config, "loadAgentConfig should return nil config for %s", tt.name)
+		})
+	}
+}
+
+func TestAgentEnvResolveProviderConfigPrecedence(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name     string
+		userCred *envUserCredentialProvider
+		orgCred  *envCredentialProvider
+		expected string
+	}{
+		{
+			name: "personal credential wins",
+			userCred: &envUserCredentialProvider{
+				personal: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "personal"}},
+				},
+				team: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "team"}},
+				},
+			},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			expected: "personal",
+		},
+		{
+			name: "team default beats org when personal missing",
+			userCred: &envUserCredentialProvider{
+				team: map[models.ProviderName]*models.DecryptedUserCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "team"}},
+				},
+			},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			expected: "team",
+		},
+		{
+			name:     "org credential is the final fallback",
+			userCred: &envUserCredentialProvider{},
+			orgCred: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
+				},
+			},
+			expected: "org",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := NewAgentEnv(AgentEnvDeps{
+				Credentials:     tt.orgCred,
+				UserCredentials: tt.userCred,
+				Provider:        &envSandboxProvider{},
+				Logger:          zerolog.Nop(),
+			})
+			cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+			require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return the provider config type for %s", tt.name)
+			require.Equal(t, tt.expected, cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should honor precedence for %s", tt.name)
+		})
+	}
+}
+
+func TestAgentEnvCheckAuthAndNarrowScopedCredentials(t *testing.T) {
+	t.Parallel()
+
+	env := NewAgentEnv(AgentEnvDeps{
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	err := env.CheckAuth(models.AgentTypeAmp, map[string]string{})
+	require.Error(t, err, "CheckAuth should reject Amp runs with no AMP_API_KEY")
+	require.Contains(t, err.Error(), "AMP_API_KEY", "CheckAuth should explain the missing Amp credential")
+
+	require.NoError(t, env.CheckAuth(models.AgentTypeAmp, map[string]string{"AMP_API_KEY": "amp-key"}), "CheckAuth should accept Amp runs with AMP_API_KEY configured")
+	require.Equal(t, "", env.NarrowScopedCredentials(models.AgentTypeClaudeCode, map[string]string{"OPENAI_API_KEY": "unused"}), "NarrowScopedCredentials should ignore non-Pi agents")
+	require.Equal(t, "", env.NarrowScopedCredentials(models.AgentTypePi, nil), "NarrowScopedCredentials should ignore nil env maps")
+
+	piEnv := map[string]string{
+		"PI_MODEL":          models.PiModelGPT54,
+		"ANTHROPIC_API_KEY": "sk-ant",
+		"OPENAI_API_KEY":    "sk-openai",
+	}
+	unknownPrefix := env.NarrowScopedCredentials(models.AgentTypePi, piEnv)
+	require.Equal(t, "", unknownPrefix, "NarrowScopedCredentials should narrow known Pi provider prefixes")
+	require.NotContains(t, piEnv, "ANTHROPIC_API_KEY", "NarrowScopedCredentials should remove unrelated Pi provider credentials")
+	require.Equal(t, "sk-openai", piEnv["OPENAI_API_KEY"], "NarrowScopedCredentials should keep the selected Pi provider key")
+
+	unknownEnv := map[string]string{
+		"PI_MODEL_CUSTOM":   "moonshot/kimi-k2",
+		"OPENAI_API_KEY":    "sk-openai",
+		"ANTHROPIC_API_KEY": "sk-ant",
+	}
+	require.Equal(t, "moonshot", env.NarrowScopedCredentials(models.AgentTypePi, unknownEnv), "NarrowScopedCredentials should report unknown Pi provider prefixes")
+}
+
+func TestAgentEnvInjectCodexAuth(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	sandbox := &Sandbox{HomeDir: "/home/test"}
+
+	tests := []struct {
+		name            string
+		codexAuth       CodexAuthProvider
+		sandboxProvider *envSandboxProvider
+		wantInjected    bool
+		wantErr         string
+		assertWrites    func(t *testing.T, provider *envSandboxProvider)
+	}{
+		{
+			name:            "no codex auth provider returns not injected",
+			sandboxProvider: &envSandboxProvider{},
+			wantInjected:    false,
+		},
+		{
+			name:            "token lookup error is returned",
+			codexAuth:       envCodexAuthProvider{err: errors.New("lookup failed")},
+			sandboxProvider: &envSandboxProvider{},
+			wantErr:         "get codex auth token",
+		},
+		{
+			name:            "missing oauth token is not an error",
+			codexAuth:       envCodexAuthProvider{},
+			sandboxProvider: &envSandboxProvider{},
+			wantInjected:    false,
+		},
+		{
+			name:            "mkdir exec failure is returned",
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			sandboxProvider: &envSandboxProvider{execErr: errors.New("exec failed")},
+			wantErr:         "create .codex dir",
+		},
+		{
+			name:            "mkdir non zero exit is returned",
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			sandboxProvider: &envSandboxProvider{execExitCode: 23},
+			wantErr:         "mkdir exited with code 23",
+		},
+		{
+			name:      "write auth json error is returned",
+			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			sandboxProvider: &envSandboxProvider{writeErrByPath: map[string]error{
+				"/home/test/.codex/auth.json": errors.New("disk full"),
+			}},
+			wantErr: "write auth.json",
+		},
+		{
+			name:      "write config error is returned",
+			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			sandboxProvider: &envSandboxProvider{writeErrByPath: map[string]error{
+				"/home/test/.codex/config.toml": errors.New("disk full"),
+			}},
+			wantErr: "write config.toml",
+		},
+		{
+			name:            "successful injection writes auth and config files",
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", RefreshToken: "refresh", IDToken: "id"}},
+			sandboxProvider: &envSandboxProvider{},
+			wantInjected:    true,
+			assertWrites: func(t *testing.T, provider *envSandboxProvider) {
+				t.Helper()
+
+				authJSON := provider.writes["/home/test/.codex/auth.json"]
+				require.NotEmpty(t, authJSON, "InjectCodexAuth should write auth.json on success")
+				require.NotEmpty(t, provider.writes["/home/test/.codex/config.toml"], "InjectCodexAuth should write config.toml on success")
+
+				var payload map[string]any
+				require.NoError(t, json.Unmarshal(authJSON, &payload), "InjectCodexAuth should write valid auth.json")
+				tokens, ok := payload["tokens"].(map[string]any)
+				require.True(t, ok, "InjectCodexAuth should encode tokens in auth.json")
+				require.Equal(t, "access", tokens["access_token"], "InjectCodexAuth should write the access token")
+				require.Equal(t, "", tokens["refresh_token"], "InjectCodexAuth should omit the refresh token from auth.json")
+				require.Equal(t, "id", tokens["id_token"], "InjectCodexAuth should write the ID token")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodexAuth: tt.codexAuth,
+				Provider:  tt.sandboxProvider,
+				Logger:    zerolog.Nop(),
+			})
+
+			injected, err := env.InjectCodexAuth(ctx, orgID, sandbox)
+			if tt.wantErr != "" {
+				require.Error(t, err, "InjectCodexAuth should return an error for %s", tt.name)
+				require.Contains(t, err.Error(), tt.wantErr, "InjectCodexAuth should describe the failure for %s", tt.name)
+				return
+			}
+
+			require.NoError(t, err, "InjectCodexAuth should succeed for %s", tt.name)
+			require.Equal(t, tt.wantInjected, injected, "InjectCodexAuth should report the expected injected flag for %s", tt.name)
+			if tt.assertWrites != nil {
+				tt.assertWrites(t, tt.sandboxProvider)
+			}
+		})
+	}
+}
