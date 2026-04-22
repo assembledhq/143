@@ -263,8 +263,9 @@ When an experiment outcome is `regression`:
 - **Database Driver**: `jackc/pgx` — fastest Go Postgres driver
 - **Database Access**: Direct pgx v5 — type-safe store functions with `CollectRows`/`RowToStructByName`, no ORM or codegen
 - **Migrations**: `golang-migrate/migrate`
-- **Logging**: `rs/zerolog` -> Mezmo (log aggregation)
-- **Monitoring**: Datadog (`DataDog/datadog-go` + `DataDog/dd-trace-go`) for metrics, APM, alerting
+- **Logging**: `rs/zerolog` -> Vector -> VictoriaLogs/Grafana
+- **Error Tracking**: Sentry for frontend exceptions today; backend exception capture should converge there as well
+- **Monitoring & Alerting**: Grafana is the operational control plane for logs, alerting, and notification routing. See [54-production-alerting.md](54-production-alerting.md)
 - **Container Management**: Docker SDK (`docker/docker`)
 
 ## Frontend: Next.js + React + shadcn/ui
@@ -288,8 +289,9 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 ## Logging & Monitoring
 
-- **Mezmo**: Primary log aggregation. Structured JSON logs shipped via Mezmo's ingestion API. Used for log search, alerting, and archival.
-- **Datadog**: Primary monitoring/observability. Custom metrics (HTTP, job queue, agent runs, cluster health), APM distributed tracing, pre-built dashboards, and alerting. Also used as a metrics source for Step 6 experiment evaluation (pull production latency/error rates to measure fix impact).
+- **VictoriaLogs + Grafana**: Primary centralized logging and operational alerting. Structured JSON logs are shipped by Vector and queried in Grafana. This is the current production observability backbone.
+- **Sentry**: Primary exception monitoring and developer-facing error triage. Frontend SDKs are already configured; backend exception capture should be added so Sentry becomes the system of record for application errors.
+- **Alerting model**: Page on aggregated service symptoms in Grafana; send exception issues from Sentry primarily to Slack unless they meet a paging threshold. See [54-production-alerting.md](54-production-alerting.md).
 
 # Build Order
 

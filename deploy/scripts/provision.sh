@@ -87,6 +87,8 @@ if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
 fi
 if [ "$ROLE" = "logging" ]; then
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
+  : "${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:?GRAFANA_ALERTS_WARNING_WEBHOOK_URL is required for logging role (set it or add to .env.production.enc)}"
+  : "${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:?GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL is required for logging role (set it or add to .env.production.enc)}"
 fi
 if [ "$ROLE" != "db" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
@@ -173,7 +175,8 @@ fi
 echo "--- Step 3/5: Writing secrets ---"
 if [ "$ROLE" = "logging" ]; then
   # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\n' "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" \
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
+    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \

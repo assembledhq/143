@@ -65,6 +65,8 @@ type Config struct {
 	// Sentry OAuth
 	SentryOAuthClientID     string `env:"SENTRY_OAUTH_CLIENT_ID"`
 	SentryOAuthClientSecret string `env:"SENTRY_OAUTH_CLIENT_SECRET"`
+	SentryDSN               string `env:"SENTRY_DSN"`
+	SentryEnvironment       string `env:"SENTRY_ENVIRONMENT"`
 
 	// Slack OAuth
 	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
@@ -326,6 +328,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"Google OAuth", c.GoogleOAuthClientID != "" && c.GoogleOAuthClientSecret != "", "login"},
 		{"Linear OAuth", c.LinearOAuthClientID != "" && c.LinearOAuthClientSecret != "", "integration auth"},
 		{"Sentry OAuth", c.SentryOAuthClientID != "" && c.SentryOAuthClientSecret != "", "integration auth"},
+		{"Backend Sentry", c.SentryDSN != "", "automatic API 5xx + panic reporting"},
 		{"GitHub App", c.GitHubAppEnabled(), "webhooks, PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
@@ -405,6 +408,13 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 			logger.Warn().Msg("DEMO_MODE suppresses the configured GitHub App — integrations will be skipped. Unset DEMO_MODE to re-enable.")
 		}
 	}
+}
+
+func (c *Config) SentryEnvironmentOrDefault() string {
+	if c.SentryEnvironment != "" {
+		return c.SentryEnvironment
+	}
+	return c.Env
 }
 
 // ValidateSecrets checks that security-sensitive configuration values meet

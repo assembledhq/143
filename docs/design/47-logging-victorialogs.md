@@ -379,7 +379,7 @@ service:api AND response_time_ms:range(1000, Inf)
 
 VictoriaLogs supports alerting via `vmalert` (VictoriaMetrics alerting engine) which evaluates LogsQL rules and fires to Alertmanager.
 
-For now, Grafana alerting on log queries is sufficient:
+For now, keep Grafana as the alerting UI and use `Alertmanager` for notification delivery, with log alert rules stored in `vmalert` YAML:
 
 - **Error rate spike**: Alert if `level:error` count exceeds threshold in 5-min window
 - **Agent run failures**: Alert if `"agent run failed"` appears > 3 times in 15 min
@@ -400,6 +400,13 @@ For now, Grafana alerting on log queries is sufficient:
     restart: unless-stopped
   ```
   Grafana alert query: `service:disk-monitor AND disk_used_pct:range(80, Inf)`
+
+The repo-owned production rule set now lives in `deploy/vmalert/rules/production-alerts.yml`. The logging node now runs:
+
+- `VictoriaLogs` for storage/query
+- `vmalert` for rule evaluation
+- `Alertmanager` for grouping and delivery
+- `Grafana` for dashboards and alert visibility via the provisioned Alertmanager datasource
 
 ## Resource Budget
 
