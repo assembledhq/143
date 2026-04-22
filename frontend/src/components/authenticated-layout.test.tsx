@@ -70,7 +70,7 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("link", { name: "Autopilot" })).toHaveAttribute("href", "/autopilot");
+    expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/autopilot")).toBeDefined();
   });
 
   it("uses a slightly narrower default sidebar width", () => {
@@ -126,7 +126,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
-    expect(screen.getByRole("link", { name: "Autopilot settings" })).toHaveAttribute("href", "/settings/autopilot");
+    expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
     expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
@@ -168,6 +168,27 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "General" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Team" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
+  });
+
+  it("hides Autopilot settings from non-admin users", async () => {
+    useAuthMock.mockReturnValue({
+      user: memberUser,
+      isLoading: false,
+      isAuthenticated: true,
+      logout: logoutMock,
+    });
+
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
+
+    expect(screen.queryAllByRole("link", { name: "Autopilot" }).filter((link) => link.getAttribute("href") === "/settings/autopilot")).toHaveLength(0);
   });
 
   it("does not show repo context switcher when org has only 1 repo", async () => {

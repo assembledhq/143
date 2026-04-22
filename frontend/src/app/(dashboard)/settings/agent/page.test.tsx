@@ -120,8 +120,7 @@ describe('AgentPage', () => {
   it('shows Execution section for admins', async () => {
     renderWithProviders(<AgentPage />);
 
-    expect(await screen.findByText('Autonomy level')).toBeInTheDocument();
-    expect(screen.getByText('Execution aggressiveness')).toBeInTheDocument();
+    expect(await screen.findByText('Execution')).toBeInTheDocument();
     expect(screen.getByText('Max concurrent runs')).toBeInTheDocument();
   });
 
@@ -141,6 +140,7 @@ describe('AgentPage', () => {
     expect(screen.queryByText('Organization coding agents')).not.toBeInTheDocument();
     expect(screen.queryByText('Autonomy level')).not.toBeInTheDocument();
     expect(screen.queryByText('Execution aggressiveness')).not.toBeInTheDocument();
+    expect(screen.queryByText('Max concurrent runs')).not.toBeInTheDocument();
   });
 
   it('renders without a save button (autosaves)', async () => {

@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,13 +40,18 @@ import {
 import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
+    enabled: isAdmin,
   });
   const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
+    enabled: isAdmin,
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
@@ -70,6 +76,7 @@ export default function AutopilotSettingsPage() {
   const scheduleHoursServer = settings.pm_schedule_hours ?? 4;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;
   const autonomyLevel = settings.autonomy_level ?? "auto_simple";
+  const executionAggressiveness = String(settings.execution_aggressiveness ?? 2);
   const maxConcurrentRunsServer = settings.max_concurrent_runs ?? 3;
 
   const autosave = useAutosave<SettingsPatch>({
@@ -92,11 +99,27 @@ export default function AutopilotSettingsPage() {
     clamp: (v) => clampNumber(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
 
+  if (!isAdmin) {
+    return (
+      <PageContainer size="default">
+        <div className="space-y-6">
+          <PageHeader
+            title="Autopilot"
+            description="Configure PM model, cadence, and organization-wide automation defaults."
+          />
+          <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            Only admins can manage Autopilot settings.
+          </div>
+        </div>
+      </PageContainer>
+    );
+  }
+
   return (
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="Autopilot settings"
+          title="Autopilot"
           description="Configure PM model, cadence, and organization-wide automation defaults."
           action={<AutosaveIndicator status={autosave.status} />}
         />
@@ -190,6 +213,49 @@ export default function AutopilotSettingsPage() {
                     <div>
                       <span className="text-xs font-medium">Operate broadly</span>
                       <p className="text-xs text-muted-foreground">Autopilot runs automatically on eligible work.</p>
+                    </div>
+                  </label>
+                </RadioGroup>
+              </div>
+              <div className="space-y-2">
+                <Label>Execution aggressiveness</Label>
+                <p className="text-xs text-muted-foreground">
+                  Controls how broadly Autopilot edits once it decides to act.
+                </p>
+                <RadioGroup
+                  value={executionAggressiveness}
+                  onValueChange={(value) =>
+                    autosave.save({
+                      settings: { execution_aggressiveness: parseInt(value, 10) },
+                    })
+                  }
+                >
+                  <label className="flex items-center gap-3 rounded-lg border p-3">
+                    <RadioGroupItem value="1" aria-label="Conservative" />
+                    <div>
+                      <span className="text-xs font-medium">Conservative</span>
+                      <p className="text-xs text-muted-foreground">Prefer smaller, lower-risk edits.</p>
+                    </div>
+                  </label>
+                  <label className="flex items-center gap-3 rounded-lg border p-3">
+                    <RadioGroupItem value="2" aria-label="Moderate" />
+                    <div>
+                      <span className="text-xs font-medium">Moderate</span>
+                      <p className="text-xs text-muted-foreground">Balance scope and caution.</p>
+                    </div>
+                  </label>
+                  <label className="flex items-center gap-3 rounded-lg border p-3">
+                    <RadioGroupItem value="3" aria-label="Aggressive" />
+                    <div>
+                      <span className="text-xs font-medium">Aggressive</span>
+                      <p className="text-xs text-muted-foreground">Allow broader changes when they stay coherent.</p>
+                    </div>
+                  </label>
+                  <label className="flex items-center gap-3 rounded-lg border p-3">
+                    <RadioGroupItem value="4" aria-label="Maximum" />
+                    <div>
+                      <span className="text-xs font-medium">Maximum</span>
+                      <p className="text-xs text-muted-foreground">Optimize for throughput over caution.</p>
                     </div>
                   </label>
                 </RadioGroup>
