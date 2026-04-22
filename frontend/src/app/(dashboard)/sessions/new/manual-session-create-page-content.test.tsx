@@ -113,4 +113,13 @@ describe("ManualSessionCreatePageContent", () => {
       expect(textareas.length).toBeGreaterThanOrEqual(1);
     });
   });
+
+  it("autofocuses the main message textarea", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await waitFor(() => {
+      expect(textarea).toHaveFocus();
+    });
+  });
 });
