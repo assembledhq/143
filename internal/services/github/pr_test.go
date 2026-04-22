@@ -253,6 +253,18 @@ func TestFormatPRTitle(t *testing.T) {
 			expect: "Keep file ordering consistent between detail view and Changes sidebar",
 		},
 		{
+			name: "non linear issue preserves existing fix prefix",
+			session: models.Session{
+				ID:            uuid.New(),
+				ResultSummary: func() *string { s := "fix: Keep file ordering consistent"; return &s }(),
+			},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
+				Title:  "Ordering mismatch",
+			},
+			expect: "fix: Keep file ordering consistent",
+		},
+		{
 			name: "issueless session trims quotes and whitespace from title",
 			session: models.Session{
 				ID:    uuid.New(),
@@ -266,6 +278,15 @@ func TestFormatPRTitle(t *testing.T) {
 			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
 			issue:   nil,
 			expect:  "Session abcdef01",
+		},
+		{
+			name:    "non linear issue with empty derived title falls back to session id",
+			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
+			issue: &models.Issue{
+				Source: models.IssueSource("support"),
+				Title:  "   ",
+			},
+			expect: "fix: Session abcdef01",
 		},
 	}
 
@@ -399,6 +420,12 @@ func TestFormatCommitMessage(t *testing.T) {
 			session: models.Session{ID: uuid.MustParse("abcdef01-2345-6789-abcd-ef0123456789")},
 			issue:   nil,
 			expect:  "Session abcdef01",
+		},
+		{
+			name:    "nil issue falls back to result summary first line",
+			session: models.Session{ID: uuid.New(), ResultSummary: func() *string { s := "Updated the login flow\n\nAdded coverage"; return &s }()},
+			issue:   nil,
+			expect:  "Updated the login flow",
 		},
 	}
 
@@ -866,6 +893,62 @@ func TestFetchPRTemplate_FoundTemplate(t *testing.T) {
 	content, path := svc.fetchPRTemplate(context.Background(), "token", "owner", "repo", "main")
 	require.Equal(t, templateContent, content, "should return decoded template content")
 	require.NotEmpty(t, path, "should return the matched template path")
+}
+
+func TestFetchPRTemplate_FallsBackToDirectoryTemplate(t *testing.T) {
+	t.Parallel()
+
+	templateContent := "## Default Template\n\nExplain the change."
+	encoded := base64.StdEncoding.EncodeToString([]byte(templateContent))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/contents/.github/PULL_REQUEST_TEMPLATE") && !strings.Contains(r.URL.Path, "default.md"):
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{
+				{"name": "default.md", "path": ".github/PULL_REQUEST_TEMPLATE/default.md", "type": "file"},
+				{"name": "extra.txt", "path": ".github/PULL_REQUEST_TEMPLATE/extra.txt", "type": "file"},
+			}), "directory listing should encode successfully")
+		case strings.Contains(r.URL.Path, "/contents/.github/PULL_REQUEST_TEMPLATE/default.md"):
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+				"content":  encoded,
+				"encoding": "base64",
+			}), "default template should encode successfully")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		}
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, path := svc.fetchPRTemplate(context.Background(), "token", "owner", "repo", "main")
+	require.Equal(t, templateContent, content, "should return the default template from the directory fallback")
+	require.Equal(t, ".github/PULL_REQUEST_TEMPLATE/default.md", path, "should return the selected directory template path")
+}
+
+func TestFetchFileContent_RequestError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"boom"}`))
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	content, ok := svc.fetchFileContent(context.Background(), "token", "owner", "repo", "main", ".github/pull_request_template.md")
+	require.False(t, ok, "fetchFileContent should report failure when the GitHub request fails")
+	require.Empty(t, content, "fetchFileContent should return empty content on request failure")
 }
 
 func TestGetOrFetchPRTemplate_NilCache(t *testing.T) {
