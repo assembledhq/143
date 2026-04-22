@@ -1,15 +1,15 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useAutosave } from "@/hooks/useAutosave";
 import {
@@ -17,7 +17,7 @@ import {
   coalesceSettingsPatch,
   type SettingsPatch,
 } from "@/lib/settings-autosave";
-import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { MembershipsResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
@@ -119,9 +119,38 @@ function PRAuthorshipSettings() {
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
+  });
+  const autosave = useAutosave<SettingsPatch>({
+    queryKey: queryKeys.settings.all,
+    mutationFn: async (payload) => {
+      const response = await api.settings.update(payload);
+      if (payload.name !== undefined) {
+        queryClient.setQueryData<SingleResponse<MembershipsResponse> | undefined>(
+          queryKeys.auth.memberships,
+          (previous) => {
+            if (!previous?.data) return previous;
+            return {
+              ...previous,
+              data: {
+                ...previous.data,
+                memberships: previous.data.memberships.map((membership) =>
+                  membership.org_id === response.data.id
+                    ? { ...membership, org_name: response.data.name }
+                    : membership,
+                ),
+              },
+            };
+          },
+        );
+      }
+      return response;
+    },
+    applyOptimistic: applyOrgSettingsPatch,
+    coalesce: coalesceSettingsPatch,
   });
 
   return (
@@ -137,16 +166,20 @@ export default function SettingsPage() {
         />
 
         <section className="space-y-3">
-          <h2 className="text-xs font-medium text-foreground">Organization</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-medium text-foreground">Organization</h2>
+            {user?.role === "admin" && <AutosaveIndicator status={autosave.status} />}
+          </div>
           <Card>
             <CardContent>
               <div className="max-w-[560px] space-y-2">
                 <Label htmlFor="org-name">Organization name</Label>
-                <Input
+                <DebouncedInput
                   id="org-name"
-                  value={settings?.data?.name ?? ""}
-                  disabled
-                  className="bg-muted"
+                  serverValue={settings?.data?.name ?? ""}
+                  onCommit={(name) => autosave.save({ name })}
+                  disabled={user?.role !== "admin"}
+                  className={user?.role !== "admin" ? "bg-muted" : undefined}
                 />
               </div>
             </CardContent>

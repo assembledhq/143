@@ -167,6 +167,45 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "Updated Org",
 		},
 		{
+			name: "trims organization name before saving",
+			body: `{"name":"  Updated Org  "}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(orgColumns()).AddRow(
+							orgID, "Test Org", json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("UPDATE organizations").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+					)
+			},
+			expectedCode: http.StatusOK,
+			expectedBody: "Updated Org",
+		},
+		{
+			name: "rejects empty organization name",
+			body: `{"name":"   "}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "MISSING_NAME",
+		},
+		{
+			name: "rejects organization name that is too long",
+			body: `{"name":"` + strings.Repeat("a", maxOrgNameLen+1) + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "NAME_TOO_LONG",
+		},
+		{
 			name: "returns bad request for invalid JSON body",
 			body: `not json`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
