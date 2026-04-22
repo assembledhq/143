@@ -21,6 +21,9 @@ describe("DefaultModelCard", () => {
       />,
     );
     expect(screen.getByText(/Uses your OpenAI key/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Used for organization-level LLM features, separate from the coding agents configured on the Agent settings page/i),
+    ).toBeInTheDocument();
   });
 
   it("shows an amber warning when the owner is not configured", () => {
