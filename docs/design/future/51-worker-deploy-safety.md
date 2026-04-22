@@ -1,6 +1,6 @@
 # Design Doc 51: Worker Deploy Safety For Long-Running Sessions
 
-> **Status:** Proposed | **Last reviewed:** 2026-04-21
+> **Status:** Phase 1-2 implemented; Phase 3 proposed | **Last reviewed:** 2026-04-21
 
 ## Summary
 
@@ -23,6 +23,25 @@ The user-visible recovery contract is:
 
 - **planned deploys:** do not interrupt accepted long-running runs
 - **unplanned worker loss:** recover from the **latest durable checkpoint**
+
+## Implementation Status
+
+The initial hardening and checkpoint-recovery phases described here are now in production code:
+
+- jobs carry renewable leases plus fencing tokens (`lease_expires_at`,
+  `lock_token`, `run_owner_id`)
+- worker terminal writes are guarded by the current `lock_token`
+- nodes advertise `draining` status and heartbeat metadata
+- a recovery loop marks stale nodes `dead` and re-queues lost running jobs
+- worker deploys now use `drain -> replace` instead of blind stop/recreate
+- reclaimed `run_agent` work now resumes from the latest committed session
+  checkpoint when one exists, and otherwise restarts from scratch
+- the committed checkpoint boundary is the last fully persisted turn
+  (`current_turn`, `snapshot_key`, `agent_session_id`, stored messages/diff);
+  blob-only snapshots not referenced by the session row are intentionally ignored
+
+Phase 3 durable per-session executors remain future work. Intra-turn checkpointing
+also remains future work; the current recovery boundary is "last completed turn".
 
 The system does **not** promise uninterrupted live process continuation across
 worker or host failure.

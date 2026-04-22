@@ -61,6 +61,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	hostname, _ := os.Hostname()
+
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
@@ -173,10 +175,22 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
+	nodeManager := cluster.NewNodeManager(pool, logger, hostname, cfg.Mode)
+	nodeManager.SetMetadataProvider(func() map[string]any {
+		return map[string]any{
+			"build_sha": version.BuildSHA,
+		}
+	})
+	if err := nodeManager.Register(ctx, hostname); err != nil {
+		logger.Fatal().Err(err).Msg("failed to register cluster node")
+	}
+	go nodeManager.StartHeartbeat(ctx)
+
 	// Start worker if mode includes worker capability
+	var processWorker *worker.Worker
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
-		hostname, _ := os.Hostname()
 		w := worker.New(pool, logger, hostname)
+		processWorker = w
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
@@ -255,8 +269,18 @@ func main() {
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
+		nodeManager.SetMetadataProvider(func() map[string]any {
+			return map[string]any{
+				"build_sha":              version.BuildSHA,
+				"active_job_count":       w.ActiveJobCount(),
+				"active_run_agent_count": w.ActiveRunAgentCount(),
+			}
+		})
 		go w.Start(ctx)
 		logger.Info().Msg("worker started with registered handlers")
+
+		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
+		go recoveryLoop.Start(ctx, 30*time.Second)
 
 		// Reconcile containers that leaked when the last server exited mid-turn
 		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
@@ -321,6 +345,26 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
+
+		if processWorker != nil {
+			processWorker.RequestDrain()
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 110*time.Second)
+		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
+			logger.Warn().Err(err).Msg("failed to mark node draining")
+		}
+		if processWorker != nil {
+			for processWorker.ActiveJobCount() > 0 {
+				select {
+				case <-drainCtx.Done():
+					logger.Warn().Int("active_jobs", processWorker.ActiveJobCount()).Msg("worker drain timed out; continuing shutdown")
+					goto drained
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+		}
+	drained:
+		drainCancel()
 
 		// Signal long-lived SSE handlers to return before calling Shutdown.
 		// Without this, Shutdown blocks on each open SSE connection until its

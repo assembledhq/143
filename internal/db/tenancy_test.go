@@ -68,11 +68,18 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "diff_history"},               // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
-		{"session_logs", "from session_logs"}, // no org_id column; scoped via session_id FK
-		{"session_logs", "into session_logs"}, // no org_id column; scoped via session_id FK
-		{"users", "where github_id"},          // pre-auth lookup by GitHub ID
-		{"users", "where lower(email)"},       // pre-auth lookup by email (case-insensitive)
-		{"users", "where google_id"},          // pre-auth lookup by Google ID
+		{"jobs", "where status = 'pending' and run_at <= now()"},        // ClaimNextRunnable: cross-org worker queue consumer
+		{"jobs", "where id = @job_id"},                                  // RenewLease: fenced worker lease renewal by job id
+		{"jobs", "where id = $1"},                                       // fenced worker terminal writes by job id
+		{"jobs", "where id = $2"},                                       // fenced worker terminal writes by job id
+		{"jobs", "where id = $3"},                                       // fenced worker retry writes by job id
+		{"jobs", "left join dead_nodes"},                                // ReclaimLostRunningJobs: cross-org recovery loop
+		{"jobs", "where status = 'running' and locked_by_node_id = $1"}, // CountRunningOwnedByNode: node-scoped drain status
+		{"session_logs", "from session_logs"},                           // no org_id column; scoped via session_id FK
+		{"session_logs", "into session_logs"},                           // no org_id column; scoped via session_id FK
+		{"users", "where github_id"},                                    // pre-auth lookup by GitHub ID
+		{"users", "where lower(email)"},                                 // pre-auth lookup by email (case-insensitive)
+		{"users", "where google_id"},                                    // pre-auth lookup by Google ID
 		// GetByIDGlobal: the auth middleware loads user identity *before* the
 		// active-org is resolved (multi-org users; org comes from the session
 		// hint or X-Active-Org-ID header against organization_memberships, not

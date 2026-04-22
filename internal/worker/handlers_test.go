@@ -25,6 +25,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var workerSessionColumns = []string{
+	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
+	"project_task_id", "model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+}
+
 func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	t.Helper()
 	mock, err := pgxmock.NewPool()
@@ -37,6 +49,52 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 		Webhooks:     db.NewWebhookDeliveryStore(mock),
 	}
 	return stores, mock
+}
+
+type orchestratorServiceStub struct {
+	runAgentCalls       int
+	recoverSessionCalls int
+	runAgentFn          func(ctx context.Context, run *models.Session) error
+	recoverSessionFn    func(ctx context.Context, session *models.Session) error
+}
+
+func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
+	s.runAgentCalls++
+	if s.runAgentFn != nil {
+		return s.runAgentFn(ctx, run)
+	}
+	return nil
+}
+
+func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session) error {
+	return nil
+}
+
+func (s *orchestratorServiceStub) RecoverSession(ctx context.Context, session *models.Session) error {
+	s.recoverSessionCalls++
+	if s.recoverSessionFn != nil {
+		return s.recoverSessionFn(ctx, session)
+	}
+	return nil
+}
+
+func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
+	return time.Minute
+}
+
+func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
+	now := time.Now()
+	return []any{
+		sessionID, issueID, orgID, "claude_code", status, "semi", "low",
+		nil, nil, nil, nil,
+		nil, false, nil, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil,
+		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+	}
 }
 
 func TestIngestWebhookHandler(t *testing.T) {
@@ -1770,6 +1828,68 @@ func TestRunAgentHandler_FetchRunError(t *testing.T) {
 	err := handler(context.Background(), "run_agent", payload)
 	require.Error(t, err, "run_agent handler should return error when session fetch fails")
 	require.Contains(t, err.Error(), "fetch agent run", "error should mention run fetch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_PendingSessionUsesFreshRunPath(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	agentSessionID := "agent-session-1"
+	snapshotKey := "snapshot-1"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 1, &agentSessionID, &snapshotKey)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.NoError(t, err, "run_agent should succeed for a pending session")
+	require.Equal(t, 1, orch.runAgentCalls, "pending run_agent jobs should execute a fresh run")
+	require.Equal(t, 0, orch.recoverSessionCalls, "pending run_agent jobs should not enter recovery mode")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunAgentHandler_RunningSessionUsesRecoveryPath(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	agentSessionID := "agent-session-1"
+	snapshotKey := "snapshot-1"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusRunning), 1, &agentSessionID, &snapshotKey)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.NoError(t, err, "run_agent should succeed for a reclaimed running session")
+	require.Equal(t, 0, orch.runAgentCalls, "reclaimed running sessions should not restart from scratch")
+	require.Equal(t, 1, orch.recoverSessionCalls, "reclaimed running sessions should recover from the durable checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

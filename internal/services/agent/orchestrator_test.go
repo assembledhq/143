@@ -674,6 +674,136 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
+func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusRunning)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.AgentSessionID = strPtr("agent-session-1")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue from the last checkpoint.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "recovery should resume in continuation mode")
+		require.Equal(t, "agent-session-1", prompt.ResumeSessionID, "recovery should pass through the committed agent session id")
+		return &agent.AgentResult{
+			Summary:             "Recovered and continued the turn",
+			ConfidenceScore:     0.88,
+			ConfidenceReasoning: "checkpoint restore succeeded",
+			ExitCode:            0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("checkpoint-bytes"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RecoverSession(context.Background(), session)
+	require.NoError(t, err, "RecoverSession should resume from the committed checkpoint")
+
+	turnUpdates := d.sessions.getTurnUpdates()
+	require.Len(t, turnUpdates, 1, "recovery should complete the resumed turn")
+	require.Equal(t, 2, turnUpdates[0].turn, "recovery should advance from the committed checkpoint turn")
+	require.Contains(t, d.sessions.getStatusUpdates(), "running", "recovery should transition the session back to running during replay")
+	require.Empty(t, d.sessions.getResultUpdates(), "recovery should stay on the interactive turn-complete path, not final result update")
+}
+
+func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Status = string(models.SessionStatusRunning)
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "Restarted cleanly",
+			ConfidenceScore:     0.91,
+			ConfidenceReasoning: "fresh restart",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RecoverSession(context.Background(), run)
+	require.NoError(t, err, "RecoverSession should restart cleanly when no checkpoint exists")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "restart should follow the normal run result path")
+	require.Equal(t, "completed", results[0].status, "restart should complete the run from scratch")
+	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+}
+
+func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.Status = string(models.SessionStatusRunning)
+
+	d := defaultDeps()
+	d.sessions.countRunning = 1
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:             "Recovered by restarting cleanly",
+			ConfidenceScore:     0.91,
+			ConfidenceReasoning: "fresh restart after pre-checkpoint worker loss",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		SessionMessages:  d.messages,
+		DecisionLog:      d.decisions,
+		ProjectTasks:     d.projects,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		Jobs:             d.jobs,
+		GitHub:           d.github,
+		CodexAuth:        d.codexAuth,
+		Credentials:      d.creds,
+		Snapshots:        d.snapshots,
+		Cancels:          d.cancels,
+		Logger:           zerolog.Nop(),
+		MaxConcurrent:    1,
+	})
+
+	err := orch.RecoverSession(context.Background(), run)
+	require.NoError(t, err, "RecoverSession should ignore the recovering session's own running slot when restarting")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "restart should still complete the run")
+	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
+	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+}
+
 // TestRunAgent_PreviewHoldsContainerSkipsDestroy covers the branch where
 // ReleaseTurnHold reports destroyNow=false (a preview is holding the
 // sandbox) so the deferred cleanup leaves the container alive

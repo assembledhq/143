@@ -125,7 +125,7 @@ type MemoryReinforcer interface {
 
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
-	Orchestrator    *agent.Orchestrator
+	Orchestrator    orchestratorService
 	Validation      *validation.Service
 	PR              *ghservice.PRService
 	Failure         *agent.FailureService
@@ -138,6 +138,13 @@ type Services struct {
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
+}
+
+type orchestratorService interface {
+	RunAgent(ctx context.Context, run *models.Session) error
+	ContinueSession(ctx context.Context, session *models.Session) error
+	RecoverSession(ctx context.Context, session *models.Session) error
+	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 }
 
 // llmClient is the interface for LLM completion calls used by eval graders.
@@ -801,7 +808,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Dur("session_timeout", sessionTimeout).
 			Msg("starting run_agent job")
 
-		if err := services.Orchestrator.RunAgent(jobCtx, &run); err != nil {
+		var runErr error
+		switch models.SessionStatus(run.Status) {
+		case models.SessionStatusRunning:
+			runErr = services.Orchestrator.RecoverSession(jobCtx, &run)
+		default:
+			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
+		}
+		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrConcurrencyLimit) {
 				// If the session has been pending for too long, fail it
 				// instead of retrying indefinitely.

@@ -207,6 +207,15 @@ type Orchestrator struct {
 	cancels           *CancelRegistry
 }
 
+// DurableCheckpoint is the latest fully committed resume boundary for a
+// session. Recovery may resume from this checkpoint, but never from newer
+// in-memory state that was not durably persisted.
+type DurableCheckpoint struct {
+	Turn           int
+	SnapshotKey    string
+	AgentSessionID string
+}
+
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
 	Provider         SandboxProvider
@@ -270,6 +279,47 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 }
 
+// RecoverSession resumes an interrupted session from its latest committed
+// checkpoint when one exists. If the session has no durable checkpoint yet,
+// it restarts the run from scratch.
+func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Session) error {
+	log := o.logger.With().
+		Str("session_id", session.ID.String()).
+		Str("org_id", session.OrgID.String()).
+		Logger()
+
+	checkpoint, ok := latestDurableCheckpoint(session)
+	if !ok {
+		log.Info().Msg("recovery requested with no durable checkpoint; restarting session from scratch")
+		return o.RunAgent(ctx, session)
+	}
+
+	event := log.Info().Int("checkpoint_turn", checkpoint.Turn)
+	if checkpoint.SnapshotKey != "" {
+		event = event.Str("snapshot_key", checkpoint.SnapshotKey)
+	}
+	if checkpoint.AgentSessionID != "" {
+		event = event.Str("agent_session_id", checkpoint.AgentSessionID)
+	}
+	event.Msg("recovering session from latest durable checkpoint")
+
+	return o.ContinueSession(ctx, session)
+}
+
+func latestDurableCheckpoint(session *models.Session) (DurableCheckpoint, bool) {
+	checkpoint := DurableCheckpoint{Turn: session.CurrentTurn}
+	if session.SnapshotKey != nil {
+		checkpoint.SnapshotKey = *session.SnapshotKey
+	}
+	if session.AgentSessionID != nil {
+		checkpoint.AgentSessionID = *session.AgentSessionID
+	}
+	if checkpoint.Turn <= 0 && checkpoint.SnapshotKey == "" && checkpoint.AgentSessionID == "" {
+		return DurableCheckpoint{}, false
+	}
+	return checkpoint, true
+}
+
 // RunAgent is the main entry point. It executes an agent run end-to-end:
 // concurrency check → sandbox creation → repo clone → agent execution →
 // result handling → follow-up job enqueuing → sandbox cleanup.
@@ -289,7 +339,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Logger()
 
 	// 1. Concurrency check.
-	if err := o.checkConcurrency(ctx, run.OrgID); err != nil {
+	if err := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning); err != nil {
 		log.Info().Err(err).Msg("concurrency limit reached, run stays pending")
 		return err
 	}
@@ -1438,10 +1488,15 @@ func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
 }
 
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit.
-func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID) error {
+// excludeCurrentRunning should be true when re-entering RunAgent for a session
+// that is already marked running, so recovery does not deadlock on its own slot.
+func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
 	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("count running runs: %w", err)
+	}
+	if excludeCurrentRunning && count > 0 {
+		count--
 	}
 	if count >= o.maxConcurrent {
 		return fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, o.maxConcurrent)
