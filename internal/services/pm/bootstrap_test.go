@@ -106,7 +106,7 @@ func (m *mockPMDocStore) WithTx(_ pgx.Tx) *db.PMDocumentStore {
 type mockTx struct{ pgx.Tx }
 
 func (mockTx) Commit(_ context.Context) error   { return nil }
-func (mockTx) Rollback(_ context.Context) error  { return nil }
+func (mockTx) Rollback(_ context.Context) error { return nil }
 
 // --- mock credential store ---
 
@@ -299,37 +299,24 @@ func TestConnectedProviderNames_Empty(t *testing.T) {
 	require.Empty(t, names)
 }
 
-func TestResolveBootstrapEnv(t *testing.T) {
+func TestApplyGitHubEnv(t *testing.T) {
 	t.Parallel()
 
-	creds := &integrationCredentials{
-		sentry: &models.DecryptedCredential{Config: models.SentryConfig{AccessToken: "s-tok", OrgSlug: "my-org"}},
-		linear: &models.DecryptedCredential{Config: models.LinearConfig{AccessToken: "l-tok"}},
-		notion: &models.DecryptedCredential{Config: models.NotionConfig{AccessToken: "n-tok"}},
-	}
 	repo := &models.Repository{FullName: "octocat/hello-world"}
-
-	env := resolveBootstrapEnv(creds, "gh-tok", repo)
+	env := map[string]string{}
+	applyGitHubEnv(env, "gh-tok", repo)
 
 	require.Equal(t, "gh-tok", env["GITHUB_TOKEN"])
 	require.Equal(t, "octocat", env["GITHUB_REPO_OWNER"])
 	require.Equal(t, "hello-world", env["GITHUB_REPO_NAME"])
-	require.Equal(t, "s-tok", env["SENTRY_AUTH_TOKEN"])
-	require.Equal(t, "my-org", env["SENTRY_ORG_SLUG"])
-	require.Equal(t, "l-tok", env["LINEAR_ACCESS_TOKEN"])
-	require.Equal(t, "n-tok", env["NOTION_ACCESS_TOKEN"])
 }
 
-func TestResolveBootstrapEnv_EmptyCredentials(t *testing.T) {
+func TestApplyGitHubEnv_EmptyInputs(t *testing.T) {
 	t.Parallel()
 
-	creds := &integrationCredentials{}
-	env := resolveBootstrapEnv(creds, "", nil)
-
-	require.Empty(t, env["GITHUB_TOKEN"])
-	require.Empty(t, env["SENTRY_AUTH_TOKEN"])
-	require.Empty(t, env["LINEAR_ACCESS_TOKEN"])
-	require.Empty(t, env["NOTION_ACCESS_TOKEN"])
+	env := map[string]string{}
+	applyGitHubEnv(env, "", nil)
+	require.Empty(t, env, "empty ghToken and nil repo should leave env untouched")
 }
 
 func TestBootstrapSandboxConfig(t *testing.T) {
