@@ -148,8 +148,36 @@ func main() {
 
 	// Snapshot store is shared across API (preview hydrate) and worker
 	// (agent orchestrator). Constructed once so both paths agree on the
-	// storage directory.
-	apiSnapshotStore := storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)
+	// configured backend and object key layout.
+	apiSnapshotStore, snapshotStoreInfo, err := storage.BuildSnapshotStore(ctx, storage.SnapshotStoreConfig{
+		StorageDir:     cfg.SnapshotStorageDir,
+		S3Bucket:       cfg.SnapshotS3Bucket,
+		S3Prefix:       cfg.SnapshotS3Prefix,
+		S3Region:       cfg.SnapshotS3Region,
+		S3Endpoint:     cfg.SnapshotS3Endpoint,
+		S3UsePathStyle: cfg.SnapshotS3UsePathStyle,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize snapshot store")
+	}
+	snapshotLog := logger.Info().
+		Str("backend", snapshotStoreInfo.Backend)
+	if snapshotStoreInfo.StorageDir != "" {
+		snapshotLog = snapshotLog.Str("storage_dir", snapshotStoreInfo.StorageDir)
+	}
+	if snapshotStoreInfo.Bucket != "" {
+		snapshotLog = snapshotLog.Str("bucket", snapshotStoreInfo.Bucket)
+	}
+	if snapshotStoreInfo.Prefix != "" {
+		snapshotLog = snapshotLog.Str("prefix", snapshotStoreInfo.Prefix)
+	}
+	if snapshotStoreInfo.EndpointHost != "" {
+		snapshotLog = snapshotLog.Str("endpoint_host", snapshotStoreInfo.EndpointHost)
+	}
+	if snapshotStoreInfo.Backend == "s3" {
+		snapshotLog = snapshotLog.Bool("use_path_style", snapshotStoreInfo.UsePathStyle)
+	}
+	snapshotLog.Msg("snapshot store configured")
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	// Shared org-settings cache: the settings handler invalidates it on write,

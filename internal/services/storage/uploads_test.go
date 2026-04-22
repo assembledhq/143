@@ -20,6 +20,7 @@ type mockS3Client struct {
 	getObjectFunc    func(ctx context.Context, input *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	putObjectFunc    func(ctx context.Context, input *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	deleteObjectFunc func(ctx context.Context, input *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	headBucketFunc   func(ctx context.Context, input *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
 }
 
 func (m *mockS3Client) GetObject(ctx context.Context, input *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
@@ -39,6 +40,13 @@ func (m *mockS3Client) PutObject(ctx context.Context, input *s3.PutObjectInput, 
 func (m *mockS3Client) DeleteObject(ctx context.Context, input *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
 	if m.deleteObjectFunc != nil {
 		return m.deleteObjectFunc(ctx, input, optFns...)
+	}
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockS3Client) HeadBucket(ctx context.Context, input *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	if m.headBucketFunc != nil {
+		return m.headBucketFunc(ctx, input, optFns...)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
