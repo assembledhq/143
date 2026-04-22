@@ -27,6 +27,9 @@ export const queryKeys = {
     summary: ["repositories", "summary"] as const,
     branches: (id: string) => ["repositories", id, "branches"] as const,
   },
+  sessionComposer: {
+    files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,
+  },
   projects: {
     all: ["projects"] as const,
     list: (params?: { repo?: string | null; search?: string }) => ["projects", params] as const,

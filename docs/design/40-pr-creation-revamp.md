@@ -735,7 +735,7 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 | Field | Source |
 |-------|--------|
-| PR title | `session.Title` (set by user or agent), falling back to first line of `ResultSummary`, falling back to `"Session {id[:8]}"` |
+| PR title | First-line `ResultSummary` when available, with minimal cleanup (trim/collapse whitespace, strip surrounding quotes, cap length); otherwise the cleaned `session.Title`, falling back to `"Session {id[:8]}"` |
 | PR body summary | `session.ResultSummary` |
 | Branch name | `143/{id[:8]}/{slugified-title}` — drop the `fix/` prefix for non-issue sessions |
 | Commit message | `session.Title` or `ResultSummary` first line |
@@ -745,22 +745,20 @@ Make `IssueID` optional in the PR creation path. The session itself has enough c
 
 ```go
 func formatPRTitle(session *models.Session, issue *models.Issue) string {
-    // Issue-based sessions: keep current behavior
     if issue != nil {
         switch issue.Source {
         case models.IssueSourceLinear:
-            return fmt.Sprintf("%s: %s", issue.ExternalID, issue.Title)
+            return fmt.Sprintf("%s: %s", issue.ExternalID, normalizePRTitleCandidate(issue.Title))
         default:
-            return fmt.Sprintf("fix: %s", issue.Title)
+            return fmt.Sprintf("fix: %s", bestPRTitleSubject(session, issue.Title))
         }
     }
 
-    // Issueless sessions: use session title
-    if session.Title != nil && *session.Title != "" {
-        return *session.Title
-    }
     if session.ResultSummary != nil && *session.ResultSummary != "" {
-        return firstLine(*session.ResultSummary)
+        return normalizePRTitleCandidate(firstLine(*session.ResultSummary))
+    }
+    if session.Title != nil && *session.Title != "" {
+        return normalizePRTitleCandidate(*session.Title)
     }
     return fmt.Sprintf("Session %s", session.ID.String()[:8])
 }
@@ -780,6 +778,8 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
     return fmt.Sprintf("143/%s/%s", short, slug)
 }
 ```
+
+`normalizePRTitleCandidate` is intentionally minimal. It collapses whitespace, trims surrounding quotes, strips trailing punctuation, and caps the final title length, but it does not try to paraphrase or reinterpret the title text. The LLM should generate the actual reviewer-facing phrasing; fallback logic should stay deterministic and simple.
 
 ### 5.4 Updated CreatePR Flow
 

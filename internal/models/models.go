@@ -45,13 +45,14 @@ type AuthSession struct {
 }
 
 type Integration struct {
-	ID           uuid.UUID           `db:"id" json:"id"`
-	OrgID        uuid.UUID           `db:"org_id" json:"org_id"`
-	Provider     IntegrationProvider `db:"provider" json:"provider"`
-	Config       json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
-	Status       IntegrationStatus   `db:"status" json:"status"`
-	LastSyncedAt *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	CreatedAt    time.Time           `db:"created_at" json:"created_at"`
+	ID                 uuid.UUID           `db:"id" json:"id"`
+	OrgID              uuid.UUID           `db:"org_id" json:"org_id"`
+	Provider           IntegrationProvider `db:"provider" json:"provider"`
+	Config             json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
+	GitHubAppInstalled *bool               `db:"-" json:"github_app_installed,omitempty"`
+	Status             IntegrationStatus   `db:"status" json:"status"`
+	LastSyncedAt       *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	CreatedAt          time.Time           `db:"created_at" json:"created_at"`
 }
 
 type Repository struct {
@@ -296,17 +297,18 @@ type SessionLog struct {
 
 // SessionMessage represents a chat message in a multi-turn session.
 type SessionMessage struct {
-	ID          int64           `db:"id" json:"id"`
-	SessionID   uuid.UUID       `db:"session_id" json:"session_id"`
-	OrgID       uuid.UUID       `db:"org_id" json:"org_id"`
-	ThreadID    *uuid.UUID      `db:"thread_id" json:"thread_id,omitempty"`
-	UserID      *uuid.UUID      `db:"user_id" json:"user_id,omitempty"`
-	TurnNumber  int             `db:"turn_number" json:"turn_number"`
-	Role        MessageRole     `db:"role" json:"role"`
-	Content     string          `db:"content" json:"content"`
-	Attachments []string        `db:"attachments" json:"attachments,omitempty"`
-	TokenUsage  json.RawMessage `db:"token_usage" json:"token_usage,omitempty"`
-	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
+	ID          int64                  `db:"id" json:"id"`
+	SessionID   uuid.UUID              `db:"session_id" json:"session_id"`
+	OrgID       uuid.UUID              `db:"org_id" json:"org_id"`
+	ThreadID    *uuid.UUID             `db:"thread_id" json:"thread_id,omitempty"`
+	UserID      *uuid.UUID             `db:"user_id" json:"user_id,omitempty"`
+	TurnNumber  int                    `db:"turn_number" json:"turn_number"`
+	Role        MessageRole            `db:"role" json:"role"`
+	Content     string                 `db:"content" json:"content"`
+	Attachments []string               `db:"attachments" json:"attachments,omitempty"`
+	References  SessionInputReferences `db:"references" json:"references,omitempty"`
+	TokenUsage  json.RawMessage        `db:"token_usage" json:"token_usage,omitempty"`
+	CreatedAt   time.Time              `db:"created_at" json:"created_at"`
 }
 
 // SessionThread represents an agent thread within a multi-agent session.

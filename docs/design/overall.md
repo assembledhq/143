@@ -41,7 +41,8 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
-    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit.
+    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, voice dictation, and repository-aware `@` mentions for files/directories without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit.
+    - Manual session `@` mentions are persisted as **structured input references** alongside the visible prompt text. The backend stores canonical reference metadata on the initial session message and lets each agent adapter translate those references into the downstream agent's native prompt/input format.
     - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Follow-up messages also resume paused sessions such as `awaiting_input`, `needs_human_guidance`, and completed terminal states from the saved snapshot when one still exists. Validation/PR creation only start when the user explicitly ends the session.
     - Snapshot persistence failures should be surfaced distinctly from true retention expiry. When the system cannot restore a prior sandbox because no snapshot was saved or the blob became unavailable, the UI should report that the snapshot is unavailable and prompt the user to send a new message to rebuild the sandbox, rather than implying the 30-day reaper expired it.
     - Multi-node deployments use shared object storage for session snapshots rather than node-local disk so worker-written snapshots can be hydrated later by API nodes; see [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
@@ -63,7 +64,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         5. the code passes all CI/CD checks and coverage is not reduced
 - Step 5: Open PR and ship
     - The system opens a new PR on github, using whatever Github template already exists. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
-    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint
+    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint, while keeping title cleanup minimal and relying on the LLM to generate the reviewer-facing phrasing when available
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
 - Step 6: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.
@@ -265,8 +266,9 @@ When an experiment outcome is `regression`:
 - **Database Driver**: `jackc/pgx` — fastest Go Postgres driver
 - **Database Access**: Direct pgx v5 — type-safe store functions with `CollectRows`/`RowToStructByName`, no ORM or codegen
 - **Migrations**: `golang-migrate/migrate`
-- **Logging**: `rs/zerolog` -> Mezmo (log aggregation)
-- **Monitoring**: Datadog (`DataDog/datadog-go` + `DataDog/dd-trace-go`) for metrics, APM, alerting
+- **Logging**: `rs/zerolog` -> Vector -> VictoriaLogs/Grafana
+- **Error Tracking**: Sentry for frontend exceptions today; backend exception capture should converge there as well
+- **Monitoring & Alerting**: Grafana is the operational control plane for logs, alerting, and notification routing. See [54-production-alerting.md](54-production-alerting.md)
 - **Container Management**: Docker SDK (`docker/docker`)
 
 ## Frontend: Next.js + React + shadcn/ui
@@ -290,8 +292,9 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 ## Logging & Monitoring
 
-- **Mezmo**: Primary log aggregation. Structured JSON logs shipped via Mezmo's ingestion API. Used for log search, alerting, and archival.
-- **Datadog**: Primary monitoring/observability. Custom metrics (HTTP, job queue, agent runs, cluster health), APM distributed tracing, pre-built dashboards, and alerting. Also used as a metrics source for Step 6 experiment evaluation (pull production latency/error rates to measure fix impact).
+- **VictoriaLogs + Grafana**: Primary centralized logging and operational alerting. Structured JSON logs are shipped by Vector and queried in Grafana. This is the current production observability backbone.
+- **Sentry**: Primary exception monitoring and developer-facing error triage. Frontend SDKs are already configured; backend exception capture should be added so Sentry becomes the system of record for application errors.
+- **Alerting model**: Page on aggregated service symptoms in Grafana; send exception issues from Sentry primarily to Slack unless they meet a paging threshold. See [54-production-alerting.md](54-production-alerting.md).
 
 # Build Order
 
