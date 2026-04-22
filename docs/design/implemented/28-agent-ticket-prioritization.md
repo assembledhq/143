@@ -266,7 +266,7 @@ The PM agent runs on a straightforward cron schedule. No complex trigger logic.
 ┌─────────────────────────────────────────────────────┐
 │  Scheduler (existing scheduler_lock.go)             │
 │                                                     │
-│  Every N hours (configurable per org, default: 4h): │
+│  Every N hours (configurable per org, default: 24h): │
 │    For each org with active integrations:            │
 │      Enqueue "pm_analyze" job                       │
 │                                                     │
@@ -282,7 +282,7 @@ The PM agent runs on a straightforward cron schedule. No complex trigger logic.
 - Avoids the complexity of counter-based triggers, race conditions, and "how often is too often" tuning
 - Admins can always trigger manually when something urgent comes in
 
-**Org setting:** `pm_schedule_hours` (default: `4`). The scheduler checks `last_pm_run_at + pm_schedule_hours < now()` for each org.
+**Org setting:** `pm_schedule_hours` (default: `24`). The scheduler checks `last_pm_run_at + pm_schedule_hours < now()` for each org.
 
 ### 2. The PM Agent
 
@@ -971,7 +971,7 @@ Existing endpoints are unchanged. The `GET /api/v1/runs/{id}` response gains the
 
 ```go
 // New fields in OrgSettings:
-PMScheduleHours  int              `json:"pm_schedule_hours"`  // hours between PM runs (default: 4)
+PMScheduleHours  int              `json:"pm_schedule_hours"`  // hours between PM runs (default: 24)
 PMModel          string           `json:"pm_model"`           // LLM model for PM agent (default: "sonnet")
 ProductContext   *ProductContext  `json:"product_context,omitempty"` // replaces product_direction string
 ```
@@ -1145,7 +1145,7 @@ The PM has full repo access and could spend its entire 10-minute timeout reading
 
 ### Risk 2: Stale plans
 
-If the PM runs every 4 hours and a P0 Sentry error arrives at hour 0:05, it waits ~4 hours. Meanwhile, the admin sees it in the dashboard but there's no automated response.
+If the PM runs every 24 hours and a P0 Sentry error arrives at hour 0:05, it waits ~24 hours. Meanwhile, the admin sees it in the dashboard but there's no automated response.
 
 **Mitigation:**
 - The existing "Fix This" button on individual issues still works — it bypasses the PM and creates a direct agent run via `CheckAutoTrigger()`.

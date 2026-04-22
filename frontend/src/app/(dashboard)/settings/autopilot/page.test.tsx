@@ -28,7 +28,6 @@ describe("AutopilotSettingsPage", () => {
           id: "org-1",
           name: "Org",
           settings: {
-            pm_schedule_hours: 4,
             pm_model: "claude-sonnet-4-5",
             default_agent_type: "codex",
             agent_config: {},
@@ -43,7 +42,7 @@ describe("AutopilotSettingsPage", () => {
     renderWithProviders(<AutopilotSettingsPage />);
 
     expect(await screen.findByText("Autopilot")).toBeInTheDocument();
-    expect(await screen.findByLabelText("Schedule (hours)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Schedule (hours)")).toHaveValue(24);
     expect(screen.getByLabelText("PM model")).toBeInTheDocument();
     expect(screen.queryByText("Reference documents")).not.toBeInTheDocument();
     expect(screen.queryByText("Priority weights")).not.toBeInTheDocument();
