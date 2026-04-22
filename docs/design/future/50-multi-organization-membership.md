@@ -1,8 +1,8 @@
 # Design: Multi-Organization Membership
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-18
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 >
-> **Depends on:** [01-database-schema.md](../01-database-schema.md), [03-frontend.md](../03-frontend.md), [20-security-architecture.md](../20-security-architecture.md), [34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md)
+> **Depends on:** [01-database-schema.md](../01-database-schema.md), [03-frontend.md](../03-frontend.md), [20-security-architecture.md](../implemented/20-security-architecture.md), [34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md)
 
 ## Problem
 
@@ -149,7 +149,7 @@ Behavior:
 - Selecting an org updates the active-org React context (so in-flight requests immediately carry the new `X-Active-Org-ID`), calls `POST /auth/active-org` to persist the bootstrap hint, invalidates the React Query cache, and reloads the current page. A clean reload is simpler and safer than trying to diff state across every open view.
 - Switching org **clears the `?repo=` query param**, since repos are org-scoped. Enforced by the switcher's onChange, not left to callers.
 
-The switcher should eventually be exposed as a command-palette entry (see [45-global-command-palette.md](45-global-command-palette.md)) so keyboard users never need to mouse to the sidebar. This is not required for the initial membership cutover.
+The switcher should eventually be exposed as a command-palette entry (see [45-global-command-palette.md](../implemented/45-global-command-palette.md)) so keyboard users never need to mouse to the sidebar. This is not required for the initial membership cutover.
 
 ### Deep-link handling
 

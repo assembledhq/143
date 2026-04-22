@@ -1,12 +1,11 @@
 # 34 - Repo Context Switcher: Repository-Scoped Navigation
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 >
 > **Implementation notes:** Backend repo summary endpoint and filtering implemented. Missing/unclear: frontend `RepoContextSwitcher` component, repo badges on rows, localStorage/URL param context persistence.
 
 > Give multi-repo users a global repo context selector that scopes all navigation, while keeping single-repo users' experience unchanged.
 
-**Status:** Proposal
 **Depends on:** [03-frontend.md](03-frontend.md), [29-projects.md](29-projects.md), [30-pm-agent-ux-elevation.md](30-pm-agent-ux-elevation.md)
 
 ---

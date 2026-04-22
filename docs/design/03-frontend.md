@@ -1,6 +1,6 @@
 # Design: Frontend Architecture
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 
 This document defines the frontend architecture for 143.dev.
 
@@ -12,7 +12,7 @@ Every page answers: **"What should I do next?"** If a page is purely information
 
 These patterns apply across every page. They are not optional — they define the baseline interaction quality.
 
-- **Cmd+K command palette** — Global fuzzy search across all entities (issues, runs, settings, actions). Single entry point for keyboard-driven navigation. Inspired by Linear's command palette — covers navigation, actions, and search without requiring menu interaction. Detailed design: [45-global-command-palette.md](45-global-command-palette.md).
+- **Cmd+K command palette** — Global fuzzy search across all entities (issues, runs, settings, actions). Single entry point for keyboard-driven navigation. Inspired by Linear's command palette — covers navigation, actions, and search without requiring menu interaction. Detailed design: [45-global-command-palette.md](implemented/45-global-command-palette.md).
 - **Keyboard-first navigation** — J/K keys for list navigation on all table/list pages. Space bar for peek preview (opens a side panel with summary details without full navigation). Single-key shortcuts for common actions. The mouse is secondary for power users.
 - **Consistent `StatusDot` component** — A single status indicator component used on every surface: sidebar badges, run list rows, Fix Queue items, browser tab favicon. Nine states mapping to the full run lifecycle (running / awaiting_input / needs_guidance / resumed_locally / completed / pr_open / in_review / merged / failed) with unambiguous colors. `awaiting_input` and `needs_guidance` use a pulsing amber dot to signal "needs you." `resumed_locally` uses a blue dot to signal "human is driving." Never invent different status representations for different pages.
 - **Confidence as English labels** — Never show raw confidence scores (0.73) to users. Map scores to clear labels: "High confidence — will auto-proceed" / "Medium — needs your review" / "Low — blocked for approval". The score can be available in a tooltip for power users, but the label is the primary display.
@@ -251,7 +251,7 @@ Recent failures (last 7 days), sorted by recency. Each row:
 - One-sentence failure explanation inline (not hidden behind a click)
 - "Retry" button if `retry_advised` is true, "View Details" otherwise
 
-This section is critical for trust-building. See [17-failure-communication.md](17-failure-communication.md) for how failure explanations are generated.
+This section is critical for trust-building. See [17-failure-communication.md](implemented/17-failure-communication.md) for how failure explanations are generated.
 
 **4. Shipped — "What impact has the system had?"**
 
@@ -261,7 +261,7 @@ Recently deployed fixes (last 7 days) with impact data when available. Each row:
 
 This section closes the loop. Users see that fixes they approved actually worked. It also builds the case for increasing the system's autonomy.
 
-**Fix rate in the header** — The fix success rate (trailing 30 days, e.g., "42%") is displayed as a single line in the page header with a green/yellow/red `StatusDot` and breakdown by issue type available on hover. This sets expectations honestly — see [17-failure-communication.md](17-failure-communication.md).
+**Fix rate in the header** — The fix success rate (trailing 30 days, e.g., "42%") is displayed as a single line in the page header with a green/yellow/red `StatusDot` and breakdown by issue type available on hover. This sets expectations honestly — see [17-failure-communication.md](implemented/17-failure-communication.md).
 
 #### Empty States
 

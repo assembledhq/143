@@ -1,6 +1,6 @@
 # Design: AI Agent Evaluation System
 
-> **Status:** Not Started | **Last reviewed:** 2026-03-19
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 
 ## Overview
 
@@ -241,7 +241,7 @@ This creates compounding reliability over time.
 - [01-database-schema.md](01-database-schema.md): prompt/eval tables and encrypted example fields.
 - [02-api-server.md](02-api-server.md): prompt/eval endpoints, jobs, and scheduler hooks.
 - [03-frontend.md](03-frontend.md): Prompts/Evals/Rollouts settings UX.
-- [20-security-architecture.md](20-security-architecture.md): tenant isolation, encryption, and redaction controls.
+- [20-security-architecture.md](../implemented/20-security-architecture.md): tenant isolation, encryption, and redaction controls.
 
 ## External Practices Incorporated (Reviewed Feb 16, 2026)
 
