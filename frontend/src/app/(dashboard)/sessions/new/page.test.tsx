@@ -329,6 +329,51 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
+  it('anchors the mention picker above the composer', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'file',
+            token: '@internal/api/handlers/sessions.go',
+            path: 'internal/api/handlers/sessions.go',
+            display: 'internal/api/handlers/sessions.go',
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.type(screen.getByPlaceholderText('Tell the agent what to do...'), 'Inspect @sess');
+
+    const picker = await screen.findByTestId('mention-picker');
+    expect(picker).toHaveClass('absolute');
+    expect(picker).toHaveClass('bottom-full');
+  });
+
   it('drops the selected reference chip when the inserted mention token is edited', async () => {
     const user = userEvent.setup();
 

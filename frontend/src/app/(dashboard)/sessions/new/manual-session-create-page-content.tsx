@@ -449,287 +449,292 @@ export function ManualSessionCreatePageContent() {
 
       {/* Composer pinned to bottom */}
       <div className="shrink-0 px-4 pb-4">
-        <Card className="w-full max-w-3xl mx-auto border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
-          <CardContent className="space-y-0 p-4">
-            <Textarea
-              ref={messageInputRef}
-              value={message}
-              onChange={(event) => {
-                updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
-                resizeMessageInput();
-              }}
-              onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
-              onKeyDown={(event) => {
-                if (showMentionPicker && fileMentions.length > 0) {
-                  if (event.key === "ArrowDown") {
-                    event.preventDefault();
-                    setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
-                    return;
+        <div className="relative w-full max-w-3xl mx-auto">
+          {showMentionPicker && (
+            <Card
+              data-testid="mention-picker"
+              className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden border-border/70 bg-background/95 shadow-lg backdrop-blur-sm"
+            >
+              <CardContent className="p-2">
+                <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                  Files and directories
+                </div>
+                {fileMentionsLoading && (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
+                )}
+                {!fileMentionsLoading && fileMentions.length === 0 && (
+                  <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
+                )}
+                {!fileMentionsLoading && fileMentions.length > 0 && (
+                  <div className="max-h-[min(20rem,calc(100vh-16rem))] space-y-1 overflow-y-auto">
+                    {fileMentions.map((reference, index) => (
+                      <Button
+                        key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                        type="button"
+                        variant="ghost"
+                        className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => applyMention(reference)}
+                      >
+                        {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
+                        <span className="truncate text-xs">{reference.display}</span>
+                      </Button>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className="w-full rounded-2xl border-border/60 bg-card shadow-lg dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]">
+            <CardContent className="space-y-0 p-4">
+              <Textarea
+                ref={messageInputRef}
+                value={message}
+                onChange={(event) => {
+                  updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
+                  resizeMessageInput();
+                }}
+                onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+                onKeyDown={(event) => {
+                  if (showMentionPicker && fileMentions.length > 0) {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
+                      return;
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
+                      return;
+                    }
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      applyMention(fileMentions[selectedMentionIndex]);
+                      return;
+                    }
                   }
-                  if (event.key === "ArrowUp") {
+                  if (showMentionPicker && event.key === "Escape") {
                     event.preventDefault();
-                    setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
+                    setMentionDismissed(true);
                     return;
                   }
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    applyMention(fileMentions[selectedMentionIndex]);
-                    return;
+                    submitManualSession();
                   }
-                }
-                if (showMentionPicker && event.key === "Escape") {
-                  event.preventDefault();
-                  setMentionDismissed(true);
-                  return;
-                }
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submitManualSession();
-                }
-              }}
-              placeholder="Tell the agent what to do..."
-              rows={1}
-              disabled={createManualSessionMutation.isPending}
-              className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
-              aria-label="Manual session prompt"
-            />
-
-            {showMentionPicker && (
-              <Card className="mb-3 overflow-hidden border-border/70 shadow-sm">
-                <CardContent className="p-2">
-                  <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                    Files and directories
-                  </div>
-                  {fileMentionsLoading && (
-                    <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
-                  )}
-                  {!fileMentionsLoading && fileMentions.length === 0 && (
-                    <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
-                  )}
-                  {!fileMentionsLoading && fileMentions.length > 0 && (
-                    <div className="space-y-1">
-                      {fileMentions.map((reference, index) => (
-                        <Button
-                          key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
-                          type="button"
-                          variant="ghost"
-                          className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => applyMention(reference)}
-                        >
-                          {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
-                          <span className="truncate text-xs">{reference.display}</span>
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-
-            {references.length > 0 && (
-              <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
-                {references.map((reference) => (
-                  <Badge
-                    key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
-                    variant="secondary"
-                    className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
-                  >
-                    {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
-                    <span className="max-w-[18rem] truncate">{reference.display}</span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5 rounded-full"
-                      aria-label={`Remove ${reference.display}`}
-                      onClick={() => removeReference(reference)}
-                    >
-                      <X className="h-3 w-3" />
-                    </Button>
-                  </Badge>
-                ))}
-              </div>
-            )}
-
-            <PendingAttachmentStrip
-              attachments={attachments}
-              isUploading={isUploading}
-              onRemove={removeAttachment}
-              size="md"
-              className="pb-3"
-            />
-
-            {showImageInput && (
-              <div className="flex items-center gap-2 pb-3">
-                <Input
-                  value={imageURL}
-                  onChange={(event) => setImageURL(event.target.value)}
-                  placeholder="https://example.com/screenshot.png"
-                  aria-label="Image URL"
-                />
-                <Button type="button" variant="outline" onClick={addImageURL}>
-                  Add
-                </Button>
-              </div>
-            )}
-
-            <div className="flex items-center gap-1 pt-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
-                    <Plus className="h-5 w-5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
-                    <Paperclip className="mr-2 h-4 w-4" />
-                    Upload files or photos
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                    <ImagePlus className="mr-2 h-4 w-4" />
-                    Add image URL
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              <Input
-                ref={uploadInputRef}
-                type="file"
-                accept="image/*,.pdf,.txt,.md,.json,.csv"
-                multiple
-                className="hidden"
-                onChange={onUploadChange}
+                }}
+                placeholder="Tell the agent what to do..."
+                rows={1}
+                disabled={createManualSessionMutation.isPending}
+                className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
+                aria-label="Manual session prompt"
               />
 
-              {repositories.length > 0 && (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+              {references.length > 0 && (
+                <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
+                  {references.map((reference) => (
+                    <Badge
+                      key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                      variant="secondary"
+                      className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
                     >
-                      <GitBranch className="h-3.5 w-3.5" />
-                      <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
-                      <ChevronDown className="h-3 w-3 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-72">
-                    {repositories.map((repo) => (
-                      <DropdownMenuItem
-                        key={repo.id}
-                        onClick={() => setSelectedRepoId(repo.id)}
-                        className={selectedRepoId === repo.id ? "font-medium" : ""}
+                      {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+                      <span className="max-w-[18rem] truncate">{reference.display}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5 rounded-full"
+                        aria-label={`Remove ${reference.display}`}
+                        onClick={() => removeReference(reference)}
                       >
-                        <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                        <span className="truncate">{repo.full_name}</span>
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </Badge>
+                  ))}
+                </div>
               )}
 
-              {selectedRepo && (
-                branchesFailed ? (
-                  <div className="flex items-center gap-1">
-                    <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    <Input
-                      value={selectedBranch}
-                      onChange={(e) => setSelectedBranch(e.target.value)}
-                      placeholder={selectedRepo.default_branch || "main"}
-                      className="h-7 w-36 text-xs px-2"
-                      aria-label="Target branch"
-                    />
-                  </div>
-                ) : (
+              <PendingAttachmentStrip
+                attachments={attachments}
+                isUploading={isUploading}
+                onRemove={removeAttachment}
+                size="md"
+                className="pb-3"
+              />
+
+              {showImageInput && (
+                <div className="flex items-center gap-2 pb-3">
+                  <Input
+                    value={imageURL}
+                    onChange={(event) => setImageURL(event.target.value)}
+                    placeholder="https://example.com/screenshot.png"
+                    aria-label="Image URL"
+                  />
+                  <Button type="button" variant="outline" onClick={addImageURL}>
+                    Add
+                  </Button>
+                </div>
+              )}
+
+              <div className="flex items-center gap-1 pt-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon" aria-label="Add files or photos" className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground">
+                      <Plus className="h-5 w-5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem onClick={() => uploadInputRef.current?.click()}>
+                      <Paperclip className="mr-2 h-4 w-4" />
+                      Upload files or photos
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setShowImageInput(true)}>
+                      <ImagePlus className="mr-2 h-4 w-4" />
+                      Add image URL
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Input
+                  ref={uploadInputRef}
+                  type="file"
+                  accept="image/*,.pdf,.txt,.md,.json,.csv"
+                  multiple
+                  className="hidden"
+                  onChange={onUploadChange}
+                />
+
+                {repositories.length > 0 && (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
                         variant="ghost"
                         size="sm"
                         className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
-                        aria-label="Target branch"
                       >
                         <GitBranch className="h-3.5 w-3.5" />
-                        <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
+                        <span>{selectedRepo ? selectedRepo.full_name.split("/").pop() : "Select repo"}</span>
                         <ChevronDown className="h-3 w-3 opacity-50" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
-                      {branchesLoading && (
-                        <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
-                      )}
-                      {!branchesLoading && branches.length === 0 && (
-                        <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
-                      )}
-                      {branches.map((branch) => (
+                    <DropdownMenuContent align="start" className="w-72">
+                      {repositories.map((repo) => (
                         <DropdownMenuItem
-                          key={branch.name}
-                          onClick={() => setSelectedBranch(branch.name)}
-                          className={selectedBranch === branch.name ? "font-medium" : ""}
+                          key={repo.id}
+                          onClick={() => setSelectedRepoId(repo.id)}
+                          className={selectedRepoId === repo.id ? "font-medium" : ""}
                         >
                           <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                          <span className="truncate">{branch.name}</span>
+                          <span className="truncate">{repo.full_name}</span>
                         </DropdownMenuItem>
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                )
-              )}
+                )}
 
-              <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                  <SelectValue placeholder="Default model" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__default__">Default model</SelectItem>
-                  {modelGroups.map((group) => (
-                    <SelectGroup key={group.key}>
-                      <SelectLabel>{group.label}</SelectLabel>
-                      {group.models.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ))}
-                </SelectContent>
-              </Select>
+                {selectedRepo && (
+                  branchesFailed ? (
+                    <div className="flex items-center gap-1">
+                      <GitBranch className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      <Input
+                        value={selectedBranch}
+                        onChange={(e) => setSelectedBranch(e.target.value)}
+                        placeholder={selectedRepo.default_branch || "main"}
+                        className="h-7 w-36 text-xs px-2"
+                        aria-label="Target branch"
+                      />
+                    </div>
+                  ) : (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground"
+                          aria-label="Target branch"
+                        >
+                          <GitBranch className="h-3.5 w-3.5" />
+                          <span>{selectedBranch || selectedRepo.default_branch || "main"}</span>
+                          <ChevronDown className="h-3 w-3 opacity-50" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
+                        {branchesLoading && (
+                          <DropdownMenuItem disabled>Loading branches…</DropdownMenuItem>
+                        )}
+                        {!branchesLoading && branches.length === 0 && (
+                          <DropdownMenuItem disabled>No branches found</DropdownMenuItem>
+                        )}
+                        {branches.map((branch) => (
+                          <DropdownMenuItem
+                            key={branch.name}
+                            onClick={() => setSelectedBranch(branch.name)}
+                            className={selectedBranch === branch.name ? "font-medium" : ""}
+                          >
+                            <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="truncate">{branch.name}</span>
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )
+                )}
 
-              <div className="ml-auto flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={toggleDictation}
-                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
-                  aria-label="Dictate"
-                >
-                  <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
-                </Button>
-                <Button
-                  type="button"
-                  size="icon"
-                  onClick={submitManualSession}
-                  disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
-                  className="h-8 w-8 rounded-full"
-                  aria-label="Start session"
-                >
-                  <ArrowUp className="h-4 w-4" />
-                </Button>
+                <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
+                  <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                    <SelectValue placeholder="Default model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Default model</SelectItem>
+                    {modelGroups.map((group) => (
+                      <SelectGroup key={group.key}>
+                        <SelectLabel>{group.label}</SelectLabel>
+                        {group.models.map((model) => (
+                          <SelectItem key={model} value={model}>
+                            {model}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <div className="ml-auto flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={toggleDictation}
+                    className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground"
+                    aria-label="Dictate"
+                  >
+                    <Mic className={`h-[18px] w-[18px] ${isDictating ? "text-primary" : ""}`} />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    onClick={submitManualSession}
+                    disabled={message.trim().length === 0 || createManualSessionMutation.isPending}
+                    className="h-8 w-8 rounded-full"
+                    aria-label="Start session"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
-            </div>
 
-            {dictationError && (
-              <p className="pt-2 text-xs text-destructive">{dictationError}</p>
-            )}
-            {creationError && (
-              <p className="pt-2 text-xs text-destructive">{creationError}</p>
-            )}
-          </CardContent>
-        </Card>
+              {dictationError && (
+                <p className="pt-2 text-xs text-destructive">{dictationError}</p>
+              )}
+              {creationError && (
+                <p className="pt-2 text-xs text-destructive">{creationError}</p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   );
