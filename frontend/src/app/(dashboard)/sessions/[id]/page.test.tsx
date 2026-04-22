@@ -6,6 +6,17 @@ import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Issue, Session, SessionLog, SessionMessage, User, SingleResponse, ListResponse } from '@/lib/types';
 
+const { toast } = vi.hoisted(() => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('sonner', () => ({
+  toast,
+}));
+
 // Mock EventSource (not available in jsdom)
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -36,6 +47,9 @@ beforeAll(() => {
 
 afterEach(() => {
   MockEventSource.instances = [];
+  toast.success.mockReset();
+  toast.error.mockReset();
+  vi.useRealTimers();
 });
 
 // Mock next/link to render a plain anchor
@@ -663,8 +677,188 @@ describe('SessionDetailPage', () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: /Create PR/ }));
 
-    expect(await screen.findByRole('button', { name: /Pushing PR…/ })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: /Creating PR…/ })).toBeDisabled();
   });
+
+  it('shows an immediate queueing state while the create PR request is still being sent', async () => {
+    let resolveCreatePR: (() => void) | undefined;
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async () => {
+        await new Promise<void>((resolve) => {
+          resolveCreatePR = resolve;
+        });
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    expect(await screen.findByRole('button', { name: /Queueing PR…/ })).toBeDisabled();
+
+    resolveCreatePR?.();
+  });
+
+  it('keeps a creating state until the pull request exists, then swaps to View PR', async () => {
+    let sessionFetchCount = 0;
+    const queuedSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'queued',
+    };
+    const pushingSession: Session = {
+      ...queuedSession,
+      pr_creation_state: 'pushing',
+    };
+    const succeededSession: Session = {
+      ...queuedSession,
+      pr_creation_state: 'succeeded',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        if (sessionFetchCount <= 1) {
+          return HttpResponse.json({
+            data: { ...queuedSession, pr_creation_state: 'idle' },
+          } satisfies SingleResponse<Session>);
+        }
+        if (sessionFetchCount === 2) {
+          return HttpResponse.json({ data: queuedSession } satisfies SingleResponse<Session>);
+        }
+        if (sessionFetchCount === 3) {
+          return HttpResponse.json({ data: pushingSession } satisfies SingleResponse<Session>);
+        }
+        return HttpResponse.json({ data: succeededSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        if (sessionFetchCount >= 4) {
+          return HttpResponse.json({
+            data: {
+              id: 'pr-1',
+              session_id: 'session-abcdef12-3456-7890',
+              org_id: queuedSession.org_id,
+              github_pr_number: 42,
+              github_pr_url: 'https://github.com/example/repo/pull/42',
+              github_repo: 'example/repo',
+              title: 'Fix bug',
+              status: 'open',
+              review_status: 'pending',
+              authored_by: 'app',
+              ci_status: 'pending',
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          });
+        }
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    expect(await screen.findByRole('button', { name: /Creating PR…/ })).toBeDisabled();
+
+    await waitFor(
+      async () => {
+        expect(await screen.findByRole('button', { name: /View PR/ })).toBeInTheDocument();
+      },
+      { timeout: 7000 },
+    );
+    expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
+  }, 10000);
+
+  it('shows a clear toast and retry button when background PR creation fails', async () => {
+    let sessionFetchCount = 0;
+    const queuedSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'queued',
+    };
+    const failedSession: Session = {
+      ...queuedSession,
+      pr_creation_state: 'failed',
+      pr_creation_error: 'GitHub rejected the branch push.',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        if (sessionFetchCount <= 1) {
+          return HttpResponse.json({
+            data: { ...queuedSession, pr_creation_state: 'idle' },
+          } satisfies SingleResponse<Session>);
+        }
+        return HttpResponse.json({ data: failedSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    await waitFor(
+      () => {
+        expect(toast.error).toHaveBeenCalledWith('GitHub rejected the branch push.');
+      },
+      { timeout: 5000 },
+    );
+    await waitFor(
+      () => {
+        expect(screen.getByRole('button', { name: /Retry/ })).toBeInTheDocument();
+      },
+      { timeout: 5000 },
+    );
+  }, 8000);
 
   it('shows file count badge on Changes tab when session has diff', async () => {
     const sessionWithDiff: Session = {
