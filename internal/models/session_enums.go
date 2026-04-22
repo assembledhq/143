@@ -6,16 +6,16 @@ import "fmt"
 type SessionStatus string
 
 const (
-	SessionStatusPending             SessionStatus = "pending"
-	SessionStatusRunning             SessionStatus = "running"
-	SessionStatusIdle                SessionStatus = "idle"
-	SessionStatusAwaitingInput       SessionStatus = "awaiting_input"
-	SessionStatusNeedsHumanGuidance  SessionStatus = "needs_human_guidance"
-	SessionStatusCompleted           SessionStatus = "completed"
-	SessionStatusPRCreated           SessionStatus = "pr_created"
-	SessionStatusFailed              SessionStatus = "failed"
-	SessionStatusCancelled           SessionStatus = "cancelled"
-	SessionStatusSkipped             SessionStatus = "skipped"
+	SessionStatusPending            SessionStatus = "pending"
+	SessionStatusRunning            SessionStatus = "running"
+	SessionStatusIdle               SessionStatus = "idle"
+	SessionStatusAwaitingInput      SessionStatus = "awaiting_input"
+	SessionStatusNeedsHumanGuidance SessionStatus = "needs_human_guidance"
+	SessionStatusCompleted          SessionStatus = "completed"
+	SessionStatusPRCreated          SessionStatus = "pr_created"
+	SessionStatusFailed             SessionStatus = "failed"
+	SessionStatusCancelled          SessionStatus = "cancelled"
+	SessionStatusSkipped            SessionStatus = "skipped"
 )
 
 func (s SessionStatus) Validate() error {
@@ -44,6 +44,34 @@ var (
 	// DoneStatuses are terminal statuses.
 	DoneStatuses = []SessionStatus{SessionStatusCompleted, SessionStatusPRCreated, SessionStatusFailed, SessionStatusCancelled, SessionStatusSkipped}
 )
+
+// PRCreationState captures whether the user has initiated PR creation for a
+// session and, if so, where that async push is in its lifecycle. It is
+// orthogonal to SessionStatus: the agent run can be `completed` while PR
+// creation is still `idle` (waiting on a user click), `pushing`, `succeeded`,
+// or `failed`. Once `succeeded` the PullRequest row is the source of truth.
+type PRCreationState string
+
+const (
+	PRCreationStateIdle      PRCreationState = "idle"
+	PRCreationStateQueued    PRCreationState = "queued"
+	PRCreationStatePushing   PRCreationState = "pushing"
+	PRCreationStateSucceeded PRCreationState = "succeeded"
+	PRCreationStateFailed    PRCreationState = "failed"
+)
+
+func (s PRCreationState) Validate() error {
+	switch s {
+	case PRCreationStateIdle,
+		PRCreationStateQueued,
+		PRCreationStatePushing,
+		PRCreationStateSucceeded,
+		PRCreationStateFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid PRCreationState: %q", s)
+	}
+}
 
 // SandboxState tracks the lifecycle of a session's sandbox.
 type SandboxState string

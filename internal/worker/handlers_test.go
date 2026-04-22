@@ -510,11 +510,89 @@ type mockPMService struct {
 	agentType       *models.AgentType
 }
 
+type stubPRService struct {
+	createPRFn func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+}
+
+func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+	if s.createPRFn != nil {
+		return s.createPRFn(ctx, run, params...)
+	}
+	return nil, nil
+}
+
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID
 	m.trigger = trigger
 	m.agentType = agentTypeOverride
 	return &pm.Plan{}, nil
+}
+
+var workerSessionColumns = []string{
+	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
+	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
+	"parent_session_id", "revision_context", "error", "result_summary", "diff",
+	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
+	"model_override", "triggered_by_user_id",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
+}
+
+func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey *string) []any {
+	return []any{
+		sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+		nil, nil, nil, nil,
+		nil, false, &now, &now, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
+		nil, nil,
+		nil, 0, now, "snapshotted", snapshotKey,
+		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "queued", (*string)(nil), nil, now,
+	}
+}
+
+func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-terminal"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrSnapshotExpired
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	var fatalErr *FatalError
+	require.ErrorAs(t, err, &fatalErr, "open_pr should dead-letter terminal PR creation failures instead of retrying them")
+	require.ErrorIs(t, fatalErr, ghservice.ErrSnapshotExpired, "open_pr should preserve the underlying terminal PR error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func (m *mockPMService) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error {

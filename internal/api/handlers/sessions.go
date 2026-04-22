@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
+	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -43,7 +44,8 @@ type SessionHandler struct {
 	messageStore     *db.SessionMessageStore
 	threadStore      *db.SessionThreadStore
 	viewStore        *db.SessionViewStore
-	llmClient        llm.Client // optional, used for generating manual session titles
+	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
+	llmClient        llm.Client            // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
@@ -72,6 +74,13 @@ func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
 // deadline expires.
 func (h *SessionHandler) SetShutdownSignal(ch <-chan struct{}) {
 	h.shutdownCh = ch
+}
+
+// SetSnapshotStore injects the snapshot store so session archive can delete
+// the associated sandbox snapshot file. Optional — if unset, archive still
+// succeeds but leaves the snapshot to be reclaimed by the TTL reaper.
+func (h *SessionHandler) SetSnapshotStore(s storage.SnapshotStore) {
+	h.snapshotStore = s
 }
 
 func NewSessionHandler(
@@ -713,9 +722,11 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: &pr})
 }
 
-// CreatePR handles POST /sessions/{id}/pr — enqueues a job to create a GitHub
-// PR from the session's diff. The session must have a non-empty diff and must
-// not already have an associated PR.
+// CreatePR handles POST /sessions/{id}/pr — enqueues a job that pushes the
+// session's snapshot to GitHub and opens a pull request. The session must
+// still have a snapshot and must not already have an associated PR. While a
+// prior attempt is in flight (queued or pushing), returns 409 to prevent
+// double-submits; a failed prior attempt may be retried.
 func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -730,9 +741,18 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if session.Diff == nil || *session.Diff == "" {
-		writeError(w, r, http.StatusBadRequest, "NO_DIFF", "session has no diff to create a PR from")
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		writeError(w, r, http.StatusBadRequest, "SNAPSHOT_EXPIRED", "session state expired — re-run to create a PR")
 		return
+	}
+
+	switch session.PRCreationState {
+	case models.PRCreationStateQueued, models.PRCreationStatePushing:
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
+	case models.PRCreationStateSucceeded:
+		// Succeeded means a PR row should exist; fall through to the
+		// PR_EXISTS check below so the 409 path is consistent.
 	}
 
 	// Check whether a PR already exists for this session.
@@ -743,6 +763,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	if !errors.Is(prErr, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
+		return
+	}
+	if session.PRCreationState == models.PRCreationStateSucceeded {
+		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
 		return
 	}
 
@@ -768,6 +792,12 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
 		return
+	}
+
+	if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to mark PR creation as queued")
 	}
 
 	sessionIDStr := sessionID.String()
@@ -1113,6 +1143,11 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
 			return
+		}
+		if err := h.runStore.UpdatePRCreationState(r.Context(), orgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("failed to mark PR creation as queued on session end")
 		}
 	} else {
 		dedupeKey := fmt.Sprintf("validate:%s", sessionID)
@@ -1498,12 +1533,18 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 
 	var auditDetails json.RawMessage
 	var auditLoadErr error
-	if h.audit != nil {
+	// Load the session once up front for archive auditing and snapshot cleanup.
+	if h.audit != nil || h.snapshotStore != nil {
 		session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 		if err != nil {
-			auditLoadErr = err
+			if h.audit != nil {
+				auditLoadErr = err
+			}
 		} else {
-			auditDetails = sessionArchiveAuditDetails(h.logger, &session, models.AuditActionSessionArchived, &user.ID)
+			snapshotKey = session.SnapshotKey
+			if h.audit != nil {
+				auditDetails = sessionArchiveAuditDetails(h.logger, &session, models.AuditActionSessionArchived, &user.ID)
+			}
 		}
 	}
 
@@ -1526,6 +1567,14 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 			Err(auditLoadErr).
 			Str("session_id", sessionID.String()).
 			Msg("failed to load session details for archive audit")
+	}
+
+	if h.snapshotStore != nil {
+		if err := storage.CleanupSessionSnapshot(r.Context(), h.snapshotStore, h.runStore, orgID, sessionID, snapshotKey); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("failed to clean up snapshot on session archive")
+		}
 	}
 
 	sessionIDStr := sessionID.String()

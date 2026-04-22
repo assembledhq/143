@@ -51,6 +51,7 @@ function makeSession(overrides: Partial<SessionListItem> = {}): SessionListItem 
     token_mode: 'standard',
     current_turn: 0,
     sandbox_state: 'none',
+    pr_creation_state: 'idle',
     created_at: '2026-02-17T07:00:00Z',
     started_at: '2026-02-17T07:00:00Z',
     completed_at: '2026-02-17T07:05:00Z',

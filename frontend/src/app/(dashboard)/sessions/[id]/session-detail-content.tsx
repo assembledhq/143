@@ -916,7 +916,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       toast.error(msg);
     },
   });
-
   // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
@@ -1023,17 +1022,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         )}
       </div>
 
-      {/* PR queued indicator */}
-      {prQueued && !hasPR && (
-        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-t bg-muted/30">
-          <GitPullRequest className="h-3 w-3 shrink-0" />
-          PR creation queued — it will appear shortly.
-        </div>
-      )}
-
       {/* Error display */}
       {(() => {
-        const firstError = uploadError || [sendMutation, endMutation, cancelMutation, createPRMutation].find(m => m.error)?.error;
+        const firstError = uploadError || [sendMutation, endMutation, cancelMutation].find(m => m.error)?.error;
         if (!firstError) return null;
         const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
         return (
@@ -1241,6 +1232,15 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
     queryFn: () => api.sessions.get(id),
+    refetchInterval: (q) => {
+      const s = q.state.data?.data;
+      if (!s) return false;
+      // Poll while PR creation is in flight so the state machine advances
+      // without waiting for the user to navigate.
+      return s.pr_creation_state === "queued" || s.pr_creation_state === "pushing"
+        ? 2000
+        : false;
+    },
   });
 
   const { data: membersData } = useQuery({
@@ -1260,6 +1260,28 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
   });
+
+  // React to pr_creation_state transitions with toast feedback. Tracks the
+  // previous value via ref so we fire once per transition rather than on
+  // every render.
+  const prevPRStateRef = useRef<string | undefined>(undefined);
+  const prUrl = prData?.data?.github_pr_url;
+  useEffect(() => {
+    const prev = prevPRStateRef.current;
+    const current = session?.pr_creation_state;
+    if (prev && current && prev !== current) {
+      if (current === "succeeded") {
+        queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+        toast.success("PR opened", prUrl ? {
+          action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
+        } : undefined);
+      } else if (current === "failed") {
+        const msg = session?.pr_creation_error || "PR creation failed";
+        toast.error(msg);
+      }
+    }
+    prevPRStateRef.current = current;
+  }, [session?.pr_creation_state, session?.pr_creation_error, prUrl, queryClient, id]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
     if (id) {
@@ -1270,8 +1292,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [id, queryClient]);
 
   const hasPR = !!prData?.data;
-  const hasDiff = !!session?.diff_stats;
-  const canCreatePR = hasDiff && !hasPR && !isRunning;
+  const hasSnapshot = !!session?.snapshot_key;
+  const canCreatePR = hasSnapshot && !hasPR && !isRunning;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -1503,28 +1525,74 @@ export function SessionDetailContent({ id }: { id: string }) {
                   Preview
                 </TabsTrigger>
               </TabsList>
-              {hasPR && prData?.data?.github_pr_url ? (
-                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                    <ExternalLink className="h-3 w-3" />
-                    View PR
+              {(() => {
+                if (hasPR && prData?.data?.github_pr_url) {
+                  return (
+                    <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                        <ExternalLink className="h-3 w-3" />
+                        View PR
+                      </Button>
+                    </a>
+                  );
+                }
+                if (!canCreatePR) return null;
+
+                const prState = session.pr_creation_state;
+                const snapshotExpired = !session.snapshot_key;
+                const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+                const inFlight = prState === "queued" || prState === "pushing" || createPRMutation.isPending;
+                const succeededButNoPR = prState === "succeeded" && !hasPR;
+
+                let label = "Create PR";
+                let spinning = false;
+                let disabled = false;
+                let title: string | undefined;
+
+                if (snapshotExpired) {
+                  label = "Create PR";
+                  disabled = true;
+                  // Prefer the server-produced message (e.g. from the last
+                  // failed attempt) when available so the UI stays aligned
+                  // with server-side wording.
+                  title = session.pr_creation_error || "Session state expired — re-run to create a PR.";
+                } else if (inFlight) {
+                  label = "Pushing PR\u2026";
+                  spinning = true;
+                  disabled = true;
+                  title = "This usually takes a few seconds";
+                } else if (succeededButNoPR) {
+                  label = "Finalizing\u2026";
+                  spinning = true;
+                  disabled = true;
+                } else if (prState === "failed") {
+                  label = "Retry";
+                  title = session.pr_creation_error || "PR creation failed";
+                } else if (ghBlocked) {
+                  disabled = true;
+                  title = "Connect your GitHub account to create PRs";
+                }
+
+                return (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs gap-1.5"
+                    disabled={disabled}
+                    title={title}
+                    onClick={() => createPRMutation.mutate()}
+                  >
+                    {spinning ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : prState === "failed" ? (
+                      <AlertTriangle className="h-3 w-3" />
+                    ) : (
+                      <GitPullRequest className="h-3 w-3" />
+                    )}
+                    {label}
                   </Button>
-                </a>
-              ) : canCreatePR ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs gap-1.5"
-                  disabled={
-                    createPRMutation.isPending ||
-                    (ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected)
-                  }
-                  onClick={() => createPRMutation.mutate()}
-                >
-                  <GitPullRequest className="h-3 w-3" />
-                  {createPRMutation.isPending ? "Creating…" : "Create PR"}
-                </Button>
-              ) : null}
+                );
+              })()}
             </div>
 
             <TabsContent value="changes" className="flex-1 min-h-0">

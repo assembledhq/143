@@ -24,7 +24,7 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -52,8 +52,10 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,      // diff_history
 		nil,      // input_manifest
 		nil, nil, // archived_at, archived_by_user_id
-		nil, // automation_run_id
-		nil, // deleted_at
+		nil,            // automation_run_id
+		"idle",         // pr_creation_state
+		(*string)(nil), // pr_creation_error
+		nil,            // deleted_at
 		createdAt,
 	}
 }

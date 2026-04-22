@@ -5,7 +5,10 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+
+	"github.com/google/uuid"
 )
 
 // ErrSnapshotNotFound is returned by Load when the requested key does not
@@ -28,4 +31,31 @@ type SnapshotStore interface {
 
 	// Delete removes a snapshot. Safe to call if the key does not exist.
 	Delete(ctx context.Context, key string) error
+}
+
+// SessionSnapshotClearer lets callers of CleanupSessionSnapshot drop the
+// snapshot_key reference from the sessions row. Declared here to avoid
+// importing the db package from storage.
+type SessionSnapshotClearer interface {
+	ClearSnapshotKey(ctx context.Context, orgID, sessionID uuid.UUID) error
+}
+
+// CleanupSessionSnapshot removes a session's snapshot file from the store and
+// clears the pointer from the sessions row. Idempotent: a nil or empty key is
+// a no-op, and a missing underlying file is treated as success so the row
+// still gets updated.
+func CleanupSessionSnapshot(
+	ctx context.Context,
+	store SnapshotStore,
+	clearer SessionSnapshotClearer,
+	orgID, sessionID uuid.UUID,
+	snapshotKey *string,
+) error {
+	if snapshotKey == nil || *snapshotKey == "" {
+		return nil
+	}
+	if err := store.Delete(ctx, *snapshotKey); err != nil && !errors.Is(err, ErrSnapshotNotFound) {
+		return fmt.Errorf("delete snapshot %s: %w", *snapshotKey, err)
+	}
+	return clearer.ClearSnapshotKey(ctx, orgID, sessionID)
 }
