@@ -164,8 +164,9 @@ type acquireSandboxResult struct {
 	// existing container (a turn still owns it — leave it alone on abort).
 	Hydrated bool
 	// ErrCode, when non-empty, is the HTTP error code to surface:
-	// "NO_SANDBOX" (409), "SNAPSHOT_EXPIRED" (410). Empty for infrastructure
-	// failures that should map to 500 PREVIEW_HYDRATE_FAILED.
+	// "NO_SANDBOX" (409), "SNAPSHOT_UNAVAILABLE" (409), "SNAPSHOT_EXPIRED"
+	// (410). Empty for infrastructure failures that should map to
+	// 500 PREVIEW_HYDRATE_FAILED.
 	ErrCode string
 	// Err is the underlying error for logging and user messaging. Always
 	// non-nil when acquisition failed; always nil when Sandbox is non-nil.
@@ -177,7 +178,8 @@ type acquireSandboxResult struct {
 //   - Reuse: session.ContainerID is set; attach by ID.
 //   - Hydrate: session has a snapshot and the sandbox was torn down; create a
 //     new container, restore the snapshot, and publish the new container_id.
-//   - Expired: no container and no usable snapshot; caller should return 410.
+//   - Expired/Unavailable: no container and no usable snapshot; caller should
+//     return 410 only when the reaper explicitly expired the snapshot.
 func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session) acquireSandboxResult {
 	// Reuse is only safe when the row believes the container is actually
 	// running. A lingering container_id from a crashed worker or a session
@@ -222,11 +224,16 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	}
 
 	// No live container. Check whether we can hydrate one from a snapshot.
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" ||
-		session.SandboxState == string(models.SandboxStateDestroyed) {
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
 		return acquireSandboxResult{
 			ErrCode: "SNAPSHOT_EXPIRED",
-			Err:     fmt.Errorf("session has no sandbox container and no usable snapshot; start a new turn to continue"),
+			Err:     fmt.Errorf("this session's sandbox snapshot has expired; send a new message to rebuild it"),
+		}
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		return acquireSandboxResult{
+			ErrCode: "SNAPSHOT_UNAVAILABLE",
+			Err:     fmt.Errorf("session has no live sandbox and no saved snapshot; send a new message to rebuild it"),
 		}
 	}
 	if h.sandboxProvider == nil || h.snapshots == nil {
@@ -252,13 +259,13 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	if err != nil {
 		// The storage layer found no blob at the recorded snapshot key — the
 		// DB row is out of sync with the object store (reaped out-of-band,
-		// deleted manually, or never saved). Map to SNAPSHOT_EXPIRED so the
-		// user sees the same actionable message as the "no snapshot key"
-		// case above and the handler emits 410 instead of 500.
+		// deleted manually, or never saved). Surface this distinctly from true
+		// retention expiry so the UI can explain that the session can be
+		// rebuilt, but not restored.
 		if errors.Is(err, agent.ErrSnapshotMissing) {
 			return acquireSandboxResult{
-				ErrCode: "SNAPSHOT_EXPIRED",
-				Err:     fmt.Errorf("session snapshot is no longer available; start a new turn to continue"),
+				ErrCode: "SNAPSHOT_UNAVAILABLE",
+				Err:     fmt.Errorf("session snapshot is unavailable in storage; send a new message to rebuild it"),
 			}
 		}
 		return acquireSandboxResult{Err: fmt.Errorf("hydrate sandbox: %w", err)}
@@ -404,7 +411,8 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	//      prior preview already hydrated it).
 	//   2. Hydrate — the container has been torn down but a snapshot exists;
 	//      create a new container and restore the snapshot.
-	//   3. SnapshotExpired — neither a container nor a usable snapshot exists.
+	//   3. SnapshotExpired / SnapshotUnavailable — neither a container nor a
+	//      usable snapshot exists.
 	acq := h.acquireSandbox(r.Context(), orgID, &session)
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
@@ -418,6 +426,8 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		switch acq.ErrCode {
 		case "SNAPSHOT_EXPIRED":
 			writeError(w, r, http.StatusGone, acq.ErrCode, acq.Err.Error())
+		case "SNAPSHOT_UNAVAILABLE":
+			writeError(w, r, http.StatusConflict, acq.ErrCode, acq.Err.Error())
 		case "NO_SANDBOX":
 			writeError(w, r, http.StatusConflict, acq.ErrCode, acq.Err.Error())
 		default:

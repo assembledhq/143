@@ -871,7 +871,11 @@ func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uu
 // ordering that prevents new reuse-path readers from attaching to a dying ID.
 func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
 	query := `UPDATE sessions
-		SET container_id = NULL, sandbox_state = 'snapshotted'
+		SET container_id = NULL,
+		    sandbox_state = CASE
+		        WHEN snapshot_key IS NULL OR snapshot_key = '' THEN 'none'
+		        ELSE 'snapshotted'
+		    END
 		WHERE id = @id
 		  AND org_id = @org_id
 		  AND container_id = @expected

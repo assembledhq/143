@@ -1157,7 +1157,25 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 		defer mock.Close()
 
 		store := NewSessionStore(mock)
-		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL, sandbox_state = 'snapshotted'`).
+		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		cleared, err := store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
+		require.NoError(t, err)
+		require.True(t, cleared)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("marks sandbox as none when no snapshot exists", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
