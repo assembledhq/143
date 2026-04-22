@@ -489,11 +489,38 @@ describe('SessionDetailPage', () => {
       status: 'completed',
       diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+  });
+
+  it('shows Create PR button for completed session with snapshot even when diff stats are missing', async () => {
+    const sessionWithSnapshotOnly: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff_stats: undefined,
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithSnapshotOnly } satisfies SingleResponse<Session>);
       }),
       http.get('/api/v1/sessions/:id/pr', () => {
         return HttpResponse.json(
@@ -574,6 +601,7 @@ describe('SessionDetailPage', () => {
       status: 'completed',
       diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
     };
 
     server.use(

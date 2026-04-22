@@ -70,6 +70,36 @@ func TestSandboxState_Validate(t *testing.T) {
 	}
 }
 
+func TestPRCreationState_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   PRCreationState
+		wantErr bool
+	}{
+		{name: "idle is valid", value: PRCreationStateIdle, wantErr: false},
+		{name: "queued is valid", value: PRCreationStateQueued, wantErr: false},
+		{name: "pushing is valid", value: PRCreationStatePushing, wantErr: false},
+		{name: "succeeded is valid", value: PRCreationStateSucceeded, wantErr: false},
+		{name: "failed is valid", value: PRCreationStateFailed, wantErr: false},
+		{name: "empty is invalid", value: "", wantErr: true},
+		{name: "bogus is invalid", value: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.value.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should return an error for %q", tt.value)
+			} else {
+				require.NoError(t, err, "Validate should not return an error for %q", tt.value)
+			}
+		})
+	}
+}
+
 func TestThreadStatus_Validate(t *testing.T) {
 	t.Parallel()
 

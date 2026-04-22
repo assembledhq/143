@@ -103,6 +103,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 				deployStore, validationStore, repoStore, jobStore, logger,
 			)
 			prService.SetReviewCommentStore(reviewCommentStore)
+			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 		}
 	}
 
@@ -164,6 +165,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, co
 	)
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetShutdownSignal(shutdownCh)
+	sessionHandler.SetSnapshotStore(snapshotStore)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,

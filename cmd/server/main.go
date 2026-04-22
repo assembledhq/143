@@ -604,6 +604,7 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, validationStore, repoStore, jobStore, logger,
 	)
+	wireWorkerPRService(prService, sandboxProvider, snapshotStore)
 
 	// Failure analysis service.
 	failureSvc := agent.NewFailureService(sessionStore, logger)
@@ -667,4 +668,11 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 	}
+}
+
+func wireWorkerPRService(prService *ghservice.PRService, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore) {
+	if prService == nil {
+		return
+	}
+	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 }
