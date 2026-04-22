@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
@@ -58,6 +59,20 @@ func main() {
 	if err := cfg.ValidateSecrets(); err != nil {
 		logger.Fatal().Err(err).Msg("security configuration check failed")
 	}
+
+	sentryReporter, err := observability.NewSentryReporter(observability.SentryConfig{
+		DSN:         cfg.SentryDSN,
+		Environment: cfg.SentryEnvironmentOrDefault(),
+		Release:     version.BuildSHA,
+	})
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize sentry")
+	}
+	defer func() {
+		if sentryReporter != nil && !sentryReporter.Flush(5*time.Second) {
+			logger.Warn().Msg("timed out flushing sentry events during shutdown")
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -200,7 +215,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}

@@ -1,0 +1,23 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: platform-warning
+    receivers:
+      - uid: platform_warning_webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: $GRAFANA_ALERTS_WARNING_WEBHOOK_URL
+          httpMethod: POST
+          maxAlerts: 20
+  - orgId: 1
+    name: platform-critical
+    receivers:
+      - uid: platform_critical_webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: $GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL
+          httpMethod: POST
+          maxAlerts: 20

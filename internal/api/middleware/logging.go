@@ -6,14 +6,20 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
+	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
 type responseWriter struct {
 	http.ResponseWriter
-	status        int
-	errorResponse *models.ErrorResponse
+	status           int
+	errorResponse    *models.ErrorResponse
+	skipErrorCapture bool
+	orgID            uuid.UUID
+	userID           uuid.UUID
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -32,6 +38,11 @@ func (rw *responseWriter) Flush() {
 	}
 }
 
+func (rw *responseWriter) SetResolvedIdentity(orgID, userID uuid.UUID) {
+	rw.orgID = orgID
+	rw.userID = userID
+}
+
 func (rw *responseWriter) captureErrorDetails(responseBody []byte) {
 	if rw.status < http.StatusBadRequest {
 		return
@@ -45,7 +56,7 @@ func (rw *responseWriter) captureErrorDetails(responseBody []byte) {
 	rw.errorResponse = &response
 }
 
-func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
+func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -74,10 +85,49 @@ func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
 					logEvent = logEvent.Str("error_message", rw.errorResponse.Error.Message)
 				}
 				logEvent.Msg("request failed")
+				if reporter != nil && rw.status >= http.StatusInternalServerError && !rw.skipErrorCapture {
+					reporter.CaptureRequestError(r, buildRequestErrorEvent(r, rw))
+				}
 				return
 			}
 
 			logEvent.Msg("request")
 		})
 	}
+}
+
+func buildRequestErrorEvent(r *http.Request, rw *responseWriter) observability.RequestErrorEvent {
+	event := observability.RequestErrorEvent{
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Route:     routePattern(r),
+		RequestID: chiMiddleware.GetReqID(r.Context()),
+		Status:    rw.status,
+	}
+	if rw.errorResponse != nil {
+		event.ErrorCode = rw.errorResponse.Error.Code
+		event.ErrorMessage = rw.errorResponse.Error.Message
+	}
+	if orgID := OrgIDFromContext(r.Context()); orgID != uuid.Nil {
+		event.OrgID = orgID.String()
+	} else if rw.orgID != uuid.Nil {
+		event.OrgID = rw.orgID.String()
+	}
+	if user := UserFromContext(r.Context()); user != nil {
+		event.UserID = user.ID.String()
+	} else if rw.userID != uuid.Nil {
+		event.UserID = rw.userID.String()
+	}
+	return event
+}
+
+func routePattern(r *http.Request) string {
+	routeCtx := chi.RouteContext(r.Context())
+	if routeCtx == nil {
+		return r.URL.Path
+	}
+	if pattern := routeCtx.RoutePattern(); pattern != "" {
+		return pattern
+	}
+	return r.URL.Path
 }

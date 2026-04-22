@@ -21,12 +21,79 @@ services:
           memory: 1G
           cpus: "1.0"
 
+  alertmanager:
+    image: quay.io/prometheus/alertmanager:v0.31.1
+    environment:
+      GRAFANA_ALERTS_WARNING_WEBHOOK_URL: ${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-http://localhost:65535/disabled-warning}
+      GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL: ${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-http://localhost:65535/disabled-critical}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        cat >/etc/alertmanager/config.yml <<EOF
+        global:
+          resolve_timeout: 5m
+        route:
+          receiver: warning-webhook
+          group_by: [service, severity, alertname]
+          group_wait: 30s
+          group_interval: 5m
+          repeat_interval: 4h
+          routes:
+            - receiver: critical-webhook
+              matchers:
+                - severity="critical"
+            - receiver: warning-webhook
+              matchers:
+                - severity="warning"
+        receivers:
+          - name: warning-webhook
+            webhook_configs:
+              - send_resolved: true
+                url: "${GRAFANA_ALERTS_WARNING_WEBHOOK_URL}"
+          - name: critical-webhook
+            webhook_configs:
+              - send_resolved: true
+                url: "${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL}"
+        EOF
+        exec /bin/alertmanager --config.file=/etc/alertmanager/config.yml --storage.path=/alertmanager
+    volumes:
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  vmalert:
+    image: victoriametrics/vmalert:v1.117.1
+    command:
+      - -datasource.url=http://victorialogs:9428
+      - -notifier.url=http://alertmanager:9093
+      - -rule=/etc/vmalert/rules/production-alerts.yml
+      - -rule.defaultRuleType=vlogs
+      - -rule.evalDelay=10s
+      - -httpListenAddr=:8880
+    volumes:
+      - ./deploy/vmalert/rules:/etc/vmalert/rules:ro
+    depends_on:
+      - victorialogs
+      - alertmanager
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
   grafana:
     image: grafana/grafana:13.0.1
     environment:
       GF_INSTALL_PLUGINS: victoriametrics-logs-datasource
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_SERVER_ROOT_URL: http://localhost:9999
+      GRAFANA_ALERTS_WARNING_WEBHOOK_URL: ${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-http://localhost:65535/disabled-warning}
+      GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL: ${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-http://localhost:65535/disabled-critical}
     volumes:
       - grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -34,6 +101,7 @@ services:
       - "127.0.0.1:9999:3000"
     depends_on:
       - victorialogs
+      - alertmanager
     restart: unless-stopped
     deploy:
       resources:
@@ -59,5 +127,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  alertmanager-data:
   vlogs-data:
   grafana-data:

@@ -1,0 +1,98 @@
+groups:
+  - name: api-errors
+    type: vlogs
+    interval: 1m
+    rules:
+      - alert: API5xxBurstWarning
+        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats count() as errors | filter errors:>9'
+        for: 1m
+        labels:
+          service: api
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'API 5xx burst warning'
+          description: 'The API emitted {{ $value }} server-error responses in the last 5 minutes.'
+          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:[500,599].'
+      - alert: API5xxBurstCritical
+        expr: '_time:5m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats count() as errors | filter errors:>24'
+        for: 1m
+        labels:
+          service: api
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'API 5xx burst critical'
+          description: 'The API emitted {{ $value }} server-error responses in the last 5 minutes.'
+          runbook: 'Check VictoriaLogs for service=api level=error _msg="request failed" status:[500,599].'
+      - alert: EndpointFailureBurst
+        expr: '_time:10m service:api AND level:error AND _msg:"request failed" AND status:[500,599] | stats by (path) count() as errors | filter errors:>4 | fields path, errors'
+        for: 1m
+        labels:
+          service: api
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Endpoint failure burst for {{ $labels.path }}'
+          description: 'Endpoint {{ $labels.path }} emitted {{ $value }} server-error responses in the last 10 minutes.'
+          runbook: 'Inspect recent request-failed logs for the affected path in VictoriaLogs.'
+      - alert: APIReadinessFailure
+        expr: '_time:5m service:api AND level:warn AND _msg:"readiness check failed: database unavailable" | stats count() as failures | filter failures:>2'
+        for: 1m
+        labels:
+          service: api
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'API readiness failures'
+          description: 'The readiness endpoint logged {{ $value }} database-unavailable failures in the last 5 minutes.'
+          runbook: 'Check database connectivity, app readiness logs, and the DB node before restarting services.'
+      - alert: APIStreamDegradation
+        expr: '_time:15m service:api AND level:error AND _msg:"failed to write log event to SSE stream" | stats count() as failures | filter failures:>9'
+        for: 1m
+        labels:
+          service: api
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'SSE/log streaming degradation'
+          description: 'The API logged {{ $value }} SSE stream write failures in the last 15 minutes.'
+          runbook: 'Inspect session log streaming paths and correlate with deploys or client disconnect spikes.'
+
+  - name: worker-failures
+    type: vlogs
+    interval: 1m
+    rules:
+      - alert: WorkerFatalFailuresWarning
+        expr: '_time:10m service:worker AND level:error AND _msg:"job failed (fatal, skipping retries)" | stats count() as failures | filter failures:>4'
+        for: 1m
+        labels:
+          service: worker
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker fatal failures warning'
+          description: 'Workers logged {{ $value }} fatal job failures in the last 10 minutes.'
+          runbook: 'Inspect worker error logs and recent failing job types in Grafana/VictoriaLogs.'
+      - alert: WorkerFatalFailuresCritical
+        expr: '_time:10m service:worker AND level:error AND _msg:"job failed (fatal, skipping retries)" | stats count() as failures | filter failures:>19'
+        for: 1m
+        labels:
+          service: worker
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Worker fatal failures critical'
+          description: 'Workers logged {{ $value }} fatal job failures in the last 10 minutes.'
+          runbook: 'Treat this as an async pipeline incident and inspect worker logs, job backlog, and DB health.'
+
+# Scheduler heartbeat and queue backlog alerts are intentionally not yet
+# encoded here. The current system does not emit a dedicated scheduler
+# heartbeat log line or backlog metric, so those rules would be noisy.
