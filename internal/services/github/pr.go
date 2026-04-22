@@ -1142,66 +1142,6 @@ func (s *PRService) getRef(ctx context.Context, token, owner, repo, ref string) 
 	return result.Object.SHA, nil
 }
 
-func (s *PRService) createRef(ctx context.Context, token, owner, repo, ref, sha string) error {
-	path := fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo)
-	_, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{
-		"ref": ref,
-		"sha": sha,
-	})
-	return err
-}
-
-func (s *PRService) updateRef(ctx context.Context, token, owner, repo, ref, sha string) error {
-	path := fmt.Sprintf("/repos/%s/%s/git/%s", owner, repo, ref)
-	_, err := s.doGitHubRequest(ctx, token, http.MethodPatch, path, map[string]any{
-		"sha":   sha,
-		"force": true,
-	})
-	return err
-}
-
-func (s *PRService) createBlob(ctx context.Context, token, owner, repo, content string) (string, error) {
-	path := fmt.Sprintf("/repos/%s/%s/git/blobs", owner, repo)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{
-		"content":  content,
-		"encoding": "utf-8",
-	})
-	if err != nil {
-		return "", err
-	}
-	var result struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-	return result.SHA, nil
-}
-
-type treeEntry struct {
-	Path string  `json:"path"`
-	Mode string  `json:"mode"`
-	Type string  `json:"type"`
-	SHA  *string `json:"sha"` // nil = delete
-}
-
-func (s *PRService) createTree(ctx context.Context, token, owner, repo, baseTreeSHA string, entries []treeEntry) (string, error) {
-	path := fmt.Sprintf("/repos/%s/%s/git/trees", owner, repo)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]any{
-		"base_tree": baseTreeSHA,
-		"tree":      entries,
-	})
-	if err != nil {
-		return "", err
-	}
-	var result struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-	return result.SHA, nil
-}
 // prCreateConfig holds optional configuration for createPullRequest.
 type prCreateConfig struct {
 	draft bool
