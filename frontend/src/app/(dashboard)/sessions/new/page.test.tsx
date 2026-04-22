@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { act } from '@testing-library/react';
+import { fireEvent } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
@@ -76,6 +77,310 @@ describe('ManualSessionCreatePage', () => {
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
+    });
+  });
+
+  it('inserts a selected mention and submits canonical references', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', ({ request }) => {
+        const url = new URL(request.url);
+        if (!url.searchParams.get('q')) {
+          return HttpResponse.json({ data: [] });
+        }
+
+        return HttpResponse.json({
+          data: [
+            {
+              kind: 'file',
+              token: '@internal/api/handlers/sessions.go',
+              path: 'internal/api/handlers/sessions.go',
+              display: 'internal/api/handlers/sessions.go',
+            },
+          ],
+        });
+      }),
+      http.post('/api/v1/sessions/manual', async ({ request }) => {
+        const body = await request.json() as { message: string; references?: Array<{ path?: string; kind: string }> };
+        expect(body.message).toContain('@internal/api/handlers/sessions.go');
+        expect(body.references).toEqual([
+          {
+            kind: 'file',
+            token: '@internal/api/handlers/sessions.go',
+            path: 'internal/api/handlers/sessions.go',
+            display: 'internal/api/handlers/sessions.go',
+          },
+        ]);
+
+        return HttpResponse.json({ data: { id: 'session-with-reference' } }, { status: 201 });
+      }),
+    );
+
+    pushMock.mockReset();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @sess');
+    await user.click(await screen.findByRole('button', { name: 'internal/api/handlers/sessions.go' }));
+
+    expect(screen.getByRole('button', { name: 'Remove internal/api/handlers/sessions.go' })).toBeInTheDocument();
+    expect(textarea).toHaveValue('Inspect @internal/api/handlers/sessions.go ');
+
+    await user.click(screen.getByRole('button', { name: 'Start session' }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith('/sessions/session-with-reference');
+    });
+  });
+
+  it('clears selected references when the repository changes', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-a',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo-a',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo-a.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+          {
+            id: 'repo-b',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 2,
+            full_name: 'acme/repo-b',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo-b.git',
+            installation_id: 11,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', ({ request }) => {
+        const url = new URL(request.url);
+        const repoID = url.searchParams.get('repository_id');
+        return HttpResponse.json({
+          data: repoID === 'repo-a'
+            ? [{ kind: 'file', token: '@internal/a.ts', path: 'internal/a.ts', display: 'internal/a.ts' }]
+            : [{ kind: 'file', token: '@internal/b.ts', path: 'internal/b.ts', display: 'internal/b.ts' }],
+        });
+      }),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @sess');
+    await user.click(await screen.findByRole('button', { name: 'internal/a.ts' }));
+
+    expect(textarea).toHaveValue('Inspect @internal/a.ts ');
+    expect(screen.getByText('internal/a.ts')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /repo-a/i }));
+    await user.click(screen.getByRole('menuitem', { name: /repo-b/i }));
+
+    await waitFor(() => {
+      expect(textarea).toHaveValue('Inspect');
+    });
+    expect(screen.queryByText('internal/a.ts')).not.toBeInTheDocument();
+  });
+
+  it('stops mention mode after moving the caret away from the @ token', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'file',
+            token: '@internal/api/handlers/sessions.go',
+            path: 'internal/api/handlers/sessions.go',
+            display: 'internal/api/handlers/sessions.go',
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...') as HTMLTextAreaElement;
+    await user.type(textarea, 'Inspect @sess');
+    expect(await screen.findByRole('button', { name: 'internal/api/handlers/sessions.go' })).toBeInTheDocument();
+
+    textarea.focus();
+    textarea.setSelectionRange(0, 0);
+    fireEvent.select(textarea);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'internal/api/handlers/sessions.go' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('closes the mention picker when the user types a space after @ text', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', ({ request }) => {
+        const url = new URL(request.url);
+        if (!url.searchParams.get('q')) {
+          return HttpResponse.json({ data: [] });
+        }
+
+        return HttpResponse.json({
+          data: [
+            {
+              kind: 'file',
+              token: '@internal/api/handlers/sessions.go',
+              path: 'internal/api/handlers/sessions.go',
+              display: 'internal/api/handlers/sessions.go',
+            },
+          ],
+        });
+      }),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @sess');
+    expect(await screen.findByRole('button', { name: 'internal/api/handlers/sessions.go' })).toBeInTheDocument();
+
+    await user.type(textarea, ' ');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'internal/api/handlers/sessions.go' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('drops the selected reference chip when the inserted mention token is edited', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'file',
+            token: '@internal/api/handlers/sessions.go',
+            path: 'internal/api/handlers/sessions.go',
+            display: 'internal/api/handlers/sessions.go',
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...') as HTMLTextAreaElement;
+    await user.type(textarea, 'Inspect @sess');
+    await user.click(await screen.findByRole('button', { name: 'internal/api/handlers/sessions.go' }));
+
+    expect(screen.getByText('internal/api/handlers/sessions.go')).toBeInTheDocument();
+
+    const currentValue = textarea.value;
+    const deleteIndex = currentValue.indexOf('/sessions.go');
+    textarea.focus();
+    textarea.setSelectionRange(deleteIndex, deleteIndex + '/sessions.go'.length);
+    await user.keyboard('{Backspace}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Remove internal/api/handlers/sessions.go' })).not.toBeInTheDocument();
     });
   });
 

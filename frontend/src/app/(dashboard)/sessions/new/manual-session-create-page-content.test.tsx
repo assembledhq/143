@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   createSessionMock: vi.fn().mockResolvedValue({
     data: { id: "new-sess" },
   }),
+  sessionComposerFilesMock: vi.fn().mockResolvedValue({ data: [] }),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -45,8 +46,11 @@ vi.mock("@/lib/api", () => ({
       list: mocks.repositoriesListMock,
       branches: mocks.branchesMock,
     },
+    sessionComposer: {
+      files: mocks.sessionComposerFilesMock,
+    },
     sessions: {
-      create: mocks.createSessionMock,
+      createManual: mocks.createSessionMock,
     },
   },
 }));

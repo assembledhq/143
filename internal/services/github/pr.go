@@ -1050,6 +1050,11 @@ type GitHubBranch struct {
 	Protected bool   `json:"protected"`
 }
 
+type GitHubTreeEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+
 // ListBranches returns the branches for a repository from the GitHub API.
 func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string) ([]GitHubBranch, error) {
 	var all []GitHubBranch
@@ -1071,6 +1076,70 @@ func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string)
 		page++
 	}
 	return all, nil
+}
+
+func (s *PRService) ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error) {
+	commitSHA, err := s.getRef(ctx, token, owner, repo, "heads/"+branch)
+	if err != nil {
+		return nil, fmt.Errorf("get branch ref: %w", err)
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/git/commits/%s", owner, repo, commitSHA)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get commit: %w", err)
+	}
+
+	var commit struct {
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if err := json.Unmarshal(body, &commit); err != nil {
+		return nil, fmt.Errorf("decode commit: %w", err)
+	}
+	if commit.Tree.SHA == "" {
+		return nil, fmt.Errorf("commit tree sha missing")
+	}
+
+	path = fmt.Sprintf("/repos/%s/%s/git/trees/%s?recursive=1", owner, repo, commit.Tree.SHA)
+	body, err = s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get tree: %w", err)
+	}
+
+	var tree struct {
+		Tree []GitHubTreeEntry `json:"tree"`
+	}
+	if err := json.Unmarshal(body, &tree); err != nil {
+		return nil, fmt.Errorf("decode tree: %w", err)
+	}
+
+	results := make([]models.RepositoryTreeEntry, 0, len(tree.Tree))
+	for _, entry := range tree.Tree {
+		results = append(results, models.RepositoryTreeEntry{
+			Path: entry.Path,
+			Type: models.RepositoryTreeEntryType(entry.Type),
+		})
+	}
+	return results, nil
+}
+
+func (s *PRService) getRef(ctx context.Context, token, owner, repo, ref string) (string, error) {
+	path := fmt.Sprintf("/repos/%s/%s/git/ref/%s", owner, repo, strings.TrimPrefix(ref, "refs/"))
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
+	}
+	return result.Object.SHA, nil
 }
 
 // prCreateConfig holds optional configuration for createPullRequest.
