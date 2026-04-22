@@ -13,6 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var sentryTestMu sync.Mutex
+
 type recordingTransport struct {
 	mu             sync.Mutex
 	events         []*sentry.Event
@@ -80,6 +82,11 @@ func TestNewSentryReporter_WithoutDSNDisablesReporter(t *testing.T) {
 }
 
 func TestNewSentryReporter_InitializesDefaults(t *testing.T) {
+	t.Parallel()
+
+	sentryTestMu.Lock()
+	defer sentryTestMu.Unlock()
+
 	originalBuildSHA := version.BuildSHA
 	version.BuildSHA = "test-build-sha"
 	defer func() {
@@ -95,6 +102,11 @@ func TestNewSentryReporter_InitializesDefaults(t *testing.T) {
 }
 
 func TestNewSentryReporter_InvalidDSNReturnsError(t *testing.T) {
+	t.Parallel()
+
+	sentryTestMu.Lock()
+	defer sentryTestMu.Unlock()
+
 	reporter, err := NewSentryReporter(SentryConfig{DSN: "://bad-dsn"})
 
 	require.Error(t, err, "invalid DSN should return an initialization error")
@@ -102,6 +114,8 @@ func TestNewSentryReporter_InvalidDSNReturnsError(t *testing.T) {
 }
 
 func TestSentryReporterFlush(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		reporter   *SentryReporter
@@ -124,8 +138,13 @@ func TestSentryReporterFlush(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if tt.shouldInit {
+				sentryTestMu.Lock()
+				defer sentryTestMu.Unlock()
 				bindTestSentryClient(t, tt.transport)
 			}
 			require.Equal(t, tt.expected, tt.reporter.Flush(time.Second), "Flush should return the underlying sentry flush result")
@@ -137,6 +156,11 @@ func TestSentryReporterFlush(t *testing.T) {
 }
 
 func TestSentryReporterCaptureRequestError(t *testing.T) {
+	t.Parallel()
+
+	sentryTestMu.Lock()
+	defer sentryTestMu.Unlock()
+
 	transport := &recordingTransport{flushResult: true}
 	bindTestSentryClient(t, transport)
 
@@ -191,6 +215,11 @@ func TestSentryReporterCaptureRequestErrorDisabledDoesNothing(t *testing.T) {
 }
 
 func TestSentryReporterCaptureRecoveredPanic(t *testing.T) {
+	t.Parallel()
+
+	sentryTestMu.Lock()
+	defer sentryTestMu.Unlock()
+
 	transport := &recordingTransport{flushResult: true}
 	bindTestSentryClient(t, transport)
 
