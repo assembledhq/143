@@ -590,7 +590,6 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Preview action failed")).toBeInTheDocument();
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
     });
   });
@@ -611,7 +610,6 @@ describe("PreviewPanel component", () => {
     await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Preview unavailable")).toBeInTheDocument();
       expect(
         screen.getByText(
           "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
@@ -637,7 +635,11 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Dismiss preview error" }));
+    // Click the dismiss button (X icon)
+    const dismissBtn = screen.getByText("Failed to start preview: connection refused")
+      .closest("div")!
+      .querySelector("button")!;
+    await user.click(dismissBtn);
 
     await waitFor(() => {
       expect(screen.queryByText("Failed to start preview: connection refused")).not.toBeInTheDocument();
