@@ -54,6 +54,12 @@ function setupRepoHandlers() {
         meta: {},
       });
     }),
+    http.get("/api/v1/repositories/:id/branches", () => {
+      return HttpResponse.json({
+        data: [{ name: "main", protected: true }],
+        meta: {},
+      });
+    }),
   );
 }
 
@@ -258,6 +264,24 @@ describe("CreateSessionDialog", () => {
     // Should show the image as an attachment with a remove button
     expect(screen.getByAltText("screenshot.png")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Remove screenshot.png/ })).toBeInTheDocument();
+  });
+
+  it("opens an image lightbox from the dialog attachment thumbnail", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Add files or photos/ }));
+    await user.click(screen.getByText("Add image URL"));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/screenshot.png");
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    await user.click(screen.getByRole("button", { name: "Preview screenshot.png" }));
+
+    expect(screen.getByRole("dialog", { name: "Image preview" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "screenshot.png" })).toBeInTheDocument();
   });
 
   it("removes an attachment when remove button is clicked", async () => {

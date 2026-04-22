@@ -2,10 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Loader2, GitBranch, ChevronDown, Paperclip, ImagePlus, Plus, X } from "lucide-react";
+import { ArrowUp, Loader2, GitBranch, ChevronDown, Paperclip, ImagePlus, Plus } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -30,8 +29,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { api } from "@/lib/api";
-import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENTS, agentTypeForModel } from "@/lib/agents";
@@ -275,36 +274,13 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
           />
         </div>
 
-        {(attachments.length > 0 || isUploading) && (
-          <div className="flex flex-wrap items-center gap-2 px-5 pb-2">
-            {attachments.map((url) => {
-              const isImage = isImageURL(url);
-              const fileName = url.startsWith("data:") ? "photo" : fileNameFromURL(url);
-              return (
-                <div key={url} className="relative group">
-                  {isImage ? (
-                    <img src={url} alt={fileName} className="h-14 w-14 rounded-md object-cover border border-border" />
-                  ) : (
-                    <Badge variant="secondary" className="gap-1 text-xs h-7">{fileName}</Badge>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(url)}
-                    className="absolute -top-1.5 -right-1.5 h-4 w-4 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                    aria-label={`Remove ${fileName}`}
-                  >
-                    <X className="h-2.5 w-2.5" />
-                  </button>
-                </div>
-              );
-            })}
-            {isUploading && (
-              <div className="h-14 w-14 rounded-md border border-border bg-muted flex items-center justify-center">
-                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-              </div>
-            )}
-          </div>
-        )}
+        <PendingAttachmentStrip
+          attachments={attachments}
+          isUploading={isUploading}
+          onRemove={removeAttachment}
+          size="sm"
+          className="px-5 pb-2"
+        />
 
         {showImageInput && (
           <div className="flex items-center gap-2 px-5 pb-2">
