@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 type EvalHandler struct {
@@ -284,13 +285,9 @@ func (h *EvalHandler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.audit != nil {
-		h.audit.EmitUserAction(r.Context(), db.UserActionParams{
-			OrgID:        orgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionEvalTaskCreated,
-			ResourceType: models.AuditResourceEvalTask,
-			ResourceID:   strPtr(task.ID.String()),
-		})
+		taskIDStr := task.ID.String()
+		emitUserAudit(h.audit, r, models.AuditActionEvalTaskCreated, models.AuditResourceEvalTask, &taskIDStr,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), evalTaskAuditSnapshot(&task)))
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalTask]{Data: task})
@@ -319,7 +316,6 @@ func (h *EvalHandler) GetTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *EvalHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	user := middleware.UserFromContext(r.Context())
 	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
@@ -335,6 +331,7 @@ func (h *EvalHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch eval task", err)
 		return
 	}
+	before := task
 
 	var req struct {
 		Name             *string                `json:"name"`
@@ -398,13 +395,13 @@ func (h *EvalHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.audit != nil {
-		h.audit.EmitUserAction(r.Context(), db.UserActionParams{
-			OrgID:        orgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionEvalTaskUpdated,
-			ResourceType: models.AuditResourceEvalTask,
-			ResourceID:   strPtr(task.ID.String()),
-		})
+		taskIDStr := task.ID.String()
+		details := evalTaskAuditSnapshot(&task)
+		if changes := evalTaskAuditDiff(&before, &task); len(changes) > 0 {
+			details["changes"] = changes
+		}
+		emitUserAudit(h.audit, r, models.AuditActionEvalTaskUpdated, models.AuditResourceEvalTask, &taskIDStr,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalTask]{Data: task})
@@ -412,11 +409,23 @@ func (h *EvalHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *EvalHandler) ArchiveTask(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	user := middleware.UserFromContext(r.Context())
 	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
 		return
+	}
+	var auditTask *models.EvalTask
+	if h.audit != nil {
+		task, err := h.taskStore.GetByID(r.Context(), orgID, taskID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "eval task not found or already archived")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch eval task", err)
+			return
+		}
+		auditTask = &task
 	}
 
 	if err := h.taskStore.Archive(r.Context(), orgID, taskID); err != nil {
@@ -429,13 +438,16 @@ func (h *EvalHandler) ArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.audit != nil {
-		h.audit.EmitUserAction(r.Context(), db.UserActionParams{
-			OrgID:        orgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionEvalTaskArchived,
-			ResourceType: models.AuditResourceEvalTask,
-			ResourceID:   strPtr(taskID.String()),
-		})
+		taskIDStr := taskID.String()
+		details := map[string]any{"eval_task_id": taskID.String()}
+		if auditTask != nil {
+			details = evalTaskAuditSnapshot(auditTask)
+		}
+		details["changes"] = map[string]any{
+			"archived_at": auditChange(nil, "set"),
+		}
+		emitUserAudit(h.audit, r, models.AuditActionEvalTaskArchived, models.AuditResourceEvalTask, &taskIDStr,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -445,7 +457,6 @@ func (h *EvalHandler) ArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	user := middleware.UserFromContext(r.Context())
 	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid task ID")
@@ -522,7 +533,8 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		"eval_run_id": run.ID.String(),
 		"org_id":      orgID.String(),
 	}
-	if _, err := txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", payload, 5, nil); err != nil {
+	jobID, err := txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", payload, 5, nil)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", err)
 		return
 	}
@@ -533,13 +545,9 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.audit != nil {
-		h.audit.EmitUserAction(ctx, db.UserActionParams{
-			OrgID:        orgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionEvalRunStarted,
-			ResourceType: models.AuditResourceEvalRun,
-			ResourceID:   strPtr(run.ID.String()),
-		})
+		runIDStr := run.ID.String()
+		emitUserAudit(h.audit, r, models.AuditActionEvalRunStarted, models.AuditResourceEvalRun, &runIDStr,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), evalRunAuditDetails(&run, jobID)))
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalRun]{Data: run})
@@ -724,13 +732,9 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.audit != nil {
-		h.audit.EmitUserAction(ctx, db.UserActionParams{
-			OrgID:        orgID,
-			UserID:       user.ID,
-			Action:       models.AuditActionEvalBatchStarted,
-			ResourceType: models.AuditResourceEvalBatch,
-			ResourceID:   strPtr(batch.ID.String()),
-		})
+		batchIDStr := batch.ID.String()
+		emitUserAudit(h.audit, r, models.AuditActionEvalBatchStarted, models.AuditResourceEvalBatch, &batchIDStr,
+			marshalAuditDetails(*zerolog.Ctx(r.Context()), evalBatchAuditDetails(&batch, req.TaskIDs, len(req.Configs))))
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalBatch]{Data: batch})
@@ -884,8 +888,8 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		BootstrapRunID uuid.UUID `json:"bootstrap_run_id"`
-		CandidateIndices []int   `json:"candidate_indices"`
+		BootstrapRunID   uuid.UUID `json:"bootstrap_run_id"`
+		CandidateIndices []int     `json:"candidate_indices"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")

@@ -450,7 +450,16 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := run.ID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &sessionIDStr, &run.ID, nil, nil)
+	emitUserAuditWithSession(
+		h.audit,
+		r,
+		models.AuditActionSessionCreated,
+		models.AuditResourceSession,
+		&sessionIDStr,
+		&run.ID,
+		nil,
+		sessionCreateAuditDetails(h.logger, run, &issue, nil),
+	)
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *run})
 }
 
@@ -496,7 +505,14 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, nil)
+	retryDetails := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "run_agent",
+		"changes": map[string]any{
+			"status": auditChange("failed", session.Status),
+		},
+	})
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionRetried, models.AuditResourceSession, &sessionIDStr, &sessionID, nil,
+		marshalAuditDetails(h.logger, retryDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
 
@@ -755,8 +771,14 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := sessionID.String()
-	draftDetails := auditDetailsDraft(req.Draft)
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil, draftDetails)
+	prDetails := sessionAuditSnapshot(&session, nil, map[string]any{
+		"job_type": "open_pr",
+	})
+	if req.Draft != nil {
+		prDetails["draft"] = *req.Draft
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
+		marshalAuditDetails(h.logger, prDetails))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -826,7 +848,20 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	if sessionID, parseErr := uuid.Parse(chi.URLParam(r, "id")); parseErr == nil {
 		sessionIDPtr = &sessionID
 	}
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, sessionIDPtr, nil, nil)
+	questionDetails := map[string]any{
+		"question_id":   question.ID.String(),
+		"session_id":    question.SessionID.String(),
+		"question_text": question.QuestionText,
+		"status":        question.Status,
+		"answer_length": len(body.Answer),
+		"answered_by":   user.ID.String(),
+		"option_count":  len(question.Options),
+	}
+	if question.BlocksPhase != nil {
+		questionDetails["blocks_phase"] = *question.BlocksPhase
+	}
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, sessionIDPtr, nil,
+		marshalAuditDetails(h.logger, questionDetails))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
@@ -1313,7 +1348,19 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	manualSessionIDStr := session.ID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &manualSessionIDStr, &session.ID, nil, nil)
+	emitUserAuditWithSession(
+		h.audit,
+		r,
+		models.AuditActionSessionCreated,
+		models.AuditResourceSession,
+		&manualSessionIDStr,
+		&session.ID,
+		nil,
+		sessionCreateAuditDetails(h.logger, session, issue, map[string]any{
+			"manual_session": true,
+			"image_count":    len(body.Images),
+		}),
+	)
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 
@@ -1391,6 +1438,17 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	var auditDetails json.RawMessage
+	var auditLoadErr error
+	if h.audit != nil {
+		session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+		if err != nil {
+			auditLoadErr = err
+		} else {
+			auditDetails = sessionArchiveAuditDetails(h.logger, &session, models.AuditActionSessionArchived, &user.ID)
+		}
+	}
+
 	if err := h.runStore.Archive(r.Context(), orgID, sessionID, user.ID); err != nil {
 		if errors.Is(err, db.ErrSessionAlreadyArchived) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found or already archived")
@@ -1405,9 +1463,15 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
+	if auditLoadErr != nil {
+		zerolog.Ctx(r.Context()).Warn().
+			Err(auditLoadErr).
+			Str("session_id", sessionID.String()).
+			Msg("failed to load session details for archive audit")
+	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionArchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionArchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, auditDetails)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1419,6 +1483,21 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
+	}
+
+	var auditActorID *uuid.UUID
+	if user := middleware.UserFromContext(r.Context()); user != nil {
+		auditActorID = &user.ID
+	}
+	var auditDetails json.RawMessage
+	var auditLoadErr error
+	if h.audit != nil {
+		session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+		if err != nil {
+			auditLoadErr = err
+		} else {
+			auditDetails = sessionArchiveAuditDetails(h.logger, &session, models.AuditActionSessionUnarchived, auditActorID)
+		}
 	}
 
 	if err := h.runStore.Unarchive(r.Context(), orgID, sessionID); err != nil {
@@ -1434,9 +1513,15 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
+	if auditLoadErr != nil {
+		zerolog.Ctx(r.Context()).Warn().
+			Err(auditLoadErr).
+			Str("session_id", sessionID.String()).
+			Msg("failed to load session details for unarchive audit")
+	}
 
 	sessionIDStr := sessionID.String()
-	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionUnarchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, nil)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionUnarchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, auditDetails)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

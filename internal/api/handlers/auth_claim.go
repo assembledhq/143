@@ -144,8 +144,14 @@ func (h *AuthHandler) emitInvitationClaimFailed(
 	}
 	invIDStr := inv.ID.String()
 	details, _ := json.Marshal(map[string]any{
-		"code":    code,
-		"message": message,
+		"invitation_id":   inv.ID.String(),
+		"email":           optString(inv.Email),
+		"github_username": optString(inv.GitHubUsername),
+		"role":            inv.Role,
+		"status":          inv.Status,
+		"invited_by":      inv.InvitedBy.String(),
+		"code":            code,
+		"message":         message,
 	})
 	h.audit.EmitUserAction(r.Context(), db.UserActionParams{
 		OrgID:        inv.OrgID,
@@ -197,12 +203,23 @@ func (h *AuthHandler) emitInvitationAccepted(
 		return
 	}
 	invIDStr := inv.ID.String()
+	details, _ := json.Marshal(map[string]any{
+		"invitation_id":   inv.ID.String(),
+		"email":           optString(inv.Email),
+		"github_username": optString(inv.GitHubUsername),
+		"role":            inv.Role,
+		"invited_by":      inv.InvitedBy.String(),
+		"changes": map[string]any{
+			"status": auditChange("pending", "accepted"),
+		},
+	})
 	h.audit.EmitUserAction(r.Context(), db.UserActionParams{
 		OrgID:        inv.OrgID,
 		UserID:       userID,
 		Action:       models.AuditActionTeamInvitationAccepted,
 		ResourceType: models.AuditResourceInvitation,
 		ResourceID:   &invIDStr,
+		Details:      details,
 	})
 }
 

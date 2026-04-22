@@ -1165,6 +1165,13 @@ func (h *AuthHandler) emitAuthEvent(r *http.Request, user *models.User, action m
 		Action:       action,
 		ResourceType: models.AuditResourceUser,
 		ResourceID:   &userIDStr,
+		Details: marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"user_id": user.ID.String(),
+			"email":   user.Email,
+			"name":    user.Name,
+			"role":    user.Role,
+			"action":  string(action),
+		}),
 	}
 	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
 		params.RequestID = &reqID
