@@ -1,7 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock3, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +43,9 @@ export function ClaudeSubscriptionManager({
 }) {
   const queryClient = useQueryClient();
   const active = subscriptions.filter((s) => s.status === "active");
+  const recoverable = subscriptions.filter(
+    (s) => s.status === "pending_auth" || s.status === "invalid",
+  );
   const connectedText = connectedLabelText
     ? connectedLabelText(active.length)
     : `Connected subscriptions (${active.length})`;
@@ -53,29 +56,18 @@ export function ClaudeSubscriptionManager({
         <div className="space-y-2">
           <Label className="text-xs text-muted-foreground">{connectedText}</Label>
           {active.map((sub) => (
-            <div key={sub.id} className="flex items-center justify-between rounded-md border px-3 py-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="border-green-600 text-green-600">
-                  <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-                  Active
-                </Badge>
-                <span className="text-sm font-medium">{sub.label}</span>
-                {sub.account_type && (
-                  <span className="text-xs text-muted-foreground">({sub.account_type})</span>
-                )}
-              </div>
-              {onRemove && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-xs text-muted-foreground hover:text-destructive"
-                  onClick={() => onRemove(sub)}
-                  aria-label={`Remove Claude subscription ${sub.label}`}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              )}
-            </div>
+            <SubscriptionRow key={sub.id} sub={sub} onRemove={onRemove} />
+          ))}
+        </div>
+      )}
+
+      {recoverable.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">
+            Needs attention ({recoverable.length})
+          </Label>
+          {recoverable.map((sub) => (
+            <SubscriptionRow key={sub.id} sub={sub} onRemove={onRemove} />
           ))}
         </div>
       )}
@@ -107,6 +99,60 @@ export function ClaudeSubscriptionManager({
             onCloseModal();
           }}
         />
+      )}
+    </div>
+  );
+}
+
+function SubscriptionRow({
+  sub,
+  onRemove,
+}: {
+  sub: ClaudeCodeSubscription;
+  onRemove?: (sub: ClaudeCodeSubscription) => void;
+}) {
+  const badge =
+    sub.status === "active"
+      ? {
+          label: "Active",
+          className: "border-green-600 text-green-600",
+          icon: CheckCircle2,
+        }
+      : sub.status === "pending_auth"
+        ? {
+            label: "Pending auth",
+            className: "border-amber-600 text-amber-700",
+            icon: Clock3,
+          }
+        : {
+            label: "Invalid",
+            className: "border-destructive text-destructive",
+            icon: AlertCircle,
+          };
+  const Icon = badge.icon;
+
+  return (
+    <div className="flex items-center justify-between rounded-md border px-3 py-2">
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className={badge.className}>
+          <Icon className="mr-1 h-3.5 w-3.5" />
+          {badge.label}
+        </Badge>
+        <span className="text-sm font-medium">{sub.label}</span>
+        {sub.account_type && (
+          <span className="text-xs text-muted-foreground">({sub.account_type})</span>
+        )}
+      </div>
+      {onRemove && (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="text-xs text-muted-foreground hover:text-destructive"
+          onClick={() => onRemove(sub)}
+          aria-label={`Remove Claude subscription ${sub.label}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
       )}
     </div>
   );

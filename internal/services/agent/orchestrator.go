@@ -1315,20 +1315,8 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
 		}
 	case models.AgentTypeClaudeCode:
-		injected, err := o.injectClaudeCodeAuth(ctx, session.OrgID, sandbox)
-		if err != nil {
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
 			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
-		}
-		if !injected {
-			// No subscription — the API-key env var was already baked into
-			// sandboxCfg.Env by resolveAgentEnv. Fail fast when neither path
-			// is configured so the session doesn't launch credential-less;
-			// matches the Codex branch above.
-			cfg := o.resolveProviderConfig(ctx, session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
-			ac, ok := cfg.(models.AnthropicConfig)
-			if !ok || ac.APIKey == "" {
-				return models.Issue{}, "", fmt.Errorf("no credentials for claude code agent")
-			}
 		}
 	}
 
@@ -2262,14 +2250,21 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
 	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
-		cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
-		if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
 			o.logger.Warn().
 				Err(err).
 				Str("org_id", run.OrgID.String()).
 				Str("session_id", run.ID.String()).
 				Msg("claude subscription injection failed; continuing with Anthropic API-key fallback")
 			return nil
+		} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("claude subscription injection failed and API-key fallback could not be prepared: %s", fallbackErr),
+				FailureCategoryClaudeCodeAuth,
+				"Your Claude subscription token could not be injected, and the sandbox could not be prepared to use the Anthropic API key fallback.",
+				[]string{"Retry the session after reconnecting your Claude subscription or verifying Anthropic credentials"},
+			)
+			return fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
 		}
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("claude subscription injection failed: %s", err),
@@ -2286,9 +2281,16 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	// No subscription — check for an Anthropic API-key fallback. The env var
 	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
 	// credential exists the sandbox is already configured.
-	cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
-	if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
 		return nil
+	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("claude API-key fallback could not be prepared: %s", fallbackErr),
+			FailureCategoryClaudeCodeAuth,
+			"The Anthropic API key fallback is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
+			[]string{"Retry the session after reconnecting your Claude subscription or verifying sandbox access"},
+		)
+		return fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
 	}
 
 	o.failRunWithCategory(ctx, run,
@@ -2301,6 +2303,48 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		},
 	)
 	return fmt.Errorf("no credentials for claude code agent")
+}
+
+var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
+
+func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
+	ac, ok := cfg.(models.AnthropicConfig)
+	if !ok || ac.APIKey == "" {
+		return errClaudeCodeFallbackUnavailable
+	}
+
+	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	if _, err := o.provider.ReadFile(ctx, sandbox, credsPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale claude credentials: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(credsPath))
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale claude credentials: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func isSandboxFileMissing(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file not found") || strings.Contains(msg, "no such file")
 }
 
 // BuildIntegrationSkills generates a CLI skills doc from the org's integration

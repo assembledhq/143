@@ -1771,6 +1771,113 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
 }
 
+func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please keep going without the old snapshot.",
+		},
+	}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.False(t, prompt.Continuation, "fresh resume should rebuild context instead of using continuation mode")
+		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
+		return &agent.AgentResult{
+			Summary:         "continued from fallback auth",
+			ConfidenceScore: 0.8,
+			ExitCode:        0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "fresh resume should fall back to the Anthropic API key when Claude token refresh fails")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "API-key fallback should not mark the resumed session as failed")
+	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, wroteCredsFile, "fresh resume should not write Claude subscription credentials when token refresh fails")
+}
+
+func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFallback(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Resume from the saved work.",
+		},
+	}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+	d.provider.Files["/home/sandbox/.claude/.credentials.json"] = []byte(`{"stale":true}`)
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "rm -f '/home/sandbox/.claude/.credentials.json'" {
+			delete(d.provider.Files, "/home/sandbox/.claude/.credentials.json")
+		}
+		return 0, nil
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "snapshot-backed resume should still use continuation mode")
+		return &agent.AgentResult{
+			Summary:         "continued after deleting stale creds",
+			ConfidenceScore: 0.84,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "snapshot resume should fall back to API key after removing stale Claude credentials")
+	require.Contains(t, d.provider.ExecCalls, "rm -f '/home/sandbox/.claude/.credentials.json'", "fallback should delete stale Claude credentials before relying on the API key")
+	_, credsStillPresent := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, credsStillPresent, "stale Claude credentials should be removed before API-key fallback continues")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "successful fallback should not record a Claude auth failure")
+}
+
 // errForcedCreateFailure is used by tests that short-circuit provider.Create so
 // the test can inspect the SandboxConfig without running the full sandbox
 // lifecycle. Named so grep picks it up and future refactors don't silently
