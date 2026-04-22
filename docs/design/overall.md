@@ -25,7 +25,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Contextual PM steering lives on `Autopilot` as compact summaries edited in side sheets, while low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
 
 - Step 0: Connect repositories and build codebase context
-    - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access — no personal access tokens needed.
+    - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access, and can also mint user-to-server tokens when a human authorizes PR creation on their behalf. No personal access tokens are required.
     - For each connected repo, the system automatically builds a **Repository Context Package** — a structured body of knowledge including architecture docs (CLAUDE.md, AGENTS.md), coding conventions extracted from the codebase and past PR reviews, a feature-to-file map (which files own which features), test infrastructure knowledge (how to run tests, what patterns are used), and a dependency map (service boundaries, safe-to-change-in-isolation analysis).
     - The system actively helps teams build and maintain this context: auto-generating it from the codebase, suggesting updates when code changes via push webhooks, and measuring **context quality** (e.g. "your repo has 40% file coverage in context docs, agents working on undocumented areas fail 3x more").
     - This context package is injected into every agent run, giving agents deep understanding of the codebase before they start working. This is arguably the single most important factor in agent success.
@@ -62,7 +62,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         4. the fix includes a regression test that would have caught the original bug (required for Sentry errors and support tickets)
         5. the code passes all CI/CD checks and coverage is not reduced
 - Step 5: Open PR and ship
-    - The system opens a new PR on github, using whatever Github template already exists
+    - The system opens a new PR on github, using whatever Github template already exists. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
     - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
 - Step 6: Observe impact and close the customer loop
