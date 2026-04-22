@@ -70,6 +70,18 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
+  it('renders the session header title at text-sm size', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const headerTitle = await screen.findByRole('heading', {
+      level: 1,
+      name: 'Fixed TypeError by adding null check',
+    });
+
+    expect(headerTitle.className).toContain('text-sm');
+    expect(headerTitle.className).not.toContain('text-xs');
+  });
+
   it('shows overview tab with status in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
