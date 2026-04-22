@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -269,6 +271,70 @@ func TestLogging_CapturesIdentityFromDownstreamAuthMiddleware(t *testing.T) {
 	require.Len(t, reporter.requestErrors, 1, "logging middleware should capture one server error event")
 	require.Equal(t, orgID.String(), reporter.requestErrors[0].OrgID, "captured event should include org identity resolved by downstream auth middleware")
 	require.Equal(t, userID.String(), reporter.requestErrors[0].UserID, "captured event should include user identity resolved by downstream auth middleware")
+}
+
+func TestBuildRequestErrorEvent_PrefersRequestContextIdentity(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req = req.WithContext(WithOrgID(req.Context(), testOrgA))
+	req = req.WithContext(WithUser(req.Context(), &models.User{ID: testUserID}))
+
+	event := buildRequestErrorEvent(req, &responseWriter{
+		status: http.StatusInternalServerError,
+		orgID:  testOrgB,
+		userID: uuid.MustParse("00000000-0000-0000-0000-000000000999"),
+	})
+
+	require.Equal(t, testOrgA.String(), event.OrgID, "request context org should win over recorder fallback")
+	require.Equal(t, testUserID.String(), event.UserID, "request context user should win over recorder fallback")
+}
+
+func TestRoutePattern_FallsBackToPathWhenUnavailable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		setupReq func(*http.Request) *http.Request
+		expected string
+	}{
+		{
+			name:     "returns path when no route context is present",
+			setupReq: func(r *http.Request) *http.Request { return r },
+			expected: "/api/v1/test/123",
+		},
+		{
+			name: "returns path when route pattern is empty",
+			setupReq: func(r *http.Request) *http.Request {
+				routeCtx := chi.NewRouteContext()
+				ctx := context.WithValue(r.Context(), chi.RouteCtxKey, routeCtx)
+				return r.WithContext(ctx)
+			},
+			expected: "/api/v1/test/123",
+		},
+		{
+			name: "returns route pattern when available",
+			setupReq: func(r *http.Request) *http.Request {
+				routeCtx := chi.NewRouteContext()
+				routeCtx.RoutePatterns = []string{"/api/v1/test/{id}"}
+				ctx := context.WithValue(r.Context(), chi.RouteCtxKey, routeCtx)
+				return r.WithContext(ctx)
+			},
+			expected: "/api/v1/test/{id}",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/test/123", nil)
+			req = tt.setupReq(req)
+
+			require.Equal(t, tt.expected, routePattern(req), "routePattern should return the expected route identifier")
+		})
+	}
 }
 
 type capturingReporter struct {

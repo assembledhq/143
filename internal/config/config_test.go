@@ -258,6 +258,35 @@ func TestValidateSecrets_ProductionShortSessionSecret(t *testing.T) {
 	require.Contains(t, err.Error(), "SESSION_SECRET")
 }
 
+func TestSentryEnvironmentOrDefault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		expected string
+	}{
+		{
+			name:     "returns explicit sentry environment when configured",
+			cfg:      Config{Env: "production", SentryEnvironment: "staging"},
+			expected: "staging",
+		},
+		{
+			name:     "falls back to app environment when sentry environment is empty",
+			cfg:      Config{Env: "production"},
+			expected: "production",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.cfg.SentryEnvironmentOrDefault(), "SentryEnvironmentOrDefault should return the expected environment")
+		})
+	}
+}
+
 func TestValidateSecrets_ProductionMissingEncryptionKey(t *testing.T) {
 	t.Parallel()
 
