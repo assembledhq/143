@@ -115,7 +115,7 @@ describe('ProjectSidebar', () => {
     expect(await screen.findByText('No projects yet')).toBeInTheDocument();
   });
 
-  it('shows filtered empty state when Mine has no matching projects', async () => {
+  it('shows a dedicated empty state when the default Mine view is empty', async () => {
     server.use(
       http.get('*/api/v1/projects', ({ request }) => {
         const createdBy = new URL(request.url).searchParams.get('created_by');
@@ -149,7 +149,8 @@ describe('ProjectSidebar', () => {
 
     renderWithProviders(<ProjectSidebar />);
 
-    expect(await screen.findByText('No projects match this filter.')).toBeInTheDocument();
+    expect(await screen.findByText('No projects in Mine yet')).toBeInTheDocument();
+    expect(screen.getByText('Switch to Everyone to browse team projects, or create a new one.')).toBeInTheDocument();
   });
 
   it('does not fetch projects until the Mine scope can resolve the current user', async () => {

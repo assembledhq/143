@@ -72,6 +72,11 @@ export function ProjectSidebar() {
   }, [filteredProjects, search]);
 
   const isNewProject = pathname === "/projects/new";
+  const showMineEmptyState =
+    currentUserFilter === "mine" &&
+    currentFilter === "all" &&
+    !search.trim() &&
+    displayedProjects.length === 0;
 
   return (
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
@@ -155,6 +160,12 @@ export function ProjectSidebar() {
               <div className="space-y-2">
                 <FolderKanban className="h-5 w-5 mx-auto text-muted-foreground/40" />
                 <p>No projects yet</p>
+              </div>
+            ) : showMineEmptyState ? (
+              <div className="space-y-2">
+                <FolderKanban className="h-5 w-5 mx-auto text-muted-foreground/40" />
+                <p className="text-foreground">No projects in Mine yet</p>
+                <p>Switch to Everyone to browse team projects, or create a new one.</p>
               </div>
             ) : (
               "No projects match this filter."
