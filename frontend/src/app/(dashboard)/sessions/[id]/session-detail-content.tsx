@@ -1470,7 +1470,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
+  const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && !isRunning;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -1746,13 +1748,17 @@ export function SessionDetailContent({ id }: { id: string }) {
                   );
                 }
                 const prState = session.pr_creation_state;
-                const showPRAction = canCreatePR || queueingPR || creatingPR || finalizingPR || prState === "failed";
+                const showPRAction =
+                  canCreatePR || showExpiredPRAction || queueingPR || creatingPR || finalizingPR || prState === "failed";
                 if (!showPRAction) return null;
                 const snapshotExpired = !session.snapshot_key;
+                const snapshotExpiredMessage =
+                  session.pr_creation_error || "Session state expired — re-run to create a PR.";
                 const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
                 const succeededButNoPR = prState === "succeeded" && !hasPR;
                 const prActionError =
                   localPRActionError ||
+                  (snapshotExpired ? snapshotExpiredMessage : null) ||
                   (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
 
                 let label = "Create PR";
@@ -1773,10 +1779,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 } else if (snapshotExpired) {
                   label = "Create PR";
                   disabled = true;
-                  // Prefer the server-produced message (e.g. from the last
-                  // failed attempt) when available so the UI stays aligned
-                  // with server-side wording.
-                  title = session.pr_creation_error || "Session state expired — re-run to create a PR.";
+                  title = snapshotExpiredMessage;
                 } else if (succeededButNoPR) {
                   label = "Finalizing PR\u2026";
                   spinning = true;
