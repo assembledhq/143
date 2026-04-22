@@ -48,7 +48,7 @@ vi.mock('next/link', () => ({
 // Mock next/image to render a plain img
 vi.mock('next/image', () => ({
   default: ({ src, alt, className, width, height }: { src: string; alt: string; className?: string; width?: number; height?: number }) => (
-    <img src={src} alt={alt} className={className} width={width} height={height} />
+    <span data-next-image={src} aria-label={alt} className={className} data-width={width} data-height={height} />
   ),
 }));
 

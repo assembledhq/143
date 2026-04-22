@@ -220,7 +220,6 @@ export function useAutosave<TVars>({
   // pass new inline closures each render — with no deps, React just re-runs
   // the assignment and we never miss an update. Do not "fix" this by adding
   // a dep array.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     mutationFnRef.current = mutationFn;
     applyOptimisticRef.current = applyOptimistic;

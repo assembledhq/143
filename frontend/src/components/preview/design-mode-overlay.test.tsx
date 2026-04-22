@@ -1,7 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderWithProviders, screen } from "@/test/test-utils";
 import { DesignModeOverlay } from "./design-mode-overlay";
-import { createRef } from "react";
 
 const { inspectMock, feedbackMock } = vi.hoisted(() => ({
   inspectMock: vi.fn().mockResolvedValue({
@@ -32,55 +31,27 @@ describe("DesignModeOverlay", () => {
   });
 
   it("renders the overlay with select tool button", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     expect(screen.getByTitle("Select element")).toBeInTheDocument();
   });
 
   it("select tool is active by default", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     const selectButton = screen.getByTitle("Select element");
     expect(selectButton.className).toMatch(/bg-primary/);
   });
 
   it("renders the overlay container with correct classes", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    const { container } = renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    const { container } = renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     const overlayDiv = container.querySelector(".absolute.inset-0.z-10");
     expect(overlayDiv).toBeInTheDocument();
   });
 
   it("does not show element info panel when nothing is selected", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     expect(
       screen.queryByPlaceholderText("Describe what to change...")
@@ -89,41 +60,20 @@ describe("DesignModeOverlay", () => {
   });
 
   it("does not show error banner initially", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     expect(screen.queryByText(/Failed to/)).not.toBeInTheDocument();
   });
 
   it("renders the crosshair overlay for click capture", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    const { container } = renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    const { container } = renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     const crosshairDiv = container.querySelector(".cursor-crosshair");
     expect(crosshairDiv).toBeInTheDocument();
   });
 
   it("renders SVG layer for element highlights", () => {
-    const iframeRef = createRef<HTMLIFrameElement>();
-    const { container } = renderWithProviders(
-      <DesignModeOverlay
-        sessionId="sess-1"
-        iframeRef={iframeRef}
-        previewOrigin="https://test.preview.143.dev"
-      />
-    );
+    const { container } = renderWithProviders(<DesignModeOverlay sessionId="sess-1" />);
 
     const svg = container.querySelector("svg");
     expect(svg).toBeInTheDocument();

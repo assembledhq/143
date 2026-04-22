@@ -31,7 +31,6 @@ import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import {
   PREVIEW_ERROR_CODES,
-  type PreviewStatusResponse,
   type PreviewStatus,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
@@ -669,8 +668,6 @@ export function PreviewPanel({
                 <ErrorBoundary fallback={null}>
                   <DesignModeOverlay
                     sessionId={sessionId}
-                    iframeRef={iframeRef}
-                    previewOrigin={previewOrigin}
                   />
                 </ErrorBoundary>
               )}
