@@ -93,6 +93,11 @@ const (
 	// accidentally echoing large or unexpected payloads.
 	maxLoggedBodyBytes = 256
 
+	// maxResponseBytes bounds how much data we read from upstream HTTP
+	// responses (token endpoint, profile endpoint). Defense-in-depth against
+	// an unexpected large payload from a trusted but unvetted upstream.
+	maxResponseBytes = 1 << 20 // 1 MiB
+
 	// pendingAuthTTL bounds how long a pending_auth row may live before
 	// CompleteOAuth refuses to honor it. The CSRF state and PKCE verifier
 	// should only be valid for the duration of a fresh login flow; a paste
@@ -205,8 +210,14 @@ type Service struct {
 	redirectURI  string
 	clientID     string
 	scopes       []string
-	refreshMu    sync.Map // credential ID string -> *sync.Mutex
-	initMu       sync.Map // pendingKey (orgID+label) -> *sync.Mutex
+	// refreshMu entries intentionally persist across successful refreshes:
+	// deleting a per-credential mutex after Unlock can race with concurrent
+	// waiters that already loaded the old pointer and let a later caller create
+	// a second mutex for the same credential. Growth is therefore bounded by the
+	// number of credential IDs seen over the process lifetime, and entries are
+	// reclaimed on disconnect/invalidation.
+	refreshMu sync.Map // credential ID string -> *sync.Mutex
+	initMu    sync.Map // pendingKey (orgID+label) -> *sync.Mutex
 }
 
 // NewService creates a new Claude Code subscription auth service.
@@ -513,7 +524,7 @@ func (s *Service) fetchProfile(ctx context.Context, accessToken string) (*profil
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read profile response: %w", err)
 	}
@@ -556,7 +567,7 @@ func (s *Service) exchangeAuthCode(ctx context.Context, code, state, verifier st
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
@@ -632,7 +643,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, orgID uuid.UUID, credID 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}
@@ -848,8 +859,12 @@ func (s *Service) DisconnectAll(ctx context.Context, orgID uuid.UUID) error {
 
 	// Snapshot the subscription IDs before disabling so we can clear their
 	// refresh mutexes afterwards. ListByProvider errors are non-fatal here:
-	// the DisableLabeled call below is the source of truth.
-	creds, _ := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+	// the DisableLabeled call below is the source of truth, but log the miss
+	// so operators can correlate any leaked refresh mutexes.
+	creds, err := s.credentials.ListByProvider(ctx, orgID, models.ProviderAnthropic)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list claude subscriptions before disconnect cleanup")
+	}
 
 	if err := s.credentials.DisableLabeled(ctx, orgID, models.ProviderAnthropic); err != nil {
 		return err

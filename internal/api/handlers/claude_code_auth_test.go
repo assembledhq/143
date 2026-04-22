@@ -213,6 +213,25 @@ func TestClaudeCodeAuthHandler_Complete_RequiresLabelAndCode(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_CODE")
 }
 
+func TestClaudeCodeAuthHandler_Complete_RejectsOverlongCode(t *testing.T) {
+	t.Parallel()
+
+	svc := claudecodeauth.NewService(&claudeStoreStub{}, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	body := strings.NewReader(`{"label":"team-a","code":"` + strings.Repeat("a", claudeCodePasteMax) + `x"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/complete", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.Complete(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "overlong pasted codes should be rejected before service processing")
+	require.Contains(t, w.Body.String(), "INVALID_CODE", "handler should return the invalid-code error code for overlong pasted codes")
+}
+
 func TestClaudeCodeAuthHandler_Complete_NoPendingRow(t *testing.T) {
 	t.Parallel()
 

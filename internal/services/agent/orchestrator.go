@@ -2174,8 +2174,8 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 // injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
 // sandbox if an active Claude Code subscription exists for this org. The
 // Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
-// vars, so when a subscription is present resolveAgentEnv deliberately omits
-// ANTHROPIC_API_KEY to let this path win. Returns (true, nil) when the file
+// vars, so when a subscription is present the file path wins even though
+// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns (true, nil) when the file
 // was written, (false, nil) when no subscription exists so the API-key
 // fallback should be used, or (false, err) on failure.
 //

@@ -1,6 +1,7 @@
 package claudecodeauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1431,6 +1432,20 @@ func TestDisconnectAll_DisableLabeledError(t *testing.T) {
 	if err := svc.DisconnectAll(context.Background(), uuid.New()); err == nil {
 		t.Fatal("want wrapped DisableLabeled error")
 	}
+}
+
+func TestDisconnectAll_LogsListByProviderError(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	store.listByProviderErr = errors.New("list failed")
+	var logBuf bytes.Buffer
+	svc := NewService(store, zerolog.New(&logBuf))
+
+	err := svc.DisconnectAll(context.Background(), uuid.New())
+
+	require.NoError(t, err, "DisconnectAll should continue when listing subscription IDs fails during best-effort mutex cleanup")
+	require.Contains(t, logBuf.String(), "failed to list claude subscriptions before disconnect cleanup", "DisconnectAll should log the list failure so leaked refresh mutexes are visible to operators")
 }
 
 func TestHasActiveSubscription_StoreError(t *testing.T) {

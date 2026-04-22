@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ export function ClaudeCodeAuthModal({
 }) {
   // Capture the label at mount time so it stays stable throughout the auth flow.
   const [stableLabel] = useState(() => label);
+  const connectedTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
   const [initiated, setInitiated] = useState<ClaudeCodeInitiateResponse | null>(null);
   const [status, setStatus] = useState<
     "initiating" | "awaiting_paste" | "exchanging" | "completed" | "error"
@@ -57,6 +58,23 @@ export function ClaudeCodeAuthModal({
     return () => clearTimeout(id);
   }, [startAuth]);
 
+  useEffect(() => {
+    return () => {
+      if (connectedTimerRef.current !== null) {
+        clearTimeout(connectedTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Close on Escape key.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   const submitCode = useCallback(async () => {
     const trimmed = code.trim();
     if (!trimmed) {
@@ -68,7 +86,7 @@ export function ClaudeCodeAuthModal({
       setError("");
       await api.claudeCodeAuth.complete(stableLabel, trimmed);
       setStatus("completed");
-      setTimeout(() => {
+      connectedTimerRef.current = setTimeout(() => {
         onConnected?.();
       }, 1200);
     } catch (err) {

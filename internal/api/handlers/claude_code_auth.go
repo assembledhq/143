@@ -24,6 +24,10 @@ import (
 // equivalent limit in codex_auth.go.
 const claudeCodeSubscriptionLabelMax = 100
 
+// claudeCodePasteMax bounds the pasted "<code>#<state>" payload size so the
+// handler rejects obviously unreasonable inputs before they reach the service.
+const claudeCodePasteMax = 2048
+
 // ClaudeCodeAuthHandler serves the /api/v1/settings/claude-code-auth endpoints.
 // Mirrors CodexAuthHandler in spirit, but the Claude Code CLI uses an
 // authorization-code + PKCE flow rather than device-code, so the endpoint
@@ -119,6 +123,10 @@ func (h *ClaudeCodeAuthHandler) Complete(w http.ResponseWriter, r *http.Request)
 	}
 	if body.Code == "" {
 		writeError(w, r, http.StatusBadRequest, "INVALID_CODE", "code is required", nil)
+		return
+	}
+	if len(body.Code) > claudeCodePasteMax {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CODE", fmt.Sprintf("code must be %d characters or fewer", claudeCodePasteMax), nil)
 		return
 	}
 
