@@ -1,6 +1,6 @@
 # 53 - Session Composer Mentions
 
-> **Status:** Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-04-22
 >
 > **Depends on:** [../overall.md](../overall.md), [../03-frontend.md](../03-frontend.md), [../future/53-session-composer-mentions.md](../future/53-session-composer-mentions.md)
 
@@ -27,7 +27,7 @@ The shipped design follows the core proposal:
 ## Frontend shape
 
 - The manual session composer maintains `message`, `references`, and caret-driven active mention state.
-- Typing `@` opens a picker, arrow keys move the selection, `Enter` inserts the mention, and selected references render as removable chips below the textarea.
+- Typing `@` opens a picker anchored directly above the composer so results stay visually attached to the input, arrow keys move the selection, `Enter` inserts the mention, and selected references render as removable chips below the textarea.
 - Reference state is reconciled back against the message text so deleting a token removes the structured reference.
 - Changing repositories clears stale references from both chips and message text to avoid cross-repo ambiguity.
 
