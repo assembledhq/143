@@ -290,7 +290,7 @@ func (s *OrgCredentialStore) ListSummaries(ctx context.Context, orgID uuid.UUID)
 	query := `
 		SELECT ` + credentialColumns + `
 		FROM org_credentials
-		WHERE org_id = @org_id AND status != 'disabled'`
+		WHERE org_id = @org_id AND label = '' AND status != 'disabled'`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
@@ -445,7 +445,7 @@ func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid
 
 // Disable soft-deletes a credential.
 func (s *OrgCredentialStore) Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error {
-	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider`
+	query := `UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE org_id = @org_id AND provider = @provider AND label = ''`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
 		"provider": string(provider),

@@ -262,6 +262,34 @@ func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	require.False(t, openaiSummary.Configured, "openai should not be configured")
 }
 
+func TestOrgCredentialStore_ListSummaries_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*label = ''`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(credColumns))
+
+	summaries, err := store.ListSummaries(context.Background(), uuid.New())
+	require.NoError(t, err, "ListSummaries should not return an error")
+
+	var anthropicSummary *models.CredentialSummary
+	for i := range summaries {
+		if summaries[i].Provider == models.ProviderAnthropic {
+			anthropicSummary = &summaries[i]
+			break
+		}
+	}
+	require.NotNil(t, anthropicSummary, "summaries should include Anthropic")
+	require.False(t, anthropicSummary.Configured, "labeled subscription rows must not make Anthropic API key appear configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "ListSummaries query must filter to label = ''")
+}
+
 func TestOrgCredentialStore_Disable(t *testing.T) {
 	t.Parallel()
 
@@ -309,6 +337,24 @@ func TestOrgCredentialStore_Disable(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestOrgCredentialStore_Disable_FiltersLabelEmpty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+
+	mock.ExpectExec(`(?s)UPDATE org_credentials.*status = 'disabled'.*label = ''`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.Disable(context.Background(), uuid.New(), models.ProviderAnthropic)
+	require.NoError(t, err, "Disable should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "Disable query must filter to label = ''")
 }
 
 func TestOrgCredentialStore_UpdateStatus(t *testing.T) {

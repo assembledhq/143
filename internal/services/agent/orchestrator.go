@@ -1747,35 +1747,18 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
-		// Subscription takes priority: when an active Claude Code subscription
-		// exists for this org, skip ANTHROPIC_API_KEY so the credentials file
-		// injected by injectClaudeCodeAuth isn't overridden at runtime.
-		hasSubscription := false
-		if o.claudeCodeAuth != nil {
-			has, err := o.claudeCodeAuth.HasActiveSubscription(ctx, orgID)
-			if err != nil {
-				// Don't swallow: a transient DB error here would fall through
-				// to the API-key branch and could overwrite a real subscription
-				// with ANTHROPIC_API_KEY. Log so operators see the outage; the
-				// sandbox will still get an API-key fallback if one exists,
-				// which is the safest degradation when we can't tell.
-				o.logger.Warn().
-					Err(err).
-					Str("org_id", orgID.String()).
-					Msg("claude subscription lookup failed; falling back to API-key env")
-			} else {
-				hasSubscription = has
+		// Always keep the Anthropic API key in env when configured. The Claude
+		// Code CLI should prefer ~/.claude/.credentials.json when a
+		// subscription file is present, but retaining ANTHROPIC_API_KEY here
+		// gives the run a real fallback if subscription token lookup/refresh
+		// fails after sandbox creation.
+		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
+		if ac, ok := cfg.(models.AnthropicConfig); ok {
+			if ac.APIKey != "" {
+				merged["ANTHROPIC_API_KEY"] = ac.APIKey
 			}
-		}
-		if !hasSubscription {
-			cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
-			if ac, ok := cfg.(models.AnthropicConfig); ok {
-				if ac.APIKey != "" {
-					merged["ANTHROPIC_API_KEY"] = ac.APIKey
-				}
-				if ac.BaseURL != "" {
-					merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
-				}
+			if ac.BaseURL != "" {
+				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
 			}
 		}
 	case models.AgentTypeCodex:
@@ -2279,6 +2262,15 @@ func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
 	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
 	if err != nil {
+		cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
+		if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("claude subscription injection failed; continuing with Anthropic API-key fallback")
+			return nil
+		}
 		o.failRunWithCategory(ctx, run,
 			fmt.Sprintf("claude subscription injection failed: %s", err),
 			FailureCategoryClaudeCodeAuth,

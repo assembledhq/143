@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -414,6 +415,27 @@ func TestDisconnectAll_PreservesAPIKeyRow(t *testing.T) {
 	if store.creds[*subID].Status != "disabled" {
 		t.Errorf("subscription row should be disabled, got %q", store.creds[*subID].Status)
 	}
+}
+
+func TestDisconnectForOrg_RejectsUnlabeledAnthropicAPIKey(t *testing.T) {
+	t.Parallel()
+
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	orgID := uuid.New()
+	apiKeyID := uuid.New()
+	store.creds[apiKeyID] = &models.DecryptedCredential{
+		ID:       apiKeyID,
+		OrgID:    orgID,
+		Provider: models.ProviderAnthropic,
+		Label:    "",
+		Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+		Status:   "active",
+	}
+
+	err := svc.DisconnectForOrg(context.Background(), orgID, apiKeyID)
+	require.ErrorIs(t, err, ErrCredentialNotFound, "Claude subscription disconnect should reject an Anthropic API-key row")
+	require.Equal(t, "active", store.creds[apiKeyID].Status, "Anthropic API-key row should remain active")
 }
 
 func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {

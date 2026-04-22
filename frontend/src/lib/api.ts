@@ -124,6 +124,10 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
   const headers: Record<string, string> = {
     'X-CSRF-Token': getCSRFToken(),
   };
+  const activeOrgId = getActiveOrgId();
+  if (activeOrgId) {
+    headers['X-Active-Org-ID'] = activeOrgId;
+  }
   // Do NOT set Content-Type — the browser sets it with the multipart boundary.
 
   const res = await fetch(`${API_BASE}/api/v1/uploads`, {
@@ -132,6 +136,10 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
     headers,
     body: formData,
   });
+
+  if (typeof window !== 'undefined' && res.headers.get('X-Org-Membership-Revoked') === '1') {
+    maybeDispatchRevoked();
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

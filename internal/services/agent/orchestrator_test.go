@@ -1351,10 +1351,10 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "run should succeed with a Claude subscription")
 
-	// Subscription wins over ANTHROPIC_API_KEY — the env var must be absent
-	// so the Claude Code CLI falls through to the credentials file we wrote.
-	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
-		"ANTHROPIC_API_KEY must not be set when a subscription is present")
+	// Keep the API key in env as a fallback if token refresh later fails.
+	// The Claude Code CLI should still prefer the credentials file we wrote.
+	require.Equal(t, "sk-ant-default-test", capturedCfg.Env["ANTHROPIC_API_KEY"],
+		"Anthropic API key should remain available as a fallback when a subscription is present")
 
 	// Credentials file was written to the expected path with the CLI's schema.
 	credsPath := "/home/sandbox/.claude/.credentials.json"
@@ -1381,6 +1381,36 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	require.Contains(t, d.provider.ExecCalls,
 		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
 		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
+}
+
+func TestRunAgent_ClaudeSubscriptionTokenFailureFallsBackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "fallback-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should fall back to the Anthropic API key when subscription token lookup fails")
+
+	require.Equal(t, "sk-ant-default-test", capturedCfg.Env["ANTHROPIC_API_KEY"],
+		"Anthropic API key should be injected into the sandbox as a fallback")
+	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, wroteCredsFile, "credentials file should not be written when subscription token lookup fails")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "fallback to API key should not mark the run as failed")
 }
 
 func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {

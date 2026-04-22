@@ -819,11 +819,15 @@ func (s *Service) DisconnectForOrg(ctx context.Context, orgID uuid.UUID, credID 
 	if s.credentials == nil {
 		return nil
 	}
-	exists, err := s.credentials.ExistsForProviderByID(ctx, orgID, credID, models.ProviderAnthropic)
+	cred, err := s.credentials.GetByID(ctx, orgID, credID)
 	if err != nil {
-		return fmt.Errorf("check credential ownership: %w", err)
+		if isNotFoundError(err) {
+			return ErrCredentialNotFound
+		}
+		return fmt.Errorf("get credential: %w", err)
 	}
-	if !exists {
+	cfg, ok := cred.Config.(models.AnthropicConfig)
+	if cred.Provider != models.ProviderAnthropic || cred.Label == "" || !ok || cfg.Subscription == nil {
 		return ErrCredentialNotFound
 	}
 	return s.Disconnect(ctx, orgID, credID)

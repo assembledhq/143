@@ -39,6 +39,7 @@ type claudeStoreStub struct {
 	disableErr                  error
 	disabled                    bool
 	existsForProviderByIDResult bool
+	getByIDCredential           *models.DecryptedCredential
 }
 
 func (s *claudeStoreStub) Get(context.Context, uuid.UUID, models.ProviderName) (*models.DecryptedCredential, error) {
@@ -55,7 +56,25 @@ func (s *claudeStoreStub) InsertPendingAuth(context.Context, uuid.UUID, *uuid.UU
 	return &id, nil
 }
 func (s *claudeStoreStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (*models.DecryptedCredential, error) {
-	return nil, errors.New("not found")
+	if s.getByIDCredential != nil {
+		return s.getByIDCredential, nil
+	}
+	if s.existsForProviderByIDResult {
+		return &models.DecryptedCredential{
+			ID:       uuid.New(),
+			OrgID:    uuid.New(),
+			Provider: models.ProviderAnthropic,
+			Label:    "team-a",
+			Config: models.AnthropicConfig{
+				Subscription: &models.AnthropicSubscription{
+					AccessToken:  "access",
+					RefreshToken: "refresh",
+				},
+			},
+			Status: "active",
+		}, nil
+	}
+	return nil, claudecodeauth.ErrCredentialNotFound
 }
 func (s *claudeStoreStub) GetByProviderAndLabel(context.Context, uuid.UUID, models.ProviderName, string) (*models.DecryptedCredential, error) {
 	// Use the sentinel the service understands so CompleteOAuth maps it to
