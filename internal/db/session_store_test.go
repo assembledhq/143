@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -47,6 +48,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, 0, lastActivityAt, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 		nil,      // target_branch
 		nil,      // working_branch
+		nil,      // base_commit_sha
 		nil,      // repository_id
 		nil,      // diff_stats
 		nil,      // diff_history
@@ -55,6 +57,8 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,            // automation_run_id
 		"idle",         // pr_creation_state
 		(*string)(nil), // pr_creation_error
+		nil,            // diff_collected_at
+		nil,            // latest_diff_snapshot_id
 		nil,            // deleted_at
 		createdAt,
 	}
@@ -114,6 +118,37 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	require.NoError(t, err, "ListByOrg without RepositoryID should not return an error")
 	require.Len(t, sessions, 1, "should return one session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
+	t.Parallel()
+
+	requiredColumns := []string{
+		"base_commit_sha",
+		"diff_collected_at",
+		"latest_diff_snapshot_id",
+	}
+
+	for _, tt := range []struct {
+		name    string
+		columns string
+	}{
+		{name: "select columns", columns: sessionSelectColumns},
+		{name: "list columns", columns: sessionListColumns},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, column := range requiredColumns {
+				require.True(
+					t,
+					strings.Contains(tt.columns, column),
+					"query column list should include %s so RowToStructByName[models.Session] remains aligned",
+					column,
+				)
+			}
+		})
+	}
 }
 
 func TestSessionStore_UpdatePRCreationState(t *testing.T) {
@@ -440,7 +475,8 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
@@ -850,7 +886,7 @@ func TestSessionStore_UpdateTurnComplete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTurnComplete(context.Background(), uuid.New(), uuid.New(), 2, result, "agent-123", "snap-key")

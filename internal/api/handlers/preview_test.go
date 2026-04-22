@@ -538,7 +538,7 @@ func (f fakeFileReader) ReadFile(_ context.Context, _, _, _ string) (string, boo
 	return f.content, false, f.err
 }
 
-func (f fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) ([]sandbox.FileLine, error) {
+func (f fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
 	panic("not used")
 }
 
@@ -643,9 +643,9 @@ var sessionRowColumns = []string{
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key", "target_branch", "working_branch",
-	"repository_id", "diff_stats", "diff_history", "input_manifest",
+	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error",
+	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"deleted_at", "created_at",
 }
 
@@ -663,8 +663,8 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		// acquireSandbox to attach to the lingering container_id; otherwise
 		// the stale-ID guard falls through to hydrate/expired.
 		"running", nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
 	}
 }
 
@@ -683,8 +683,8 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 		nil, nil, nil, nil,
 		0, time.Now(),
 		"running", snapshotKey, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
 	}
 }
 
@@ -702,8 +702,8 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 		nil, nil, nil, nil,
 		0, time.Now(),
 		sandboxState, snapshotKey, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, time.Now(),
+		nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
 	}
 }
 
