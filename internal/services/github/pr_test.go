@@ -1,9 +1,12 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +20,8 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/storage"
 )
 
 // mockLLMClient implements llm.Client for testing.
@@ -29,6 +34,124 @@ type mockLLMClient struct {
 func (m *mockLLMClient) Complete(_ context.Context, _, userPrompt string) (string, error) {
 	m.lastUserPrompt = userPrompt
 	return m.response, m.err
+}
+
+var prTestIssueColumns = []string{
+	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+	"created_at", "updated_at", "deleted_at",
+}
+
+var prTestRepoColumns = []string{
+	"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+	"private", "language", "description", "clone_url", "installation_id", "status",
+	"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+}
+
+var prTestOrganizationColumns = []string{
+	"id", "name", "settings", "created_at", "updated_at",
+}
+
+var prTestUserColumns = []string{
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at",
+}
+
+type prTestSnapshotStore struct {
+	payload   []byte
+	loadErr   error
+	deleted   []string
+	deleteErr error
+}
+
+func (s *prTestSnapshotStore) Save(context.Context, string, io.Reader) error { return nil }
+func (s *prTestSnapshotStore) Load(_ context.Context, _ string, w io.Writer) error {
+	if s.loadErr != nil {
+		return s.loadErr
+	}
+	_, err := w.Write(s.payload)
+	return err
+}
+func (s *prTestSnapshotStore) Delete(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	return s.deleteErr
+}
+
+type prTestSandboxProvider struct {
+	lastConfig  agent.SandboxConfig
+	lastExecCmd string
+	writes      map[string][]byte
+	execExit    int
+	execErr     error
+	execStderr  string
+	createErr   error
+	restoreErr  error
+	writeErrs   map[string]error
+	destroyErr  error
+	destroyed   int
+}
+
+func (p *prTestSandboxProvider) Name() string { return "test" }
+
+func (p *prTestSandboxProvider) Create(_ context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	if p.createErr != nil {
+		return nil, p.createErr
+	}
+	p.lastConfig = cfg
+	return &agent.Sandbox{ID: "sandbox-1", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+}
+
+func (p *prTestSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, string, string, string) error {
+	return nil
+}
+
+func (p *prTestSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	p.lastExecCmd = cmd
+	if p.execStderr != "" {
+		_, _ = io.WriteString(stderr, p.execStderr)
+	}
+	return p.execExit, p.execErr
+}
+
+func (p *prTestSandboxProvider) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (p *prTestSandboxProvider) WriteFile(_ context.Context, _ *agent.Sandbox, path string, data []byte) error {
+	if err := p.writeErrs[path]; err != nil {
+		return err
+	}
+	if p.writes == nil {
+		p.writes = make(map[string][]byte)
+	}
+	p.writes[path] = append([]byte(nil), data...)
+	return nil
+}
+
+func (p *prTestSandboxProvider) Destroy(context.Context, *agent.Sandbox) error {
+	p.destroyed++
+	return p.destroyErr
+}
+
+func (p *prTestSandboxProvider) IsAlive(context.Context, *agent.Sandbox) (bool, error) {
+	return true, nil
+}
+
+func (p *prTestSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	return nil, nil
+}
+
+func (p *prTestSandboxProvider) Snapshot(context.Context, *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+
+func (p *prTestSandboxProvider) Restore(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+	_, _ = io.Copy(io.Discard, reader)
+	return p.restoreErr
+}
+
+func (p *prTestSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
+	return 0, nil
 }
 
 func TestFormatPRTitle(t *testing.T) {
@@ -1509,4 +1632,464 @@ func TestCommitIdentity(t *testing.T) {
 		require.Equal(t, "Alice", name)
 		require.Equal(t, "alice@example.com", email)
 	})
+}
+
+func TestPushSessionBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		snapshots      *prTestSnapshotStore
+		provider       *prTestSandboxProvider
+		wantErrIs      error
+		wantErrSubstr  string
+		wantDestroyCnt int
+	}{
+		{
+			name:           "missing snapshot maps to expired",
+			snapshots:      &prTestSnapshotStore{loadErr: storage.ErrSnapshotNotFound},
+			provider:       &prTestSandboxProvider{},
+			wantErrIs:      ErrSnapshotExpired,
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "write commit message failure returns error",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{writeErrs: map[string]error{pushCommitMsgPath: errors.New("disk full")}},
+			wantErrSubstr:  "write commit message to sandbox",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "write helper failure returns error",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{writeErrs: map[string]error{pushHelperPath: errors.New("chmod failed")}},
+			wantErrSubstr:  "write push helper to sandbox",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "exec failure returns error",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execErr: errors.New("sandbox exec failed")},
+			wantErrSubstr:  "exec push script",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "no changes sentinel maps to ErrNoChanges",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: pushExitNoChanges},
+			wantErrIs:      ErrNoChanges,
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "nonzero exit scrubs token from stderr",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: 12, execStderr: "token leaked: secret-token"},
+			wantErrSubstr:  "git push failed (exit 12): token leaked: ***",
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "success writes helper files and executes push",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{},
+			wantDestroyCnt: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &PRService{
+				sandboxProvider: tt.provider,
+				snapshots:       tt.snapshots,
+				logger:          zerolog.Nop(),
+			}
+			run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+			repo := &models.Repository{FullName: "owner/repo"}
+
+			err := svc.pushSessionBranch(
+				context.Background(),
+				run,
+				repo,
+				"secret-token",
+				"snapshots/key.tar",
+				"143/abc123/fix",
+				"commit message",
+				"Test User",
+				"test@example.com",
+			)
+
+			if tt.wantErrIs != nil {
+				require.ErrorIs(t, err, tt.wantErrIs, "pushSessionBranch should return the expected sentinel error")
+			} else if tt.wantErrSubstr != "" {
+				require.Error(t, err, "pushSessionBranch should return an error")
+				require.Contains(t, err.Error(), tt.wantErrSubstr, "pushSessionBranch should include the expected error text")
+			} else {
+				require.NoError(t, err, "pushSessionBranch should succeed")
+				require.Equal(t, []byte("commit message"), tt.provider.writes[pushCommitMsgPath], "pushSessionBranch should write the commit message file")
+				require.Equal(t, []byte("secret-token"), tt.provider.writes[pushInputPath], "pushSessionBranch should write the credential input file")
+				require.Contains(t, string(tt.provider.writes[pushHelperPath]), pushInputPath, "pushSessionBranch should write a helper script that reads the credential input file")
+				require.Contains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should run git push through the helper script")
+			}
+
+			require.Equal(t, tt.wantDestroyCnt, tt.provider.destroyed, "pushSessionBranch should always destroy the hydrated sandbox")
+		})
+	}
+}
+
+func TestCreatePR_ConfigChecks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		run           *models.Session
+		configureDeps func(svc *PRService)
+		wantErrIs     error
+		wantErrSubstr string
+	}{
+		{
+			name: "missing sandbox deps fails fast",
+			run: &models.Session{
+				ID:          uuid.New(),
+				OrgID:       uuid.New(),
+				SnapshotKey: func() *string { s := "snap"; return &s }(),
+			},
+			configureDeps: func(*PRService) {},
+			wantErrSubstr: "sandbox push dependencies not configured",
+		},
+		{
+			name: "missing snapshot key maps to expired",
+			run: &models.Session{
+				ID:    uuid.New(),
+				OrgID: uuid.New(),
+			},
+			configureDeps: func(svc *PRService) {
+				svc.sandboxProvider = &prTestSandboxProvider{}
+				svc.snapshots = &prTestSnapshotStore{}
+			},
+			wantErrIs: ErrSnapshotExpired,
+		},
+		{
+			name: "missing repository returns error",
+			run: &models.Session{
+				ID:          uuid.New(),
+				OrgID:       uuid.New(),
+				SnapshotKey: func() *string { s := "snap"; return &s }(),
+			},
+			configureDeps: func(svc *PRService) {
+				svc.sandboxProvider = &prTestSandboxProvider{}
+				svc.snapshots = &prTestSnapshotStore{}
+			},
+			wantErrSubstr: "has no repository",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+					"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+				}))
+
+			svc := &PRService{
+				pullRequests: db.NewPullRequestStore(mock),
+				logger:       zerolog.Nop(),
+			}
+			tt.configureDeps(svc)
+
+			_, err = svc.CreatePR(context.Background(), tt.run)
+			if tt.wantErrIs != nil {
+				require.ErrorIs(t, err, tt.wantErrIs, "CreatePR should return the expected sentinel error")
+			} else {
+				require.Error(t, err, "CreatePR should return an error")
+				require.Contains(t, err.Error(), tt.wantErrSubstr, "CreatePR should include the expected error text")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	body := ""
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("SELECT .+ FROM issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestIssueColumns).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, &repoID,
+				"Broken button", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 1, "high", []string{"bug"}, "fp",
+				now, now, nil,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+				orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only","pr_draft_default":true}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestUserColumns).AddRow(
+				userID, orgID, "alice@example.com", "Alice", "member", nil, nil, nil, nil, nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectExec("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE issues SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	var createPRPayload map[string]any
+	labelCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&createPRPayload), "mock server should decode the create PR payload")
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"number":   42,
+				"html_url": "https://github.com/owner/repo/pull/42",
+			}), "mock server should encode the created PR")
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/42/labels":
+			labelCalls++
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{{"name": "143-generated"}}), "mock server should encode label response")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := &prTestSandboxProvider{}
+	svc := &PRService{
+		tokenProvider: &Service{
+			cache: map[int64]*cachedToken{
+				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+			},
+		},
+		pullRequests:    db.NewPullRequestStore(mock),
+		sessions:        db.NewSessionStore(mock),
+		issues:          db.NewIssueStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		users:           db.NewUserStore(mock),
+		orgs:            db.NewOrganizationStore(mock),
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		baseURL:         server.URL,
+		httpClient:      server.Client(),
+		logger:          zerolog.Nop(),
+	}
+
+	run := &models.Session{
+		ID:                runID,
+		OrgID:             orgID,
+		IssueID:           issueID,
+		TriggeredByUserID: &userID,
+		SnapshotKey:       &snapshotKey,
+		ResultSummary:     func() *string { s := "Implemented the fix"; return &s }(),
+	}
+
+	pr, err := svc.CreatePR(context.Background(), run)
+	require.NoError(t, err, "CreatePR should succeed for a snapshot-backed session")
+	require.Equal(t, 42, pr.GitHubPRNumber, "CreatePR should store the returned PR number")
+	require.Equal(t, "https://github.com/owner/repo/pull/42", pr.GitHubPRURL, "CreatePR should store the returned PR URL")
+	require.Equal(t, "owner/repo", pr.GitHubRepo, "CreatePR should store the repository name")
+	require.Equal(t, 1, labelCalls, "CreatePR should add labels to the created PR")
+	require.Equal(t, true, createPRPayload["draft"], "CreatePR should honor the org default draft setting")
+	require.Contains(t, string(provider.writes[pushCommitMsgPath]), "Co-authored-by: Alice <alice@example.com>", "CreatePR should include a co-author trailer when using the app token for a user-triggered run")
+	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/", "CreatePR should push the restored branch before opening the PR")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	_ = body
+}
+
+func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	integrationID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, writeErr := w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between main and 143/abc123/changes"}]}`))
+		require.NoError(t, writeErr, "mock server should return the GitHub no-commits validation error")
+	}))
+	defer server.Close()
+
+	svc := &PRService{
+		tokenProvider: &Service{
+			cache: map[int64]*cachedToken{
+				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+			},
+		},
+		pullRequests:    db.NewPullRequestStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		sandboxProvider: &prTestSandboxProvider{},
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		baseURL:         server.URL,
+		httpClient:      server.Client(),
+		logger:          zerolog.Nop(),
+	}
+
+	run := &models.Session{
+		ID:           runID,
+		OrgID:        orgID,
+		RepositoryID: &repoID,
+		SnapshotKey:  &snapshotKey,
+	}
+
+	_, err = svc.CreatePR(context.Background(), run)
+	require.ErrorIs(t, err, ErrNoChanges, "CreatePR should translate GitHub's no-commits 422 into ErrNoChanges")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCreateOrGetPullRequest_AdditionalPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns created pull request directly", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"number":   7,
+				"html_url": "https://github.com/owner/repo/pull/7",
+			}), "mock server should encode the created PR")
+		}))
+		defer server.Close()
+
+		svc := &PRService{baseURL: server.URL, httpClient: server.Client(), logger: zerolog.Nop()}
+		prNumber, prURL, err := svc.createOrGetPullRequest(context.Background(), "token", "owner", "repo", "title", "body", "head", "main")
+		require.NoError(t, err, "createOrGetPullRequest should return a created PR without fallback lookup")
+		require.Equal(t, 7, prNumber, "createOrGetPullRequest should return the created PR number")
+		require.Equal(t, "https://github.com/owner/repo/pull/7", prURL, "createOrGetPullRequest should return the created PR URL")
+	})
+
+	t.Run("passthroughs non-conflict error", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, writeErr := w.Write([]byte(`{"message":"upstream down"}`))
+			require.NoError(t, writeErr, "mock server should return a non-conflict error")
+		}))
+		defer server.Close()
+
+		svc := &PRService{baseURL: server.URL, httpClient: server.Client(), logger: zerolog.Nop()}
+		_, _, err := svc.createOrGetPullRequest(context.Background(), "token", "owner", "repo", "title", "body", "head", "main")
+		require.Error(t, err, "createOrGetPullRequest should return non-conflict errors directly")
+		require.Contains(t, err.Error(), "returned 502", "createOrGetPullRequest should preserve the original GitHub API error")
+	})
+}
+
+func TestFindOpenPullRequestByHead_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		handler       http.HandlerFunc
+		wantErrSubstr string
+	}{
+		{
+			name: "request failure wraps lookup context",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"message":"boom"}`))
+			},
+			wantErrSubstr: "find existing pull request by head",
+		},
+		{
+			name: "decode failure wraps decode context",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`not json`))
+			},
+			wantErrSubstr: "decode existing pull request lookup",
+		},
+		{
+			name: "empty result returns descriptive error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.NoError(t, json.NewEncoder(w).Encode([]map[string]any{}), "mock server should encode an empty PR list")
+			},
+			wantErrSubstr: "no open pull request found for head-branch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			svc := &PRService{baseURL: server.URL, httpClient: server.Client(), logger: zerolog.Nop()}
+			_, _, err := svc.findOpenPullRequestByHead(context.Background(), "token", "owner", "repo", "head-branch")
+			require.Error(t, err, "findOpenPullRequestByHead should return an error for %s", tt.name)
+			require.Contains(t, err.Error(), tt.wantErrSubstr, "findOpenPullRequestByHead should include the expected error context")
+		})
+	}
 }

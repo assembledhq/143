@@ -116,6 +116,82 @@ func TestSessionStore_ListByOrg_WithoutRepositoryID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_UpdatePRCreationState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     models.PRCreationState
+		errMsg    string
+		expectErr bool
+	}{
+		{
+			name:   "failed state stores error message",
+			state:  models.PRCreationStateFailed,
+			errMsg: "push failed",
+		},
+		{
+			name:  "queued state clears error message",
+			state: models.PRCreationStateQueued,
+		},
+		{
+			name:      "invalid state returns validation error",
+			state:     models.PRCreationState("bogus"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+
+			if !tt.expectErr {
+				mock.ExpectExec("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.UpdatePRCreationState(context.Background(), orgID, sessionID, tt.state, tt.errMsg)
+			if tt.expectErr {
+				require.Error(t, err, "UpdatePRCreationState should reject invalid enum values")
+				require.Contains(t, err.Error(), "invalid PRCreationState", "UpdatePRCreationState should surface enum validation failures")
+				return
+			}
+
+			require.NoError(t, err, "UpdatePRCreationState should persist valid state transitions")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ClearSnapshotKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ClearSnapshotKey(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ClearSnapshotKey should update the row without error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // TestSessionStore_ListByOrg_MRUOrdering verifies the list query orders by
 // last_activity_at (Most-Recently-Updated), not created_at. Regressions here
 // would flip the Sessions page back to creation-time ordering, which is the
