@@ -101,10 +101,10 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 	return deleted, err
 }
 
-const claimedJobColumns = `id, org_id, queue, job_type, payload, priority, status,
-	attempts, max_attempts, run_at, locked_by_node_id, locked_at,
-	lease_expires_at, lock_token, run_owner_id, last_error,
-	dedupe_key, created_at, updated_at, completed_at`
+const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
+	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
+	j.lease_expires_at, j.lock_token, j.run_owner_id, j.last_error,
+	j.dedupe_key, j.created_at, j.updated_at, j.completed_at`
 
 type jobExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
