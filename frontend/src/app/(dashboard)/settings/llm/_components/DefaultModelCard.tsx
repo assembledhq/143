@@ -76,6 +76,10 @@ export function DefaultModelCard({
                 No provider key configured for this model
               </p>
             )}
+            <p className="text-xs text-muted-foreground">
+              Used for organization-level LLM features, separate from the coding agents configured
+              on the Agent settings page.
+            </p>
           </div>
 
           <div className="space-y-2">

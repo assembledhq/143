@@ -213,7 +213,8 @@ export default function LLMPage() {
       <div className="space-y-6">
         <PageHeader
           title="LLM"
-          description="Configure agent credentials and the AI model for your organization."
+          description="Configure the app-level LLMs used for extra features like PR descriptions, session titles, validation, and project generation."
+          subtitle="These models are separate from the coding agents configured on the Agent page."
         />
 
         {!hasPlatformLLM && (
@@ -244,6 +245,10 @@ export default function LLMPage() {
             <h2 className="text-xs font-medium text-foreground">Default model</h2>
             <AutosaveIndicator status={autosave.status} />
           </div>
+          <p className="text-xs text-muted-foreground">
+            Choose the default model for app features like PR descriptions, titles, validation, and
+            project generation.
+          </p>
           <DefaultModelCard
             value={llmModel}
             reasoningEffort={reasoningEffort}
@@ -265,8 +270,8 @@ export default function LLMPage() {
         <section className="space-y-3">
           <h2 className="text-xs font-medium text-foreground">Provider keys</h2>
           <p className="text-xs text-muted-foreground">
-            Add API keys for this org. Keys flow to coding agent sessions and can power the default
-            model above when the matching provider is selected.
+            Add API keys for these app-level LLM features. These keys power the default model above
+            and are separate from the coding agent credentials on the Agent page.
           </p>
           <div className="space-y-2">
             {LLM_PROVIDERS.map((provider) => (
