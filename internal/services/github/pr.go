@@ -52,6 +52,7 @@ type PRService struct {
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
+	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
 	users           *db.UserStore
 	orgs            *db.OrganizationStore
@@ -96,6 +97,11 @@ func NewPRService(
 // SetReviewCommentStore sets the review comment store for the feedback loop.
 func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
+}
+
+// SetIntegrationStore sets the integration store for installation fallback lookups.
+func (s *PRService) SetIntegrationStore(store *db.IntegrationStore) {
+	s.integrations = store
 }
 
 // SetUserCredentialStore sets the user credential store for user-authored PRs.
@@ -171,12 +177,93 @@ type tokenResolution struct {
 	User        *models.User // set when IsUserToken is true
 }
 
+func shouldRetryWithOrgInstallation(err error) bool {
+	var apiErr *githubAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func integrationInstallationID(integration *models.Integration) (int64, error) {
+	if integration == nil || len(integration.Config) == 0 {
+		return 0, fmt.Errorf("github integration config missing installation_id")
+	}
+
+	var cfg struct {
+		InstallationID int64 `json:"installation_id"`
+	}
+	if err := json.Unmarshal(integration.Config, &cfg); err != nil {
+		return 0, fmt.Errorf("parse github integration config: %w", err)
+	}
+	if cfg.InstallationID <= 0 {
+		return 0, fmt.Errorf("github integration config missing installation_id")
+	}
+	return cfg.InstallationID, nil
+}
+
+func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
+	tryInstallation := func(installationID int64) (string, error) {
+		if installationID <= 0 {
+			return "", fmt.Errorf("repository %s has no github installation_id", repo.FullName)
+		}
+		token, err := s.tokenProvider.GetInstallationToken(ctx, installationID)
+		if err != nil {
+			return "", fmt.Errorf("get installation token for installation %d: %w", installationID, err)
+		}
+		return token, nil
+	}
+
+	var primaryErr error
+	if repo.InstallationID > 0 {
+		token, err := tryInstallation(repo.InstallationID)
+		if err == nil {
+			return token, nil
+		}
+		primaryErr = err
+		if !shouldRetryWithOrgInstallation(err) {
+			return "", err
+		}
+	} else {
+		primaryErr = fmt.Errorf("repository %s has no github installation_id", repo.FullName)
+	}
+
+	if s.integrations == nil || repo.IntegrationID == uuid.Nil {
+		return "", primaryErr
+	}
+
+	integration, err := s.integrations.GetByID(ctx, repo.IntegrationID)
+	if err != nil {
+		return "", primaryErr
+	}
+
+	fallbackInstallationID, err := integrationInstallationID(&integration)
+	if err != nil {
+		return "", primaryErr
+	}
+	if fallbackInstallationID == repo.InstallationID {
+		return "", primaryErr
+	}
+
+	token, err := tryInstallation(fallbackInstallationID)
+	if err != nil {
+		return "", err
+	}
+
+	s.logger.Warn().
+		Str("org_id", orgID.String()).
+		Str("repo", repo.FullName).
+		Str("integration_id", repo.IntegrationID.String()).
+		Int64("repo_installation_id", repo.InstallationID).
+		Int64("fallback_installation_id", fallbackInstallationID).
+		Msg("using GitHub integration installation fallback for PR creation")
+
+	return token, nil
+}
+
 // resolveToken determines which GitHub token to use for PR creation.
 // Order: user's personal GitHub token → GitHub App installation token.
 func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (*tokenResolution, error) {
 	// If org is set to app_only, skip user token lookup.
 	if orgSettings.PRAuthorship == models.PRAuthorshipAppOnly {
-		token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+		token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
 		if err != nil {
 			return nil, fmt.Errorf("get installation token: %w", err)
 		}
@@ -216,7 +303,7 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 	}
 
 	// Fall back to app installation token.
-	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+	token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token: %w", err)
 	}

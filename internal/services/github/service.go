@@ -80,7 +80,8 @@ func (s *Service) generateJWT() (string, error) {
 }
 
 func (s *Service) exchangeForInstallationToken(ctx context.Context, jwtToken string, installationID int64) (string, time.Time, error) {
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+	path := fmt.Sprintf("/app/installations/%d/access_tokens", installationID)
+	url := "https://api.github.com" + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return "", time.Time{}, err
@@ -96,7 +97,12 @@ func (s *Service) exchangeForInstallationToken(ctx context.Context, jwtToken str
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", time.Time{}, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, body)
+		return "", time.Time{}, &githubAPIError{
+			Method:     http.MethodPost,
+			Path:       path,
+			StatusCode: resp.StatusCode,
+			Body:       body,
+		}
 	}
 
 	var result struct {
