@@ -1006,6 +1006,119 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
   });
 
+  it('shows the PR authorship modal and falls back to app mode when requested', async () => {
+    const requestBodies: Array<Record<string, unknown> | undefined> = [];
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: false,
+          has_repo_scope: false,
+          pr_authorship_mode: 'user_preferred',
+          pr_draft_default: false,
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        requestBodies.push(await request.json().catch(() => undefined));
+        if (requestBodies.length === 1) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'GITHUB_PR_AUTHORSHIP_REQUIRED',
+                message: 'Authorize GitHub to create this pull request as you.',
+                details: {
+                  connect_url: '/api/v1/users/me/github/connect?flow=pr_authorship',
+                  resume_token: 'resume-123',
+                  can_fallback_to_app: true,
+                },
+              },
+            },
+            { status: 409 },
+          );
+        }
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    expect(await screen.findByText('Open this pull request as yourself?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Create as 143' }));
+
+    await waitFor(() => {
+      expect(requestBodies).toEqual([undefined, { author_mode: 'app' }]);
+    });
+  });
+
+  it('auto-resumes PR creation after GitHub auth callback', async () => {
+    const requestBodies: Array<Record<string, unknown> | undefined> = [];
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: true,
+          has_repo_scope: true,
+          github_login: 'alice',
+          pr_authorship_mode: 'user_preferred',
+          pr_draft_default: false,
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        requestBodies.push(await request.json().catch(() => undefined));
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, {
+      searchParams: { github_pr: 'connected', resume_pr: 'resume-123' },
+    });
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    await waitFor(() => {
+      expect(requestBodies).toEqual([{ author_mode: 'user', resume_token: 'resume-123' }]);
+    });
+  });
+
   it('keeps a creating state until the pull request exists, then swaps to View PR', async () => {
     let sessionFetchCount = 0;
     const queuedSession: Session = {

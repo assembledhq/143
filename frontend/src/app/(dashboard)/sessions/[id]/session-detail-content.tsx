@@ -28,6 +28,16 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -40,7 +50,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
@@ -141,8 +151,23 @@ function checkResultBadge(result: string | null) {
 // ---------------------------------------------------------------------------
 
 type DetailTab = "overview" | "changes" | "validation" | "preview";
+type PRAuthorMode = "auto" | "user" | "app";
+
+type PRAuthInterceptDetails = {
+  connect_url: string;
+  resume_token: string;
+  can_fallback_to_app: boolean;
+};
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+
+function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
+  if (!value || typeof value !== "object") return false;
+  const details = value as Partial<PRAuthInterceptDetails>;
+  return typeof details.connect_url === "string" &&
+    typeof details.resume_token === "string" &&
+    typeof details.can_fallback_to_app === "boolean";
+}
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
   const queryClient = useQueryClient();
@@ -1320,6 +1345,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
+  const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
+  const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
   const centerMode = reviewParam === "active" ? "review" : "chat";
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
@@ -1356,6 +1383,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<string | null>(null);
+  const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthInterceptDetails | null>(null);
+  const resumeAttemptRef = useRef<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -1465,8 +1494,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     staleTime: 5 * 60 * 1000,
   });
 
+  const clearPRResumeParams = useCallback(() => {
+    void setResumePRParam(null);
+    if (githubPRParam === "connected") {
+      void setGithubPRParam(null);
+    }
+  }, [githubPRParam, setGithubPRParam, setResumePRParam]);
+
   const createPRMutation = useMutation({
-    mutationFn: () => api.sessions.createPR(id),
+    mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string }) =>
+      api.sessions.createPR(id, options),
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
@@ -1478,12 +1515,28 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
     onError: (err) => {
+      if (err instanceof ApiError &&
+        (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
+        isPRAuthInterceptDetails(err.details)) {
+        setLocalPRState("idle");
+        setLocalPRActionError(null);
+        setPRAuthPrompt(err.details);
+        clearPRResumeParams();
+        return;
+      }
       setLocalPRState("idle");
       const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
       setLocalPRActionError(msg);
       toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
     },
   });
+
+  useEffect(() => {
+    if (!canCreatePR || !resumePRParam) return;
+    if (resumeAttemptRef.current === resumePRParam) return;
+    resumeAttemptRef.current = resumePRParam;
+    createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
+  }, [canCreatePR, createPRMutation, resumePRParam]);
 
   const sessionDiff = session?.diff;
   const diffStats = useMemo(() => {
@@ -1816,6 +1869,43 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
         </>
       )}
+      <AlertDialog
+        open={!!prAuthPrompt}
+        onOpenChange={(open) => {
+          if (!open) setPRAuthPrompt(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Open this pull request as yourself?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            {prAuthPrompt?.can_fallback_to_app ? (
+              <AlertDialogCancel
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPRAuthPrompt(null);
+                  createPRMutation.mutate({ authorMode: "app" });
+                }}
+              >
+                Create as 143
+              </AlertDialogCancel>
+            ) : null}
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                if (!prAuthPrompt) return;
+                api.githubStatus.connect(prAuthPrompt.resume_token);
+              }}
+            >
+              Continue with GitHub
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

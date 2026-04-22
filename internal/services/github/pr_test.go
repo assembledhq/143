@@ -129,6 +129,14 @@ func (p *prTestSandboxProvider) WriteFile(_ context.Context, _ *agent.Sandbox, p
 	return nil
 }
 
+type stubPRAppUserAuth struct {
+	getValidCredentialFunc func(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error)
+}
+
+func (s *stubPRAppUserAuth) GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error) {
+	return s.getValidCredentialFunc(ctx, orgID, userID)
+}
+
 func (p *prTestSandboxProvider) Destroy(context.Context, *agent.Sandbox) error {
 	p.destroyed++
 	return p.destroyErr
@@ -1334,11 +1342,11 @@ func TestResolveToken_AppOnly(t *testing.T) {
 		logger:        zerolog.Nop(),
 	}
 
-	repo := &models.Repository{InstallationID: 1}
+	repo := &models.Repository{InstallationID: 1, FullName: "owner/repo"}
 	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipAppOnly}
 	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 
-	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err)
 	require.Equal(t, "app-token-123", resolution.Token)
 	require.False(t, resolution.IsUserToken)
@@ -1362,7 +1370,7 @@ func TestResolveToken_UserPreferred_NoUser(t *testing.T) {
 	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
 	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()} // no TriggeredByUserID
 
-	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err)
 	require.Equal(t, "app-token-fallback", resolution.Token)
 	require.False(t, resolution.IsUserToken, "should fall back to app token when no user")
@@ -1377,7 +1385,7 @@ func TestResolveToken_UserRequired_NoUser(t *testing.T) {
 	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserRequired}
 	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 
-	_, err := svc.resolveToken(context.Background(), run, repo, settings)
+	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.Error(t, err, "should fail when user_required but no user token")
 	require.Contains(t, err.Error(), "org requires user GitHub auth")
 }
@@ -1411,7 +1419,7 @@ func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationMiss
 	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
 	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 
-	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "resolveToken should recover when the repo row is missing installation_id")
 	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should use the repository integration installation token")
 	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
@@ -1465,7 +1473,7 @@ func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationIsSt
 	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
 	run := &models.Session{ID: uuid.New(), OrgID: orgID}
 
-	resolution, err := svc.resolveToken(context.Background(), run, repo, settings)
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "resolveToken should recover when the repo installation_id is stale")
 	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should retry with the repository integration installation token")
 	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
@@ -1513,10 +1521,10 @@ func TestIntegrationInstallationID(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 
 			installationID, err := integrationInstallationID(tt.integration)
 			if tt.expectErr {
@@ -1715,9 +1723,142 @@ func TestGetInstallationTokenForRepo_ErrorPaths(t *testing.T) {
 			svc := tt.setupSvc(t)
 			_, err := svc.getInstallationTokenForRepo(context.Background(), orgID, tt.repo)
 			require.Error(t, err, "getInstallationTokenForRepo should return an error for this path")
-			require.Contains(t, err.Error(), tt.wantError, "getInstallationTokenForRepo should preserve the expected error context")
-		})
+				require.Contains(t, err.Error(), tt.wantError, "getInstallationTokenForRepo should preserve the expected error context")
+			})
+		}
+
+}
+
+func TestResolveToken_UsesGitHubAppUserCredential(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			require.Equal(t, "token ghu_user_token", r.Header.Get("Authorization"), "repo access probe should use the user token")
+			_, _ = w.Write([]byte(`{"full_name":"owner/repo"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	svc := &PRService{
+		appUserAuth: &stubPRAppUserAuth{
+			getValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+				return &models.GitHubAppUserConfig{
+					AccessToken:           "ghu_user_token",
+					RefreshToken:          "ghr_refresh",
+					ExpiresAt:             time.Now().Add(time.Hour),
+					RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				}, nil
+			},
+		},
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
 	}
+
+	repo := &models.Repository{InstallationID: 1, FullName: "owner/repo"}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
+	require.NoError(t, err, "resolveToken should use the GitHub App user credential when available")
+	require.Equal(t, "ghu_user_token", resolution.Token, "resolveToken should return the user access token")
+	require.True(t, resolution.IsUserToken, "resolveToken should mark GitHub App user tokens as user-authored")
+}
+
+func TestResolveToken_UserPreferredFallsBackWhenUserTokenCannotAccessRepo(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			require.Equal(t, "token ghu_user_token", r.Header.Get("Authorization"), "repo access probe should use the user token")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tokenSvc := &Service{cache: make(map[int64]*cachedToken)}
+	tokenSvc.cache[1] = &cachedToken{
+		Token:     "app-token-fallback",
+		ExpiresAt: time.Now().Add(30 * time.Minute),
+	}
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repo := &models.Repository{InstallationID: 1, FullName: "owner/repo"}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID}
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		appUserAuth: &stubPRAppUserAuth{
+			getValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+				return &models.GitHubAppUserConfig{
+					AccessToken:           "ghu_user_token",
+					RefreshToken:          "ghr_refresh",
+					ExpiresAt:             time.Now().Add(time.Hour),
+					RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				}, nil
+			},
+		},
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
+	require.NoError(t, err, "user_preferred should fall back to the app token when the user token cannot access the repo")
+	require.Equal(t, "app-token-fallback", resolution.Token, "resolveToken should fall back to the installation token")
+	require.False(t, resolution.IsUserToken, "resolveToken should mark the fallback token as app-authored")
+}
+
+func TestResolveToken_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repo := &models.Repository{InstallationID: 1, FullName: "owner/repo"}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserRequired}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID}
+	svc := &PRService{
+		appUserAuth: &stubPRAppUserAuth{
+			getValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.GitHubAppUserConfig, error) {
+				return &models.GitHubAppUserConfig{
+					AccessToken:           "ghu_user_token",
+					RefreshToken:          "ghr_refresh",
+					ExpiresAt:             time.Now().Add(time.Hour),
+					RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				}, nil
+			},
+		},
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
+	}
+
+	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
+	require.Error(t, err, "user_required should fail when the user token cannot access the target repo")
+	require.Contains(t, err.Error(), "cannot access repo", "resolveToken should surface repo access failures for user-required auth")
 }
 
 func TestValidateUserToken_ValidToken(t *testing.T) {
