@@ -71,6 +71,7 @@ export interface Integration {
   id: string;
   org_id: string;
   provider: string;
+  github_app_installed?: boolean;
   status: string;
   last_synced_at?: string;
   created_at: string;

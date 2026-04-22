@@ -191,6 +191,43 @@ func (s *RepositoryStore) GetByFullName(ctx context.Context, orgID uuid.UUID, fu
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
+// GetAnyInstallationIDByOrg returns one non-zero GitHub installation_id for an
+// active repo in the org. This is a repair-path fallback for orgs whose
+// integrations.github config is missing installation_id even though repo sync
+// already populated repository rows with the correct installation.
+func (s *RepositoryStore) GetAnyInstallationIDByOrg(ctx context.Context, orgID uuid.UUID) (int64, error) {
+	query := `
+		SELECT installation_id
+		FROM repositories
+		WHERE org_id = @org_id
+		  AND status = 'active'
+		  AND installation_id > 0
+		ORDER BY full_name ASC
+		LIMIT 1`
+
+	var installationID int64
+	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID}).Scan(&installationID)
+	if err != nil {
+		return 0, err
+	}
+	return installationID, nil
+}
+
+// DisconnectByIntegration marks every repo under the given integration as
+// disconnected within the org. This keeps repo state aligned with an explicit
+// user disconnect of the parent GitHub integration.
+func (s *RepositoryStore) DisconnectByIntegration(ctx context.Context, orgID, integrationID uuid.UUID) error {
+	query := `
+		UPDATE repositories
+		SET status = 'disconnected', updated_at = now()
+		WHERE org_id = @org_id AND integration_id = @integration_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"org_id":         orgID,
+		"integration_id": integrationID,
+	})
+	return err
+}
+
 // DisconnectByInstallationID marks every repo under the given GitHub
 // installation as disconnected (cascades on app uninstall).
 // lint:allow-no-orgid reason="cross-org cascade when a GitHub app installation is uninstalled"

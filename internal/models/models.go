@@ -45,13 +45,14 @@ type AuthSession struct {
 }
 
 type Integration struct {
-	ID           uuid.UUID           `db:"id" json:"id"`
-	OrgID        uuid.UUID           `db:"org_id" json:"org_id"`
-	Provider     IntegrationProvider `db:"provider" json:"provider"`
-	Config       json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
-	Status       IntegrationStatus   `db:"status" json:"status"`
-	LastSyncedAt *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
-	CreatedAt    time.Time           `db:"created_at" json:"created_at"`
+	ID                 uuid.UUID           `db:"id" json:"id"`
+	OrgID              uuid.UUID           `db:"org_id" json:"org_id"`
+	Provider           IntegrationProvider `db:"provider" json:"provider"`
+	Config             json.RawMessage     `db:"config" json:"-"` // never expose config in JSON (contains secrets)
+	GitHubAppInstalled *bool               `db:"-" json:"github_app_installed,omitempty"`
+	Status             IntegrationStatus   `db:"status" json:"status"`
+	LastSyncedAt       *time.Time          `db:"last_synced_at" json:"last_synced_at,omitempty"`
+	CreatedAt          time.Time           `db:"created_at" json:"created_at"`
 }
 
 type Repository struct {
