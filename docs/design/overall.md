@@ -64,7 +64,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
         5. the code passes all CI/CD checks and coverage is not reduced
 - Step 5: Open PR and ship
     - The system opens a new PR on github, using whatever Github template already exists
-    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint
+    - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint, while keeping title cleanup minimal and relying on the LLM to generate the reviewer-facing phrasing when available
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
 - Step 6: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.
