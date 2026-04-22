@@ -248,7 +248,74 @@ A resolved comment shows as:
      ── ✓ 1 resolved comment ──    ← click to expand
 ```
 
-#### 4d. Comments Summary Panel
+#### 4d. Inline Comment Composer Width On Long Lines
+
+When a diff line is very long and forces horizontal scrolling, the inline comment composer must not expand into a huge full-width interaction surface. The core usability goal is to keep the composer actions physically close to the text input and visually close to the line anchor, so users can type and submit without chasing buttons across a very wide row.
+
+The current implementation risk is a comment area rendered as a full-width block below the diff row. That preserves alignment with the diff, but on long lines it makes the composer feel detached from its own actions.
+
+Preferred design direction:
+
+- Render the composer as a **bounded card** anchored to the commented line, not as a full-width strip.
+- Keep the editable surface in a readable range such as **420-560px** wide on desktop.
+- Place the action row directly under the textarea inside the same bounded card.
+- Let the diff maintain its own horizontal scroll behavior independently from the comment composer.
+- Fall back to full width only on narrow mobile/tablet breakpoints.
+
+Potential layout options:
+
+**Option A: Anchored floating card below the line** (recommended)
+
+```
+line content ────────────────────────────────────────────────>
+           ┌──────────────────────────────────────┐
+           │ Leave a comment…                     │
+           │                                      │
+           │         Cancel   Add comment  ⌘↵     │
+           └──────────────────────────────────────┘
+```
+
+- The diff row stays full-width and horizontally scrollable.
+- The composer appears below the selected line, left-aligned near the gutter/comment anchor.
+- The composer card has a max width and does not attempt to span the hunk.
+- This is the best tradeoff between implementation cost and UX improvement.
+
+**Option B: Right-side comment rail**
+
+```
+┌──────────────────────────────┬──────────────────────┐
+│ diff row (scrolls sideways)  │ comment composer     │
+│                              │ actions stay fixed   │
+└──────────────────────────────┴──────────────────────┘
+```
+
+- Reserve a fixed-width rail on the right for active composers and threads.
+- The code pane scrolls horizontally while the comment controls stay stable.
+- Strong option for dense review workflows, but more invasive because it changes the overall diff balance and reduces code width.
+
+**Option C: Full-width thread background with bounded inner composer**
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ full-width thread background                              │
+│  ┌──────────────────────────────────────┐                  │
+│  │ Leave a comment…                     │                  │
+│  │         Cancel   Add comment  ⌘↵     │                  │
+│  └──────────────────────────────────────┘                  │
+└────────────────────────────────────────────────────────────┘
+```
+
+- Keep the existing full-width inline thread zone for continuity with the diff.
+- Constrain only the actual composer card inside that zone.
+- Lowest-risk visual change, but still leaves some of the oversized-container feel in place.
+
+Recommendation:
+
+- Ship **Option A** first.
+- If the review surface later evolves toward many simultaneous open threads, revisit **Option B**.
+- Avoid designs where the action bar itself spans the full thread width. Even if the thread container remains wide, the actionable cluster should stay compact.
+
+#### 4e. Comments Summary Panel
 
 A collapsible panel at the top of the Changes tab:
 
@@ -266,7 +333,7 @@ A collapsible panel at the top of the Changes tab:
 - Click any comment to scroll to its location in the diff
 - **"Send to agent"** button compiles open comments into a structured directive and sends it as a message in the chat panel
 
-#### 4e. Sending Comments to the Agent
+#### 4f. Sending Comments to the Agent
 
 When the user clicks "Send to agent", comments are formatted as a chat message:
 

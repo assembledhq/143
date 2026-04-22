@@ -116,7 +116,7 @@ describe("DiffHunk", () => {
 
   it("renders comment input when activeCommentLine matches", () => {
     const hunk = makeHunk([addLine]);
-    render(
+    const { container } = render(
       <DiffHunk
         hunk={hunk}
         filePath="src/app.ts"
@@ -127,6 +127,12 @@ describe("DiffHunk", () => {
     );
     // CommentInput should have a submit button
     expect(screen.getByRole("button", { name: /submit|comment/i })).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="inline-comment-composer"]')).toHaveClass(
+      "max-w-2xl"
+    );
+    expect(container.querySelector('[data-testid="inline-comment-composer-anchor"]')).toHaveClass(
+      "pl-[120px]"
+    );
   });
 
   it("does not render comment input when activeCommentLine does not match", () => {

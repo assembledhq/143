@@ -275,7 +275,32 @@ export function SplitDiffHunk({
                   <CommentThread comments={rightComments} onUpdate={onUpdateComment} onDelete={onDeleteComment} />
                 )}
                 {(isLeftActive || isRightActive) && onSubmitComment && onCancelComment && (
-                  <CommentInput onSubmit={onSubmitComment} onCancel={onCancelComment} />
+                  <div className="flex divide-x divide-border/50">
+                    <div
+                      data-testid="left-comment-composer-slot"
+                      className="flex-1 px-2"
+                    >
+                      {isLeftActive ? (
+                        <CommentInput
+                          className="max-w-2xl"
+                          onSubmit={onSubmitComment}
+                          onCancel={onCancelComment}
+                        />
+                      ) : null}
+                    </div>
+                    <div
+                      data-testid="right-comment-composer-slot"
+                      className="flex-1 px-2"
+                    >
+                      {isRightActive ? (
+                        <CommentInput
+                          className="max-w-2xl"
+                          onSubmit={onSubmitComment}
+                          onCancel={onCancelComment}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
                 )}
               </div>
             )}
