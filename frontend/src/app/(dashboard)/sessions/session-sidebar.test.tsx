@@ -137,6 +137,29 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('shows a GitHub setup notice when no repository integration is connected', async () => {
+    serveSessions([]);
+    server.use(
+      http.get('/api/v1/integrations', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/repositories', () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+
+    expect(await screen.findByText('GitHub setup required')).toBeInTheDocument();
+    expect(
+      screen.getByText(/connect github before creating sessions or projects/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open integrations' })).toHaveAttribute(
+      'href',
+      '/settings/integrations',
+    );
+  });
+
   // -----------------------------------------------------------------------
   // Optimistic session rows
   // -----------------------------------------------------------------------
