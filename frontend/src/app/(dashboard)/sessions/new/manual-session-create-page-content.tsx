@@ -2,9 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, X, ImagePlus, Paperclip, GitBranch, ChevronDown, Loader2 } from "lucide-react";
+import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -24,8 +23,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { api } from "@/lib/api";
-import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import {
@@ -385,42 +384,13 @@ export function ManualSessionCreatePageContent() {
               aria-label="Manual session prompt"
             />
 
-            {(attachments.length > 0 || isUploading) && (
-              <div className="flex flex-wrap items-center gap-2 pb-3">
-                {attachments.map((url) => {
-                  const isImage = isImageURL(url);
-                  const fileName = url.startsWith("data:") ? "photo" : fileNameFromURL(url);
-                  return (
-                    <div key={url} className="relative group">
-                      {isImage ? (
-                        <img
-                          src={url}
-                          alt={fileName}
-                          className="h-16 w-16 rounded-md object-cover border border-border"
-                        />
-                      ) : (
-                        <Badge variant="secondary" className="gap-1 text-xs h-8">
-                          {fileName}
-                        </Badge>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => removeAttachment(url)}
-                        className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        aria-label={`Remove ${fileName}`}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  );
-                })}
-                {isUploading && (
-                  <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  </div>
-                )}
-              </div>
-            )}
+            <PendingAttachmentStrip
+              attachments={attachments}
+              isUploading={isUploading}
+              onRemove={removeAttachment}
+              size="md"
+              className="pb-3"
+            />
 
             {showImageInput && (
               <div className="flex items-center gap-2 pb-3">

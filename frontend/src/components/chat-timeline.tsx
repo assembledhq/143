@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import { ChevronRight, AlertTriangle, FileCode2, X, FileText, ClipboardList, Check, PenLine } from "lucide-react";
+import { useState, useCallback } from "react";
+import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine } from "lucide-react";
+import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +17,7 @@ import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
+import { ImageLightbox } from "@/components/image-lightbox";
 
 // Shared max-width for chat bubbles (user, assistant, plan) so they line up
 // consistently across the timeline.
@@ -258,45 +260,6 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Image lightbox overlay
-// ---------------------------------------------------------------------------
-
-function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <button
-        onClick={onClose}
-        className="absolute top-4 right-4 h-8 w-8 rounded-full bg-background/80 flex items-center justify-center hover:bg-background transition-colors"
-        aria-label="Close"
-      >
-        <X className="h-4 w-4" />
-      </button>
-      <img
-        src={src}
-        alt={alt}
-        className="max-w-[90vw] max-h-[90vh] rounded-lg shadow-2xl object-contain"
-        onClick={(e) => e.stopPropagation()}
-      />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Attachment thumbnails for messages
-// ---------------------------------------------------------------------------
-
 function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
@@ -311,9 +274,14 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
     <>
       {lightboxSrc && (
         <ImageLightbox
+          open
           src={lightboxSrc}
           alt="Attachment"
-          onClose={closeLightbox}
+          onOpenChange={(open) => {
+            if (!open) {
+              closeLightbox();
+            }
+          }}
         />
       )}
 
@@ -326,9 +294,12 @@ function AttachmentGrid({ attachments }: { attachments: string[] }) {
               onClick={() => setLightboxSrc(url)}
               className="relative group rounded-md overflow-hidden border border-border/50 hover:border-border transition-colors"
             >
-              <img
+              <Image
                 src={url}
                 alt="Attached image"
+                width={96}
+                height={96}
+                unoptimized
                 className="h-24 w-24 object-cover"
               />
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />

@@ -22,9 +22,7 @@ import {
   Clock,
   MessageSquare,
   Paperclip,
-  X,
 } from "lucide-react";
-import Image from "next/image";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
@@ -50,13 +48,14 @@ import { formatReviewMessage } from "@/lib/format-review-message";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { cn, sessionTitle, isImageURL, fileNameFromURL, formatTimeAgo } from "@/lib/utils";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
+import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
+import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -1174,46 +1173,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
 
-          {/* Attachment previews */}
-          {(attachments.length > 0 || isUploading) && (
-            <div className="flex flex-wrap items-center gap-2 px-3 pb-2">
-              {attachments.map((url) => {
-                const isImage = isImageURL(url);
-                const fileName = fileNameFromURL(url);
-                return (
-                  <div key={url} className="relative group">
-                    {isImage ? (
-                      <Image
-                        src={url}
-                        alt={fileName}
-                        width={64}
-                        height={64}
-                        unoptimized
-                        className="h-16 w-16 rounded-md object-cover border border-border"
-                      />
-                    ) : (
-                      <div className="h-16 px-3 flex items-center rounded-md border border-border bg-muted text-xs text-muted-foreground">
-                        {fileName}
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(url)}
-                      className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-background border border-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                      aria-label={`Remove ${fileName}`}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                );
-              })}
-              {isUploading && (
-                <div className="h-16 w-16 rounded-md border border-border bg-muted flex items-center justify-center">
-                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                </div>
-              )}
-            </div>
-          )}
+          <PendingAttachmentStrip
+            attachments={attachments}
+            isUploading={isUploading}
+            onRemove={removeAttachment}
+            size="md"
+            className="px-3 pb-2"
+          />
 
           <div className="flex items-center gap-1 px-2 pb-2">
             {/* File upload button */}
@@ -1493,7 +1459,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
-            <h1 className="text-xs font-medium text-foreground truncate">
+            <h1 className="text-sm font-medium text-foreground truncate">
               {sessionTitle(session)}
             </h1>
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
