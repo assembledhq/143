@@ -55,7 +55,7 @@ function seedPMFromOrg(
   override: Partial<RepoPMSettings> = {},
 ): RepoPMSettings {
   return {
-    pm_schedule_hours: orgSettings.pm_schedule_hours ?? 4,
+    pm_schedule_hours: orgSettings.pm_schedule_hours ?? 24,
     pm_model: orgSettings.pm_model ?? DEFAULT_PM_MODEL,
     product_context: {
       philosophy: orgSettings.product_context?.philosophy ?? "",
@@ -88,7 +88,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
   // Effective values — what the form renders. When not customized, fall back
   // to org defaults so the "Customize" stamp captures what the user sees.
   const effectiveScheduleHours =
-    repoSettings.pm?.pm_schedule_hours ?? orgSettings.pm_schedule_hours ?? 4;
+    repoSettings.pm?.pm_schedule_hours ?? orgSettings.pm_schedule_hours ?? 24;
   const effectiveModel =
     repoSettings.pm?.pm_model ?? orgSettings.pm_model ?? DEFAULT_PM_MODEL;
   const effectivePhilosophy =
@@ -293,10 +293,10 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                     value={scheduleField.value}
                     onChange={scheduleField.onChange}
                     onBlur={scheduleField.onBlur}
-                    placeholder="4"
+                    placeholder="24"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Org default: every {orgSettings.pm_schedule_hours ?? 4} hours
+                    Org default: every {orgSettings.pm_schedule_hours ?? 24} hours
                   </p>
                 </div>
                 <div className="space-y-2">

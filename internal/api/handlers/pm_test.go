@@ -400,8 +400,8 @@ func TestPMHandler_StatusNextRunAtAccountsForFailure(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response should be valid JSON")
 	require.NotNil(t, resp.Data.NextRunAt, "should compute next run time")
 
-	// With default 4h schedule: plan-based next run = planCreatedAt + 4h = now - 1h (in the past).
-	// Failure-based next run = failedAt + 4h = now + 3h30m (in the future).
+	// With the default schedule: plan-based next run = planCreatedAt + interval = now - 1h (in the past).
+	// Failure-based next run = failedAt + interval = now + 3h30m (in the future).
 	// NextRunAt should use the failure-based time since it's later.
 	defaultInterval := time.Duration(models.DefaultPMScheduleHours) * time.Hour
 	expectedNextRun := failedAt.Add(defaultInterval)
