@@ -1,2 +1,2 @@
 ALTER TABLE session_messages
-    DROP COLUMN IF EXISTS references;
+    DROP COLUMN IF EXISTS "references";
