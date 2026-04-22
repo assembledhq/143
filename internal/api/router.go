@@ -94,6 +94,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create PRService if GitHub App credentials are configured.
 	var prService *ghservice.PRService
+	var appUserAuthSvc *ghservice.AppUserAuthService
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err != nil {
@@ -107,6 +108,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 		}
+	}
+	if cfg.GitHubAppClientID != "" && cfg.GitHubAppClientSecret != "" {
+		appUserAuthSvc = ghservice.NewAppUserAuthService(userCredentialStore, cfg.GitHubAppClientID, cfg.GitHubAppClientSecret, cfg.BaseURL, logger)
 	}
 
 	// Create handlers
@@ -169,6 +173,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
+	sessionHandler.SetPRCredentialStore(userCredentialStore)
+	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
+	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -219,13 +226,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	githubStatusHandler := handlers.NewGitHubStatusHandler(
 		userCredentialStore, orgStore,
-		cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret,
+		cfg.GitHubAppClientID, cfg.GitHubAppClientSecret,
 		cfg.BaseURL, cfg.FrontendURL,
 	)
+	githubStatusHandler.SetPRAuthFlow(cfg.CSRFSigningKey)
+	githubStatusHandler.SetAppUserAuth(appUserAuthSvc)
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
 		prService.SetUserCredentialStore(userCredentialStore)
+		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)
 		prService.SetLLMClient(llmClient)

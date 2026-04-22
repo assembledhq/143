@@ -698,17 +698,20 @@ describe('api client', () => {
   describe('sessions - createPR', () => {
     it('creates PR and returns queued status', async () => {
       let capturedUrl: string | undefined;
+      let capturedBody: unknown;
 
       server.use(
-        http.post('/api/v1/sessions/:id/pr', ({ request }) => {
+        http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
           capturedUrl = request.url;
+          capturedBody = await request.json();
           return HttpResponse.json({ status: 'queued' }, { status: 202 });
         }),
       );
 
-      const result = await api.sessions.createPR('session-abc');
+      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123' });
       expect(result.status).toBe('queued');
       expect(capturedUrl).toContain('/api/v1/sessions/session-abc/pr');
+      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123' });
     });
 
     it('throws on conflict when PR already exists', async () => {
@@ -722,6 +725,35 @@ describe('api client', () => {
       );
 
       await expect(api.sessions.createPR('session-abc')).rejects.toThrow('a pull request already exists for this session');
+    });
+
+    it('surfaces auth intercept details', async () => {
+      server.use(
+        http.post('/api/v1/sessions/:id/pr', () => {
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'GITHUB_PR_AUTHORSHIP_REQUIRED',
+                message: 'Authorize GitHub to create this pull request as you.',
+                details: {
+                  connect_url: '/api/v1/users/me/github/connect?flow=pr_authorship',
+                  resume_token: 'resume-123',
+                  can_fallback_to_app: true,
+                },
+              },
+            },
+            { status: 409 },
+          );
+        }),
+      );
+
+      await expect(api.sessions.createPR('session-abc')).rejects.toMatchObject({
+        code: 'GITHUB_PR_AUTHORSHIP_REQUIRED',
+        details: expect.objectContaining({
+          connect_url: '/api/v1/users/me/github/connect?flow=pr_authorship',
+          resume_token: 'resume-123',
+        }),
+      });
     });
   });
 

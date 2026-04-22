@@ -20,6 +20,7 @@ func TestProviderName_Valid(t *testing.T) {
 		{"gemini is valid", ProviderGemini, true},
 		{"openrouter is valid", ProviderOpenRouter, true},
 		{"github_app is valid", ProviderGitHubApp, true},
+		{"github_app_user is valid", ProviderGitHubAppUser, true},
 		{"github_oauth is valid", ProviderGitHubOAuth, true},
 		{"sentry is valid", ProviderSentry, true},
 		{"linear is valid", ProviderLinear, true},
@@ -185,6 +186,22 @@ func TestParseProviderConfig_GitHubOAuth(t *testing.T) {
 	require.Equal(t, "secret_test", ghoc.ClientSecret, "should parse client_secret")
 }
 
+func TestParseProviderConfig_GitHubAppUser(t *testing.T) {
+	t.Parallel()
+
+	input := `{"access_token":"ghu_test","refresh_token":"ghr_test","token_type":"bearer","expires_at":"2026-04-22T12:00:00Z","refresh_token_expires_at":"2026-05-22T12:00:00Z"}`
+	cfg, err := ParseProviderConfig(ProviderGitHubAppUser, []byte(input))
+	require.NoError(t, err, "ParseProviderConfig should not return an error")
+
+	ghuc, ok := cfg.(GitHubAppUserConfig)
+	require.True(t, ok, "config should be GitHubAppUserConfig")
+	require.Equal(t, "ghu_test", ghuc.AccessToken, "should parse access_token")
+	require.Equal(t, "ghr_test", ghuc.RefreshToken, "should parse refresh_token")
+	require.Equal(t, "bearer", ghuc.TokenType, "should parse token_type")
+	require.Equal(t, time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC), ghuc.ExpiresAt, "should parse expires_at")
+	require.Equal(t, time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC), ghuc.RefreshTokenExpiresAt, "should parse refresh_token_expires_at")
+}
+
 func TestParseProviderConfig_Sentry(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +247,7 @@ func TestProviderConfig_Provider(t *testing.T) {
 		{"GeminiConfig", GeminiConfig{}, ProviderGemini},
 		{"OpenRouterConfig", OpenRouterConfig{}, ProviderOpenRouter},
 		{"GitHubAppConfig", GitHubAppConfig{}, ProviderGitHubApp},
+		{"GitHubAppUserConfig", GitHubAppUserConfig{}, ProviderGitHubAppUser},
 		{"GitHubOAuthConfig", GitHubOAuthConfig{}, ProviderGitHubOAuth},
 		{"SentryConfig", SentryConfig{}, ProviderSentry},
 		{"LinearConfig", LinearConfig{}, ProviderLinear},
@@ -268,6 +286,11 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"github_app valid", GitHubAppConfig{AppID: 123, PrivateKey: "key"}, false},
 		{"github_app missing app_id", GitHubAppConfig{AppID: 0, PrivateKey: "key"}, true},
 		{"github_app missing private_key", GitHubAppConfig{AppID: 123, PrivateKey: ""}, true},
+		{"github_app_user valid", GitHubAppUserConfig{AccessToken: "ghu", RefreshToken: "ghr", ExpiresAt: time.Now().Add(time.Hour)}, false},
+		{"github_app_user valid non-expiring", GitHubAppUserConfig{AccessToken: "ghu"}, false},
+		{"github_app_user missing access token", GitHubAppUserConfig{RefreshToken: "ghr", ExpiresAt: time.Now().Add(time.Hour)}, true},
+		{"github_app_user missing refresh token", GitHubAppUserConfig{AccessToken: "ghu", ExpiresAt: time.Now().Add(time.Hour)}, false},
+		{"github_app_user missing expires_at", GitHubAppUserConfig{AccessToken: "ghu", RefreshToken: "ghr"}, false},
 		{"github_oauth valid client creds", GitHubOAuthConfig{ClientID: "id", ClientSecret: "secret"}, false},
 		{"github_oauth valid access token", GitHubOAuthConfig{AccessToken: "gh-token"}, false},
 		{"github_oauth missing client_id", GitHubOAuthConfig{ClientID: "", ClientSecret: "secret"}, true},
@@ -297,6 +320,37 @@ func TestProviderConfig_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGitHubAppUserConfig_TimeHelpersAndSummary(t *testing.T) {
+	t.Parallel()
+
+	expired := GitHubAppUserConfig{
+		AccessToken:           "ghu_expired_token",
+		ExpiresAt:             time.Now().Add(-time.Minute),
+		RefreshTokenExpiresAt: time.Now().Add(-time.Minute),
+	}
+	require.True(t, expired.IsExpired(), "IsExpired should report expired access tokens")
+	require.True(t, expired.NeedsRefresh(time.Minute), "NeedsRefresh should report near-expiry access tokens")
+	require.True(t, expired.RefreshTokenExpired(), "RefreshTokenExpired should report expired refresh tokens")
+
+	nonExpiring := GitHubAppUserConfig{AccessToken: "ghu_nonexpiring"}
+	require.False(t, nonExpiring.IsExpired(), "IsExpired should treat zero expiries as non-expiring")
+	require.False(t, nonExpiring.NeedsRefresh(time.Hour), "NeedsRefresh should not refresh zero expiries")
+	require.False(t, nonExpiring.RefreshTokenExpired(), "RefreshTokenExpired should treat zero refresh expiries as active")
+
+	summary := expired.MaskedSummary()
+	require.Equal(t, ProviderGitHubAppUser, summary.Provider, "MaskedSummary should tag GitHub App user credentials correctly")
+	require.True(t, summary.Configured, "MaskedSummary should mark the credential configured")
+	require.NotEmpty(t, summary.MaskedKey, "MaskedSummary should mask the access token")
+}
+
+func TestParseProviderConfig_GitHubAppUser_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderGitHubAppUser, []byte(`{`))
+	require.Error(t, err, "ParseProviderConfig should reject malformed GitHub App user config JSON")
+	require.Contains(t, err.Error(), "invalid github_app_user config", "ParseProviderConfig should preserve provider context for malformed GitHub App user config")
 }
 
 func TestMaskKey(t *testing.T) {
