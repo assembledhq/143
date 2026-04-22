@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -102,16 +102,6 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   if (hours < 24) return `${hours}h ${mins % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
-}
-
-// Live counter that ticks every second; isolated so only the text node re-renders.
-function LiveDuration({ startedAt }: { startedAt?: string }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  return <>{formatDuration(startedAt)}</>;
 }
 
 /** Returns true if the session has been pending for more than 2 minutes. */
@@ -280,16 +270,11 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
 
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
-          {!((session.status === "failed" || session.status === "cancelled") &&
-            !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
+          {terminalSessionStatuses.has(session.status) &&
+            !((session.status === "failed" || session.status === "cancelled") &&
+              !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
             <>
-              <span>
-                {session.status === "pending"
-                  ? <LiveDuration startedAt={session.created_at} />
-                  : isActive
-                    ? <LiveDuration startedAt={session.started_at} />
-                    : formatDuration(session.started_at, session.completed_at)}
-              </span>
+              <span>{formatDuration(session.started_at, session.completed_at)}</span>
               <span aria-hidden="true" className="text-muted-foreground/50">·</span>
             </>
           )}

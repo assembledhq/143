@@ -1469,7 +1469,11 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findByText('Agent is working...');
-    expect(screen.getByText(/Started/)).toBeInTheDocument();
+    const startedLabel = screen.getByText(/Started/);
+    expect(startedLabel).toBeInTheDocument();
+
+    const metadataRow = startedLabel.closest('div');
+    expect(metadataRow?.textContent?.trim().startsWith('Started')).toBe(true);
   });
 
   it('shows raw agent type when not in known labels', async () => {
