@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,24 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type archiveTestSnapshotStore struct {
+	deleted []string
+	err     error
+}
+
+func (s *archiveTestSnapshotStore) Save(context.Context, string, io.Reader) error {
+	return nil
+}
+
+func (s *archiveTestSnapshotStore) Load(context.Context, string, io.Writer) error {
+	return nil
+}
+
+func (s *archiveTestSnapshotStore) Delete(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	return s.err
+}
 
 func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler {
 	t.Helper()
@@ -54,7 +73,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -93,8 +112,10 @@ func TestSessionHandler_List(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -178,8 +199,10 @@ func TestSessionHandler_List_WithRepositoryID(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -274,8 +297,10 @@ func TestSessionHandler_List_CommaSeparatedStatuses(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -358,7 +383,7 @@ func TestSessionHandler_List_WithCursor(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, 0, now, "none", nil,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
 			),
 		)
 
@@ -407,7 +432,7 @@ func TestSessionHandler_List_EmitsCursorWhenFull(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil,
 				nil, 0, now, "none", nil,
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, now,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
 			),
 		)
 
@@ -596,8 +621,10 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -1376,8 +1403,10 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -1466,8 +1495,10 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -1529,8 +1560,10 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -1556,8 +1589,10 @@ func TestSessionHandler_StreamLogs_TerminalRun(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -1645,8 +1680,10 @@ func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -1956,8 +1993,10 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -2018,8 +2057,10 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -2030,6 +2071,9 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/end", nil)
 	rctx := chi.NewRouteContext()
@@ -2201,8 +2245,10 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2243,8 +2289,10 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2327,8 +2375,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2354,8 +2404,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2398,8 +2450,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2445,8 +2499,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2486,6 +2542,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2517,6 +2575,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2554,8 +2614,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil, nil,
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2584,8 +2646,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil, nil, nil, nil, nil,
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2619,8 +2683,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2650,8 +2716,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,      // diff_history
 							nil,      // input_manifest
 							nil, nil, // archived_at, archived_by_user_id
-							nil, // automation_run_id
-							nil, // deleted_at
+							nil,            // automation_run_id
+							"idle",         // pr_creation_state
+							(*string)(nil), // pr_creation_error
+							nil,            // deleted_at
 							now,
 						),
 					)
@@ -2690,6 +2758,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2712,6 +2782,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2747,6 +2819,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2772,6 +2846,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2823,6 +2899,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2848,6 +2926,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2885,6 +2965,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2910,6 +2992,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2947,6 +3031,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -2972,6 +3058,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3015,6 +3103,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3045,6 +3135,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3067,6 +3159,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3104,6 +3198,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3126,6 +3222,8 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 							nil,
 							nil, nil,
 							nil,
+							"idle",
+							(*string)(nil),
 							nil,
 							now,
 						),
@@ -3427,6 +3525,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	defer mock.Close()
 
 	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_Success"
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
@@ -3447,8 +3546,8 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil, nil, nil, nil, &diff,
 				nil, nil, nil, nil,
 				nil, nil,
-				nil,                      // triggered_by_user_id
-				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,                               // triggered_by_user_id
+				nil, 0, now, "none", &snapshotKey, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
 				nil,      // target_branch
 				nil,      // working_branch
 				nil,      // repository_id
@@ -3456,8 +3555,10 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 				nil,      // diff_history
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3474,6 +3575,9 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -3501,6 +3605,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	defer mock.Close()
 
 	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_DedupeConflict"
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
@@ -3520,11 +3625,12 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, now, "none", nil,
+				nil, 0, now, "none", &snapshotKey,
 				nil, nil, nil, nil, nil,
 				nil,
 				nil, nil,
 				nil,
+				"idle", (*string)(nil),
 				nil,
 				now,
 			),
@@ -3542,6 +3648,9 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()
@@ -3558,7 +3667,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
+func TestSessionHandler_CreatePR_SnapshotExpired(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -3571,7 +3680,8 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 	issueID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
-	// Mock session lookup — session has no diff.
+	// Mock session lookup — session has no snapshot_key, simulating an
+	// expired sandbox that can no longer be restored for push.
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -3580,16 +3690,18 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
 				nil, nil, nil, false,
-				nil, nil, nil, nil, nil, // diff is nil
+				nil, nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, now, "none", nil,
+				nil, 0, now, "none", nil, // snapshot_key is nil
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3604,8 +3716,141 @@ func TestSessionHandler_CreatePR_NoDiff(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 when session has no diff")
-	require.Contains(t, w.Body.String(), "NO_DIFF", "error code should indicate missing diff")
+	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 when snapshot has expired")
+	require.Contains(t, w.Body.String(), "SNAPSHOT_EXPIRED", "error code should indicate snapshot expiry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_InFlightRejectsDuplicateSubmit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{name: "queued state rejects duplicate", state: "queued"},
+		{name: "pushing state rejects duplicate", state: "pushing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			now := time.Now()
+			snapshotKey := "snap-" + tt.state
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			handler := newSessionHandler(t, mock)
+
+			mock.ExpectQuery("SELECT .+ FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(sessionColumns).AddRow(
+						sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+						nil, nil, nil, nil,
+						nil, false, &now, &now, nil,
+						nil, nil, nil, false,
+						nil, nil, nil, nil, nil,
+						nil, nil, nil, nil,
+						nil, nil,
+						nil,
+						nil, 0, now, "none", &snapshotKey,
+						nil, nil, nil, nil, nil,
+						nil,      // input_manifest
+						nil, nil, // archived_at, archived_by_user_id
+						nil,            // automation_run_id
+						tt.state,       // pr_creation_state
+						(*string)(nil), // pr_creation_error
+						nil,            // deleted_at
+						now,
+					),
+				)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.CreatePR(w, req)
+
+			require.Equal(t, http.StatusConflict, w.Code, "in-flight PR creation should reject duplicate submits")
+			require.Contains(t, w.Body.String(), "PR_IN_FLIGHT", "error code should indicate an in-flight PR creation")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	jobID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("write failed"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "CreatePR should still accept the request when the best-effort state update fails")
+	require.Contains(t, w.Body.String(), `"status":"queued"`, "response should still indicate queued status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -3617,6 +3862,7 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 	defer mock.Close()
 
 	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_AlreadyExists"
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
@@ -3638,12 +3884,14 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, now, "none", nil,
+				nil, 0, now, "none", &snapshotKey,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3673,6 +3921,67 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when PR already exists")
 	require.Contains(t, w.Body.String(), "PR_EXISTS", "error code should indicate PR already exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_SucceededWithoutStoredPRRejectsRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_SucceededWithoutStoredPRRejectsRetry"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).AddRow(
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil,
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"succeeded",    // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should reject retries after PR creation already succeeded without re-enqueueing")
+	require.Contains(t, w.Body.String(), "PR_ALREADY_CREATED", "error code should indicate the terminal PR state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -3715,6 +4024,7 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 	defer mock.Close()
 
 	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_PRLookupDBError"
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	issueID := uuid.New()
@@ -3735,12 +4045,14 @@ func TestSessionHandler_CreatePR_PRLookupDBError(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, now, "none", nil,
+				nil, 0, now, "none", &snapshotKey,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3809,8 +4121,10 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3863,8 +4177,10 @@ func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -3941,8 +4257,10 @@ func TestSessionHandler_CancelSession_NoCanceller(t *testing.T) {
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
-				nil, // automation_run_id
-				nil, // deleted_at
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -4045,6 +4363,166 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 
 		require.Equal(t, http.StatusNotFound, w.Code)
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("cleans up snapshot when archiving session with snapshot key", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		snapshotStore := &archiveTestSnapshotStore{}
+		handler.SetSnapshotStore(snapshotStore)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		userID := uuid.New()
+		now := time.Now()
+		snapshotKey := "snapshots/session.tar.zst"
+
+		mock.ExpectQuery("SELECT .+ FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionColumns).AddRow(
+					sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+					nil, nil, nil, nil,
+					nil, false, &now, &now, nil,
+					nil, nil, nil, false,
+					nil, nil, nil, nil, nil,
+					nil, nil, nil, nil,
+					nil, nil, nil,
+					nil, 0, now, "saved", &snapshotKey,
+					nil, nil, nil, nil, nil, nil,
+					nil, nil,
+					nil,
+					"idle",
+					(*string)(nil),
+					nil,
+					now,
+				),
+			)
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("UPDATE sessions\\s+SET snapshot_key = NULL, sandbox_state = 'destroyed'").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should return 200 after snapshot cleanup")
+		require.Equal(t, []string{snapshotKey}, snapshotStore.deleted, "archive should delete the stored snapshot exactly once")
+		require.NoError(t, mock.ExpectationsWereMet(), "archive should satisfy all database expectations")
+	})
+
+	t.Run("still archives when preload lookup fails for audit", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db down"))
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should still succeed when the preload lookup fails")
+		require.NoError(t, mock.ExpectationsWereMet(), "archive should satisfy all database expectations")
+	})
+
+	t.Run("ignores snapshot cleanup failure after archive succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		snapshotStore := &archiveTestSnapshotStore{err: errors.New("delete failed")}
+		handler.SetSnapshotStore(snapshotStore)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		userID := uuid.New()
+		now := time.Now()
+		snapshotKey := "snapshots/session.tar.zst"
+
+		mock.ExpectQuery("SELECT .+ FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionColumns).AddRow(
+					sessionID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+					nil, nil, nil, nil,
+					nil, false, &now, &now, nil,
+					nil, nil, nil, false,
+					nil, nil, nil, nil, nil,
+					nil, nil, nil, nil,
+					nil, nil, nil,
+					nil, 0, now, "saved", &snapshotKey,
+					nil, nil, nil, nil, nil, nil,
+					nil, nil,
+					nil,
+					"idle",
+					(*string)(nil),
+					nil,
+					now,
+				),
+			)
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should still succeed when snapshot cleanup fails")
+		require.Equal(t, []string{snapshotKey}, snapshotStore.deleted, "archive should still attempt snapshot cleanup")
+		require.NoError(t, mock.ExpectationsWereMet(), "archive should satisfy all database expectations")
 	})
 }
 

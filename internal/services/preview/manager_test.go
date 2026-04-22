@@ -152,7 +152,9 @@ var sessionTestCols = []string{
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "deleted_at", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id",
+	"pr_creation_state", "pr_creation_error",
+	"deleted_at", "created_at",
 }
 
 func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time) []any {
@@ -184,7 +186,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		nil, nil, nil,
 		nil, 0, now, "running", nil,
 		nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, nil, now,
+		nil, nil, nil, "idle", (*string)(nil), nil, now,
 	}
 }
 
