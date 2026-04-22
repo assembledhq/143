@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -87,6 +88,7 @@ func (h *SettingsHandler) GetLLMModels(w http.ResponseWriter, r *http.Request) {
 
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	logger := zerolog.Ctx(r.Context())
 	var req struct {
 		Name     *string          `json:"name"`
 		Settings *json.RawMessage `json:"settings"`
@@ -144,18 +146,6 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		org.Settings = merged
 	}
 
-	if err := h.orgStore.Update(r.Context(), &org); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization", err)
-		return
-	}
-
-	// Drop any cached agent_config for this org so the next Amp/Pi session
-	// start observes the write. Skipping invalidation would leave stale env
-	// overrides in place until the cache TTL expires.
-	if h.invalidator != nil {
-		h.invalidator.InvalidateOrg(orgID)
-	}
-
 	// Build the audit diff from what actually changed. Skip the emit entirely
 	// when nothing changed so a no-op PATCH (client re-saving the current
 	// values) doesn't pollute the timeline with empty "updated settings" rows.
@@ -168,11 +158,41 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			changes[k] = v
 		}
 	}
+	changedKeys := sortedSettingsChangeKeys(changes)
+	requestSettingsKeys := topLevelSettingsPatchKeys(req.Settings)
+	patchLogger := logger.Info().
+		Str("path", r.URL.Path).
+		Str("origin", r.Header.Get("Origin")).
+		Str("referer", r.Referer()).
+		Str("user_agent", r.UserAgent()).
+		Bool("has_name_patch", req.Name != nil).
+		Strs("request_settings_keys", requestSettingsKeys).
+		Strs("changed_keys", changedKeys)
+
+	if len(changes) == 0 {
+		patchLogger.Bool("noop", true).Msg("settings patch noop")
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
+		return
+	}
+
+	if err := h.orgStore.Update(r.Context(), &org); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update organization", err)
+		return
+	}
+
+	// Drop any cached agent_config for this org so the next Amp/Pi session
+	// start observes the write. Skipping invalidation would leave stale env
+	// overrides in place until the cache TTL expires.
+	if h.invalidator != nil {
+		h.invalidator.InvalidateOrg(orgID)
+	}
+
 	if len(changes) > 0 {
 		orgIDStr := orgID.String()
 		emitUserAudit(h.audit, r, models.AuditActionSettingsUpdated, models.AuditResourceSettings, &orgIDStr,
 			marshalAuditDetails(h.logger, map[string]any{"changes": changes}))
 	}
+	patchLogger.Bool("noop", false).Msg("settings patch applied")
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Organization]{Data: org})
 }
 
@@ -260,4 +280,29 @@ func deepMergeMap(base, incoming map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func sortedSettingsChangeKeys(changes map[string]any) []string {
+	keys := make([]string, 0, len(changes))
+	for key := range changes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func topLevelSettingsPatchKeys(raw *json.RawMessage) []string {
+	if raw == nil || len(*raw) == 0 {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(*raw, &payload); err != nil {
+		return nil
+	}
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

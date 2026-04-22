@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -331,6 +333,89 @@ func TestSettingsHandler_Update(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"codex"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return success for a no-op patch")
+	require.Contains(t, w.Body.String(), `"default_agent_type":"codex"`, "response should return the existing settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "no-op patch should not issue an UPDATE")
+}
+
+func TestSettingsHandler_Update_LogsPatchMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"claude_code"}}`))
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Referer", "https://app.example.com/settings/agent")
+	req.Header.Set("User-Agent", "TestBrowser/1.0")
+	req = req.WithContext(logger.WithContext(middleware.WithOrgID(req.Context(), orgID)))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should update settings successfully")
+	require.Contains(t, logs.String(), `"message":"settings patch applied"`, "patch updates should be logged")
+	require.Contains(t, logs.String(), `"changed_keys":["default_agent_type"]`, "log should include the changed settings key")
+	require.Contains(t, logs.String(), `"origin":"https://app.example.com"`, "log should include the request origin")
+	require.Contains(t, logs.String(), `"referer":"https://app.example.com/settings/agent"`, "log should include the request referer")
+	require.Contains(t, logs.String(), `"user_agent":"TestBrowser/1.0"`, "log should include the request user agent")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestMergeSettingsJSON_ShallowKey(t *testing.T) {
