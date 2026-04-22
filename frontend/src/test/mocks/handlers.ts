@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -267,6 +267,13 @@ export const handlers = [
       data: [] as SessionLog[],
       meta: {},
     } satisfies ListResponse<SessionLog>);
+  }),
+
+  http.get('/api/v1/sessions/:id/timeline', () => {
+    return HttpResponse.json({
+      data: [] as SessionTimelineEntry[],
+      meta: {},
+    } satisfies ListResponse<SessionTimelineEntry>);
   }),
 
   http.get('/api/v1/sessions/:id/validation', () => {

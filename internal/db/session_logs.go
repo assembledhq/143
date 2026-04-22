@@ -38,6 +38,34 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 	return row.Scan(&log.ID, &log.Timestamp)
 }
 
+func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error {
+	query := `
+		UPDATE session_logs
+		SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"type":"assistant_final","duplicate_of_transcript":true}'::jsonb
+		WHERE id = (
+			SELECT id
+			FROM session_logs
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND turn_number = @turn_number
+			  AND level = 'output'
+			  AND message = @message
+			ORDER BY id DESC
+			LIMIT 1
+		)`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"org_id":      orgID,
+		"session_id":  sessionID,
+		"turn_number": turnNumber,
+		"message":     message,
+	})
+	if err != nil {
+		return fmt.Errorf("mark assistant transcript duplicate: %w", err)
+	}
+	return nil
+}
+
 func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionLog, error) {
 	query := `
 		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
