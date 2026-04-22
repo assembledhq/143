@@ -44,7 +44,7 @@ describe("CommandPalette", () => {
     renderPalette();
     expect(await screen.findByText("Sessions")).toBeInTheDocument();
     expect(screen.getByText("Projects")).toBeInTheDocument();
-    expect(screen.getByText("Autopilot")).toBeInTheDocument();
+    expect(screen.getAllByText("Autopilot")).toHaveLength(2);
   });
 
   it("renders settings items", async () => {
@@ -65,6 +65,7 @@ describe("CommandPalette", () => {
     renderPalette({ userRole: "member" });
     await screen.findByText("General");
     expect(screen.queryByText("Audit log")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Autopilot")).toHaveLength(1);
   });
 
   it("includes admin-only items for admin users", async () => {
@@ -76,7 +77,7 @@ describe("CommandPalette", () => {
     const user = userEvent.setup();
     renderPalette();
 
-    const autopilotItem = await screen.findByText("Autopilot");
+    const [autopilotItem] = await screen.findAllByText("Autopilot");
     await user.click(autopilotItem);
 
     expect(pushMock).toHaveBeenCalledWith("/autopilot");

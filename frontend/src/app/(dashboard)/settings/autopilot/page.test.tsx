@@ -1,10 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutopilotSettingsPage from "./page";
 
+const { useAuthMock } = vi.hoisted(() => ({
+  useAuthMock: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: useAuthMock,
+}));
+
 describe("AutopilotSettingsPage", () => {
+  beforeEach(() => {
+    useAuthMock.mockReturnValue({
+      user: { id: "user-1", name: "Admin User", email: "admin@example.com", role: "admin" },
+      isLoading: false,
+      isAuthenticated: true,
+    });
+  });
+
   it("renders Autopilot settings without workspace steering fields", async () => {
     server.use(
       http.get("/api/v1/settings", () => HttpResponse.json({
@@ -183,5 +199,20 @@ describe("AutopilotSettingsPage", () => {
         settings: { execution_aggressiveness: 4 },
       });
     });
+  });
+
+  it("shows an admin-only message for non-admin users", async () => {
+    useAuthMock.mockReturnValue({
+      user: { id: "user-2", name: "Member User", email: "member@example.com", role: "member" },
+      isLoading: false,
+      isAuthenticated: true,
+    });
+
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    expect(await screen.findByText("Autopilot")).toBeInTheDocument();
+    expect(screen.getByText("Only admins can manage Autopilot settings.")).toBeInTheDocument();
+    expect(screen.queryByText("PM configuration")).not.toBeInTheDocument();
+    expect(screen.queryByText("Execution aggressiveness")).not.toBeInTheDocument();
   });
 });

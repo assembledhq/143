@@ -170,6 +170,27 @@ describe("AuthenticatedLayout", () => {
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
   });
 
+  it("hides Autopilot settings from non-admin users", async () => {
+    useAuthMock.mockReturnValue({
+      user: memberUser,
+      isLoading: false,
+      isAuthenticated: true,
+      logout: logoutMock,
+    });
+
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await user.click(screen.getByRole("button", { name: /Settings/ }));
+
+    expect(screen.queryAllByRole("link", { name: "Autopilot" }).filter((link) => link.getAttribute("href") === "/settings/autopilot")).toHaveLength(0);
+  });
+
   it("does not show repo context switcher when org has only 1 repo", async () => {
     server.use(
       http.get("/api/v1/repositories/summary", () => {

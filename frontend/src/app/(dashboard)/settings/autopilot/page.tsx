@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useAuth } from "@/hooks/use-auth";
 import { Badge } from "@/components/ui/badge";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,13 +40,18 @@ import {
 import type { ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
+    enabled: isAdmin,
   });
   const { data: repositoriesResponse } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
+    enabled: isAdmin,
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
@@ -92,6 +98,22 @@ export default function AutopilotSettingsPage() {
     toPatch: (v) => ({ settings: { max_concurrent_runs: v } }),
     clamp: (v) => clampNumber(v, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
+
+  if (!isAdmin) {
+    return (
+      <PageContainer size="default">
+        <div className="space-y-6">
+          <PageHeader
+            title="Autopilot"
+            description="Configure PM model, cadence, and organization-wide automation defaults."
+          />
+          <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            Only admins can manage Autopilot settings.
+          </div>
+        </div>
+      </PageContainer>
+    );
+  }
 
   return (
     <PageContainer size="default">
