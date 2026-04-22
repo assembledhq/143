@@ -69,6 +69,8 @@ const PREVIEW_ORIGIN_TEMPLATE =
   "http://{id}.preview.localhost:9090";
 
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
+const PR_ERROR_TOAST_DURATION_MS = 10_000;
+const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 
 const statusConfig: Record<string, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
@@ -1353,6 +1355,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
+  const [localPRActionError, setLocalPRActionError] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -1428,8 +1431,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
         } : undefined);
       } else if (current === "failed") {
-        const msg = session?.pr_creation_error || "PR creation failed";
-        toast.error(msg);
+        toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
       }
     }
     prevPRStateRef.current = current;
@@ -1466,17 +1468,20 @@ export function SessionDetailContent({ id }: { id: string }) {
   const createPRMutation = useMutation({
     mutationFn: () => api.sessions.createPR(id),
     onMutate: () => {
+      setLocalPRActionError(null);
       setLocalPRState("submitting");
     },
     onSuccess: () => {
+      setLocalPRActionError(null);
       setLocalPRState("queued");
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
     onError: (err) => {
       setLocalPRState("idle");
-      const msg = err instanceof Error ? err.message : "Failed to create PR";
-      toast.error(msg);
+      const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
+      setLocalPRActionError(msg);
+      toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
     },
   });
 
@@ -1708,6 +1713,9 @@ export function SessionDetailContent({ id }: { id: string }) {
                 const snapshotExpired = !session.snapshot_key;
                 const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
                 const succeededButNoPR = prState === "succeeded" && !hasPR;
+                const prActionError =
+                  localPRActionError ||
+                  (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
 
                 let label = "Create PR";
                 let spinning = false;
@@ -1744,23 +1752,30 @@ export function SessionDetailContent({ id }: { id: string }) {
                 }
 
                 return (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs gap-1.5"
-                    disabled={disabled}
-                    title={title}
-                    onClick={() => createPRMutation.mutate()}
-                  >
-                    {spinning ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : prState === "failed" ? (
-                      <AlertTriangle className="h-3 w-3" />
-                    ) : (
-                      <GitPullRequest className="h-3 w-3" />
+                  <div className="flex flex-col items-end gap-1 py-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs gap-1.5"
+                      disabled={disabled}
+                      title={title}
+                      onClick={() => createPRMutation.mutate()}
+                    >
+                      {spinning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : prState === "failed" || localPRActionError ? (
+                        <AlertTriangle className="h-3 w-3" />
+                      ) : (
+                        <GitPullRequest className="h-3 w-3" />
+                      )}
+                      {label}
+                    </Button>
+                    {prActionError && (
+                      <div className="max-w-64 text-right text-xs leading-4 text-destructive">
+                        {prActionError}
+                      </div>
                     )}
-                    {label}
-                  </Button>
+                  </div>
                 );
               })()}
             </div>
