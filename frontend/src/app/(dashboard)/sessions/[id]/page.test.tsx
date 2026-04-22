@@ -851,7 +851,7 @@ describe('SessionDetailPage', () => {
 
     const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
     expect(createPRButton).toBeDisabled();
-    expect(createPRButton).toHaveAttribute('title', 'Session state expired — re-run to create a PR.');
+    expect(screen.getByText('Session state expired — re-run to create a PR.')).toBeInTheDocument();
   });
 
   it('does not show Create PR button when session is running', async () => {
