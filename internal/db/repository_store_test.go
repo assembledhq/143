@@ -11,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -538,5 +539,79 @@ func TestRepositoryStore_DisconnectByInstallationID(t *testing.T) {
 
 	err = store.DisconnectByInstallationID(context.Background(), int64(99))
 	require.NoError(t, err, "DisconnectByInstallationID should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRepositoryStore_GetAnyInstallationIDByOrg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expected  int64
+		expectErr bool
+	}{
+		{
+			name: "returns installation id for active repo",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT installation_id FROM repositories").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"installation_id"}).AddRow(int64(12345)))
+			},
+			expected: 12345,
+		},
+		{
+			name: "returns error when no active repo installation exists",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				mock.ExpectQuery("SELECT installation_id FROM repositories").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewRepositoryStore(mock)
+			orgID := uuid.New()
+			tt.setupMock(mock, orgID)
+
+			installationID, err := store.GetAnyInstallationIDByOrg(context.Background(), orgID)
+			if tt.expectErr {
+				require.Error(t, err, "GetAnyInstallationIDByOrg should return an error when no installation id is available")
+			} else {
+				require.NoError(t, err, "GetAnyInstallationIDByOrg should not return an error")
+				require.Equal(t, tt.expected, installationID, "GetAnyInstallationIDByOrg should return the expected installation id")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestRepositoryStore_DisconnectByIntegration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewRepositoryStore(mock)
+	orgID := uuid.New()
+	integrationID := uuid.New()
+
+	mock.ExpectExec("UPDATE repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	err = store.DisconnectByIntegration(context.Background(), orgID, integrationID)
+	require.NoError(t, err, "DisconnectByIntegration should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
