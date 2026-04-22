@@ -1,6 +1,6 @@
 # Design: Infrastructure & Deployment
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 
 This document describes how 143.dev is packaged, deployed, and scaled.
 
@@ -188,7 +188,7 @@ docker compose -f docker-compose.prod.yml up -d
 - Server runs in production mode (no hot reload)
 - Frontend is pre-built and served by the Go server
 - TLS termination via a reverse proxy (Caddy or Traefik)
-- Docker socket access via [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) instead of direct socket mount (see [20-security-architecture.md](20-security-architecture.md))
+- Docker socket access via [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) instead of direct socket mount (see [20-security-architecture.md](implemented/20-security-architecture.md))
 - Server container runs with `security_opt: [no-new-privileges:true]`, `read_only: true`
 - Database connection uses `sslmode=verify-full` with TLS
 
@@ -761,7 +761,7 @@ For teams that don't use Mezmo or Datadog:
 
 ## Security Considerations
 
-See [20-security-architecture.md](20-security-architecture.md) for the comprehensive security architecture. Key points:
+See [20-security-architecture.md](implemented/20-security-architecture.md) for the comprehensive security architecture. Key points:
 
 - All inter-service communication over TLS in production. Database connections use `sslmode=verify-full`.
 - **Sandbox isolation via gVisor**: Agent sandboxes run under gVisor (`runsc`) by default. gVisor is **required in production** — the server refuses to start without it unless `SANDBOX_REQUIRE_GVISOR=false` is explicitly set. In development, fallback to `runc` is allowed with a warning.

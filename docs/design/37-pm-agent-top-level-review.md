@@ -1,6 +1,6 @@
 # 35 - PM Agent: Operator Workspace
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
 >
 > **Implementation notes:** Decision log model/API and PM handler exist. Missing: split-view workspace, autonomy model, PM as first-class nav item. Plans still exposed as concept.
 
@@ -1141,4 +1141,3 @@ The PM's context gathering now scales automatically by org size. This replaces t
 18. Add "context health" indicators to "Your Direction" zone showing how product context influences decisions
 19. Show effective context inheritance (org → repo) on per-repo settings
 20. Add autonomy readiness signals ("PM has 87% acceptance over 9 cycles — ready to advance?")
-

@@ -1,6 +1,6 @@
 # Design: Time to First Fix
 
-> **Status:** Not Started | **Last reviewed:** 2026-03-19
+> **Status:** Not Started | **Last reviewed:** 2026-04-21
 
 The most critical moment in the 143.dev experience is: **user installs, connects a repo, and sees their first successful fix**. Every minute this takes, a percentage of users are lost. This document designs the path from sign-up to "wow" as short as possible.
 
@@ -195,7 +195,7 @@ Key elements:
 
 - **Step 2 (GitHub App install)**: If the user isn't an org admin, show "You'll need an org admin to approve this. Here's a link to send them." Don't dead-end.
 - **Step 4 (Sentry connection)**: Make this optional for the first run. If no Sentry, the system can still scan for open Linear issues or let the user paste a stack trace manually.
-- **Step 7 (Agent failure)**: If the first fix attempt fails, automatically try the next quick-win candidate. Don't show the user a failure on their very first experience. If all candidates fail, show the failure gracefully (see [17-failure-communication.md](17-failure-communication.md)).
+- **Step 7 (Agent failure)**: If the first fix attempt fails, automatically try the next quick-win candidate. Don't show the user a failure on their very first experience. If all candidates fail, show the failure gracefully (see [17-failure-communication.md](../implemented/17-failure-communication.md)).
 
 ## Data Model
 

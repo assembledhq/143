@@ -12,7 +12,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 
 - The current product is single-organization per user, but the intended long-term identity model is **one user identity, many organization memberships**. A user represents the human account (email, GitHub ID, Google ID); membership represents access to an organization and carries the user's role for that org.
 - All product data remains scoped to exactly one `org_id`. Multi-organization support should change how the active org is resolved for a request, not introduce cross-org views by default.
-- The detailed future design lives in [future/49-multi-organization-membership.md](future/49-multi-organization-membership.md). The key product guardrail is that single-org users should see no new UI or onboarding complexity.
+- The detailed future design lives in [future/50-multi-organization-membership.md](future/50-multi-organization-membership.md). The key product guardrail is that single-org users should see no new UI or onboarding complexity.
 - Audit log entries are expected to be self-describing. Every emitted audit event should include structured `details` with operator-useful context such as resource names, source/provenance, runtime choices, job IDs, related IDs, counts, and before/after changes. Audit details must not copy secrets, full document contents, large diffs, or access tokens; use booleans, lengths, hashes, masked summaries, and IDs instead.
 
 ## Autopilot workspace UX
@@ -45,13 +45,13 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Follow-up messages also resume paused sessions such as `awaiting_input`, `needs_human_guidance`, and completed terminal states from the saved snapshot when one still exists. Validation/PR creation only start when the user explicitly ends the session.
     - The inline code review surface should remain usable even on very long diff lines: comment composers should be visually compact, anchored near the commented line, and decoupled from the diff row's full scroll width so submit/cancel actions stay close to the text input.
     - The agent runs in a sandboxed container and produces a code diff.
-    - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore uses drain-before-deploy behavior, lease-based dead-worker recovery for in-flight jobs, and checkpoint-aware resume from the last committed turn after unplanned worker loss; see [future/51-worker-deploy-safety.md](future/51-worker-deploy-safety.md).
+    - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore uses drain-before-deploy behavior, lease-based dead-worker recovery for in-flight jobs, and checkpoint-aware resume from the last committed turn after unplanned worker loss; see [51-worker-deploy-safety.md](51-worker-deploy-safety.md).
     - Optional live preview for sandbox output is served from an **isolated preview origin** using short-lived preview tokens, never from the main app origin. This prevents untrusted preview code from sharing the app's authenticated browser context. The feature is positioned as a no-local-setup review loop for supported repos, not as a full browser IDE, and relies on gateway-enforced browser-side controls such as CSP, service-worker blocking, and preview-session scoping.
     - Preview recycle state is persisted with the preview lifecycle record rather than held only in worker memory so long-lived previews can be safely recycled after API restarts or deploys.
     - Agent runtime credentials are loaded from org-scoped encrypted credentials (`org_credentials`) rather than process `.env` defaults, so each org can manage Codex/Claude/Gemini auth independently.
     - The agent outputs a **confidence score** with its fix. Low-confidence runs are paused for human review before proceeding to validation.
     - If the agent asks a clarifying question during execution, the run pauses and the question surfaces in the Fix Queue. The user can answer in the UI, provide guidance, or **resume the session locally** via CLI (e.g., `143 resume <run-id>` or `claude --resume <session-id>`) to take over the sandbox interactively.
-    - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
+    - When a run fails, the system generates a **human-readable failure explanation** with actionable next steps — see [17-failure-communication.md](implemented/17-failure-communication.md). Failures are classified by sub-type and feed back into the system to improve future runs.
 - Step 4: Validate correctness
     - The system checks the code and ensures that
         1. it works towards the right product direction
@@ -290,39 +290,6 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 
 - **Mezmo**: Primary log aggregation. Structured JSON logs shipped via Mezmo's ingestion API. Used for log search, alerting, and archival.
 - **Datadog**: Primary monitoring/observability. Custom metrics (HTTP, job queue, agent runs, cluster health), APM distributed tracing, pre-built dashboards, and alerting. Also used as a metrics source for Step 6 experiment evaluation (pull production latency/error rates to measure fix impact).
-
-# Design Documents
-
-| # | Document | Description | Status |
-|---|----------|-------------|--------|
-| 01 | [Database Schema](01-database-schema.md) | PostgreSQL tables, indexes, relationships | Draft |
-| 02 | [API Server](02-api-server.md) | Go backend structure, routes, middleware, workers | Draft |
-| 03 | [Frontend](03-frontend.md) | Next.js + shadcn/ui architecture, pages, data fetching | Draft |
-| 04 | [Ingestion Pipeline](04-ingestion.md) | Webhooks, polling, normalization, deduplication | Draft |
-| 05 | [Prioritization Engine](05-prioritization.md) | Scoring algorithm, admin controls, auto-triggering | Draft |
-| 06 | [Agent Orchestrator](06-agent-orchestrator.md) | Sandbox management, agent adapters, log streaming | Draft |
-| 07 | [Validation Pipeline](07-validation.md) | LLM-based code review, CI checks, fail-fast | Draft |
-| 08 | [PR & Ship](08-pr-and-ship.md) | GitHub PR creation, review, deploy detection | Draft |
-| 09 | [Observability](09-observability.md) | Impact measurement, experiments, outcome classification | Draft |
-| 10 | [Infrastructure](10-infrastructure.md) | Docker, deployment, horizontal scaling, Mezmo, Datadog | Draft |
-| 11 | [Review Feedback Loop](11-review-feedback-loop.md) | PR review capture, auto-apply, review patterns KB, acceptance tracking | Draft |
-| 12 | [Smart Issue Routing](12-smart-routing.md) | Complexity estimation, execution aggressiveness, confidence scoring | Draft |
-| 13 | [Repository Onboarding](13-repository-onboarding.md) | GitHub OAuth + App auth, repo connection, cloning strategy | Draft |
-| 14 | [Codebase Context Layer](14-codebase-context.md) | Context packages, file maps, conventions, quality scoring | Draft |
-| 15 | [Time to First Fix](15-time-to-first-fix.md) | Demo mode, quick-win scan, progress UX, onboarding optimization | Draft |
-| 16 | [AI Agent Evaluation System](16-ai-agent-evals.md) | Offline/online eval architecture, grader design, release gates, and automated eval flywheel | Draft |
-| 17 | [Failure Communication](17-failure-communication.md) | Failure taxonomy, human-readable explanations, system learning from failures, trust progression, fix rate transparency | Draft |
-| 18 | [Fix Quality Feedback Loop](18-fix-quality-feedback.md) | Production outcome analysis, ineffective fix learning, anti-pattern detection | Draft |
-| 20 | [Security Architecture](20-security-architecture.md) | Threat model, sandbox hardening, prompt injection defense, secret management, RBAC | Draft |
-| 21 | [First-Run Experience](21-first-run-experience.md) | Onboarding flow, quick-start issue scan, time-to-value optimization | Draft |
-| 22 | [Notification System](22-notifications.md) | Event taxonomy, multi-channel delivery, user preferences, escalation | Draft |
-| 23 | [Auto-Closing Feedback Loops](23-auto-closing-feedback-loops.md) | Self-tuning loops for complexity calibration, agent defaults, context, conventions | Draft |
-| 24 | [Design Resolutions](24-design-resolutions.md) | Cross-document clarifications, conflict resolutions, decision flowcharts | Draft |
-| 28 | [AI Product Manager Agent](28-agent-ticket-prioritization.md) | Batch PM agent that analyzes all issues, produces prioritized work plans, and delegates to coding agents | Draft |
-| 29 | [Projects](29-projects.md) | Project containers and PM-aware multi-task planning/execution across cycles | Draft |
-| 30 | [PM Agent UX Elevation](30-pm-agent-ux-elevation.md) | Surface PM context, decisions, and project grouping in Sessions UX | Draft |
-| 31 | [Automations Tab](31-automations-tab.md) | On-demand reusable automation workflows layered on top of PM/manual-session primitives | Draft |
-| 32 | [Project Cadence and Lifecycle](32-project-cadence-and-lifecycle.md) | Project-centric model for finite vs evergreen work with cron cadence and project-scoped quick actions | Proposal |
 
 # Build Order
 
