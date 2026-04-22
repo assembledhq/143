@@ -41,7 +41,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
     - **Projects** are the primary long-term control surface. The canonical review surface for PM-proposed projects lives in `Projects`, while `Autopilot` shows lightweight PM proposal summaries and links users into that review flow. Each project can be `finite` (completes) or `evergreen` (continuous maintenance) with optional cadence-based execution and project-scoped quick actions.
 - Step 3: Execute a coding agent
     - Admins set a **confidence threshold** that controls which issues the system will auto-attempt. Issues below the threshold require manual triggering.
-    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit; see [50-manual-session-image-preview.md](50-manual-session-image-preview.md).
+    - The Sessions area supports **one-off manual sessions** through a dedicated `/sessions/new` creation page with a chat-style composer. Users can start a manual run from free-form instructions, file/photo attachments, optional image URLs, and voice dictation without waiting for PM planning cadence. Composer attachment previews should make uploaded screenshots easy to inspect before submit.
     - Manual sessions are **interactive by default**: after each turn the worker snapshots the sandbox + agent state, stores the latest diff/summary on the session, and returns the session to `idle` so the user can send a follow-up message. Validation/PR creation only start when the user explicitly ends the session.
     - The agent runs in a sandboxed container and produces a code diff.
     - Long-running sessions must survive routine platform deploys and worker restarts. Worker infrastructure therefore needs explicit drain-before-deploy behavior plus lease-based dead-worker recovery for in-flight jobs; see [future/51-worker-deploy-safety.md](future/51-worker-deploy-safety.md).
@@ -322,7 +322,6 @@ Single system of record. Bundled in Docker Compose for local dev, swappable to m
 | 30 | [PM Agent UX Elevation](30-pm-agent-ux-elevation.md) | Surface PM context, decisions, and project grouping in Sessions UX | Draft |
 | 31 | [Automations Tab](31-automations-tab.md) | On-demand reusable automation workflows layered on top of PM/manual-session primitives | Draft |
 | 32 | [Project Cadence and Lifecycle](32-project-cadence-and-lifecycle.md) | Project-centric model for finite vs evergreen work with cron cadence and project-scoped quick actions | Proposal |
-| 50 | [Manual Session Image Hover Preview](50-manual-session-image-preview.md) | Shared composer attachment previews with hover peek and click-to-lightbox for uploaded images | Proposal |
 
 # Build Order
 
