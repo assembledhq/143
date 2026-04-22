@@ -13,6 +13,13 @@ colored status text, no sticky bottom footer.
 Exceptions that still use explicit buttons are enumerated below. If your field
 is not on that list, autosave it.
 
+Short rule:
+
+- **Edits configuration state** for future behavior and is easy to undo →
+  autosave it.
+- **Performs an operation** (connect, disconnect, create, delete, rotate,
+  promote, archive) or handles a secret → use an explicit button/dialog.
+
 ## The hook
 
 See `@/hooks/useAutosave.ts`.

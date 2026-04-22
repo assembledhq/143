@@ -3,7 +3,10 @@ import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 /**
  * Patch shape used by every `api.settings.update(...)` autosave call.
  */
-export type SettingsPatch = { settings: Partial<OrgSettings> };
+export type SettingsPatch = {
+  name?: string;
+  settings?: Partial<OrgSettings>;
+};
 
 /**
  * Keys inside `OrgSettings` whose values are nested objects. Patching any of
@@ -48,6 +51,7 @@ export function applyOrgSettingsPatch(prev: unknown, patch: SettingsPatch): unkn
     ...previous,
     data: {
       ...previous.data,
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
       settings: { ...previous.data.settings, ...patch.settings },
     },
   };
@@ -57,6 +61,7 @@ function warnIfPartialNestedPatch(
   previous: SingleResponse<Organization> | undefined,
   patch: SettingsPatch,
 ): void {
+  if (!patch.settings) return;
   const existing = previous?.data?.settings ?? ({} as Partial<OrgSettings>);
   for (const key of Object.keys(patch.settings) as (keyof OrgSettings)[]) {
     if (!NESTED_OBJECT_KEYS.has(key)) continue;
@@ -84,5 +89,9 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * when a single page may emit multiple in-flight saves.
  */
 export function coalesceSettingsPatch(a: SettingsPatch, b: SettingsPatch): SettingsPatch {
-  return { settings: { ...a.settings, ...b.settings } };
+  return {
+    ...(a.name !== undefined ? { name: a.name } : {}),
+    ...(b.name !== undefined ? { name: b.name } : {}),
+    settings: { ...a.settings, ...b.settings },
+  };
 }
