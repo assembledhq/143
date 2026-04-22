@@ -215,7 +215,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
-				mock.ExpectQuery("WITH next_job AS").
+				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
 					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
@@ -235,7 +235,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				orgID := uuid.New()
 				now := time.Now()
 				completedAt := now.Add(time.Minute)
-				mock.ExpectQuery("WITH next_job AS").
+				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
 					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
@@ -251,7 +251,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 		{
 			name: "returns nil when no pending job exists",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS").
+				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
 					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
@@ -260,7 +260,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 		{
 			name: "returns query errors",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
-				mock.ExpectQuery("WITH next_job AS").
+				mock.ExpectQuery("WITH next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
 					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(errors.New("db down"))
 			},
