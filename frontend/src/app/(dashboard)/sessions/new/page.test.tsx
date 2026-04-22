@@ -183,6 +183,22 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
+  it('opens an image lightbox from the composer attachment thumbnail', async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Add image URL' }));
+    await user.type(screen.getByPlaceholderText('https://example.com/screenshot.png'), 'https://example.com/test.png');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    await user.click(screen.getByRole('button', { name: 'Preview test.png' }));
+
+    expect(screen.getByRole('dialog', { name: 'Image preview' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'test.png' })).toBeInTheDocument();
+  });
+
   it('shows error for oversized files', async () => {
     const user = userEvent.setup();
     renderWithProviders(<ManualSessionCreatePageContent />);
