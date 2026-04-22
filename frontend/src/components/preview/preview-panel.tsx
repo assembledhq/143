@@ -50,6 +50,11 @@ export interface PreviewPanelProps {
   previewOriginTemplate: string; // e.g. "http://{id}.preview.localhost:9090"
 }
 
+type PreviewMutationError = {
+  title: string;
+  message: string;
+};
+
 const WIDTH_PRESETS = [
   { name: "Mobile", width: 375, icon: Smartphone },
   { name: "Tablet", width: 768, icon: Tablet },
@@ -120,7 +125,7 @@ export function PreviewPanel({
   const [selectedWidth, setSelectedWidth] = useState<number>(0); // 0 = full
   const [designMode, setDesignMode] = useState(false);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
-  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<PreviewMutationError | null>(null);
 
   // Poll preview status every 3s when active
   const {
@@ -173,28 +178,40 @@ export function PreviewPanel({
       // buries the real issue (capacity, expired snapshot, etc.).
       const code = (err as { code?: string })?.code;
       if (code === PREVIEW_ERROR_CODES.CAPACITY_REACHED) {
-        setMutationError(err.message);
+        setMutationError({
+          title: "Preview unavailable",
+          message: err.message,
+        });
         return;
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_EXPIRED) {
-        setMutationError(
-          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again."
-        );
+        setMutationError({
+          title: "Preview unavailable",
+          message:
+            "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again.",
+        });
         return;
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_UNAVAILABLE) {
-        setMutationError(
-          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
-        );
+        setMutationError({
+          title: "Preview unavailable",
+          message:
+            "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again.",
+        });
         return;
       }
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
-        setMutationError(
-          "Preview is unavailable on this server (Docker not configured). Contact an admin."
-        );
+        setMutationError({
+          title: "Preview unavailable",
+          message:
+            "Preview is unavailable on this server (Docker not configured). Contact an admin.",
+        });
         return;
       }
-      setMutationError(`Failed to start preview: ${err.message}`);
+      setMutationError({
+        title: "Preview action failed",
+        message: `Failed to start preview: ${err.message}`,
+      });
     },
   });
 
@@ -211,7 +228,10 @@ export function PreviewPanel({
     mutationFn: () => api.sessions.preview.stop(sessionId),
     onSuccess: resetPreviewState,
     onError: (err) => {
-      setMutationError(`Failed to stop preview: ${err.message}`);
+      setMutationError({
+        title: "Preview action failed",
+        message: `Failed to stop preview: ${err.message}`,
+      });
     },
   });
 
@@ -220,7 +240,10 @@ export function PreviewPanel({
     mutationFn: () => api.sessions.preview.restart(sessionId),
     onSuccess: resetPreviewState,
     onError: (err) => {
-      setMutationError(`Failed to restart preview: ${err.message}`);
+      setMutationError({
+        title: "Preview action failed",
+        message: `Failed to restart preview: ${err.message}`,
+      });
     },
   });
 
@@ -228,7 +251,10 @@ export function PreviewPanel({
   const bootstrapMutation = useMutation({
     mutationFn: () => api.sessions.preview.bootstrap(sessionId),
     onError: (err) => {
-      setMutationError(`Failed to bootstrap preview: ${err.message}`);
+      setMutationError({
+        title: "Preview action failed",
+        message: `Failed to bootstrap preview: ${err.message}`,
+      });
     },
   });
 
@@ -371,17 +397,7 @@ export function PreviewPanel({
       <div className="flex items-center gap-2 flex-wrap">
         {/* Start / Stop / Restart */}
         <div className="flex items-center gap-1">
-          {!isActive ? (
-            <Button
-              size="sm"
-              onClick={() => startMutation.mutate()}
-              disabled={isMutating}
-              loading={startMutation.isPending}
-            >
-              <Play className="size-3.5" />
-              Start Preview
-            </Button>
-          ) : (
+          {isActive ? (
             <>
               <Button
                 size="sm"
@@ -404,7 +420,7 @@ export function PreviewPanel({
                 Restart
               </Button>
             </>
-          )}
+          ) : null}
         </div>
 
         {/* Status badge */}
@@ -511,13 +527,19 @@ export function PreviewPanel({
 
       {/* Mutation error banner */}
       {mutationError && (
-        <div className="flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-2 text-sm text-destructive">
-          <AlertTriangle className="size-4 shrink-0" />
-          <span className="flex-1">{mutationError}</span>
+        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3 text-destructive">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium">{mutationError.title}</p>
+            <p className="mt-1 text-sm leading-6 break-words text-destructive/90">
+              {mutationError.message}
+            </p>
+          </div>
           <Button
             variant="ghost"
             size="icon-xs"
             onClick={() => setMutationError(null)}
+            aria-label="Dismiss preview error"
             className="rounded p-0.5 hover:bg-destructive/10"
           >
             <X className="size-3.5" />
