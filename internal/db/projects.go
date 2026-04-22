@@ -25,6 +25,7 @@ type ProjectFilters struct {
 	Limit        int
 	Cursor       string
 	RepositoryID uuid.UUID
+	CreatedBy    uuid.UUID
 	Search       string // When non-empty, filter projects by title or goal (case-insensitive substring match).
 	ProposedByPM *bool  // When non-nil, filter by proposed_by_pm flag.
 }
@@ -208,6 +209,10 @@ func applyProjectFilters(query string, args pgx.NamedArgs, filters ProjectFilter
 	if filters.RepositoryID != uuid.Nil {
 		query += ` AND repository_id = @repository_id`
 		args["repository_id"] = &filters.RepositoryID
+	}
+	if filters.CreatedBy != uuid.Nil {
+		query += ` AND created_by = @created_by`
+		args["created_by"] = filters.CreatedBy
 	}
 	if filters.ProposedByPM != nil {
 		query += ` AND proposed_by_pm = @proposed_by_pm`

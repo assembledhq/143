@@ -383,6 +383,34 @@ func TestProjectStore_ListByOrg_WithSearch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestProjectStore_ListByOrg_WithCreatedBy(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM projects WHERE org_id .+ AND created_by").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(projectTestColumns).
+				AddRow(newProjectRow(uuid.New(), orgID, repoID, now)...),
+		)
+
+	store := NewProjectStore(mock)
+	projects, err := store.ListByOrg(context.Background(), orgID, ProjectFilters{
+		CreatedBy: userID,
+	})
+	require.NoError(t, err, "ListByOrg with CreatedBy should not return an error")
+	require.Len(t, projects, 1, "should return one project")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestProjectStore_SoftDelete(t *testing.T) {
 	t.Parallel()
 

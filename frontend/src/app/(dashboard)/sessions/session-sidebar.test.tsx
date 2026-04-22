@@ -15,6 +15,17 @@ vi.mock('next/link', () => ({
 
 let mockPathname = '/sessions';
 let mockParams: Record<string, string> = {};
+const mockAuthState: {
+  isAuthenticated: boolean;
+  user: { id: string } | null;
+  isLoading: boolean;
+  logout: ReturnType<typeof vi.fn>;
+} = {
+  isAuthenticated: true,
+  user: { id: 'user-1' },
+  isLoading: false,
+  logout: vi.fn(),
+};
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
@@ -24,7 +35,7 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
-  useAuth: () => ({ isAuthenticated: true, user: { id: 'user-1' }, isLoading: false, logout: vi.fn() }),
+  useAuth: () => mockAuthState,
 }));
 
 const mockOptimisticSessions: { id: string; title: string; status: 'pending'; created_at: string; resolvedId?: string }[] = [];
@@ -74,6 +85,49 @@ describe('SessionSidebar', () => {
     mockPathname = '/sessions';
     mockParams = {};
     mockOptimisticSessions.length = 0;
+    mockAuthState.isAuthenticated = true;
+    mockAuthState.user = { id: 'user-1' };
+    mockAuthState.isLoading = false;
+    mockAuthState.logout = vi.fn();
+  });
+
+  it('defaults the owner scope to Mine', async () => {
+    let capturedUserId: string | null = null;
+    server.use(
+      http.get('/api/v1/sessions', ({ request }) => {
+        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_id');
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByRole('radio', { name: 'Mine' });
+    expect(capturedUserId).toBe('user-1');
+  });
+
+  it('does not fetch sessions until the Mine scope can resolve the current user', async () => {
+    mockAuthState.isAuthenticated = false;
+    mockAuthState.user = null;
+    mockAuthState.isLoading = true;
+
+    let requestCount = 0;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        requestCount += 1;
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get('/api/v1/sessions/counts', () => {
+        requestCount += 1;
+        return HttpResponse.json({ data: { all: 0, active: 0, archived: 0, cap: 0 } });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(requestCount).toBe(0);
+    expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
   // -----------------------------------------------------------------------
