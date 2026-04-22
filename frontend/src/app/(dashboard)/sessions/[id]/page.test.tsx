@@ -797,6 +797,46 @@ describe('SessionDetailPage', () => {
     resolveCreatePR?.();
   });
 
+  it('shows the immediate create PR error in a 10-second toast', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'PUSH_FAILED', message: 'GitHub rejected the branch push.' } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 });
+    });
+    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
+  });
+
   it('keeps a creating state until the pull request exists, then swaps to View PR', async () => {
     let sessionFetchCount = 0;
     const queuedSession: Session = {
@@ -924,7 +964,7 @@ describe('SessionDetailPage', () => {
 
     await waitFor(
       () => {
-        expect(toast.error).toHaveBeenCalledWith('GitHub rejected the branch push.');
+        expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 });
       },
       { timeout: 5000 },
     );
@@ -934,6 +974,7 @@ describe('SessionDetailPage', () => {
       },
       { timeout: 5000 },
     );
+    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
   }, 8000);
 
   it('shows file count badge on Changes tab when session has diff', async () => {
