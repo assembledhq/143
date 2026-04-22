@@ -1207,6 +1207,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       exitReview();
     }
   }, [centerMode, exitReview, setPreviewParam]);
+  const [legacyPRRequested, setLegacyPRRequested] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -1216,7 +1217,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (!s) return false;
       // Poll while PR creation is in flight so the state machine advances
       // without waiting for the user to navigate.
-      return s.pr_creation_state === "queued" || s.pr_creation_state === "pushing"
+      return s.pr_creation_state === "queued" ||
+        s.pr_creation_state === "pushing" ||
+        (legacyPRRequested && s.status !== "pr_created" && s.pr_creation_state !== "failed" && s.pr_creation_state !== "succeeded")
         ? 2000
         : false;
     },
@@ -1238,6 +1241,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    refetchInterval: (q) => (legacyPRRequested && !q.state.data?.data ? 2000 : false),
   });
 
   // React to pr_creation_state transitions with toast feedback. Tracks the
@@ -1245,6 +1249,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   // every render.
   const prevPRStateRef = useRef<string | undefined>(undefined);
   const prUrl = prData?.data?.github_pr_url;
+  const legacyPRPending =
+    legacyPRRequested &&
+    !prUrl &&
+    session?.pr_creation_state !== "failed" &&
+    session?.pr_creation_state !== "succeeded";
   useEffect(() => {
     const prev = prevPRStateRef.current;
     const current = session?.pr_creation_state;
@@ -1261,6 +1270,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRStateRef.current = current;
   }, [session?.pr_creation_state, session?.pr_creation_error, prUrl, queryClient, id]);
+  const prevPRUrlRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (legacyPRRequested && prUrl && prevPRUrlRef.current !== prUrl && !session?.pr_creation_state) {
+      toast.success("PR opened", {
+        action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
+      });
+    }
+    prevPRUrlRef.current = prUrl;
+  }, [legacyPRRequested, prUrl, session?.pr_creation_state]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
     if (id) {
@@ -1283,11 +1301,15 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const createPRMutation = useMutation({
     mutationFn: () => api.sessions.createPR(id),
+    onMutate: () => {
+      setLegacyPRRequested(true);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
     onError: (err) => {
+      setLegacyPRRequested(false);
       const msg = err instanceof Error ? err.message : "Failed to create PR";
       toast.error(msg);
     },
@@ -1515,12 +1537,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </a>
                   );
                 }
-                if (!canCreatePR) return null;
+                if (!canCreatePR && !legacyPRPending) return null;
 
                 const prState = session.pr_creation_state;
                 const snapshotExpired = !session.snapshot_key;
                 const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
-                const inFlight = prState === "queued" || prState === "pushing" || createPRMutation.isPending;
+                const inFlight = prState === "queued" || prState === "pushing" || createPRMutation.isPending || legacyPRPending;
                 const succeededButNoPR = prState === "succeeded" && !hasPR;
 
                 let label = "Create PR";
@@ -1528,18 +1550,18 @@ export function SessionDetailContent({ id }: { id: string }) {
                 let disabled = false;
                 let title: string | undefined;
 
-                if (snapshotExpired) {
+                if (inFlight) {
+                  label = "Pushing PR\u2026";
+                  spinning = true;
+                  disabled = true;
+                  title = "This usually takes a few seconds";
+                } else if (snapshotExpired) {
                   label = "Create PR";
                   disabled = true;
                   // Prefer the server-produced message (e.g. from the last
                   // failed attempt) when available so the UI stays aligned
                   // with server-side wording.
                   title = session.pr_creation_error || "Session state expired — re-run to create a PR.";
-                } else if (inFlight) {
-                  label = "Pushing PR\u2026";
-                  spinning = true;
-                  disabled = true;
-                  title = "This usually takes a few seconds";
                 } else if (succeededButNoPR) {
                   label = "Finalizing\u2026";
                   spinning = true;
