@@ -253,6 +253,80 @@ describe("useAutosave", () => {
     expect(queryClient.getQueryData(queryKey)).toEqual({ data: { settings: { existing: "value" } } });
   });
 
+  it("skips dispatch when the optimistic end state is unchanged", async () => {
+    const mutationFn = vi.fn().mockResolvedValue(undefined);
+    const queryKey = ["settings", "test-noop"];
+    queryClient.setQueryData(queryKey, { data: { settings: { foo: "bar" } } });
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: { foo: string } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.save({ settings: { foo: "bar" } });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mutationFn).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(queryKey)).toEqual({ data: { settings: { foo: "bar" } } });
+  });
+
+  it("does not queue a follow-up mutation when an in-flight save already matches the requested end state", async () => {
+    let resolveFirst: (() => void) | undefined;
+    const mutationFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+
+    const queryKey = ["settings", "test-inflight-noop"];
+    queryClient.setQueryData(queryKey, { data: { settings: { default_agent_type: "codex" } } });
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: { default_agent_type: string } }>({
+          queryKey,
+          mutationFn,
+          applyOptimistic,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.save({ settings: { default_agent_type: "claude_code" } });
+    });
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.save({ settings: { default_agent_type: "claude_code" } });
+    });
+
+    await act(async () => {
+      resolveFirst?.();
+      await Promise.resolve();
+    });
+
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(queryKey)).toEqual({
+      data: { settings: { default_agent_type: "claude_code" } },
+    });
+  });
+
   it("transitions status idle → saving → saved → idle", async () => {
     // Fake timers let us jump past SAVED_LINGER_MS (1500ms) without burning
     // real wall-clock time. `shouldAdvanceTime` keeps waitFor's polling alive

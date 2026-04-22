@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,22 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
 func orgColumns() []string {
 	return []string{"id", "name", "settings", "created_at", "updated_at"}
+}
+
+type testOrgSettingsInvalidator struct {
+	called bool
+	orgID  uuid.UUID
+}
+
+func (i *testOrgSettingsInvalidator) InvalidateOrg(orgID uuid.UUID) {
+	i.called = true
+	i.orgID = orgID
 }
 
 func TestSettingsHandler_Get(t *testing.T) {
@@ -333,6 +345,168 @@ func TestSettingsHandler_Update(t *testing.T) {
 	}
 }
 
+func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"codex"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return success for a no-op patch")
+	require.Contains(t, w.Body.String(), `"default_agent_type":"codex"`, "response should return the existing settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "no-op patch should not issue an UPDATE")
+}
+
+func TestSettingsHandler_Update_LogsPatchMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"claude_code"}}`))
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Referer", "https://app.example.com/settings/agent")
+	req.Header.Set("User-Agent", "TestBrowser/1.0")
+	req = req.WithContext(logger.WithContext(middleware.WithOrgID(req.Context(), orgID)))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should update settings successfully")
+	require.Contains(t, logs.String(), `"message":"settings patch applied"`, "patch updates should be logged")
+	require.Contains(t, logs.String(), `"changed_keys":["default_agent_type"]`, "log should include the changed settings key")
+	require.Contains(t, logs.String(), `"origin":"https://app.example.com"`, "log should include the request origin")
+	require.Contains(t, logs.String(), `"referer":"https://app.example.com/settings/agent"`, "log should include the request referer")
+	require.Contains(t, logs.String(), `"user_agent":"TestBrowser/1.0"`, "log should include the request user agent")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_Update_ReturnsErrorWhenStoreUpdateFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(assertAnError("write failed"))
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"claude_code"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code, "should return 500 when the organization update fails")
+	require.Contains(t, w.Body.String(), "UPDATE_FAILED", "response should surface the update failure code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_Update_InvalidatesOrgSettingsCacheOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"default_agent_type":"codex"}`),
+				now,
+				now,
+			),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, nil)
+	invalidator := &testOrgSettingsInvalidator{}
+	handler.SetOrgSettingsInvalidator(invalidator)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"claude_code"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should update settings successfully")
+	require.True(t, invalidator.called, "successful updates should invalidate the cached org settings")
+	require.Equal(t, orgID, invalidator.orgID, "invalidator should receive the updated org id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestMergeSettingsJSON_ShallowKey(t *testing.T) {
 	t.Parallel()
 	existing := json.RawMessage(`{"llm_model":"gpt-5.3","pm_schedule_hours":4}`)
@@ -562,4 +736,55 @@ func TestMergeSettingsJSON_PreservesIntegerEncoding(t *testing.T) {
 	bigGot, err := mergeSettingsJSON(bigExisting, json.RawMessage(`{"other":"x"}`))
 	require.NoError(t, err)
 	require.Contains(t, string(bigGot), `"big":9007199254740993`)
+}
+
+func TestTopLevelSettingsPatchKeys(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      *json.RawMessage
+		expected []string
+	}{
+		{
+			name:     "returns nil for nil input",
+			raw:      nil,
+			expected: nil,
+		},
+		{
+			name: "returns nil for malformed json",
+			raw: func() *json.RawMessage {
+				raw := json.RawMessage(`{"default_agent_type":`)
+				return &raw
+			}(),
+			expected: nil,
+		},
+		{
+			name: "returns sorted top level keys",
+			raw: func() *json.RawMessage {
+				raw := json.RawMessage(`{"z":1,"a":{"nested":true},"m":null}`)
+				return &raw
+			}(),
+			expected: []string{"a", "m", "z"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, topLevelSettingsPatchKeys(tt.raw), "should return the expected top-level patch keys")
+		})
+	}
+}
+
+func assertAnError(msg string) error {
+	return &testError{msg: msg}
+}
+
+type testError struct {
+	msg string
+}
+
+func (e *testError) Error() string {
+	return e.msg
 }

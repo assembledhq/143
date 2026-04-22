@@ -64,6 +64,42 @@ type QueueStatus = "idle" | "saving" | "saved" | "error";
 
 const queues = new Map<string, QueueEntry>();
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    for (let i = 0; i < a.length; i += 1) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  if (isPlainObject(a) || isPlainObject(b)) {
+    if (!isPlainObject(a) || !isPlainObject(b)) return false;
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const key of keysA) {
+      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+      if (!deepEqual(a[key], b[key])) return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 function getQueue(key: QueryKey): QueueEntry {
   const id = hashKey(key);
   let entry = queues.get(id);
@@ -270,6 +306,18 @@ export function useAutosave<TVars>({
 
   const dispatch = useCallback(
     (vars: TVars) => {
+      const current = queryClient.getQueryData(queryKey);
+      if (current !== undefined) {
+        const next = applyOptimisticRef.current(current, vars);
+        // Guard against spurious autosaves: if applying `vars` would leave the
+        // cache unchanged, we already reached the requested end state (either
+        // from the server, from our own optimistic write, or from another
+        // component sharing the query scope). Skip the network call entirely.
+        if (deepEqual(current, next)) {
+          return;
+        }
+      }
+
       const entry = getQueue(queryKey);
       // First dispatcher wins on coalesce: if two components share a queryKey
       // with different coalesce fns, the first one registered is used for all
