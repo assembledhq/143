@@ -410,12 +410,20 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/messages', () => {
-        const msgs: SessionMessage[] = [
-          { id: 1, session_id: idleSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
-          { id: 2, session_id: idleSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'Done fixing', created_at: '2026-02-17T07:02:00Z' },
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        const timeline: SessionTimelineEntry[] = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:01:00Z',
+            message: { id: 1, session_id: idleSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+          },
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:02:00Z',
+            message: { id: 2, session_id: idleSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'Done fixing', created_at: '2026-02-17T07:02:00Z' },
+          },
         ];
-        return HttpResponse.json({ data: msgs, meta: {} } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
       }),
     );
 
@@ -444,11 +452,15 @@ describe('SessionDetailPage', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/messages', () => {
-        const msgs: SessionMessage[] = [
-          { id: 1, session_id: runningSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        const timeline: SessionTimelineEntry[] = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:01:00Z',
+            message: { id: 1, session_id: runningSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+          },
         ];
-        return HttpResponse.json({ data: msgs, meta: {} } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
       }),
     );
 
