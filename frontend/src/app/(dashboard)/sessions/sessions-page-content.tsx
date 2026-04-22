@@ -303,6 +303,7 @@ export function SessionsPageContent() {
 
   const columns = useMemo(() => buildColumns(members), [members]);
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table exposes unstable functions by design; this component does not memoize the table instance across boundaries.
   const table = useReactTable({
     data: filteredSessions,
     columns,

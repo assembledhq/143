@@ -420,62 +420,7 @@ function ValidationTab({ sessionId }: { sessionId: string }) {
   );
 }
 
-const prStatusColor: Record<string, string> = {
-  open: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-  merged: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
-  closed: "bg-red-500/10 text-red-700 dark:text-red-400",
-};
-
-function PRCard({ sessionId }: { sessionId: string }) {
-  const { data: prData, isLoading: prLoading } = useQuery({
-    queryKey: ["session", sessionId, "pr"],
-    queryFn: () => api.sessions.getPR(sessionId),
-  });
-
-  const pr = prData?.data;
-  if (prLoading) return <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading PR...</div>;
-  if (!pr) return null;
-
-  return (
-    <Card className="mx-4 mt-3">
-      <CardContent className="py-3 space-y-3">
-        <div className="flex items-start justify-between">
-          <div className="min-w-0">
-            <h3 className="text-xs font-medium truncate">{pr.title}</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">{pr.github_repo} #{pr.github_pr_number}</p>
-          </div>
-          <a href={pr.github_pr_url} target="_blank" rel="noopener noreferrer">
-            <Button variant="outline" size="sm">
-              <ExternalLink className="mr-1.5 h-3 w-3" />
-              GitHub
-            </Button>
-          </a>
-        </div>
-        <div className="flex items-center gap-3 text-xs">
-          <div>
-            <span className="text-muted-foreground">Status: </span>
-            <Badge variant="secondary" className={`text-xs ${prStatusColor[pr.status] || "bg-muted text-muted-foreground"}`}>
-              {pr.status}
-            </Badge>
-          </div>
-          {pr.review_status && (
-            <div>
-              <span className="text-muted-foreground">Review: </span>
-              <Badge variant="secondary" className="text-xs">{pr.review_status}</Badge>
-            </div>
-          )}
-          <div className="min-w-0">
-            <span className="text-muted-foreground">Branch: </span>
-            <code className="text-xs bg-muted px-1 py-0.5 rounded">{pr.branch_name}</code>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function ChangesTab({
-  sessionId,
   filteredFiles,
   activeFileIndex,
   onFileSelect,
@@ -487,7 +432,6 @@ function ChangesTab({
   onPassRangeChange,
   emptyStatusText,
 }: {
-  sessionId: string;
   filteredFiles: DiffFile[];
   activeFileIndex: number;
   onFileSelect: (index: number) => void;
@@ -957,22 +901,9 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     queryFn: () => api.sessions.getPR(sessionId),
   });
   const hasPR = !!prData?.data;
-  const hasDiff = !!session.diff_stats;
-  const canCreatePR = hasDiff && !hasPR && !isRunning;
-
   const [prQueued, setPRQueued] = useState(false);
-  const [prDraftOverride, setPRDraftOverride] = useState<boolean | null>(null);
-
-  const { data: ghStatus } = useQuery({
-    queryKey: ["github-status"],
-    queryFn: () => api.githubStatus.get(),
-    enabled: canCreatePR,
-    staleTime: 5 * 60 * 1000, // 5 min
-  });
-
-  const draftValue = prDraftOverride ?? ghStatus?.pr_draft_default ?? false;
   const createPRMutation = useMutation({
-    mutationFn: () => api.sessions.createPR(sessionId, prDraftOverride !== null ? { draft: prDraftOverride } : undefined),
+    mutationFn: () => api.sessions.createPR(sessionId),
     onSuccess: () => {
       setPRQueued(true);
       // Clear the queued banner after 30s if the PR hasn't appeared yet.
@@ -1598,7 +1529,6 @@ export function SessionDetailContent({ id }: { id: string }) {
 
             <TabsContent value="changes" className="flex-1 min-h-0">
               <ChangesTab
-                sessionId={id}
                 filteredFiles={filteredFiles}
                 activeFileIndex={activeFileIndex}
                 onFileSelect={setActiveFileIndex}

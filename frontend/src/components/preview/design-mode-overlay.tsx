@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  type RefObject,
   useCallback,
   useEffect,
   useRef,
@@ -27,8 +26,6 @@ import { VisualEditingPanel } from "./visual-editing-panel";
 
 interface DesignModeOverlayProps {
   sessionId: string;
-  iframeRef: RefObject<HTMLIFrameElement | null>;
-  previewOrigin: string;
 }
 
 interface SelectedElement {
@@ -48,8 +45,6 @@ function buildSelector(info: ElementInfo): string {
 
 export function DesignModeOverlay({
   sessionId,
-  iframeRef,
-  previewOrigin,
 }: DesignModeOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
 
