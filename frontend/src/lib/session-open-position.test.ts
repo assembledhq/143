@@ -1,0 +1,181 @@
+import { describe, expect, it } from "vitest";
+import { buildTimeline, type TimelineEntry } from "./timeline";
+import type { SessionLog, SessionMessage } from "./types";
+import {
+  findLatestAssistantTurnStartIndex,
+  getSessionScrollStorageKey,
+  readStoredSessionScrollPosition,
+  resolveInitialSessionAnchor,
+  writeStoredSessionScrollPosition,
+} from "./session-open-position";
+
+const viewerScope = { userId: "user-1", orgId: "org-1" };
+
+function makeMessage(overrides: Partial<SessionMessage>): SessionMessage {
+  return {
+    id: overrides.id ?? 1,
+    session_id: overrides.session_id ?? "session-1",
+    org_id: overrides.org_id ?? "org-1",
+    user_id: overrides.user_id,
+    turn_number: overrides.turn_number ?? 0,
+    role: overrides.role ?? "user",
+    content: overrides.content ?? "message",
+    created_at: overrides.created_at ?? "2026-04-22T10:00:00Z",
+  };
+}
+
+function makeLog(overrides: Partial<SessionLog>): SessionLog {
+  return {
+    id: overrides.id ?? 1,
+    session_id: overrides.session_id ?? "session-1",
+    level: overrides.level ?? "output",
+    message: overrides.message ?? "assistant output",
+    created_at: overrides.created_at ?? "2026-04-22T10:00:01Z",
+    turn_number: overrides.turn_number ?? 1,
+    metadata: overrides.metadata ?? null,
+  };
+}
+
+describe("session-open-position", () => {
+  it("builds a stable per-session scroll storage key", () => {
+    expect(getSessionScrollStorageKey("sess-123", viewerScope)).toBe("session-scroll-position:org-1:user-1:sess-123");
+  });
+
+  it("scopes storage keys by viewer identity", () => {
+    expect(
+      getSessionScrollStorageKey("sess-123", { userId: "user-1", orgId: "org-1" }),
+    ).not.toBe(
+      getSessionScrollStorageKey("sess-123", { userId: "user-2", orgId: "org-1" }),
+    );
+  });
+
+  it("returns null for missing or invalid stored positions", () => {
+    const emptyStorage = new Map<string, string>();
+    const invalidStorage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", "-20"]]);
+
+    expect(readStoredSessionScrollPosition(emptyStorage, "sess-123", viewerScope)).toBeNull();
+    expect(readStoredSessionScrollPosition(invalidStorage, "sess-123", viewerScope)).toBeNull();
+  });
+
+  it("reads a stored session position when present", () => {
+    const storage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", "480"]]);
+
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope)).toBe(480);
+  });
+
+  it("stores normalized scroll positions for a session", () => {
+    const storage = new Map<string, string>();
+
+    writeStoredSessionScrollPosition(storage, "sess-123", viewerScope, 319.8);
+
+    expect(storage.get("session-scroll-position:org-1:user-1:sess-123")).toBe("320");
+  });
+
+  it("does not read another viewer's saved session position", () => {
+    const storage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", "480"]]);
+
+    expect(
+      readStoredSessionScrollPosition(storage, "sess-123", { userId: "user-2", orgId: "org-1" }),
+    ).toBeNull();
+  });
+
+  it("finds the first visible entry for the latest assistant turn", () => {
+    const messages: SessionMessage[] = [
+      makeMessage({ id: 1, role: "user", turn_number: 1, content: "first ask", created_at: "2026-04-22T10:00:00Z" }),
+      makeMessage({ id: 2, role: "user", turn_number: 2, content: "second ask", created_at: "2026-04-22T10:01:00Z" }),
+    ];
+    const logs: SessionLog[] = [
+      makeLog({ id: 11, level: "tool_use", turn_number: 1, message: "rg", created_at: "2026-04-22T10:00:10Z" }),
+      makeLog({ id: 12, level: "output", turn_number: 1, message: "done", created_at: "2026-04-22T10:00:20Z" }),
+      makeLog({ id: 21, level: "tool_use", turn_number: 2, message: "git diff", created_at: "2026-04-22T10:01:10Z" }),
+      makeLog({ id: 22, level: "output", turn_number: 2, message: "latest answer", created_at: "2026-04-22T10:01:20Z" }),
+    ];
+
+    const entries = buildTimeline(messages, logs);
+
+    expect(findLatestAssistantTurnStartIndex(entries)).toBe(4);
+  });
+
+  it("skips hidden log entries when anchoring the latest assistant turn", () => {
+    const messages: SessionMessage[] = [
+      makeMessage({ id: 1, role: "user", turn_number: 1, content: "first ask", created_at: "2026-04-22T10:00:00Z" }),
+      makeMessage({ id: 2, role: "user", turn_number: 2, content: "second ask", created_at: "2026-04-22T10:01:00Z" }),
+    ];
+    const logs: SessionLog[] = [
+      makeLog({ id: 11, level: "output", turn_number: 1, message: "done", created_at: "2026-04-22T10:00:20Z" }),
+      makeLog({ id: 21, level: "info", turn_number: 2, message: "starting latest turn", created_at: "2026-04-22T10:01:05Z" }),
+      makeLog({ id: 22, level: "tool_use", turn_number: 2, message: "git diff", created_at: "2026-04-22T10:01:10Z" }),
+      makeLog({ id: 23, level: "output", turn_number: 2, message: "latest answer", created_at: "2026-04-22T10:01:20Z" }),
+    ];
+
+    const entries = buildTimeline(messages, logs);
+
+    expect(findLatestAssistantTurnStartIndex(entries)).toBe(4);
+  });
+
+  it("returns null when there is no assistant turn to anchor to", () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, role: "user", turn_number: 1 }) },
+    ];
+
+    expect(findLatestAssistantTurnStartIndex(entries)).toBeNull();
+  });
+
+  it("prefers restoring the saved position over any generic default", () => {
+    const entries: TimelineEntry[] = [];
+
+    expect(
+      resolveInitialSessionAnchor({
+        entries,
+        isActive: false,
+        storedScrollTop: 320,
+      }),
+    ).toEqual({ kind: "saved_position", scrollTop: 320 });
+  });
+
+  it("opens active sessions at the live edge when there is no saved position", () => {
+    const entries: TimelineEntry[] = [];
+
+    expect(
+      resolveInitialSessionAnchor({
+        entries,
+        isActive: true,
+        storedScrollTop: null,
+      }),
+    ).toEqual({ kind: "live_edge" });
+  });
+
+  it("anchors inactive sessions to the latest assistant turn when there is no saved position", () => {
+    const messages: SessionMessage[] = [
+      makeMessage({ id: 1, role: "user", turn_number: 1, created_at: "2026-04-22T10:00:00Z" }),
+      makeMessage({ id: 2, role: "user", turn_number: 2, created_at: "2026-04-22T10:01:00Z" }),
+    ];
+    const logs: SessionLog[] = [
+      makeLog({ id: 11, level: "output", turn_number: 1, created_at: "2026-04-22T10:00:20Z" }),
+      makeLog({ id: 21, level: "tool_use", turn_number: 2, created_at: "2026-04-22T10:01:10Z" }),
+      makeLog({ id: 22, level: "output", turn_number: 2, created_at: "2026-04-22T10:01:20Z" }),
+    ];
+
+    expect(
+      resolveInitialSessionAnchor({
+        entries: buildTimeline(messages, logs),
+        isActive: false,
+        storedScrollTop: null,
+      }),
+    ).toEqual({ kind: "entry", entryIndex: 3 });
+  });
+
+  it("falls back to the live edge when an inactive session has no assistant turn", () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, role: "user", turn_number: 1 }) },
+    ];
+
+    expect(
+      resolveInitialSessionAnchor({
+        entries,
+        isActive: false,
+        storedScrollTop: null,
+      }),
+    ).toEqual({ kind: "live_edge" });
+  });
+});

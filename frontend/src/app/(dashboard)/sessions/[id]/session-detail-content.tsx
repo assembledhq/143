@@ -5,6 +5,7 @@ import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowUp,
   ClipboardList,
   ExternalLink,
@@ -45,6 +46,11 @@ import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
+import {
+  readStoredSessionScrollPosition,
+  resolveInitialSessionAnchor,
+  writeStoredSessionScrollPosition,
+} from "@/lib/session-open-position";
 import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -55,6 +61,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
+import { useAuth } from "@/hooks/use-auth";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 
 const PREVIEW_ORIGIN_TEMPLATE =
@@ -653,9 +660,15 @@ const MAX_SSE_RECONNECT_ATTEMPTS = 3;
 const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
+const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+
+function isNearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
+}
 
 function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [message, setMessage] = useState("");
   const [planMode, setPlanMode] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
@@ -667,17 +680,24 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
+  const initialAnchorAppliedRef = useRef(false);
+  const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isClaudeCode = session.agent_type === "claude_code";
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   // Sourced from the AGENTS registry so the per-agent flag lives in one place
   // (see lacksHeadlessResume on AgentMeta). When true, follow-up runs replay
   // only the new user message against the restored filesystem — prior
   // conversation context is not sent back to the CLI. See runStreamingAgent
   // in internal/services/agent/adapters/stream_parser.go.
   const lacksHeadlessResume = AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false;
+  const viewerScope = useMemo(
+    () => (user ? { userId: user.id, orgId: user.org_id } : null),
+    [user],
+  );
 
   const isRunning = session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
@@ -691,13 +711,13 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     return agentType?.models ?? [];
   }, [session.agent_type]);
 
-  const { data: messagesData } = useQuery({
+  const messagesQuery = useQuery({
     queryKey: ["session", sessionId, "messages"],
     queryFn: () => api.sessions.getMessages(sessionId),
     refetchInterval: isRunning ? 3000 : false,
   });
 
-  const { data: logsData } = useQuery({
+  const logsQuery = useQuery({
     queryKey: ["session", sessionId, "logs"],
     queryFn: () => api.sessions.getLogs(sessionId),
     refetchInterval: isActive ? 3000 : false,
@@ -706,7 +726,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   // Fetch the linked issue to display its description as the initial prompt.
   // Manual sessions have no issue — issue_id comes back as the zero UUID.
   const hasIssue = !!session.issue_id && session.issue_id !== "00000000-0000-0000-0000-000000000000";
-  const { data: issueData } = useQuery({
+  const issueQuery = useQuery({
     queryKey: ["issue", session.issue_id],
     queryFn: () => api.issues.get(session.issue_id),
     enabled: hasIssue,
@@ -714,18 +734,18 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
   // Merge fetched logs with streamed logs, deduplicating by ID.
   const allLogs = useMemo(() => {
-    const fetched = logsData?.data || [];
+    const fetched = logsQuery.data?.data || [];
     const idSet = new Set(fetched.map((l) => l.id));
     const extra = streamedLogs.filter((l) => !idSet.has(l.id));
     return [...fetched, ...extra];
-  }, [logsData?.data, streamedLogs]);
+  }, [logsQuery.data?.data, streamedLogs]);
 
-  const messages = messagesData?.data;
+  const messages = messagesQuery.data?.data;
 
   // Prepend the issue description as a synthetic user message for turn 0
   // so the initial prompt is visible in the timeline.
   const allMessages = useMemo(() => {
-    const issueDescription = issueData?.data?.description;
+    const issueDescription = issueQuery.data?.data?.description;
     const msgs = messages || [];
     if (!issueDescription) return msgs;
     // Only prepend if there's no user message for turn 0 already.
@@ -741,12 +761,41 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       created_at: session.created_at,
     };
     return [syntheticMsg, ...msgs];
-  }, [messages, issueData?.data?.description, sessionId, session.org_id, session.created_at]);
+  }, [messages, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at]);
 
   const timelineEntries = useMemo(
     () => buildTimeline(allMessages, allLogs),
     [allMessages, allLogs]
   );
+  const hasLoadedTimelineInputs = messagesQuery.isFetched && logsQuery.isFetched && (!hasIssue || issueQuery.isFetched);
+
+  const persistScrollPosition = useCallback((scrollTop: number) => {
+    if (typeof window === "undefined" || !viewerScope) return;
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop);
+  }, [sessionId, viewerScope]);
+
+  const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
+    if (saveScrollTimerRef.current) {
+      clearTimeout(saveScrollTimerRef.current);
+    }
+    saveScrollTimerRef.current = setTimeout(() => {
+      persistScrollPosition(scrollTop);
+      saveScrollTimerRef.current = null;
+    }, SCROLL_POSITION_SAVE_DEBOUNCE_MS);
+  }, [persistScrollPosition]);
+
+  const syncScrollState = useCallback((el: HTMLDivElement) => {
+    isNearBottomRef.current = isNearBottom(el);
+    setShowJumpToLatest(!isNearBottomRef.current);
+  }, []);
+
+  const scrollToLiveEdge = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -873,10 +922,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
         textareaRef.current.style.height = "auto";
       }
       // Scroll to bottom after sending a message so the user sees the response.
-      isNearBottomRef.current = true;
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
+      scrollToLiveEdge();
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       queryClient.invalidateQueries({ queryKey: ["session", sessionId, "messages"] });
     },
@@ -907,16 +953,70 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isNearBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
-  }, []);
+    syncScrollState(el);
+    schedulePersistScrollPosition(el.scrollTop);
+  }, [schedulePersistScrollPosition, syncScrollState]);
+
+  useEffect(() => {
+    initialAnchorAppliedRef.current = false;
+    setShowJumpToLatest(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    const currentScrollEl = scrollRef.current;
+    return () => {
+      if (saveScrollTimerRef.current) {
+        clearTimeout(saveScrollTimerRef.current);
+      }
+      if (currentScrollEl) {
+        persistScrollPosition(currentScrollEl.scrollTop);
+      }
+    };
+  }, [persistScrollPosition]);
+
+  useEffect(() => {
+    if (!hasLoadedTimelineInputs || initialAnchorAppliedRef.current || !viewerScope) return;
+
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const storedScrollTop =
+      typeof window === "undefined"
+        ? null
+        : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope);
+    const anchor = resolveInitialSessionAnchor({
+      entries: timelineEntries,
+      isActive: isRunning,
+      storedScrollTop,
+    });
+
+    if (anchor.kind === "saved_position") {
+      el.scrollTop = anchor.scrollTop;
+      syncScrollState(el);
+      initialAnchorAppliedRef.current = true;
+      return;
+    }
+
+    if (anchor.kind === "entry") {
+      const target = el.querySelector<HTMLElement>(`[data-session-entry-index="${anchor.entryIndex}"]`);
+      if (target) {
+        el.scrollTop = target.offsetTop;
+        syncScrollState(el);
+        initialAnchorAppliedRef.current = true;
+        return;
+      }
+    }
+
+    scrollToLiveEdge();
+    initialAnchorAppliedRef.current = true;
+  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdge, sessionId, syncScrollState, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
     if (scrollRef.current && isNearBottomRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      scrollToLiveEdge();
     }
-  }, [timelineEntries.length]);
+  }, [scrollToLiveEdge, timelineEntries.length]);
 
   const hasContent = message.trim() || attachments.length > 0;
 
@@ -947,7 +1047,21 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
+      {showJumpToLatest && (
+        <div className="absolute bottom-24 right-4 z-20">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="rounded-full shadow-sm"
+            onClick={scrollToLiveEdge}
+          >
+            <ArrowDown className="h-4 w-4" />
+            Jump to latest
+          </Button>
+        </div>
+      )}
       {/* Unified timeline */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
         {timelineEntries.length === 0 && !isRunning && session.status !== "pending" && (
@@ -989,6 +1103,11 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           onDiffClick={onDiffClick}
           onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
           onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
+          getEntryContainerProps={(_, index) =>
+            ({
+              "data-session-entry-index": index,
+            }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>
+          }
         />
         {session.status === "pending" && (
           <div className="flex items-center justify-center py-12">
