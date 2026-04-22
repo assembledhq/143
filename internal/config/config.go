@@ -74,10 +74,12 @@ type Config struct {
 	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
 	// GitHub App
-	GitHubAppID         int64  `env:"GITHUB_APP_ID"`
-	GitHubAppPrivateKey string `env:"GITHUB_APP_PRIVATE_KEY"`
-	GitHubWebhookSecret string `env:"GITHUB_WEBHOOK_SECRET"`
-	GitHubAppSlug       string `env:"GITHUB_APP_SLUG"`
+	GitHubAppID           int64  `env:"GITHUB_APP_ID"`
+	GitHubAppClientID     string `env:"GITHUB_APP_CLIENT_ID"`
+	GitHubAppClientSecret string `env:"GITHUB_APP_CLIENT_SECRET"`
+	GitHubAppPrivateKey   string `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubWebhookSecret   string `env:"GITHUB_WEBHOOK_SECRET"`
+	GitHubAppSlug         string `env:"GITHUB_APP_SLUG"`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
@@ -335,6 +337,7 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		{"Sentry OAuth", c.SentryOAuthClientID != "" && c.SentryOAuthClientSecret != "", "integration auth"},
 		{"Backend Sentry", c.SentryDSN != "", "automatic API 5xx + panic reporting"},
 		{"GitHub App", c.GitHubAppEnabled(), "webhooks, PRs"},
+		{"GitHub App User Auth", c.GitHubAppClientID != "" && c.GitHubAppClientSecret != "", "user-authored PRs"},
 		{"Credential encryption", c.EncryptionMasterKey != "", "encrypted credential storage"},
 	}
 

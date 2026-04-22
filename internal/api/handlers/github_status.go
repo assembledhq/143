@@ -3,9 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,7 +16,6 @@ import (
 
 const (
 	githubPRConnectStateCookie = "github_pr_connect_state"
-	githubPRConnectScope       = "repo read:user user:email"
 )
 
 // githubStatusCredentialStore is the interface for checking GitHub credential status.
@@ -30,6 +30,11 @@ type githubStatusOrgReader interface {
 	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
 }
 
+type githubAppUserAuth interface {
+	HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
+	ExchangeCode(ctx context.Context, code string) (*models.GitHubAppUserConfig, error)
+}
+
 // GitHubStatusHandler serves the user's GitHub connection status for PR creation.
 type GitHubStatusHandler struct {
 	credentials    githubStatusCredentialStore
@@ -38,6 +43,8 @@ type GitHubStatusHandler struct {
 	githubSecret   string
 	baseURL        string // e.g. "https://app.143.dev"
 	frontendURL    string // e.g. "https://app.143.dev"
+	signingKey     []byte
+	appUserAuth    githubAppUserAuth
 }
 
 // NewGitHubStatusHandler creates a new GitHub status handler.
@@ -54,6 +61,17 @@ func NewGitHubStatusHandler(
 		baseURL:        baseURL,
 		frontendURL:    frontendURL,
 	}
+}
+
+// SetPRAuthFlow wires the signing key used for signed PR resume tokens.
+func (h *GitHubStatusHandler) SetPRAuthFlow(signingKey string) {
+	h.signingKey = []byte(signingKey)
+}
+
+// SetAppUserAuth wires the refresh-aware GitHub App user auth service used by
+// the on-demand Create PR flow.
+func (h *GitHubStatusHandler) SetAppUserAuth(auth githubAppUserAuth) {
+	h.appUserAuth = auth
 }
 
 // GitHubStatusResponse is the response for GET /api/v1/users/me/github-status.
@@ -88,15 +106,30 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Check if the user has a GitHub OAuth credential.
-	cred, err := h.credentials.GetForUser(r.Context(), orgID, user.ID, models.ProviderGitHubOAuth)
-	if err == nil && cred != nil {
-		cfg, ok := cred.Config.(models.GitHubOAuthConfig)
-		if ok && cfg.AccessToken != "" {
+	if h.appUserAuth != nil {
+		ok, authErr := h.appUserAuth.HasValidCredential(r.Context(), orgID, user.ID)
+		if authErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to determine GitHub PR auth status", authErr)
+			return
+		}
+		if ok {
 			resp.Connected = true
-			resp.HasRepoScope = hasRepoScope(cfg.Scope)
+			resp.HasRepoScope = true
 			if user.GitHubLogin != nil {
 				resp.GitHubLogin = *user.GitHubLogin
+			}
+		}
+	} else {
+		// Fallback for tests/wiring without the refresh-aware auth service.
+		cred, err := h.credentials.GetForUser(r.Context(), orgID, user.ID, models.ProviderGitHubAppUser)
+		if err == nil && cred != nil {
+			cfg, ok := cred.Config.(models.GitHubAppUserConfig)
+			if ok && cfg.AccessToken != "" && !cfg.IsExpired() {
+				resp.Connected = true
+				resp.HasRepoScope = true
+				if user.GitHubLogin != nil {
+					resp.GitHubLogin = *user.GitHubLogin
+				}
 			}
 		}
 	}
@@ -105,11 +138,34 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// StartConnect initiates a GitHub OAuth flow with repo scope for PR authorship.
+// StartConnect initiates a GitHub App user authorization flow for PR authorship.
 func (h *GitHubStatusHandler) StartConnect(w http.ResponseWriter, r *http.Request) {
 	if h.githubClientID == "" || h.githubSecret == "" {
-		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_OAUTH_NOT_CONFIGURED", "github oauth is not configured")
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
 		return
+	}
+	var resumeCookieName string
+	if resumeToken := r.URL.Query().Get("resume_token"); resumeToken != "" {
+		user := middleware.UserFromContext(r.Context())
+		orgID := middleware.OrgIDFromContext(r.Context())
+		if user == nil {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			return
+		}
+		if len(h.signingKey) == 0 {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
+			return
+		}
+		claims, err := parsePRAuthResumeToken(h.signingKey, resumeToken, time.Now())
+		if err != nil || claims.UserID != user.ID || claims.OrgID != orgID {
+			writeJSON(w, http.StatusConflict, models.ErrorResponse{
+				Error: models.ErrorDetail{
+					Code:    "PR_RESUME_EXPIRED",
+					Message: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
+				},
+			})
+			return
+		}
 	}
 
 	state, err := setOAuthState(w, githubPRConnectStateCookie)
@@ -118,17 +174,29 @@ func (h *GitHubStatusHandler) StartConnect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if resumeToken := r.URL.Query().Get("resume_token"); resumeToken != "" {
+		resumeCookieName = githubPRResumeCookiePrefix + state
+		http.SetCookie(w, &http.Cookie{
+			Name:     resumeCookieName,
+			Value:    resumeToken,
+			Path:     "/",
+			MaxAge:   int(prAuthResumeTokenTTL.Seconds()),
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   isSecureRequest(r),
+		})
+	}
+
 	params := url.Values{
 		"client_id":    {h.githubClientID},
 		"redirect_uri": {h.baseURL + "/api/v1/users/me/github/callback"},
-		"scope":        {githubPRConnectScope},
 		"state":        {state},
 	}
 
 	http.Redirect(w, r, "https://github.com/login/oauth/authorize?"+params.Encode(), http.StatusTemporaryRedirect)
 }
 
-// HandleConnectCallback handles the GitHub OAuth callback for PR authorship.
+// HandleConnectCallback handles the GitHub App user auth callback for PR authorship.
 func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *http.Request) {
 	code, ok := validateOAuthCallback(w, r, githubPRConnectStateCookie)
 	if !ok {
@@ -142,38 +210,34 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	// Exchange code for token using the shared helper.
-	tokenResp, err := exchangeGitHubOAuthCode(h.githubClientID, h.githubSecret, code)
+	if h.appUserAuth == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
+		return
+	}
+
+	cfg, err := h.appUserAuth.ExchangeCode(r.Context(), code)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "TOKEN_EXCHANGE_FAILED", "failed to exchange code", err)
 		return
 	}
 
-	// Store user credential with repo scope.
-	cfg := models.GitHubOAuthConfig{
-		AccessToken: tokenResp.AccessToken,
-		TokenType:   tokenResp.TokenType,
-		Scope:       tokenResp.Scope,
-	}
 	if err := h.credentials.Upsert(r.Context(), user.ID, orgID, cfg, false); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store credential", err)
 		return
 	}
 
-	http.Redirect(w, r, h.frontendURL+"/settings?github_pr=connected", http.StatusTemporaryRedirect)
-}
-
-// hasRepoScope returns true if the comma/space-separated scope string includes "repo".
-func hasRepoScope(scope string) bool {
-	for _, s := range strings.FieldsFunc(scope, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if s == "repo" {
-			return true
+	redirectURL := h.frontendURL + "/settings?github_pr=connected"
+	resumeCookieName := githubPRResumeCookiePrefix + r.URL.Query().Get("state")
+	if resumeCookie, err := r.Cookie(resumeCookieName); err == nil && resumeCookie.Value != "" && len(h.signingKey) > 0 {
+		if claims, tokenErr := parsePRAuthResumeToken(h.signingKey, resumeCookie.Value, time.Now()); tokenErr == nil {
+			redirectURL = fmt.Sprintf("%s/sessions/%s?github_pr=connected&resume_pr=%s", h.frontendURL, claims.SessionID, url.QueryEscape(resumeCookie.Value))
 		}
 	}
-	return false
+	clearCookie(w, r, resumeCookieName)
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
-// Disconnect removes the user's stored GitHub OAuth credential.
+// Disconnect removes the user's stored GitHub App user credential.
 func (h *GitHubStatusHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
@@ -182,7 +246,7 @@ func (h *GitHubStatusHandler) Disconnect(w http.ResponseWriter, r *http.Request)
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 
-	if err := h.credentials.Disable(r.Context(), orgID, user.ID, models.ProviderGitHubOAuth); err != nil {
+	if err := h.credentials.Disable(r.Context(), orgID, user.ID, models.ProviderGitHubAppUser); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DISCONNECT_FAILED", "failed to disconnect GitHub", err)
 		return
 	}

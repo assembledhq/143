@@ -45,11 +45,17 @@ type SessionHandler struct {
 	messageStore     *db.SessionMessageStore
 	threadStore      *db.SessionThreadStore
 	viewStore        *db.SessionViewStore
+	prCredentials    githubStatusCredentialStore
+	prAuthChecker    interface {
+		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
+	}
 	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
 	llmClient        llm.Client            // optional, used for generating manual session titles
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
+	prAuthSigningKey []byte
+	frontendURL      string
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
@@ -82,6 +88,27 @@ func (h *SessionHandler) SetShutdownSignal(ch <-chan struct{}) {
 // succeeds but leaves the snapshot to be reclaimed by the TTL reaper.
 func (h *SessionHandler) SetSnapshotStore(s storage.SnapshotStore) {
 	h.snapshotStore = s
+}
+
+// SetPRCredentialStore injects the personal GitHub credential store used to
+// decide whether CreatePR should intercept for authorship authorization.
+func (h *SessionHandler) SetPRCredentialStore(store githubStatusCredentialStore) {
+	h.prCredentials = store
+}
+
+// SetPRAuthCredentialChecker injects the refresh-aware GitHub user-auth checker
+// used to determine whether Create PR should intercept for authorization.
+func (h *SessionHandler) SetPRAuthCredentialChecker(checker interface {
+	HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
+}) {
+	h.prAuthChecker = checker
+}
+
+// SetPRAuthFlow wires the signing key and frontend URL used by the on-demand
+// Create PR GitHub-auth flow.
+func (h *SessionHandler) SetPRAuthFlow(signingKey, frontendURL string) {
+	h.prAuthSigningKey = []byte(signingKey)
+	h.frontendURL = frontendURL
 }
 
 func NewSessionHandler(
@@ -771,9 +798,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse optional request body for per-PR overrides (e.g. draft).
+	// Parse optional request body for per-PR overrides and authorship flow.
 	var req struct {
-		Draft *bool `json:"draft,omitempty"`
+		Draft       *bool  `json:"draft,omitempty"`
+		AuthorMode  string `json:"author_mode,omitempty"`
+		ResumeToken string `json:"resume_token,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -781,13 +810,104 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	authorMode, err := parsePRAuthorMode(req.AuthorMode)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
 
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if h.orgStore != nil {
+		if org, orgErr := h.orgStore.GetByID(r.Context(), orgID); orgErr == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				orgSettings = parsed
+			}
+		}
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if shouldPromptForPRAuth(authorMode, orgSettings.PRAuthorship) &&
+		session.TriggeredByUserID != nil &&
+		user != nil &&
+		user.ID == *session.TriggeredByUserID {
+		if req.ResumeToken != "" {
+			if len(h.prAuthSigningKey) == 0 {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
+				return
+			}
+			claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now())
+			if tokenErr != nil || claims.SessionID != sessionID || claims.UserID != user.ID || claims.OrgID != orgID {
+				writeJSON(w, http.StatusConflict, models.ErrorResponse{
+					Error: models.ErrorDetail{
+						Code:    "PR_RESUME_EXPIRED",
+						Message: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
+					},
+				})
+				return
+			}
+		}
+
+		hasCredential := false
+		authUnavailable := h.prAuthChecker == nil
+		if h.prAuthChecker != nil {
+			var checkErr error
+			hasCredential, checkErr = h.prAuthChecker.HasValidCredential(r.Context(), orgID, user.ID)
+			if checkErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to verify GitHub PR authorization", checkErr)
+				return
+			}
+		}
+		if authUnavailable && !hasCredential {
+			if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == prAuthorModeUser {
+				writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_USER_AUTH_NOT_CONFIGURED", "github app user auth is not configured")
+				return
+			}
+			goto enqueuePR
+		}
+		if !hasCredential {
+			if len(h.prAuthSigningKey) == 0 {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "PR auth flow is not configured")
+				return
+			}
+			resumeToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
+				SessionID:  sessionID,
+				UserID:     user.ID,
+				OrgID:      orgID,
+				Draft:      req.Draft,
+				AuthorMode: string(prAuthorModeUser),
+				ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
+			})
+			if signErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare GitHub PR authorization", signErr)
+				return
+			}
+			writeJSON(w, http.StatusConflict, models.ErrorResponse{
+				Error: models.ErrorDetail{
+					Code:    "GITHUB_PR_AUTHORSHIP_REQUIRED",
+					Message: "Authorize GitHub to create this pull request as you.",
+					Details: map[string]any{
+						"session_id":            sessionID.String(),
+						"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
+						"resume_token":          resumeToken,
+						"can_fallback_to_app":   orgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
+						"suggested_author_mode": string(prAuthorModeUser),
+					},
+				},
+			})
+			return
+		}
+	}
+
+enqueuePR:
 	payload := map[string]any{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
 	if req.Draft != nil {
 		payload["draft"] = *req.Draft
+	}
+	if authorMode != prAuthorModeAuto {
+		payload["author_mode"] = string(authorMode)
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {

@@ -54,6 +54,9 @@ type PRService struct {
 	reviewComments  *db.ReviewCommentStore
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
+	appUserAuth     interface {
+		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
+	}
 	users           *db.UserStore
 	orgs            *db.OrganizationStore
 	prTemplates     *db.PRTemplateStore
@@ -107,6 +110,14 @@ func (s *PRService) SetIntegrationStore(store *db.IntegrationStore) {
 // SetUserCredentialStore sets the user credential store for user-authored PRs.
 func (s *PRService) SetUserCredentialStore(store *db.UserCredentialStore) {
 	s.userCredentials = store
+}
+
+// SetAppUserAuth wires the refresh-aware GitHub App user auth service used to
+// author PRs as the triggering user.
+func (s *PRService) SetAppUserAuth(auth interface {
+	GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
+}) {
+	s.appUserAuth = auth
 }
 
 // SetLLMClient sets the LLM client for repo PR template filling.
@@ -259,8 +270,15 @@ func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.
 }
 
 // resolveToken determines which GitHub token to use for PR creation.
-// Order: user's personal GitHub token → GitHub App installation token.
-func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (*tokenResolution, error) {
+// Order: user's GitHub App user token → GitHub App installation token.
+func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings, authorMode string) (*tokenResolution, error) {
+	if authorMode == "app" {
+		token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+		if err != nil {
+			return nil, fmt.Errorf("get installation token: %w", err)
+		}
+		return &tokenResolution{Token: token, IsUserToken: false}, nil
+	}
 	// If org is set to app_only, skip user token lookup.
 	if orgSettings.PRAuthorship == models.PRAuthorshipAppOnly {
 		token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
@@ -270,35 +288,35 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 		return &tokenResolution{Token: token, IsUserToken: false}, nil
 	}
 
-	// Try user token if user triggered the session and we have credential stores.
-	if run.TriggeredByUserID != nil && s.userCredentials != nil && s.users != nil {
-		cred, err := s.userCredentials.GetForUser(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
-		if err == nil && cred != nil && cred.Config != nil {
-			cfg, ok := cred.Config.(models.GitHubOAuthConfig)
-			// The token must have "repo" scope to push code and create PRs.
-			// Login-only tokens (read:user,user:email) lack this — skip them.
-			if ok && cfg.AccessToken != "" && hasRepoScope(cfg.Scope) {
-				// Validate token is still active before using it.
-				if s.validateUserToken(ctx, cfg.AccessToken) {
-					user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID)
-					if userErr == nil {
-						return &tokenResolution{
-							Token:       cfg.AccessToken,
-							IsUserToken: true,
-							User:        &user,
-						}, nil
-					}
-				} else {
-					// Token was revoked — disable the stored credential and fall through.
-					s.logger.Warn().Str("user_id", run.TriggeredByUserID.String()).Msg("user GitHub token revoked, disabling credential and falling back to app token")
-					_ = s.userCredentials.Disable(ctx, run.OrgID, *run.TriggeredByUserID, models.ProviderGitHubOAuth)
+	// Try user token if user triggered the session and we have the auth service.
+	if run.TriggeredByUserID != nil && s.appUserAuth != nil {
+		cfg, err := s.appUserAuth.GetValidCredential(ctx, run.OrgID, *run.TriggeredByUserID)
+		if err == nil && cfg != nil && cfg.AccessToken != "" {
+			canAccessRepo, accessErr := s.userTokenCanAccessRepo(ctx, cfg.AccessToken, repo.FullName)
+			if accessErr != nil {
+				return nil, fmt.Errorf("check user github access: %w", accessErr)
+			}
+			if !canAccessRepo {
+				if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == "user" {
+					return nil, fmt.Errorf("user GitHub auth cannot access repo %s", repo.FullName)
 				}
+			} else {
+				resolution := &tokenResolution{
+					Token:       cfg.AccessToken,
+					IsUserToken: true,
+				}
+				if s.users != nil {
+					if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+						resolution.User = &user
+					}
+				}
+				return resolution, nil
 			}
 		}
 	}
 
 	// If org requires user auth and we couldn't get a user token, block.
-	if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired {
+	if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == "user" {
 		return nil, fmt.Errorf("org requires user GitHub auth for PR creation, but no valid user token found")
 	}
 
@@ -317,6 +335,22 @@ func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
 	return err == nil
 }
 
+func (s *PRService) userTokenCanAccessRepo(ctx context.Context, token, fullName string) (bool, error) {
+	owner, repo := splitRepo(fullName)
+	if owner == "" || repo == "" {
+		return false, fmt.Errorf("invalid repo full name %q", fullName)
+	}
+	_, err := s.doGitHubRequest(ctx, token, http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, repo), nil)
+	if err == nil {
+		return true, nil
+	}
+	var apiErr *githubAPIError
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
 // SetBaseURL overrides the GitHub API base URL (for testing).
 func (s *PRService) SetBaseURL(url string) {
 	s.baseURL = url
@@ -326,7 +360,8 @@ func (s *PRService) SetBaseURL(url string) {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft *bool `json:"draft,omitempty"`
+	Draft      *bool  `json:"draft,omitempty"`
+	AuthorMode string `json:"author_mode,omitempty"`
 }
 
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
@@ -399,7 +434,17 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings)
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.Draft != nil {
+			opts.Draft = param.Draft
+		}
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+	}
+
+	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
@@ -441,8 +486,8 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	draft := orgSettings.PRDraftDefault
-	if len(params) > 0 && params[0].Draft != nil {
-		draft = *params[0].Draft
+	if opts.Draft != nil {
+		draft = *opts.Draft
 	}
 	var prOpts []prCreateOption
 	if draft {

@@ -4,7 +4,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
 const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(public code: string, message: string, public details?: unknown) {
     super(message);
     this.name = 'ApiError';
@@ -298,8 +298,12 @@ export const api = {
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
-    createPR: (sessionId: string, options?: { draft?: boolean }) =>
-      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options),
+    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
+        ...(options.draft !== undefined ? { draft: options.draft } : {}),
+        ...(options.authorMode ? { author_mode: options.authorMode } : {}),
+        ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+      } : undefined),
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
@@ -466,7 +470,12 @@ export const api = {
   },
   githubStatus: {
     get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),
-    connect: () => { window.location.href = `${API_BASE}/api/v1/users/me/github/connect`; },
+    connect: (resumeToken?: string) => {
+      const searchParams = new URLSearchParams();
+      if (resumeToken) searchParams.set('resume_token', resumeToken);
+      const qs = searchParams.toString();
+      window.location.href = `${API_BASE}/api/v1/users/me/github/connect${qs ? `?${qs}` : ''}`;
+    },
     disconnect: () => post('/api/v1/users/me/github/disconnect'),
   },
   priority: {

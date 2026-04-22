@@ -1,8 +1,8 @@
 # Design: PR Creation Revamp — User-Authored PRs, Template Support, and Issueless Sessions
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-22
 >
-> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). Missing: GitHub App user-to-server token storage/refresh, user-authored PR creation flow via GitHub App authorization, issueless session support.
+> **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). The on-demand `Create PR` authorization flow now uses encrypted `github_app_user` credentials with refresh-aware validation, app fallback, and frontend auto-resume after callback. The implementation reuses `/api/v1/users/me/github/*` routes for PR authorship instead of introducing separate `/github-app/*` endpoints. Remaining work: issueless session support and any future reconnect/error-taxonomy tightening.
 
 **Depends on**: [08-pr-and-ship.md](implemented/08-pr-and-ship.md), [13-repository-onboarding.md](implemented/13-repository-onboarding.md), [34-personal-team-coding-agents.md](implemented/34-personal-team-coding-agents.md)
 
@@ -116,12 +116,12 @@ Provider split:
 
 Add a dedicated GitHub App authorization flow for PR authorship. This is separate from `/api/v1/auth/github/*`.
 
-New endpoints:
+Routes used for PR authorship:
 
 ```text
-GET  /api/v1/users/me/github-app/connect
-GET  /api/v1/users/me/github-app/callback
-POST /api/v1/users/me/github-app/disconnect
+GET  /api/v1/users/me/github/connect
+GET  /api/v1/users/me/github/callback
+POST /api/v1/users/me/github/disconnect
 GET  /api/v1/users/me/github-status
 ```
 
@@ -136,6 +136,7 @@ Flow:
 7. 143 exchanges the code for a GitHub App user access token and stores it under `provider = github_app_user`
 8. 143 redirects the user back to the same session page with enough state to auto-resume PR creation
 9. Future PR creation attempts reuse the stored credential and refresh it silently when possible
+10. Concurrent auth flows in multiple tabs must bind the PR `resume_token` to the OAuth `state` so callbacks resume the correct session
 
 Handler shape:
 
@@ -177,11 +178,13 @@ func (h *GitHubAppUserHandler) HandleConnectCallback(w http.ResponseWriter, r *h
 
 Unlike login OAuth, GitHub App user tokens may expire and require refresh. We therefore need a small token manager in `internal/services/github/`.
 
-Interface:
+Concrete service shape:
 
 ```go
-type GitHubAppUserTokenManager interface {
-    GetValidToken(ctx context.Context, orgID, userID uuid.UUID) (string, *models.User, error)
+type AppUserAuthService interface {
+    ExchangeCode(ctx context.Context, code string) (*models.GitHubAppUserConfig, error)
+    HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
+    GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 }
 ```
 
@@ -369,7 +372,7 @@ When the org is `user_preferred` or `user_required`, the request wants a user-au
   },
   "details": {
     "session_id": "session-123",
-    "connect_url": "/api/v1/users/me/github-app/connect?flow=pr_authorship",
+    "connect_url": "/api/v1/users/me/github/connect?flow=pr_authorship",
     "resume_token": "opaque-short-lived-token",
     "can_fallback_to_app": true,
     "suggested_author_mode": "user"
@@ -403,7 +406,7 @@ If the modal offers `Create as 143`, the frontend should retry:
 
 That makes the fallback explicit and avoids backend ambiguity about whether the second attempt should still try user auth.
 
-##### `GET /api/v1/users/me/github-app/connect`
+##### `GET /api/v1/users/me/github/connect`
 
 This endpoint starts GitHub App user authorization.
 
@@ -419,10 +422,10 @@ Behavior:
 - validate the current authenticated user matches the intended flow owner
 - validate the `resume_token` is still active
 - store a short-lived CSRF state cookie
-- store or bind the `resume_token` to the auth state
+- bind the `resume_token` to the OAuth `state` (for example via a state-scoped cookie name) so concurrent tabs cannot overwrite one another
 - redirect to GitHub's user authorization URL
 
-##### `GET /api/v1/users/me/github-app/callback`
+##### `GET /api/v1/users/me/github/callback`
 
 Behavior after GitHub redirects back:
 
@@ -853,9 +856,9 @@ Low-risk changes to unblock manually created sessions.
 |--------|----------|--------|
 | `POST /api/v1/sessions/{id}/pr` | Add optional `draft`, `author_mode`, and `resume_token`; may return typed auth-intercept responses |
 | `GET /api/v1/users/me/github-status` | New — returns whether user has a valid GitHub App user token for PR creation |
-| `GET /api/v1/users/me/github-app/connect` | New — starts GitHub App user authorization for PR authorship |
-| `GET /api/v1/users/me/github-app/callback` | New — stores GitHub App user token after authorization |
-| `POST /api/v1/users/me/github-app/disconnect` | New — removes stored GitHub App user credential |
+| `GET /api/v1/users/me/github/connect` | Starts GitHub App user authorization for PR authorship |
+| `GET /api/v1/users/me/github/callback` | Stores GitHub App user token after authorization |
+| `POST /api/v1/users/me/github/disconnect` | Removes stored GitHub App user credential |
 
 ### New Org Settings Fields
 
