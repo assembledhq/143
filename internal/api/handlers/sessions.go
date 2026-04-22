@@ -914,6 +914,10 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", "this session's environment has expired and can no longer be continued")
 		return
 	}
+	if session.Status == string(models.SessionStatusAwaitingInput) && body.Message == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_ANSWER", "answer text is required when replying to a pending session question")
+		return
+	}
 
 	// Build the user message from the request context.
 	user := middleware.UserFromContext(r.Context())
@@ -945,14 +949,33 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.runStore.Begin(r.Context())
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_BEGIN_FAILED", "failed to begin session transaction", err)
+		return
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rollbackErr := tx.Rollback(r.Context()); rollbackErr != nil {
+			zerolog.Ctx(r.Context()).Error().Err(rollbackErr).Str("session_id", sessionID.String()).Msg("failed to rollback send message transaction")
+		}
+	}()
+
+	txRunStore := db.NewSessionStore(tx)
+	txMessageStore := db.NewSessionMessageStore(tx)
+	txQuestionStore := db.NewSessionQuestionStore(tx)
+
 	// Try claiming an idle session first, then fall back to resuming a
 	// terminal session (completed/pr_created/failed/cancelled).
 	var revertStatus string
-	claimed, claimErr := h.runStore.ClaimIdle(r.Context(), orgID, sessionID)
+	claimed, claimErr := txRunStore.ClaimIdle(r.Context(), orgID, sessionID)
 	if claimErr != nil {
-		claimed, claimErr = h.runStore.ClaimForResume(r.Context(), orgID, sessionID)
+		claimed, claimErr = txRunStore.ClaimForResume(r.Context(), orgID, sessionID)
 		if claimErr != nil {
-			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, or completed to send a message")
+			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
 			return
 		}
 		revertStatus = session.Status // preserve original status for revert
@@ -963,12 +986,26 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	session = claimed
 	msg.TurnNumber = session.CurrentTurn + 1
 
-	if err := h.messageStore.Create(r.Context(), msg); err != nil {
-		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
-			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after message creation failure")
-		}
+	if err := txMessageStore.Create(r.Context(), msg); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		return
+	}
+
+	// If the session was paused on a clarifying question, treat the follow-up
+	// message as the answer so question state stays in sync with the resumed run.
+	var answeredQuestion *models.SessionQuestion
+	if revertStatus == string(models.SessionStatusAwaitingInput) && userID != nil && h.questionStore != nil {
+		question, err := txQuestionStore.AnswerLatestPendingBySession(r.Context(), orgID, sessionID, body.Message, *userID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				zerolog.Ctx(r.Context()).Warn().Str("session_id", sessionID.String()).Msg("awaiting_input session resumed without a pending question to answer")
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "ANSWER_FAILED", "failed to resolve pending session question", err)
+				return
+			}
+		} else {
+			answeredQuestion = &question
+		}
 	}
 
 	// Enqueue continue_session job.
@@ -976,12 +1013,33 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "continue_session", payload, 5, nil); err != nil {
-		if revertErr := h.runStore.UpdateStatus(r.Context(), orgID, sessionID, revertStatus); revertErr != nil {
-			zerolog.Ctx(r.Context()).Error().Err(revertErr).Str("session_id", sessionID.String()).Msg("failed to revert session status after enqueue failure")
-		}
+	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "agent", "continue_session", payload, 5, nil); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit session follow-up", err)
+		return
+	}
+	committed = true
+
+	if answeredQuestion != nil {
+		qIDStr := answeredQuestion.ID.String()
+		questionDetails := map[string]any{
+			"question_id":   answeredQuestion.ID.String(),
+			"session_id":    answeredQuestion.SessionID.String(),
+			"question_text": answeredQuestion.QuestionText,
+			"status":        answeredQuestion.Status,
+			"answer_length": len(body.Message),
+			"answered_by":   userID.String(),
+			"option_count":  len(answeredQuestion.Options),
+			"auto_answered": true,
+		}
+		if answeredQuestion.BlocksPhase != nil {
+			questionDetails["blocks_phase"] = *answeredQuestion.BlocksPhase
+		}
+		emitUserAuditWithSession(h.audit, r, models.AuditActionSessionQuestionAnswered, models.AuditResourceSession, &qIDStr, &sessionID, nil,
+			marshalAuditDetails(h.logger, questionDetails))
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionMessage]{Data: *msg})

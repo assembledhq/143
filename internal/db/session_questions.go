@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -25,7 +26,7 @@ func (s *SessionQuestionStore) Create(ctx context.Context, q *models.SessionQues
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
-		"session_id":  q.SessionID,
+		"session_id":    q.SessionID,
 		"org_id":        q.OrgID,
 		"question_text": q.QuestionText,
 		"options":       q.Options,
@@ -65,7 +66,7 @@ func (s *SessionQuestionStore) ListByRunID(ctx context.Context, orgID, sessionID
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"session_id": sessionID,
-		"org_id":       orgID,
+		"org_id":     orgID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query session questions: %w", err)
@@ -86,4 +87,37 @@ func (s *SessionQuestionStore) Answer(ctx context.Context, orgID, id uuid.UUID, 
 		"answered_by": answeredBy,
 	})
 	return err
+}
+
+func (s *SessionQuestionStore) AnswerLatestPendingBySession(ctx context.Context, orgID, sessionID uuid.UUID, answerText string, answeredBy uuid.UUID) (models.SessionQuestion, error) {
+	query := `
+		UPDATE session_questions
+		SET answer_text = @answer_text, answered_by = @answered_by, answered_at = now(), status = 'answered'
+		WHERE id = (
+			SELECT id
+			FROM session_questions
+			WHERE session_id = @session_id AND org_id = @org_id AND status = 'pending'
+			ORDER BY created_at DESC
+			LIMIT 1
+		)
+		RETURNING id, session_id, org_id, question_text, options, context,
+		          blocks_phase, answer_text, answered_by, answered_at, status, created_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"session_id":  sessionID,
+		"org_id":      orgID,
+		"answer_text": answerText,
+		"answered_by": answeredBy,
+	})
+	if err != nil {
+		return models.SessionQuestion{}, fmt.Errorf("answer latest pending session question: %w", err)
+	}
+	question, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionQuestion])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.SessionQuestion{}, pgx.ErrNoRows
+		}
+		return models.SessionQuestion{}, fmt.Errorf("collect answered session question: %w", err)
+	}
+	return question, nil
 }

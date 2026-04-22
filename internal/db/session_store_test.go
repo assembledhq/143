@@ -9,6 +9,8 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -434,7 +436,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			name: "resumes completed session successfully",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
-				mock.ExpectQuery("UPDATE sessions").
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(
@@ -447,11 +449,39 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 		{
 			name: "returns error when no matching row",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("UPDATE sessions").
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 			},
 			wantErr: true,
+		},
+		{
+			name: "resumes awaiting input session successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
+				row[4] = string(models.SessionStatusRunning)
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
+					)
+			},
+			wantErr: false,
+		},
+		{
+			name: "resumes needs human guidance session successfully",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
+				row[4] = string(models.SessionStatusRunning)
+				mock.ExpectQuery("UPDATE sessions\\s+SET status = 'running', completed_at = NULL, last_activity_at = now\\(\\)\\s+WHERE id = @id AND org_id = @org_id AND status IN \\('completed', 'pr_created', 'failed', 'cancelled', 'awaiting_input', 'needs_human_guidance'\\)\\s+AND sandbox_state != 'destroyed'\\s+RETURNING").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
+					)
+			},
+			wantErr: false,
 		},
 	}
 
@@ -474,6 +504,43 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+type noTxDB struct{}
+
+func (noTxDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (noTxDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unused")
+}
+func (noTxDB) QueryRow(context.Context, string, ...any) pgx.Row       { return nil }
+func (noTxDB) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+
+func TestSessionStore_Begin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("starts transaction when supported", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+		tx, err := NewSessionStore(mock).Begin(context.Background())
+		require.NoError(t, err)
+		require.NotNil(t, tx)
+		require.NoError(t, tx.Rollback(context.Background()))
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("returns error when transactions unsupported", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewSessionStore(noTxDB{}).Begin(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not support transactions")
+	})
 }
 
 func TestSessionStore_UpdatePMPlanID(t *testing.T) {
