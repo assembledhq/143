@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type PMDocumentHandler struct {
@@ -140,6 +141,7 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "INACTIVE_VERSION", "cannot update an inactive document version; use the current active version")
 		return
 	}
+	before := doc
 
 	var req struct {
 		Title      *string         `json:"title"`
@@ -184,7 +186,12 @@ func (h *PMDocumentHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idStr := doc.ID.String()
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentUpdated, models.AuditResourcePMDocument, &idStr, nil)
+	details := pmDocumentAuditSnapshot(&doc)
+	if changes := pmDocumentAuditDiff(&before, &doc); len(changes) > 0 {
+		details["changes"] = changes
+	}
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentUpdated, models.AuditResourcePMDocument, &idStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: doc})
 }
@@ -295,7 +302,16 @@ func (h *PMDocumentHandler) RestoreVersion(w http.ResponseWriter, r *http.Reques
 	}
 
 	idStr := restored.ID.String()
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentRestored, models.AuditResourcePMDocument, &idStr, nil)
+	details := pmDocumentAuditSnapshot(&restored)
+	details["restored_from_id"] = req.RestoreFromID.String()
+	details["previous_active_document_id"] = activeDoc.ID.String()
+	details["changes"] = map[string]any{
+		"active_document_id": auditChange(activeDoc.ID.String(), restored.ID.String()),
+		"content_hash":       auditChange(activeDoc.ContentHash, restored.ContentHash),
+		"content_length":     auditChange(len(activeDoc.Content), len(restored.Content)),
+	}
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentRestored, models.AuditResourcePMDocument, &idStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), details))
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PMDocument]{Data: restored})
 }
@@ -362,7 +378,11 @@ func (h *PMDocumentHandler) CreateDocumentSetPin(w http.ResponseWriter, r *http.
 	}
 
 	idStr := pin.ID.String()
-	emitUserAudit(h.audit, r, models.AuditActionPMDocumentSetPinned, models.AuditResourcePMDocumentSet, &idStr, nil)
+	emitUserAudit(h.audit, r, models.AuditActionPMDocumentSetPinned, models.AuditResourcePMDocumentSet, &idStr,
+		marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"document_set_pin_id": pin.ID.String(),
+			"created_at":          pin.CreatedAt.UTC().Format(time.RFC3339Nano),
+		}))
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.PMDocumentSetPin]{Data: pin})
 }

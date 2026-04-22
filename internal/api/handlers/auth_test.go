@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -53,6 +54,34 @@ func TestAuthHandler_Login_Redirects(t *testing.T) {
 		}
 	}
 	require.True(t, foundStateCookie, "github_oauth_state cookie should be set")
+}
+
+func TestAuthHandler_EmitAuthEvent_IncludesStructuredDetails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+	handler.SetAuditEmitter(newAuditEmitterForTest(mock))
+	expectAuditInsert(mock)
+
+	user := &models.User{
+		ID:    uuid.New(),
+		OrgID: uuid.New(),
+		Email: "u@example.com",
+		Name:  "User Example",
+		Role:  "member",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.Header.Set("User-Agent", "codex-test")
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	req = req.WithContext(context.WithValue(req.Context(), chiMiddleware.RequestIDKey, "req-123"))
+
+	handler.emitAuthEvent(req, user, models.AuditActionAuthLogout)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "auth event should emit one structured audit row")
 }
 
 func TestAuthHandler_Logout(t *testing.T) {

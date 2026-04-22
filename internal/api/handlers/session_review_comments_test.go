@@ -143,6 +143,8 @@ func TestSessionReviewCommentHandler_Create(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
+		handler.SetAuditEmitter(newAuditEmitterForTest(mock))
+		handler.SetAuditEmitter(newAuditEmitterForTest(mock))
 
 		// GetByID for session lookup (to get current_turn)
 		setupSessionMock(mock, orgID, sessionID, nil)
@@ -155,6 +157,7 @@ func TestSessionReviewCommentHandler_Create(t *testing.T) {
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Add tests", false)...),
 			)
+		expectAuditInsert(mock)
 
 		body := `{"file_path":"src/app.ts","line_number":10,"body":"Add tests"}`
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments", sessionID)
@@ -295,6 +298,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
+		handler.SetAuditEmitter(newAuditEmitterForTest(mock))
 
 		// Ownership check: GetByID returns the comment owned by the requesting user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
@@ -308,6 +312,7 @@ func TestSessionReviewCommentHandler_Delete(t *testing.T) {
 		mock.ExpectExec("DELETE FROM session_review_comments WHERE id = .+ AND org_id = .+ AND session_id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("DELETE", 1))
+		expectAuditInsert(mock)
 
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)
 		req := httptest.NewRequest(http.MethodDelete, url, nil)
@@ -404,6 +409,7 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newTestReviewCommentHandler(t, mock)
+		handler.SetAuditEmitter(newAuditEmitterForTest(mock))
 
 		// Ownership check: GetByID returns the comment owned by the requesting user
 		mock.ExpectQuery("SELECT .+ FROM session_review_comments WHERE id").
@@ -419,6 +425,7 @@ func TestSessionReviewCommentHandler_Update(t *testing.T) {
 				pgxmock.NewRows(reviewCommentColumns).
 					AddRow(reviewCommentRow(commentID, sessionID, orgID, userID, "src/app.ts", 10, "Updated text", false)...),
 			)
+		expectAuditInsert(mock)
 
 		body := `{"body":"Updated text"}`
 		url := fmt.Sprintf("/api/v1/sessions/%s/review-comments/%s", sessionID, commentID)

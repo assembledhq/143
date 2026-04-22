@@ -83,16 +83,6 @@ func emitUserAuditWithSession(emitter *db.AuditEmitter, r *http.Request, action 
 	emitter.EmitUserAction(r.Context(), params)
 }
 
-// auditDetailsDraft returns audit details JSON containing the requested draft
-// status, or nil when no explicit draft preference was given.
-func auditDetailsDraft(draft *bool) json.RawMessage {
-	if draft == nil {
-		return nil
-	}
-	b, _ := json.Marshal(map[string]any{"draft": *draft})
-	return b
-}
-
 // parseClientIP extracts the client IP from the request as a netip.Prefix
 // suitable for PostgreSQL inet storage.
 func parseClientIP(r *http.Request) *netip.Prefix {
@@ -115,4 +105,3 @@ func parseClientIP(r *http.Request) *netip.Prefix {
 	}
 	return nil
 }
-
