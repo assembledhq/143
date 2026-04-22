@@ -51,7 +51,15 @@ afterEach(() => {
   toast.success.mockReset();
   toast.error.mockReset();
   vi.useRealTimers();
+  window.localStorage.clear();
+  vi.restoreAllMocks();
 });
+
+function getChatScroller(container: HTMLElement): HTMLDivElement {
+  const scroller = container.querySelector('div.flex-1.overflow-y-auto.space-y-2.p-4');
+  expect(scroller).toBeInstanceOf(HTMLDivElement);
+  return scroller as HTMLDivElement;
+}
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -382,6 +390,74 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('No activity yet')).toBeInTheDocument();
     expect(screen.getByText('The session is processing its initial turn.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+  });
+
+  it('restores the saved scroll position when reopening an existing session', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      id: 'session-scroll-restore',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 2,
+      sandbox_state: 'snapshotted',
+    };
+
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${idleSession.id}`, '320');
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/messages', () => {
+        const msgs: SessionMessage[] = [
+          { id: 1, session_id: idleSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+          { id: 2, session_id: idleSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'Done fixing', created_at: '2026-02-17T07:02:00Z' },
+        ];
+        return HttpResponse.json({ data: msgs, meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+    await screen.findByText('Done fixing');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(320);
+    });
+  });
+
+  it('opens active sessions at the live edge when there is no saved position', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      id: 'session-scroll-live-edge',
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 2,
+      sandbox_state: 'running',
+    };
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/messages', () => {
+        const msgs: SessionMessage[] = [
+          { id: 1, session_id: runningSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'Fix the bug', created_at: '2026-02-17T07:01:00Z' },
+        ];
+        return HttpResponse.json({ data: msgs, meta: {} } satisfies ListResponse<SessionMessage>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    await screen.findByText('Fix the bug');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(900);
+    });
   });
 
   it('shows running indicator for running session', async () => {
