@@ -52,6 +52,15 @@ type CodexAuthProvider interface {
 	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
 }
 
+// ClaudeCodeAuthProvider abstracts Claude Code subscription OAuth: the
+// existence check drives the resolveAgentEnv branch (so we know whether to
+// set ANTHROPIC_API_KEY or leave it empty for the file path to win), while
+// GetValidToken drives the sandbox file injection.
+type ClaudeCodeAuthProvider interface {
+	HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error)
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -195,7 +204,8 @@ type Orchestrator struct {
 	orgs              OrgStore
 	jobs              JobStore
 	github            GitHubTokenProvider
-	codexAuth         CodexAuthProvider // can be nil
+	codexAuth         CodexAuthProvider      // can be nil
+	claudeCodeAuth    ClaudeCodeAuthProvider // can be nil
 	credentials       CredentialProvider
 	memory            MemoryService          // can be nil
 	userCredentials   UserCredentialProvider // can be nil
@@ -223,7 +233,8 @@ type OrchestratorConfig struct {
 	Orgs             OrgStore
 	Jobs             JobStore
 	GitHub           GitHubTokenProvider
-	CodexAuth        CodexAuthProvider // optional — enables ChatGPT OAuth for Codex agent
+	CodexAuth        CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth   ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials      CredentialProvider
 	Memory           MemoryService          // optional — injects learned memories into agent prompts
 	UserCredentials  UserCredentialProvider // optional — enables personal/team credential resolution
@@ -258,6 +269,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		jobs:              cfg.Jobs,
 		github:            cfg.GitHub,
 		codexAuth:         cfg.CodexAuth,
+		claudeCodeAuth:    cfg.ClaudeCodeAuth,
 		credentials:       cfg.Credentials,
 		memory:            cfg.Memory,
 		userCredentials:   cfg.UserCredentials,
@@ -594,11 +606,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	// 9. Inject Codex auth.json if this is a codex agent run.
-	//    auth.json is the primary auth mechanism (uses ChatGPT backend).
-	//    Done after clone so the workspace is available.
-	if run.AgentType == models.AgentTypeCodex {
+	// 9. Inject auth credentials into the sandbox. Done after clone so the
+	//    workspace is available.
+	//    - Codex: auth.json is the primary (and only) auth mechanism.
+	//    - Claude Code: subscription credentials file is preferred, with
+	//      ANTHROPIC_API_KEY env var as the fallback.
+	switch run.AgentType {
+	case models.AgentTypeCodex:
 		if err := o.ensureCodexAuth(ctx, run, sandbox); err != nil {
+			return err
+		}
+	case models.AgentTypeClaudeCode:
+		if err := o.ensureClaudeCodeAuth(ctx, run, sandbox); err != nil {
 			return err
 		}
 	}
@@ -1108,11 +1127,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	//     prompt from the conversation history + stored diff.
 	var prompt *AgentPrompt
 	if reusedExisting || hasSnapshot {
-		// Re-inject Codex auth.json. Cheap, and catches the case where the
-		// file was cleared or drifted while the container was idle (or where
-		// the preview created the container without agent credentials).
-		if session.AgentType == models.AgentTypeCodex {
+		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
+		// Cheap, and catches the case where the file was cleared or drifted
+		// while the container was idle (or where the preview created the
+		// container without agent credentials).
+		switch session.AgentType {
+		case models.AgentTypeCodex:
 			if err := o.ensureCodexAuth(ctx, session, sandbox); err != nil {
+				return err
+			}
+		case models.AgentTypeClaudeCode:
+			if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
 				return err
 			}
 		}
@@ -1279,14 +1304,19 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
-	// Inject Codex auth if needed.
-	if session.AgentType == models.AgentTypeCodex {
+	// Inject auth credentials into the sandbox.
+	switch session.AgentType {
+	case models.AgentTypeCodex:
 		injected, err := o.injectCodexAuth(ctx, session.OrgID, sandbox)
 		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("codex auth injection: %w", err)
 		}
 		if !injected {
 			return models.Issue{}, "", fmt.Errorf("no credentials for codex agent")
+		}
+	case models.AgentTypeClaudeCode:
+		if err := o.ensureClaudeCodeAuth(ctx, session, sandbox); err != nil {
+			return models.Issue{}, "", fmt.Errorf("claude code auth injection: %w", err)
 		}
 	}
 
@@ -1705,6 +1735,11 @@ func (o *Orchestrator) resolveAgentEnv(ctx context.Context, orgID uuid.UUID, age
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
+		// Always keep the Anthropic API key in env when configured. The Claude
+		// Code CLI should prefer ~/.claude/.credentials.json when a
+		// subscription file is present, but retaining ANTHROPIC_API_KEY here
+		// gives the run a real fallback if subscription token lookup/refresh
+		// fails after sandbox creation.
 		cfg := o.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
 		if ac, ok := cfg.(models.AnthropicConfig); ok {
 			if ac.APIKey != "" {
@@ -2091,7 +2126,7 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 	// sandbox user's home dir (see RunAgent step 7) so the Codex CLI
 	// resolves ~/.codex/auth.json to this path.
 	authDir := path.Join(sandbox.HomeDir, ".codex")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", authDir)
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", shellEscapeSingleQuote(authDir))
 
 	var mkdirOut, mkdirErr bytes.Buffer
 	exitCode, err := o.provider.Exec(ctx, sandbox, mkdirCmd, &mkdirOut, &mkdirErr)
@@ -2122,6 +2157,194 @@ func (o *Orchestrator) injectCodexAuth(ctx context.Context, orgID uuid.UUID, san
 		Msg("injected codex auth.json and config.toml into sandbox")
 
 	return true, nil
+}
+
+// injectClaudeCodeAuth writes a ~/.claude/.credentials.json file into the
+// sandbox if an active Claude Code subscription exists for this org. The
+// Claude Code CLI prefers the credentials file over ANTHROPIC_API_KEY env
+// vars, so when a subscription is present the file path wins even though
+// resolveAgentEnv still sets ANTHROPIC_API_KEY as a fallback. Returns (true, nil) when the file
+// was written, (false, nil) when no subscription exists so the API-key
+// fallback should be used, or (false, err) on failure.
+//
+// Credentials file schema: the shape (claudeAiOauth.{accessToken,
+// refreshToken, expiresAt, scopes, subscriptionType, rateLimitTier}) mirrors
+// what the Claude Code CLI writes itself when a user runs `claude login`.
+// expiresAt is milliseconds-since-epoch. Scopes is the array form the CLI
+// uses; we translate from the space-separated `scope` response string when
+// the tokens are issued. If Anthropic ever changes this format, update this
+// marshal block and the AnthropicSubscription struct together.
+func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox) (bool, error) {
+	if o.claudeCodeAuth == nil {
+		return false, nil
+	}
+
+	sub, _, err := o.claudeCodeAuth.GetValidToken(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("get claude code subscription token: %w", err)
+	}
+	if sub == nil {
+		return false, nil
+	}
+
+	oauthPayload := map[string]interface{}{
+		"accessToken":  sub.AccessToken,
+		"refreshToken": sub.RefreshToken,
+		"expiresAt":    sub.ExpiresAt.UnixMilli(),
+	}
+	if len(sub.Scopes) > 0 {
+		oauthPayload["scopes"] = sub.Scopes
+	}
+	if sub.AccountType != "" {
+		oauthPayload["subscriptionType"] = sub.AccountType
+	}
+	if sub.RateLimitTier != "" {
+		oauthPayload["rateLimitTier"] = sub.RateLimitTier
+	}
+	credsJSON, err := json.Marshal(map[string]interface{}{"claudeAiOauth": oauthPayload})
+	if err != nil {
+		return false, fmt.Errorf("marshal claude credentials: %w", err)
+	}
+
+	authDir := path.Join(sandbox.HomeDir, ".claude")
+	credsPath := authDir + "/.credentials.json"
+
+	// Single-quote each path defensively even though HomeDir is orchestrator-
+	// controlled today; a future refactor could start threading user input
+	// through HomeDir and we don't want a silent shell-injection footgun.
+	// We combine mkdir + pre-create-with-0600 into one Exec so there is no
+	// window where the credentials file exists at the shell's default umask
+	// (typically 0644) before being locked down. `install -m 600 /dev/null`
+	// creates an empty file with mode 0600 atomically; the subsequent
+	// WriteFile uses POSIX `>` truncation, which preserves the existing
+	// file's mode rather than re-applying the umask.
+	prepCmd := fmt.Sprintf(
+		"mkdir -p '%s' && install -m 600 /dev/null '%s'",
+		shellEscapeSingleQuote(authDir),
+		shellEscapeSingleQuote(credsPath),
+	)
+
+	var prepOut, prepErr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, prepCmd, &prepOut, &prepErr)
+	if err != nil {
+		return false, fmt.Errorf("prepare claude credentials file: %w", err)
+	}
+	if exitCode != 0 {
+		return false, fmt.Errorf("prepare claude credentials file: exited with code %d: %s", exitCode, prepErr.String())
+	}
+
+	if err := o.provider.WriteFile(ctx, sandbox, credsPath, credsJSON); err != nil {
+		return false, fmt.Errorf("write claude credentials: %w", err)
+	}
+
+	o.logger.Debug().
+		Str("org_id", orgID.String()).
+		Msg("injected claude subscription credentials into sandbox")
+
+	return true, nil
+}
+
+// ensureClaudeCodeAuth guarantees that the Claude Code agent has at least one
+// credential path available in the sandbox. Priority is subscription file >
+// ANTHROPIC_API_KEY env var; the run only fails when neither is configured.
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	injected, err := o.injectClaudeCodeAuth(ctx, run.OrgID, sandbox)
+	if err != nil {
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("claude subscription injection failed; continuing with Anthropic API-key fallback")
+			return nil
+		} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("claude subscription injection failed and API-key fallback could not be prepared: %s", fallbackErr),
+				FailureCategoryClaudeCodeAuth,
+				"Your Claude subscription token could not be injected, and the sandbox could not be prepared to use the Anthropic API key fallback.",
+				[]string{"Retry the session after reconnecting your Claude subscription or verifying Anthropic credentials"},
+			)
+			return fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
+		}
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("claude subscription injection failed: %s", err),
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
+			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+		)
+		return fmt.Errorf("claude code auth injection: %w", err)
+	}
+	if injected {
+		return nil
+	}
+
+	// No subscription — check for an Anthropic API-key fallback. The env var
+	// was already baked into sandboxCfg.Env by resolveAgentEnv, so if the
+	// credential exists the sandbox is already configured.
+	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox); fallbackErr == nil {
+		return nil
+	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
+		o.failRunWithCategory(ctx, run,
+			fmt.Sprintf("claude API-key fallback could not be prepared: %s", fallbackErr),
+			FailureCategoryClaudeCodeAuth,
+			"The Anthropic API key fallback is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
+			[]string{"Retry the session after reconnecting your Claude subscription or verifying sandbox access"},
+		)
+		return fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
+	}
+
+	o.failRunWithCategory(ctx, run,
+		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
+		FailureCategoryClaudeCodeAuth,
+		"No Claude Code credentials are configured. Connect your Claude subscription (recommended) or add an Anthropic API key from the Agent settings page.",
+		[]string{
+			"Connect a Claude subscription from the Agent settings page",
+			"Or add an Anthropic API key under Credentials",
+		},
+	)
+	return fmt.Errorf("no credentials for claude code agent")
+}
+
+var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
+
+func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run *models.Session, sandbox *Sandbox) error {
+	cfg := o.resolveProviderConfig(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic)
+	ac, ok := cfg.(models.AnthropicConfig)
+	if !ok || ac.APIKey == "" {
+		return errClaudeCodeFallbackUnavailable
+	}
+
+	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (o *Orchestrator) removeClaudeCodeCredentialsFile(ctx context.Context, sandbox *Sandbox) error {
+	credsPath := path.Join(sandbox.HomeDir, ".claude", ".credentials.json")
+	if _, err := o.provider.ReadFile(ctx, sandbox, credsPath); err != nil {
+		if isSandboxFileMissing(err) {
+			return nil
+		}
+		return fmt.Errorf("check stale claude credentials: %w", err)
+	}
+
+	cmd := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(credsPath))
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("remove stale claude credentials: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("remove stale claude credentials: exited with code %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func isSandboxFileMissing(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file not found") || strings.Contains(msg, "no such file")
 }
 
 // BuildIntegrationSkills generates a CLI skills doc from the org's integration

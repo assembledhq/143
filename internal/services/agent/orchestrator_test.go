@@ -100,6 +100,26 @@ func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UU
 	return m.cfg, nil
 }
 
+// mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
+type mockClaudeCodeAuthProvider struct {
+	sub       *models.AnthropicSubscription
+	credID    *uuid.UUID
+	hasSub    bool
+	hasSubErr error
+	tokenErr  error
+}
+
+func (m *mockClaudeCodeAuthProvider) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error) {
+	return m.hasSub, m.hasSubErr
+}
+
+func (m *mockClaudeCodeAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.AnthropicSubscription, *uuid.UUID, error) {
+	if m.tokenErr != nil {
+		return nil, nil, m.tokenErr
+	}
+	return m.sub, m.credID, nil
+}
+
 type mockCredentialProvider struct {
 	byProvider map[models.ProviderName]*models.DecryptedCredential
 	err        error
@@ -561,22 +581,23 @@ func strPtr(s string) *string {
 }
 
 type testDeps struct {
-	provider  *testutil.MockSandboxProvider
-	adapter   *mockAgentAdapter
-	sessions  *mockSessionStore
-	projects  *mockProjectTaskUpdater
-	issues    *mockIssueStore
-	repos     *mockRepositoryStore
-	logs      *mockSessionLogStore
-	questions *mockSessionQuestionStore
-	messages  *mockSessionMessageStore
-	decisions *mockDecisionLogStore
-	jobs      *mockJobStore
-	github    *mockGitHubTokenProvider
-	codexAuth agent.CodexAuthProvider
-	creds     *mockCredentialProvider
-	snapshots *mockSnapshotStore
-	cancels   *agent.CancelRegistry
+	provider       *testutil.MockSandboxProvider
+	adapter        *mockAgentAdapter
+	sessions       *mockSessionStore
+	projects       *mockProjectTaskUpdater
+	issues         *mockIssueStore
+	repos          *mockRepositoryStore
+	logs           *mockSessionLogStore
+	questions      *mockSessionQuestionStore
+	messages       *mockSessionMessageStore
+	decisions      *mockDecisionLogStore
+	jobs           *mockJobStore
+	github         *mockGitHubTokenProvider
+	codexAuth      agent.CodexAuthProvider
+	claudeCodeAuth agent.ClaudeCodeAuthProvider
+	creds          *mockCredentialProvider
+	snapshots      *mockSnapshotStore
+	cancels        *agent.CancelRegistry
 }
 
 func defaultDeps() testDeps {
@@ -595,7 +616,18 @@ func defaultDeps() testDeps {
 		jobs:      &mockJobStore{},
 		github:    &mockGitHubTokenProvider{token: "ghp_test123"},
 		codexAuth: nil,
-		creds:     &mockCredentialProvider{},
+		creds: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				// Seed an Anthropic API key so ensureClaudeCodeAuth's fallback
+				// path succeeds for tests that use the default Claude Code
+				// agent type. Tests exercising credential-specific behavior
+				// override d.creds directly.
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-default-test"},
+				},
+			},
+		},
 		snapshots: &mockSnapshotStore{},
 	}
 }
@@ -615,6 +647,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Jobs:             d.jobs,
 		GitHub:           d.github,
 		CodexAuth:        d.codexAuth,
+		ClaudeCodeAuth:   d.claudeCodeAuth,
 		Credentials:      d.creds,
 		Snapshots:        d.snapshots,
 		Cancels:          d.cancels,
@@ -926,7 +959,15 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 		Orgs:             mockOrgs,
 		Jobs:             mockJobs,
 		GitHub:           mockGH,
-		Logger:           zerolog.Nop(),
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-pm-ctx-test"},
+				},
+			},
+		},
+		Logger: zerolog.Nop(),
 	})
 
 	err := orchestrator.RunAgent(context.Background(), run)
@@ -1277,6 +1318,101 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	require.Equal(t, "sk-ant-test-key", capturedCfg.Env["ANTHROPIC_API_KEY"])
 }
 
+func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	credID := uuid.New()
+	expiresAt := time.Now().Add(45 * time.Minute)
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub: true,
+		credID: &credID,
+		sub: &models.AnthropicSubscription{
+			AccessToken:   "sub-access-1",
+			RefreshToken:  "sub-refresh-1",
+			ExpiresAt:     expiresAt,
+			AccountType:   "claude_max",
+			RateLimitTier: "default_claude_max_20x",
+			Scopes:        []string{"user:profile", "user:inference", "user:sessions:claude_code"},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "sub-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should succeed with a Claude subscription")
+
+	// Keep the API key in env as a fallback if token refresh later fails.
+	// The Claude Code CLI should still prefer the credentials file we wrote.
+	require.Equal(t, "sk-ant-default-test", capturedCfg.Env["ANTHROPIC_API_KEY"],
+		"Anthropic API key should remain available as a fallback when a subscription is present")
+
+	// Credentials file was written to the expected path with the CLI's schema.
+	credsPath := "/home/sandbox/.claude/.credentials.json"
+	credsData, ok := d.provider.Files[credsPath]
+	require.True(t, ok, ".credentials.json should be written under ~/.claude")
+
+	var credsJSON map[string]interface{}
+	require.NoError(t, json.Unmarshal(credsData, &credsJSON))
+	oauth, ok := credsJSON["claudeAiOauth"].(map[string]interface{})
+	require.True(t, ok, "credentials file should have claudeAiOauth object")
+	require.Equal(t, "sub-access-1", oauth["accessToken"])
+	require.Equal(t, "sub-refresh-1", oauth["refreshToken"])
+	require.Equal(t, "claude_max", oauth["subscriptionType"])
+	require.Equal(t, "default_claude_max_20x", oauth["rateLimitTier"])
+	require.EqualValues(t, expiresAt.UnixMilli(), oauth["expiresAt"], "expiresAt should be millis-since-epoch")
+	scopes, ok := oauth["scopes"].([]interface{})
+	require.True(t, ok, "scopes should be an array")
+	require.Len(t, scopes, 3)
+
+	// The credentials file must be pre-created at 0600 in the same Exec that
+	// mkdirs ~/.claude, so the subsequent WriteFile (which uses `>`) inherits
+	// the locked-down mode instead of briefly existing at the shell's default
+	// umask. The CLI refuses a world-readable token file.
+	require.Contains(t, d.provider.ExecCalls,
+		"mkdir -p '/home/sandbox/.claude' && install -m 600 /dev/null '/home/sandbox/.claude/.credentials.json'",
+		"should create ~/.claude and pre-create the credentials file with mode 0600 in a single command")
+}
+
+func TestRunAgent_ClaudeSubscriptionTokenFailureFallsBackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "fallback-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "run should fall back to the Anthropic API key when subscription token lookup fails")
+
+	require.Equal(t, "sk-ant-default-test", capturedCfg.Env["ANTHROPIC_API_KEY"],
+		"Anthropic API key should be injected into the sandbox as a fallback")
+	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, wroteCredsFile, "credentials file should not be written when subscription token lookup fails")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "fallback to API key should not mark the run as failed")
+}
+
 func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	t.Parallel()
 
@@ -1285,6 +1421,9 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
+	// Override: no credential configured at all so we can assert on the
+	// sandbox env and the fail-fast path.
+	d.creds = &mockCredentialProvider{}
 
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -1292,7 +1431,6 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		return &agent.Sandbox{ID: "no-env-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 
-	// No credential configured for "claude_code".
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         d.provider,
 		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -1310,15 +1448,23 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	})
 
 	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err)
+	// Without any Claude subscription or Anthropic API key, ensureClaudeCodeAuth
+	// fails the run fast. The sandbox is still created (capturedCfg populated)
+	// before the auth check runs.
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credentials for claude code agent")
 
-	// Sandbox should have no agent-specific env vars since "claude_code" has no credential.
-	// HOME is always injected as a fallback, and GitHub integration vars are injected
-	// when integration skills are available (independent of agent type).
+	// Sandbox config was captured before the auth check failed. Confirm no
+	// ANTHROPIC_API_KEY was injected since no credential was configured.
 	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY",
 		"sandbox config should not have agent-specific env for unconfigured agent type")
 	require.Equal(t, "/home/sandbox", capturedCfg.Env["HOME"],
 		"HOME should always be set to the sandbox user's home dir")
+
+	// The failure should be categorized as claude_code_auth.
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
@@ -1415,7 +1561,7 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	require.Contains(
 		t,
 		d.provider.ExecCalls,
-		"mkdir -p /home/sandbox/.codex",
+		"mkdir -p '/home/sandbox/.codex'",
 		"codex auth setup should create the auth directory under the sandbox user's home",
 	)
 
@@ -1623,6 +1769,113 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Len(t, messages, 2, "continue_session should append an assistant reply")
 	require.Equal(t, models.MessageRoleAssistant, messages[1].Role, "assistant reply should be stored for the continued turn")
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
+}
+
+func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please keep going without the old snapshot.",
+		},
+	}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.False(t, prompt.Continuation, "fresh resume should rebuild context instead of using continuation mode")
+		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
+		return &agent.AgentResult{
+			Summary:         "continued from fallback auth",
+			ConfidenceScore: 0.8,
+			ExitCode:        0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "fresh resume should fall back to the Anthropic API key when Claude token refresh fails")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "API-key fallback should not mark the resumed session as failed")
+	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, wroteCredsFile, "fresh resume should not write Claude subscription credentials when token refresh fails")
+}
+
+func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFallback(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Resume from the saved work.",
+		},
+	}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
+		hasSub:   true,
+		tokenErr: errors.New("refresh failed"),
+	}
+	d.provider.Files["/home/sandbox/.claude/.credentials.json"] = []byte(`{"stale":true}`)
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "rm -f '/home/sandbox/.claude/.credentials.json'" {
+			delete(d.provider.Files, "/home/sandbox/.claude/.credentials.json")
+		}
+		return 0, nil
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, prompt.Continuation, "snapshot-backed resume should still use continuation mode")
+		return &agent.AgentResult{
+			Summary:         "continued after deleting stale creds",
+			ConfidenceScore: 0.84,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "snapshot resume should fall back to API key after removing stale Claude credentials")
+	require.Contains(t, d.provider.ExecCalls, "rm -f '/home/sandbox/.claude/.credentials.json'", "fallback should delete stale Claude credentials before relying on the API key")
+	_, credsStillPresent := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
+	require.False(t, credsStillPresent, "stale Claude credentials should be removed before API-key fallback continues")
+	require.Len(t, d.sessions.getFailureUpdates(), 0, "successful fallback should not record a Claude auth failure")
 }
 
 // errForcedCreateFailure is used by tests that short-circuit provider.Create so
@@ -2882,6 +3135,9 @@ func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypePi
+	// defaultDeps seeds an Anthropic API key so the Claude Code happy path
+	// works out of the box; strip it here so Pi fails its pre-flight key check.
+	d.creds = &mockCredentialProvider{}
 
 	var sandboxCreated bool
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {

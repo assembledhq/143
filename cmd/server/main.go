@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/automations"
+	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -109,6 +110,7 @@ func main() {
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
+	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
 
 	// Platform LLM client for internal features (titles, PR descriptions, project
 	// generation, validation, prioritization). Uses the cheap PLATFORM_LLM_MODEL.
@@ -168,7 +170,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -232,7 +234,7 @@ func main() {
 		// Build Phase 3+ services if runtime dependencies are available.
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
@@ -387,6 +389,7 @@ func buildServices(
 	pool *pgxpool.Pool,
 	logger zerolog.Logger,
 	codexAuthSvc *codexauth.Service,
+	claudeCodeAuthSvc *claudecodeauth.Service,
 	credentialStore *db.OrgCredentialStore,
 	userCredentialStore *db.UserCredentialStore,
 	issueStore *db.IssueStore,
@@ -495,6 +498,7 @@ func buildServices(
 		Jobs:             jobStore,
 		GitHub:           ghSvc,
 		CodexAuth:        codexAuthSvc,
+		ClaudeCodeAuth:   claudeCodeAuthSvc,
 		Credentials:      credentialStore,
 		UserCredentials:  userCredentialStore,
 		Snapshots:        snapshotStore,

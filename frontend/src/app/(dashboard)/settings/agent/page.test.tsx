@@ -70,6 +70,9 @@ function setupHandlers({
     http.get('/api/v1/settings/codex-auth/subscriptions', () => {
       return HttpResponse.json({ data: subscriptions, meta: {} } satisfies ListResponse<CodexSubscription>);
     }),
+    http.get('/api/v1/settings/claude-code-auth/subscriptions', () => {
+      return HttpResponse.json({ data: [], meta: {} });
+    }),
   );
 }
 
@@ -318,11 +321,14 @@ describe('AgentPage', () => {
   });
 
   it('shows Advanced settings toggle for agents with advanced env vars', async () => {
-    // claude_code has advanced env var (ANTHROPIC_BASE_URL)
+    // claude_code has advanced env var (ANTHROPIC_BASE_URL). Env vars are
+    // hidden under the subscription method, so switch to API key first.
     setupHandlers({ team: [], resolved: [] });
 
+    const user = userEvent.setup();
     renderWithProviders(<AgentPage />);
 
+    await user.click(await screen.findByLabelText('Use Anthropic API key'));
     expect(await screen.findByText('Advanced settings')).toBeInTheDocument();
   });
 
@@ -332,6 +338,7 @@ describe('AgentPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AgentPage />);
 
+    await user.click(await screen.findByLabelText('Use Anthropic API key'));
     const advBtn = await screen.findByText('Advanced settings');
     await user.click(advBtn);
 
