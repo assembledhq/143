@@ -67,7 +67,7 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 		return fmt.Errorf("marshal project context: %w", err)
 	}
 
-	agentType := resolveAgentType(settings)
+	agentType := resolveAgentType(settings, nil)
 	adapter, err := s.pickAdapter(agentType)
 	if err != nil {
 		return fmt.Errorf("pick adapter: %w", err)
@@ -86,7 +86,15 @@ func (s *Service) AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if s.usageTracker != nil {
+		usageEventID = s.usageTracker.ContainerStarted(ctx, orgID, uuid.Nil, sb, sbCfg, containerStartedAt)
+	}
 	defer func() {
+		if s.usageTracker != nil {
+			s.usageTracker.ContainerStopped(ctx, orgID, uuid.Nil, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy project PM sandbox")
 		}

@@ -557,6 +557,7 @@ func buildServices(
 		ghSvc,
 		logger,
 	)
+	pmSvc.SetUsageTracker(usageTracker)
 	pmSvc.SetProjectStores(projectStore, projectTaskStore, projectCycleStore)
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)

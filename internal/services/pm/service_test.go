@@ -230,7 +230,7 @@ func TestAnalyze_FailSessionRecordsError(t *testing.T) {
 		logger:      zerolog.Nop(),
 	}
 
-	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.Error(t, err, "Analyze should fail")
 	require.Contains(t, err.Error(), "gather context")
 

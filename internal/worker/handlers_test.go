@@ -451,7 +451,7 @@ type mockPMService struct {
 	trigger         models.PMTrigger
 }
 
-func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error) {
+func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID
 	m.trigger = trigger
 	return &pm.Plan{}, nil
@@ -1463,7 +1463,7 @@ func TestPMAnalyzeHandler_MissingOrgID(t *testing.T) {
 
 type mockPMServiceError struct{}
 
-func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error) {
+func (m *mockPMServiceError) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	return nil, errors.New("pm analysis failed")
 }
 

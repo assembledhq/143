@@ -146,7 +146,7 @@ type llmClient interface {
 }
 
 type pmService interface {
-	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*pm.Plan, error)
+	Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error)
 	AnalyzeProject(ctx context.Context, orgID, projectID uuid.UUID) error
 	RunBootstrap(ctx context.Context, orgID uuid.UUID) error
 	RunRefresh(ctx context.Context, orgID uuid.UUID) error
@@ -215,9 +215,10 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID   string `json:"org_id"`
-			Trigger string `json:"trigger"`
-			RepoID  string `json:"repo_id,omitempty"`
+			OrgID     string `json:"org_id"`
+			Trigger   string `json:"trigger"`
+			RepoID    string `json:"repo_id,omitempty"`
+			AgentType string `json:"agent_type,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal pm_analyze payload: %w", err)
@@ -244,8 +245,14 @@ func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logg
 			repoID = &parsed
 		}
 
+		var agentTypeOverride *models.AgentType
+		if input.AgentType != "" {
+			at := models.AgentType(input.AgentType)
+			agentTypeOverride = &at
+		}
+
 		logger.Info().Str("org_id", orgID.String()).Str("trigger", string(trigger)).Msg("running pm analyze")
-		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID)
+		_, err = services.PM.Analyze(ctx, orgID, trigger, repoID, agentTypeOverride)
 		if err != nil {
 			// Mark all PM analysis errors as fatal (no retries). Analyze() creates a
 			// new session record before doing any real work, so each retry would produce

@@ -3,6 +3,7 @@ package pm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -18,11 +19,12 @@ import (
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 )
 
-// resolveAgentType returns the agent type the PM should run under for this
-// org. It consults settings.DefaultAgentType with a fallback to the
-// platform-wide default. Centralised so Analyze, AnalyzeProject, and bootstrap
-// all pick the same agent and stay in lock-step with session selection.
-func resolveAgentType(settings models.OrgSettings) models.AgentType {
+// resolveAgentType returns the agent type the PM should run under.
+// Priority: explicit override (per-run) → settings.DefaultAgentType → platform default.
+func resolveAgentType(settings models.OrgSettings, override *models.AgentType) models.AgentType {
+	if override != nil && *override != "" {
+		return *override
+	}
 	if settings.DefaultAgentType != "" {
 		return settings.DefaultAgentType
 	}
@@ -148,6 +150,7 @@ type Service struct {
 	sandbox           agent.SandboxProvider
 	adapters          map[models.AgentType]agent.AgentAdapter
 	env               *agent.AgentEnv
+	usageTracker      agent.UsageRecorder // nil-safe: container billing disabled if nil
 	github            agent.GitHubTokenProvider
 	internalAPIURL    string // base URL for internal API (e.g. "http://server:8080/api/v1/internal")
 	internalAPISecret string // signing secret for internal API tokens
@@ -230,6 +233,12 @@ func (s *Service) SetInternalAPI(url, secret string) {
 	s.internalAPISecret = secret
 }
 
+// SetUsageTracker injects the container usage recorder for billing. Nil-safe:
+// if not called, PM sandbox usage is not tracked.
+func (s *Service) SetUsageTracker(ut agent.UsageRecorder) {
+	s.usageTracker = ut
+}
+
 // SetSkillsBuilder injects the skills builder for bootstrap/refresh agent prompts.
 func (s *Service) SetSkillsBuilder(sb SkillsBuilder) {
 	s.skills = sb
@@ -267,7 +276,7 @@ func (s *Service) selectRepo(ctx context.Context, orgID uuid.UUID, repoID *uuid.
 	return repo, nil
 }
 
-func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID) (*Plan, error) {
+func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*Plan, error) {
 	if s.sandbox == nil || s.env == nil {
 		return nil, fmt.Errorf("pm sandbox or env helper not configured")
 	}
@@ -299,6 +308,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	// the session record and writing a session log entry (matching the manual-session
 	// pattern so failures are visible in the UI). It returns a wrapped error for the
 	// caller to return directly, avoiding duplicate format strings at each call site.
+	//
+	// When the cause is an AuthError, a failed plan record is also persisted so
+	// the UI can show an actionable message in the plan history rather than only
+	// surfacing the error via the job's last_error column.
 	failSession := func(stage string, cause error) error {
 		errMsg := fmt.Sprintf("%s: %v", stage, cause)
 		if pmSession != nil {
@@ -308,7 +321,6 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 			if err := s.sessions.UpdateResult(ctx, orgID, pmSession.ID, "failed", result); err != nil {
 				s.logger.Error().Err(err).Msg("failed to mark PM session as failed")
 			}
-			// Write an error-level session log so the failure appears in the activity stream.
 			if s.sessionLogs != nil {
 				log := &models.SessionLog{
 					SessionID: pmSession.ID,
@@ -321,6 +333,10 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 				}
 			}
 		}
+		var authErr *agent.AuthError
+		if errors.As(cause, &authErr) {
+			s.persistFailedPlan(ctx, orgID, trigger, errMsg)
+		}
 		return fmt.Errorf("%s: %w", stage, cause)
 	}
 
@@ -329,7 +345,7 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 		return nil, failSession("gather context", err)
 	}
 
-	agentType := resolveAgentType(ctxBundle.settings)
+	agentType := resolveAgentType(ctxBundle.settings, agentTypeOverride)
 	adapter, err := s.pickAdapter(agentType)
 	if err != nil {
 		return nil, failSession("pick adapter", err)
@@ -362,7 +378,19 @@ func (s *Service) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.P
 	if err != nil {
 		return nil, failSession("create sandbox", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	sessionID := uuid.Nil
+	if pmSession != nil {
+		sessionID = pmSession.ID
+	}
+	if s.usageTracker != nil {
+		usageEventID = s.usageTracker.ContainerStarted(ctx, orgID, sessionID, sb, sbCfg, containerStartedAt)
+	}
 	defer func() {
+		if s.usageTracker != nil {
+			s.usageTracker.ContainerStopped(ctx, orgID, sessionID, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Msg("failed to destroy PM sandbox")
 		}
@@ -570,6 +598,43 @@ func (s *Service) streamPMLogs(ctx context.Context, pmSession *models.Session, l
 			s.logger.Error().Err(err).Msg("failed to persist PM log entry")
 		}
 	}
+}
+
+// persistFailedPlan creates a minimal plan record with status=failed so auth
+// and other early failures appear in the plan history. The Analysis field
+// carries the error message, giving the UI something actionable to show. Called
+// from failSession when the error chain contains an AuthError. Returns the
+// persisted plan ID for log correlation, or uuid.Nil on failure.
+func (s *Service) persistFailedPlan(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, errMsg string) uuid.UUID {
+	now := time.Now()
+	plan := &models.PMPlan{
+		OrgID:         orgID,
+		Status:        models.PMPlanStatusFailed,
+		Analysis:      errMsg,
+		Tasks:         []byte("[]"),
+		Clusters:      []byte("[]"),
+		SkippedIssues: []byte("[]"),
+		TriggeredBy:   trigger,
+		CompletedAt:   &now,
+	}
+	if err := s.plans.Create(ctx, plan); err != nil {
+		s.logger.Error().Err(err).Msg("failed to persist failed plan record")
+		return uuid.Nil
+	}
+	return plan.ID
+}
+
+func containerExitReason(ctx context.Context, err error) string {
+	if err == nil {
+		return "completed"
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr == context.DeadlineExceeded {
+			return "timeout"
+		}
+		return "cancelled"
+	}
+	return "failed"
 }
 
 func pmSandboxConfig() agent.SandboxConfig {

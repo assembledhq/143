@@ -15,6 +15,23 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// AuthError is returned by CheckAuth and parsePlan's auth-detection heuristic
+// when an agent run cannot authenticate. Callers can errors.As to distinguish
+// auth failures from generic errors — the PM service uses this to persist a
+// descriptive failure on the plan record so the UI can show actionable guidance
+// ("PM paused: configure Codex") instead of an opaque parse error.
+type AuthError struct {
+	AgentType models.AgentType
+	Detail    string
+}
+
+func (e *AuthError) Error() string {
+	if e.AgentType != "" {
+		return fmt.Sprintf("agent auth failed (%s): %s", e.AgentType, e.Detail)
+	}
+	return fmt.Sprintf("agent auth failed: %s", e.Detail)
+}
+
 // AgentEnv owns the logic for shaping the sandbox environment and auth
 // setup for a coding agent run. It is the single source of truth for:
 //   - per-agent-type provider credential resolution (user → team → org)
@@ -250,10 +267,13 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 	switch agentType {
 	case models.AgentTypeAmp:
 		if env["AMP_API_KEY"] == "" {
-			return fmt.Errorf("missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session")
+			return &AuthError{
+				AgentType: agentType,
+				Detail:    "missing AMP_API_KEY: configure Amp under Settings → Default Agent → Amp before starting a session",
+			}
 		}
 	case models.AgentTypePi:
-		return checkPiProviderKey(env)
+		return checkPiProviderKey(agentType, env)
 	}
 	return nil
 }
@@ -269,27 +289,25 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 // that users reach via PI_MODEL_CUSTOM (moonshot, etc.), we can't know which
 // env var is required, so we fall back to the weaker "at least one inherited
 // key" guarantee.
-func checkPiProviderKey(env map[string]string) error {
+func checkPiProviderKey(agentType models.AgentType, env map[string]string) error {
 	model := piResolvedModel(env)
 	prefix, _, _ := strings.Cut(model, "/")
 	switch strings.ToLower(prefix) {
 	case "anthropic":
 		if env["ANTHROPIC_API_KEY"] == "" {
-			return fmt.Errorf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)
+			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)}
 		}
 	case "openai":
 		if env["OPENAI_API_KEY"] == "" {
-			return fmt.Errorf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)
+			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)}
 		}
 	case "google", "gemini":
 		if env["GEMINI_API_KEY"] == "" {
-			return fmt.Errorf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)
+			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)}
 		}
 	default:
-		// Unknown provider (e.g. moonshot via PI_MODEL_CUSTOM). We can't tell
-		// which env var Pi needs, so fall back to "at least one inherited key".
 		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
-			return fmt.Errorf("missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key")
+			return &AuthError{AgentType: agentType, Detail: "missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key"}
 		}
 	}
 	return nil

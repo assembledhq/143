@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/assembledhq/143/internal/services/agent"
 )
 
 // apiKeyPattern matches common API key shapes (Anthropic `sk-ant-…`, OpenAI
@@ -27,7 +29,9 @@ func parsePlan(output string) (*Plan, error) {
 			strings.Contains(lower, "authentication_failed") ||
 			strings.Contains(lower, "invalid api key") ||
 			strings.Contains(lower, "invalid_api_key") {
-			return nil, fmt.Errorf("pm agent not authenticated — configure an Anthropic API key for this org: %s", excerpt(output, 200))
+			return nil, &agent.AuthError{
+				Detail: fmt.Sprintf("pm agent not authenticated — configure credentials for this org: %s", excerpt(output, 200)),
+			}
 		}
 		return nil, fmt.Errorf("pm plan tags not found in agent output: %s", excerpt(output, 500))
 	}

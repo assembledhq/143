@@ -64,7 +64,7 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	if err != nil {
 		return nil, noop, fmt.Errorf("parse org settings: %w", err)
 	}
-	agentType := resolveAgentType(settings)
+	agentType := resolveAgentType(settings, nil)
 	adapter, err := s.pickAdapter(agentType)
 	if err != nil {
 		return nil, noop, fmt.Errorf("pick adapter: %w", err)
@@ -83,8 +83,16 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 	if err != nil {
 		return nil, noop, fmt.Errorf("create sandbox: %w", err)
 	}
+	containerStartedAt := time.Now()
+	var usageEventID uuid.UUID
+	if s.usageTracker != nil {
+		usageEventID = s.usageTracker.ContainerStarted(ctx, params.orgID, uuid.Nil, sb, sbCfg, containerStartedAt)
+	}
 	if agentType == models.AgentTypeCodex {
 		if _, err := s.env.InjectCodexAuth(ctx, params.orgID, sb); err != nil {
+			if s.usageTracker != nil {
+				s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, "failed")
+			}
 			if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 				s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox after codex auth failure")
 			}
@@ -92,6 +100,9 @@ func (s *Service) runAgentInSandbox(ctx context.Context, params sandboxRunParams
 		}
 	}
 	cleanup := func() {
+		if s.usageTracker != nil {
+			s.usageTracker.ContainerStopped(ctx, params.orgID, uuid.Nil, usageEventID, containerStartedAt, containerExitReason(ctx, err))
+		}
 		if destroyErr := s.sandbox.Destroy(ctx, sb); destroyErr != nil {
 			s.logger.Warn().Err(destroyErr).Str("source", params.logName).Msg("failed to destroy sandbox")
 		}

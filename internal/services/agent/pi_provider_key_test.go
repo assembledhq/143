@@ -113,7 +113,7 @@ func TestCheckPiProviderKey(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkPiProviderKey(tc.env)
+			err := checkPiProviderKey(models.AgentTypePi, tc.env)
 			if !tc.wantErr {
 				require.NoError(t, err)
 				return

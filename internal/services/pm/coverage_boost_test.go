@@ -936,7 +936,7 @@ func TestAnalyze_NilAdapterOrSandbox(t *testing.T) {
 	t.Parallel()
 
 	svc := &Service{sandbox: nil, env: nil}
-	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not configured")
 }
@@ -949,7 +949,7 @@ func TestAnalyze_InvalidTrigger(t *testing.T) {
 		env:      testAgentEnv(),
 		sandbox:  &pmSandboxMock{},
 	}
-	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTrigger("invalid"), nil)
+	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTrigger("invalid"), nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid trigger")
 }
@@ -987,7 +987,7 @@ func TestAnalyze_NoRepositories(t *testing.T) {
 		sandbox:  &pmSandboxMock{},
 		repos:    &mockRepoStore{repos: []models.Repository{}},
 	}
-	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no repositories")
 }
@@ -1006,7 +1006,7 @@ func TestAnalyze_RepoNotFound(t *testing.T) {
 			{ID: otherRepoID, Status: "active"},
 		}},
 	}
-	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, &repoID)
+	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, &repoID, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found in org")
 }
@@ -1020,7 +1020,7 @@ func TestAnalyze_RepoListError(t *testing.T) {
 		sandbox:  &pmSandboxMock{},
 		repos:    &mockRepoStore{err: fmt.Errorf("db error")},
 	}
-	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), uuid.New(), models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list repositories")
 }
@@ -1061,7 +1061,7 @@ func TestAnalyze_SelectsActiveRepo(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 	require.Equal(t, "test", plan.Analysis)
@@ -1458,7 +1458,7 @@ func TestAnalyze_WithSpecificRepoID(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, &repoID)
+	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, &repoID, nil)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 	require.Equal(t, "specific repo", plan.Analysis)
@@ -1502,7 +1502,7 @@ func TestAnalyze_WritesDecisionLog(t *testing.T) {
 		logger:      zerolog.Nop(),
 	}
 
-	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 	require.Equal(t, models.PMPlanStatusCompleted, plan.Status)
@@ -1553,7 +1553,7 @@ func TestAnalyze_WithProductContext(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	plan, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 }
@@ -1581,7 +1581,7 @@ func TestAnalyze_ParsePlanError(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "parse plan")
 }
@@ -1609,7 +1609,7 @@ func TestAnalyze_ExecuteError(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "pm agent execution")
 }
@@ -1650,7 +1650,7 @@ func TestAnalyze_GitHubTokenError(t *testing.T) {
 		logger:   zerolog.Nop(),
 	}
 
-	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil)
+	_, err := svc.Analyze(context.Background(), orgID, models.PMTriggerCron, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "get installation token")
 }
