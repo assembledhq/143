@@ -151,7 +151,7 @@ func TestService_ExchangeForInstallationToken(t *testing.T) {
 			status:      http.StatusUnauthorized,
 			body:        `{"message":"bad credentials"}`,
 			expectErr:   true,
-			errContains: "GitHub API error 401",
+			errContains: "returned 401",
 		},
 		{
 			name:        "returns error for invalid JSON body",
