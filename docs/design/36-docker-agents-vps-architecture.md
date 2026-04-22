@@ -253,6 +253,7 @@ ssh -i ~/.ssh/143-deploy deploy@<vps-ip> "docker compose -f /opt/143/docker-comp
 | `deploy/cloud-init/db.yml` | Dedicated Postgres (Phase 3a) | `docker-compose.db.yml` |
 | `deploy/cloud-init/worker.yml` | Agent sandbox worker (Phase 3b) | `docker-compose.worker.yml` |
 | `deploy/cloud-init/api.yml` | API-only node behind LB (Phase 3c) | `docker-compose.api.yml` |
+| `deploy/cloud-init/redis.yml` | Redis cache + pub/sub (Phase 3d) | `docker-compose.redis.yml` |
 
 Each is a variation of the same template — only the compose file and env vars
 differ. The Docker + gVisor + kernel tuning section is identical across all roles.
@@ -509,6 +510,7 @@ services:
       NODE_ID: ${HOSTNAME:-node-1}
       BASE_URL: ${BASE_URL:-https://143.dev}
       FRONTEND_URL: ${FRONTEND_URL:-https://143.dev}
+      REDIS_URL: ${REDIS_URL:-}   # optional — leave empty to disable Redis
     env_file:
       - .env
     depends_on:
@@ -1159,6 +1161,7 @@ services:
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       SANDBOX_IMAGE: ghcr.io/assembledhq/143-agent:latest
       SANDBOX_RUNTIME: runsc
+      REDIS_URL: ${REDIS_URL:-}
     env_file:
       - .env
     volumes:
@@ -1287,6 +1290,159 @@ Add to `docker-compose.db.yml`:
 All app/worker nodes change `DATABASE_URL` to point at PgBouncer (port 6432)
 instead of Postgres directly.
 
+#### Step 3d: Add a Dedicated Redis Node
+
+Redis provides shared caching, pub/sub for real-time log streaming, distributed
+rate limiting, and job queue notifications. See
+[52-redis.md](../future/52-redis.md) for the full design. Redis is **optional** —
+all code paths fall back to current behavior (Postgres polling, per-node rate
+limiting) when Redis is unavailable.
+
+```
+┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+│  VPS-1 (DB)   │     │  VPS-2 (App)  │     │  VPS-6 (Redis)│
+│               │     │  mode=all     │     │               │
+│  Postgres  ◄──┼─────┤  Caddy        ├────►│  Redis 8.6    │
+│               │  ┌──┤               │     │  :6379        │
+└───────────────┘  │  └───────────────┘     └───────▲───────┘
+                   │                                │
+        ┌──────────┼──────────┐                     │
+        │          │          │                     │
+   ┌────▼────┐ ┌──▼──────┐ ┌─▼───────┐             │
+   │ VPS-3   │ │ VPS-4   │ │ VPS-5   │─────────────┘
+   │ worker  │ │ worker  │ │ worker  │  (all nodes connect
+   │ 5 runs  │ │ 5 runs  │ │ 5 runs  │   to shared Redis)
+   └─────────┘ └─────────┘ └─────────┘
+```
+
+**New file: `docker-compose.redis.yml`** (runs on the Redis VPS):
+
+```yaml
+services:
+  redis:
+    image: redis:8.6-alpine
+    ports:
+      - "0.0.0.0:6379:6379"   # accessible from private network
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    command: >-
+      redis-server
+        --save 60 1
+        --loglevel warning
+        --maxmemory 400mb
+        --maxmemory-policy allkeys-lru
+        --bind 0.0.0.0
+        --protected-mode no
+        --requirepass ${REDIS_PASSWORD}
+
+volumes:
+  redisdata:
+```
+
+**Cloud-init template: `deploy/cloud-init/redis.yml`**
+
+```yaml
+#cloud-config
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+
+runcmd:
+  # No gVisor needed — Redis doesn't run sandboxes
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.redis.yml up -d'
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: '0600'
+    content: |
+      REDIS_PASSWORD=${REDIS_PASSWORD}
+
+  - path: /opt/143/docker-compose.redis.yml
+    owner: deploy:deploy
+    permissions: '0644'
+    encoding: b64
+    content: ${DOCKER_COMPOSE_REDIS_B64}
+
+  # Kernel tuning for Redis
+  - path: /etc/sysctl.d/99-redis.conf
+    content: |
+      vm.overcommit_memory = 1
+      net.core.somaxconn = 512
+```
+
+**Redis VPS sizing:** Redis is extremely lightweight for 143's workload. A
+`CX22` (2 vCPU / 4 GB, ~€4/month on Hetzner) is more than sufficient. Redis
+uses ~256MB for the expected workload (pub/sub messages are transient, rate-limit
+keys are small integers, cached tokens are <1KB each).
+
+> **`[PROVIDER-SPECIFIC]` Redis VPS sizing:**
+>
+> | Provider | Instance Type | Monthly Cost | Notes |
+> |----------|--------------|-------------|-------|
+> | Hetzner | CX22 (2 vCPU / 4 GB) | ~€4 (~$5) | More than enough for cache + pub/sub |
+> | AWS | t3.micro (2 vCPU / 1 GB) | ~$8 | Or use ElastiCache `cache.t4g.micro` (~$12/mo) for managed |
+> | GCP | e2-micro (shared 2 vCPU / 1 GB) | ~$7 | Or use Memorystore for managed |
+> | DigitalOcean | s-1vcpu-1gb | ~$6 | Simple, adequate for small-medium scale |
+
+**Connecting app/worker nodes to Redis:**
+
+All app and worker nodes need `REDIS_URL` in their environment, pointing to the
+Redis VPS's private IP:
+
+```bash
+# Add to .env on each app/worker VPS:
+REDIS_URL=redis://:${REDIS_PASSWORD}@10.0.0.X:6379/0
+```
+
+Update `docker-compose.prod.yml` (app node) to pass `REDIS_URL`:
+
+```yaml
+  api:
+    environment:
+      # ... existing vars ...
+      REDIS_URL: ${REDIS_URL}   # optional — omit or leave empty to disable Redis
+```
+
+Update `docker-compose.worker.yml` (worker nodes) similarly:
+
+```yaml
+  worker:
+    environment:
+      # ... existing vars ...
+      REDIS_URL: ${REDIS_URL}
+```
+
+**Security:** Redis listens on 0.0.0.0 but requires a password
+(`--requirepass`). The Hetzner firewall should block port 6379 from the public
+internet — only allow it from the private network CIDR (e.g., `10.0.0.0/16`).
+
+**Move to managed Redis when:** you need HA (automatic failover), or you're
+managing 10+ nodes and want one fewer thing to operate. See
+[52-redis.md Section 6](../future/52-redis.md#6-production-migrating-to-hosted-redis)
+for the migration path — it's a config change (update `REDIS_URL`), not a code
+change.
+
 ### Fleet Deployment
 
 Once you have multiple nodes, the Phase 1 single-node deploy script doesn't
@@ -1347,6 +1503,7 @@ generate the hosts file from your provider's CLI or API if you prefer.
 | Postgres CPU > 70% sustained | Separate Postgres to its own VPS (Step 3a) |
 | API p95 latency > 500ms under load | Add API nodes (Step 3c) |
 | Disk I/O wait > 20% on shared VPS | Separate Postgres (Step 3a) |
+| SSE polling > 500 QPS or rate limits need cross-node enforcement | Add Redis node (Step 3d) |
 | Need 99.9%+ uptime | Multiple API nodes + Postgres HA (Step 3c + Phase 4) |
 
 ---
@@ -1543,15 +1700,18 @@ More importantly, there's no way to enforce org-level concurrency limits on agen
 runs across the fleet.
 
 **Fix (required for Phase 3c):**
-- Move rate limiting to a shared store. Options:
-  - **Postgres-backed** (simplest): rate limit check is a single
-    `SELECT count(*) FROM requests WHERE org_id = $1 AND created_at > now() - interval '1 minute'`.
-    Adds ~1ms per request. Fine up to ~1000 req/sec.
-  - **Redis** (standard): if you're already running Redis for caching, use it.
-    Adds operational complexity (another stateful service).
-  - **Load balancer sticky sessions**: route all requests from an org to the same
-    API node. Per-node rate limiting then works correctly. Simplest if your LB
-    supports it, but limits horizontal scaling benefits.
+- **Redis sliding-window counter (recommended):** With a Redis node deployed
+  (Step 3d), use the distributed rate limiter described in
+  [52-redis.md Section 2.2](future/52-redis.md#22-distributed-rate-limiting).
+  A simple `INCR`/`EXPIRE` counter on Redis provides globally-consistent rate
+  limiting across all nodes with sub-millisecond overhead. Falls back to per-node
+  in-memory limiting if Redis is unavailable.
+- **Postgres-backed** (simpler, no Redis): rate limit check is a single
+  `SELECT count(*) FROM requests WHERE org_id = $1 AND created_at > now() - interval '1 minute'`.
+  Adds ~1ms per request. Fine up to ~1000 req/sec.
+- **Load balancer sticky sessions**: route all requests from an org to the same
+  API node. Per-node rate limiting then works correctly. Simplest if your LB
+  supports it, but limits horizontal scaling benefits.
 - For org-level agent run concurrency, the existing `maxConcurrent` check already
   queries Postgres, so it works correctly across nodes today. The concern is only
   for HTTP request rate limiting.
@@ -1571,10 +1731,17 @@ you grow.
 **When it matters:** When you regularly have 50+ concurrent streaming sessions
 across all API nodes. Monitor `session_logs` query frequency in `pg_stat_statements`.
 
-**Future fix options (not needed now):**
+**Fix options:**
+- **Redis Streams (recommended):** With a Redis node deployed (Step 3d), use
+  Redis Streams for log delivery as described in
+  [52-redis.md Section 2.1](future/52-redis.md#21-redis-streams-for-real-time-events-highest-value).
+  A fan-out goroutine per node per active session calls `XREAD BLOCK` and
+  broadcasts to local SSE clients via Go channels, reducing per-client DB
+  queries to zero. Falls back to 1s Postgres polling if Redis is unavailable.
 - **Postgres LISTEN/NOTIFY**: The orchestrator issues `NOTIFY session_log, '<run_id>'`
   on each log write. SSE handlers `LISTEN` on the channel and only query when
-  notified. Eliminates polling entirely. Medium code change.
+  notified. Eliminates polling entirely. Medium code change. No new dependency
+  but doesn't address caching or rate limiting.
 - **In-memory broadcast with cross-node pub/sub**: Each node maintains an
   in-memory channel per active session. Log writes fan out locally. Cross-node
   delivery via Postgres NOTIFY or Redis pub/sub. More complex but eliminates
