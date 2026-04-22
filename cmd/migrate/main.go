@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database"
@@ -31,7 +32,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	m, err := migrate.New("file://migrations", dbURL)
+	migrationSource, err := resolveMigrationSource(pathExists)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to resolve migrations directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	m, err := migrate.New(migrationSource, dbURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create migrator: %v\n", err)
 		os.Exit(1)
@@ -57,6 +64,41 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+func resolveMigrationSource(exists func(string) bool) (string, error) {
+	candidates := []struct {
+		path   string
+		source string
+	}{
+		{path: "migrations", source: "file://migrations"},
+		{path: "/migrations", source: "file:///migrations"},
+	}
+
+	execPath, err := os.Executable()
+	if err == nil {
+		execDir := filepath.Dir(execPath)
+		candidates = append(candidates, struct {
+			path   string
+			source string
+		}{
+			path:   filepath.Join(execDir, "migrations"),
+			source: fmt.Sprintf("file://%s", filepath.Join(execDir, "migrations")),
+		})
+	}
+
+	for _, candidate := range candidates {
+		if exists(candidate.path) {
+			return candidate.source, nil
+		}
+	}
+
+	return "", fmt.Errorf("searched %q, %q, and executable-adjacent migrations", "migrations", "/migrations")
+}
+
+func pathExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // logMigrationError prints detailed diagnostics for a failed migration.
