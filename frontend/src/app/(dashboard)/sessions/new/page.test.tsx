@@ -329,6 +329,228 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
+  it('renders the mention picker as an overlay outside the composer card flow', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'directory',
+            token: '@internal/services',
+            path: 'internal/services',
+            display: 'internal/services',
+          },
+        ],
+      })),
+    );
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const composerCard = screen.getByTestId('manual-session-composer');
+    vi.spyOn(composerCard, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 420,
+      width: 600,
+      height: 120,
+      top: 420,
+      right: 600,
+      bottom: 540,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @serv');
+
+    const overlay = await screen.findByTestId('mention-picker-overlay');
+
+    expect(composerCard).not.toContainElement(overlay);
+    expect(overlay).toHaveAttribute('data-side', 'top');
+    expect(screen.getByRole('button', { name: 'internal/services' })).toBeInTheDocument();
+  });
+
+  it('places the mention picker below the composer when there is not enough room above', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'directory',
+            token: '@internal/services',
+            path: 'internal/services',
+            display: 'internal/services',
+          },
+        ],
+      })),
+    );
+
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 220,
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const composerCard = screen.getByTestId('manual-session-composer');
+    vi.spyOn(composerCard, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 40,
+      width: 600,
+      height: 60,
+      top: 40,
+      right: 600,
+      bottom: 100,
+      left: 0,
+      toJSON: () => ({}),
+    });
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @serv');
+
+    const overlay = await screen.findByTestId('mention-picker-overlay');
+    expect(overlay).toHaveAttribute('data-side', 'bottom');
+
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: originalInnerHeight,
+    });
+  });
+
+  it('repositions the mention picker when the composer resizes', async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get('/api/v1/repositories', () => HttpResponse.json({
+        data: [
+          {
+            id: 'repo-1',
+            org_id: 'org-1',
+            integration_id: 'int-1',
+            github_id: 1,
+            full_name: 'acme/repo',
+            default_branch: 'main',
+            private: false,
+            clone_url: 'https://github.com/acme/repo.git',
+            installation_id: 10,
+            status: 'active',
+            settings: {},
+            created_at: '2026-03-05T12:00:00Z',
+            updated_at: '2026-03-05T12:00:00Z',
+          },
+        ],
+      })),
+      http.get('/api/v1/repositories/:id/branches', () => HttpResponse.json({ data: [{ name: 'main', protected: true }] })),
+      http.get('/api/v1/session-composer/files', () => HttpResponse.json({
+        data: [
+          {
+            kind: 'directory',
+            token: '@internal/services',
+            path: 'internal/services',
+            display: 'internal/services',
+          },
+        ],
+      })),
+    );
+
+    let resizeObserverCallback: ResizeObserverCallback | null = null;
+    const disconnectMock = vi.fn();
+    const originalResizeObserver = window.ResizeObserver;
+    class MockResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        disconnectMock();
+      }
+    }
+    window.ResizeObserver = MockResizeObserver as typeof ResizeObserver;
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const composerCard = screen.getByTestId('manual-session-composer');
+    let rect = {
+      x: 0,
+      y: 420,
+      width: 600,
+      height: 120,
+      top: 420,
+      right: 600,
+      bottom: 540,
+      left: 0,
+      toJSON: () => ({}),
+    };
+    vi.spyOn(composerCard, 'getBoundingClientRect').mockImplementation(() => rect);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
+    await user.type(textarea, 'Inspect @serv');
+
+    const overlay = await screen.findByTestId('mention-picker-overlay');
+    expect(overlay).toHaveStyle({ left: '0px', width: '600px' });
+
+    rect = {
+      ...rect,
+      width: 720,
+      right: 760,
+      left: 40,
+      x: 40,
+    };
+
+    act(() => {
+      resizeObserverCallback?.([], {} as ResizeObserver);
+    });
+
+    await waitFor(() => {
+      expect(overlay).toHaveStyle({ left: '40px', width: '720px' });
+    });
+
+    window.ResizeObserver = originalResizeObserver;
+  });
+
   it('drops the selected reference chip when the inserted mention token is edited', async () => {
     const user = userEvent.setup();
 
@@ -372,12 +594,13 @@ describe('ManualSessionCreatePage', () => {
     await user.click(await screen.findByRole('button', { name: 'internal/api/handlers/sessions.go' }));
 
     expect(screen.getByText('internal/api/handlers/sessions.go')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(textarea).toHaveValue('Inspect @internal/api/handlers/sessions.go ');
+    });
 
-    const currentValue = textarea.value;
-    const deleteIndex = currentValue.indexOf('/sessions.go');
-    textarea.focus();
-    textarea.setSelectionRange(deleteIndex, deleteIndex + '/sessions.go'.length);
-    await user.keyboard('{Backspace}');
+    fireEvent.change(textarea, {
+      target: { value: 'Inspect @internal/api/handlers ' },
+    });
 
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Remove internal/api/handlers/sessions.go' })).not.toBeInTheDocument();
