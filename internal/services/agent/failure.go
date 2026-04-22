@@ -13,11 +13,12 @@ import (
 
 // Well-known failure categories.
 const (
-	FailureCategoryTooling    = "tooling"
-	FailureCategoryContext    = "context"
-	FailureCategoryValidation = "validation"
-	FailureCategoryComplexity = "complexity"
-	FailureCategoryCodexAuth  = "codex_auth_expired"
+	FailureCategoryTooling        = "tooling"
+	FailureCategoryContext        = "context"
+	FailureCategoryValidation     = "validation"
+	FailureCategoryComplexity     = "complexity"
+	FailureCategoryCodexAuth      = "codex_auth_expired"
+	FailureCategoryClaudeCodeAuth = "claude_code_auth_expired"
 	// FailureCategoryTimeout marks a session that hit its configured
 	// wall-clock limit. Set explicitly by the orchestrator timeout path so
 	// classification does not depend on error-text matching in classifyFailure.

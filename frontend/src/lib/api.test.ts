@@ -2,8 +2,13 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { api } from './api';
+import { setActiveOrgId } from './active-org';
 
 describe('api client', () => {
+  afterEach(() => {
+    setActiveOrgId(null);
+  });
+
   describe('issues', () => {
     it('fetches issues list', async () => {
       const mockData = {
@@ -1052,6 +1057,30 @@ describe('api client', () => {
       expect(result.data[0].source).toBe('personal');
       expect(result.data[1].source).toBe('team_default');
       expect(result.data[2].source).toBe('none');
+    });
+  });
+
+  describe('uploads', () => {
+    it('sends the active org header on uploads', async () => {
+      setActiveOrgId('org-switched');
+
+      let capturedHeader: string | null = null;
+
+      server.use(
+        http.post('/api/v1/uploads', ({ request }) => {
+          capturedHeader = request.headers.get('X-Active-Org-ID');
+          return HttpResponse.json({
+            url: '/api/v1/uploads/files/org-switched/2026-04/test.txt',
+            file_name: 'test.txt',
+            content_type: 'text/plain',
+          });
+        }),
+      );
+
+      const file = new File(['hello'], 'test.txt', { type: 'text/plain' });
+      await api.uploads.upload(file);
+
+      expect(capturedHeader).toBe('org-switched');
     });
   });
 
