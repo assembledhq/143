@@ -439,6 +439,9 @@ type Job struct {
 	RunAt          time.Time       `db:"run_at" json:"run_at"`
 	LockedByNodeID *string         `db:"locked_by_node_id" json:"locked_by_node_id,omitempty"`
 	LockedAt       *time.Time      `db:"locked_at" json:"locked_at,omitempty"`
+	LeaseExpiresAt *time.Time      `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
+	LockToken      *uuid.UUID      `db:"lock_token" json:"lock_token,omitempty"`
+	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
 	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
 	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`

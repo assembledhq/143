@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -197,6 +198,397 @@ func TestJobStore_DeleteExpiredCompleted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(42), deleted)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestJobStore_ClaimNextRunnable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID)
+		expectNil bool
+		expectErr bool
+	}{
+		{
+			name: "claims next due job with lease and fencing token",
+			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
+				jobID := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"dedupe_key", "created_at", "updated_at", "completed_at",
+					}).AddRow(
+						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", nil, nil, now, now, nil,
+					))
+			},
+		},
+		{
+			name: "hydrates optional persisted fields",
+			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
+				jobID := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				completedAt := now.Add(time.Minute)
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"dedupe_key", "created_at", "updated_at", "completed_at",
+					}).AddRow(
+						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "boom", "dedupe-1", now, now, completedAt,
+					))
+			},
+		},
+		{
+			name: "returns nil when no pending job exists",
+			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			expectNil: true,
+		},
+		{
+			name: "returns query errors",
+			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WillReturnError(errors.New("db down"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			leaseDuration := 60 * time.Second
+			lockToken := uuid.New()
+			tt.setupMock(mock, leaseDuration, lockToken)
+
+			job, err := store.ClaimNextRunnable(context.Background(), "worker-1", "worker-1", lockToken, leaseDuration)
+			if tt.expectErr {
+				require.Error(t, err, "ClaimNextRunnable should return an error")
+				require.Nil(t, job, "ClaimNextRunnable should not return a job on error")
+				return
+			}
+			require.NoError(t, err, "ClaimNextRunnable should not return an error")
+			if tt.expectNil {
+				require.Nil(t, job, "ClaimNextRunnable should return nil when no job is due")
+			} else {
+				require.NotNil(t, job, "ClaimNextRunnable should return the claimed job")
+				require.Equal(t, lockToken, *job.LockToken, "ClaimNextRunnable should persist the fencing token")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestJobStore_RenewLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		setupMock  func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration)
+		wantActive bool
+		expectErr  bool
+	}{
+		{
+			name: "renews active lease",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnRows(pgxmock.NewRows([]string{"lease_expires_at"}).AddRow(time.Now().Add(leaseDuration)))
+			},
+			wantActive: true,
+		},
+		{
+			name: "returns inactive when ownership was lost",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnError(pgx.ErrNoRows)
+			},
+		},
+		{
+			name: "returns errors from renewal query",
+			setupMock: func(mock pgxmock.PgxPoolIface, lockToken uuid.UUID, leaseDuration time.Duration) {
+				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnError(errors.New("write failed"))
+			},
+			expectErr: true,
+		},
+	}
+
+	jobID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			lockToken := uuid.New()
+			leaseDuration := 45 * time.Second
+			tt.setupMock(mock, lockToken, leaseDuration)
+
+			lease, ok, err := store.RenewLease(context.Background(), jobID, lockToken, leaseDuration)
+			if tt.expectErr {
+				require.Error(t, err, "RenewLease should return an error")
+				require.False(t, ok, "RenewLease should report inactive on error")
+				require.Nil(t, lease, "RenewLease should not return a lease on error")
+				return
+			}
+			require.NoError(t, err, "RenewLease should not return an error")
+			require.Equal(t, tt.wantActive, ok, "RenewLease should report whether the lease is still owned")
+			if tt.wantActive {
+				require.NotNil(t, lease, "RenewLease should return the updated lease")
+			} else {
+				require.Nil(t, lease, "RenewLease should return nil when ownership was lost")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestJobStore_MarkSucceededWithLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		setupMock  func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID)
+		wantActive bool
+		expectErr  bool
+	}{
+		{
+			name: "marks job succeeded when lease is current",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+			wantActive: true,
+		},
+		{
+			name: "reports inactive when fencing token no longer matches",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+		},
+		{
+			name: "returns exec errors",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
+					WillReturnError(errors.New("write failed"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			jobID := uuid.New()
+			lockToken := uuid.New()
+			tt.setupMock(mock, jobID, lockToken)
+
+			ok, err := store.MarkSucceededWithLease(context.Background(), jobID, lockToken)
+			if tt.expectErr {
+				require.Error(t, err, "MarkSucceededWithLease should return an error")
+				require.False(t, ok, "MarkSucceededWithLease should report inactive on error")
+				return
+			}
+			require.NoError(t, err, "MarkSucceededWithLease should not return an error")
+			require.Equal(t, tt.wantActive, ok, "MarkSucceededWithLease should report whether the write won the fencing race")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestJobStore_LeaseTerminalHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		invoke    func(store *JobStore, ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
+		setupMock func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID)
+		expectOK  bool
+		expectErr bool
+	}{
+		{
+			name: "MarkFailedWithLease returns true on success",
+			invoke: func(store *JobStore, ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+				return store.MarkFailedWithLease(ctx, jobID, lockToken, "boom")
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'failed'").
+					WithArgs("boom", jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+			expectOK: true,
+		},
+		{
+			name: "RetryWithLease reports lost ownership",
+			invoke: func(store *JobStore, ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+				return store.RetryWithLease(ctx, jobID, lockToken, "retry", time.Now())
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'pending'").
+					WithArgs("retry", pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+		},
+		{
+			name: "RetryWithoutConsumingAttemptWithLease wraps errors",
+			invoke: func(store *JobStore, ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+				return store.RetryWithoutConsumingAttemptWithLease(ctx, jobID, lockToken, "retry", time.Now())
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+					WithArgs("retry", pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnError(errors.New("write failed"))
+			},
+			expectErr: true,
+		},
+		{
+			name: "DeadLetterWithLease returns true on success",
+			invoke: func(store *JobStore, ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+				return store.DeadLetterWithLease(ctx, jobID, lockToken, "boom")
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
+					WithArgs("boom", jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+			expectOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewJobStore(mock)
+			jobID := uuid.New()
+			lockToken := uuid.New()
+			tt.setupMock(mock, jobID, lockToken)
+
+			ok, err := tt.invoke(store, context.Background(), jobID, lockToken)
+			if tt.expectErr {
+				require.Error(t, err, "helper should return errors from the terminal write")
+				require.False(t, ok, "helper should report false on error")
+			} else {
+				require.NoError(t, err, "helper should not return an error")
+				require.Equal(t, tt.expectOK, ok, "helper should report whether it won the fencing race")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	staleBefore := time.Now().Add(-90 * time.Second)
+	mock.ExpectExec("WITH dead_nodes AS").
+		WithArgs(staleBefore, 100).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
+	require.NoError(t, err, "ReclaimLostRunningJobs should not return an error")
+	require.Equal(t, int64(3), reclaimed, "ReclaimLostRunningJobs should return the number of reclaimed jobs")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	staleBefore := time.Now().Add(-90 * time.Second)
+	mock.ExpectExec("WITH dead_nodes AS").
+		WithArgs(staleBefore, 100).
+		WillReturnError(errors.New("update failed"))
+
+	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
+	require.Error(t, err, "ReclaimLostRunningJobs should return wrapped update errors")
+	require.Equal(t, int64(0), reclaimed, "ReclaimLostRunningJobs should return zero on error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_CountRunningOwnedByNode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM jobs").
+		WithArgs("worker-1").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+
+	count, err := store.CountRunningOwnedByNode(context.Background(), "worker-1")
+	require.NoError(t, err, "CountRunningOwnedByNode should not return an error")
+	require.Equal(t, 2, count, "CountRunningOwnedByNode should count active owned jobs")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_CountRunningOwnedByNode_ReturnsWrappedErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM jobs").
+		WithArgs("worker-1").
+		WillReturnError(errors.New("query failed"))
+
+	count, err := store.CountRunningOwnedByNode(context.Background(), "worker-1")
+	require.Error(t, err, "CountRunningOwnedByNode should return wrapped query errors")
+	require.Equal(t, 0, count, "CountRunningOwnedByNode should return zero on error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func jobDedupeKeyPtr(s string) *string {

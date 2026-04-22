@@ -271,6 +271,37 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "$service rolled over successfully."
   }
 
+  # drain_worker_service SERVICE — send SIGTERM to the current worker and wait
+  # for it to exit after draining its active jobs. The worker process handles
+  # SIGTERM by marking itself draining, stopping new claims, and waiting for
+  # in-flight work to finish before exiting.
+  drain_worker_service() {
+    local service="$1"
+    local timeout="${WORKER_DRAIN_TIMEOUT:-7200}"
+    local waited=0
+    local cid
+
+    cid="$(docker compose -f "$COMPOSE_FILE" ps -q "$service" | head -1 || true)"
+    if [ -z "$cid" ]; then
+      echo "No running $service container found — nothing to drain."
+      return 0
+    fi
+
+    echo "Requesting drain for $service container ${cid:0:12}..."
+    docker kill --signal=TERM "$cid" >/dev/null
+
+    while docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; do
+      if [ "$waited" -ge "$timeout" ]; then
+        echo "ERROR: $service drain timed out after ${timeout}s"
+        return 1
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+
+    echo "$service drained successfully."
+  }
+
   dump_diagnostics() {
     local cid="${1:-}"
     echo "--- Last 50 lines of $HEALTH_SERVICE logs ---"
@@ -415,11 +446,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
   elif [ "$ROLE" = "worker" ]; then
-    # Workers poll for jobs, so running two simultaneously would double the
-    # effective concurrency limit. Instead, stop-then-start: brief downtime is
-    # acceptable since workers process async jobs (no user-facing HTTP traffic).
-    echo "Stopping old $HEALTH_SERVICE container..."
-    docker compose -f "$COMPOSE_FILE" stop "$HEALTH_SERVICE"
+    # Workers remain single-replica, but we now drain the old replica before
+    # replacement so accepted long-running sessions are not interrupted by a
+    # routine deploy.
+    drain_worker_service "$HEALTH_SERVICE"
     docker compose -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$HEALTH_SERVICE"
 
     CONTAINER_ID="$(docker compose -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"

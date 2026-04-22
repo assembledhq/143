@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,13 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/jobctx"
+	"github.com/assembledhq/143/internal/models"
 )
 
 func newTestWorker(t *testing.T) (*Worker, pgxmock.PgxPoolIface) {
 	t.Helper()
+
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create pgxmock pool")
+
 	w := New(mock, zerolog.Nop(), "test-node")
+	w.renewInterval = time.Hour
 	return w, mock
 }
 
@@ -35,164 +39,6 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
-// ---------------------------------------------------------------------------
-// Direct tests for job lifecycle methods
-// ---------------------------------------------------------------------------
-
-func TestWorker_SucceedJob(t *testing.T) {
-	t.Parallel()
-
-	w, mock := newTestWorker(t)
-	defer mock.Close()
-
-	jobID := uuid.New()
-
-	mock.ExpectExec("UPDATE jobs SET status = 'succeeded'").
-		WithArgs(jobID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	w.succeedJob(context.Background(), jobID)
-
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestWorker_FailJob(t *testing.T) {
-	t.Parallel()
-
-	w, mock := newTestWorker(t)
-	defer mock.Close()
-
-	jobID := uuid.New()
-	errMsg := "something went wrong"
-
-	mock.ExpectExec("UPDATE jobs SET status = 'failed'").
-		WithArgs(errMsg, jobID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	w.failJob(context.Background(), jobID, errMsg)
-
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestWorker_RetryJob(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		attempt     int
-		expectedSec int
-	}{
-		{name: "attempt 0 backs off 1 second", attempt: 0, expectedSec: 1},
-		{name: "attempt 1 backs off 2 seconds", attempt: 1, expectedSec: 2},
-		{name: "attempt 2 backs off 4 seconds", attempt: 2, expectedSec: 4},
-		{name: "attempt 3 backs off 8 seconds", attempt: 3, expectedSec: 8},
-		{name: "attempt 5 backs off 32 seconds", attempt: 5, expectedSec: 32},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, mock := newTestWorker(t)
-			defer mock.Close()
-
-			jobID := uuid.New()
-			errMsg := "transient error"
-			intervalStr := fmt.Sprintf("%d seconds", tt.expectedSec)
-
-			mock.ExpectExec("UPDATE jobs SET status = 'pending'").
-				WithArgs(errMsg, intervalStr, jobID).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-			w.retryJob(context.Background(), jobID, errMsg, tt.attempt)
-
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
-}
-
-func TestWorker_DeadLetterJob(t *testing.T) {
-	t.Parallel()
-
-	w, mock := newTestWorker(t)
-	defer mock.Close()
-
-	jobID := uuid.New()
-	errMsg := "max attempts exceeded"
-
-	mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
-		WithArgs(errMsg, jobID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	w.deadLetterJob(context.Background(), jobID, errMsg)
-
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestWorker_LifecycleMethodsLogWarningOnExecFailure(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		expectSQL    string
-		invoke       func(w *Worker, ctx context.Context, jobID uuid.UUID)
-		expectedArg1 string
-	}{
-		{
-			name:      "succeedJob logs warning when update fails",
-			expectSQL: "UPDATE jobs SET status = 'succeeded'",
-			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
-				w.succeedJob(ctx, jobID)
-			},
-		},
-		{
-			name:      "failJob logs warning when update fails",
-			expectSQL: "UPDATE jobs SET status = 'failed'",
-			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
-				w.failJob(ctx, jobID, "boom")
-			},
-			expectedArg1: "boom",
-		},
-		{
-			name:      "deadLetterJob logs warning when update fails",
-			expectSQL: "UPDATE jobs SET status = 'dead_letter'",
-			invoke: func(w *Worker, ctx context.Context, jobID uuid.UUID) {
-				w.deadLetterJob(ctx, jobID, "boom")
-			},
-			expectedArg1: "boom",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, mock := newTestWorker(t)
-			defer mock.Close()
-
-			jobID := uuid.New()
-			if tt.expectedArg1 == "" {
-				mock.ExpectExec(tt.expectSQL).
-					WithArgs(jobID).
-					WillReturnError(errors.New("write failed"))
-			} else {
-				mock.ExpectExec(tt.expectSQL).
-					WithArgs(tt.expectedArg1, jobID).
-					WillReturnError(errors.New("write failed"))
-			}
-
-			require.NotPanics(t, func() {
-				tt.invoke(w, context.Background(), jobID)
-			}, "lifecycle helpers should swallow best-effort update failures after logging")
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Poll tests — consolidated into a single table-driven test
-// ---------------------------------------------------------------------------
-
 func TestWorker_Poll(t *testing.T) {
 	t.Parallel()
 
@@ -201,313 +47,163 @@ func TestWorker_Poll(t *testing.T) {
 		setupMock func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface)
 	}{
 		{
-			name: "begin error does not panic",
+			name: "no pending jobs returns cleanly",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
-				mock.ExpectBegin().WillReturnError(errors.New("connection refused"))
-			},
-		},
-		{
-			name: "no pending jobs rolls back gracefully",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				mock.ExpectBegin()
-				mock.ExpectQuery("SELECT .+ FROM jobs").
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
-				mock.ExpectRollback()
 			},
 		},
 		{
-			name: "successful job is marked succeeded",
+			name: "successful job is fenced and marked succeeded",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+
 				jobID := uuid.New()
+				lockToken := uuid.New()
 				orgID := uuid.New()
+				now := time.Now()
 				payload := json.RawMessage(`{"key":"value"}`)
 
-				w.Register("test_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					require.Equal(t, "test_job", jobType, "handler should receive correct job type")
-					require.JSONEq(t, `{"key":"value"}`, string(p), "handler should receive correct payload")
+				w.Register("test_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					require.Equal(t, "test_job", jobType, "handler should receive the claimed job type")
+					require.JSONEq(t, string(payload), string(got), "handler should receive the claimed payload")
 					return nil
 				})
 
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "test_job", payload, 0, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				mock.ExpectExec("UPDATE jobs SET status = 'succeeded'").
-					WithArgs(jobID).
+				expectClaim(mock, jobID, orgID, "test_job", payload, now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'succeeded'").
+					WithArgs(jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
 		{
-			name: "failed job with remaining attempts is retried",
+			name: "unknown job type is marked failed behind the fencing token",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+
 				jobID := uuid.New()
+				lockToken := uuid.New()
 				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
+				now := time.Now()
+
+				expectClaim(mock, jobID, orgID, "unknown_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'failed'").
+					WithArgs("no handler for job type: unknown_job", jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "plain failure retries with exponential backoff",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
 				handlerErr := errors.New("temporary failure")
 
-				w.Register("retry_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
+				w.Register("retry_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
 					return handlerErr
 				})
 
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "retry_job", payload, 0, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				// retryJob with attempt=1 => backoff = 2^1 = 2 seconds
-				mock.ExpectExec("UPDATE jobs SET status = 'pending'").
-					WithArgs(handlerErr.Error(), "2 seconds", jobID).
+				expectClaim(mock, jobID, orgID, "retry_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'pending'").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
 		{
-			name: "failed job at max attempts is dead lettered",
+			name: "retryable failure preserves attempts",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+
 				jobID := uuid.New()
+				lockToken := uuid.New()
 				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
+				now := time.Now()
+				handlerErr := &RetryableError{Err: errors.New("capacity reached")}
+
+				w.Register("retryable_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "retryable_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "fatal failure dead-letters immediately",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &FatalError{Err: errors.New("sandbox unavailable")}
+
+				w.Register("fatal_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaim(mock, jobID, orgID, "fatal_job", json.RawMessage(`{}`), now, lockToken)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'dead_letter'").
+					WithArgs(handlerErr.Error(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "retries exhausted dead-letter the job",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
 				handlerErr := errors.New("permanent failure")
 
-				w.Register("dead_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
+				w.Register("dead_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
 					return handlerErr
 				})
 
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "dead_job", payload, 2, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
-					WithArgs(handlerErr.Error(), jobID).
+				expectClaimWithAttempts(mock, jobID, orgID, "dead_job", json.RawMessage(`{}`), now, lockToken, 3, 3)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'dead_letter'").
+					WithArgs(handlerErr.Error(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
 		{
-			name: "no handler registered fails the job",
+			name: "draining worker skips claiming new jobs",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+				w.RequestDrain()
+			},
+		},
+		{
+			name: "claimed job without fencing token is ignored",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
 				jobID := uuid.New()
 				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "unknown_job", payload, 0, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				mock.ExpectExec("UPDATE jobs SET status = 'failed'").
-					WithArgs("no handler for job type: unknown_job", jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			},
-		},
-		{
-			name: "query error rolls back gracefully",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				mock.ExpectBegin()
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnError(errors.New("database error"))
-				mock.ExpectRollback()
-			},
-		},
-		{
-			name: "lock exec error rolls back gracefully",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "some_job", payload, 0, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnError(errors.New("lock failed"))
-				mock.ExpectRollback()
-			},
-		},
-		{
-			name: "commit error rolls back gracefully",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "some_job", payload, 0, 3, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
-				mock.ExpectRollback()
-			},
-		},
-		{
-			name: "dead letter at exact boundary (attempts+1 == maxAttempts)",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-				handlerErr := errors.New("boundary failure")
-
-				w.Register("boundary_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					return handlerErr
-				})
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "boundary_job", payload, 1, 2, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
-					WithArgs(handlerErr.Error(), jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			},
-		},
-		{
-			name: "retry just below boundary (attempts+1 < maxAttempts)",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-				handlerErr := errors.New("retryable failure")
-
-				w.Register("retry_boundary_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					return handlerErr
-				})
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "retry_boundary_job", payload, 0, 2, time.Now())
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				// retryJob with attempt=1 => backoff = 2^1 = 2 seconds
-				mock.ExpectExec("UPDATE jobs SET status = 'pending'").
-					WithArgs(handlerErr.Error(), "2 seconds", jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			},
-		},
-		{
-			name: "retryable error within time limit is retried",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-				handlerErr := &RetryableError{Err: errors.New("concurrency limit")}
-
-				w.Register("retryable_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					return handlerErr
-				})
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "retryable_job", payload, 0, 3, time.Now()) // recently created — should retry
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				// Should retry (not dead-letter) since job is young
-				mock.ExpectExec("UPDATE jobs SET status = 'pending'").
-					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			},
-		},
-		{
-			name: "retryable error exceeding max duration is dead-lettered",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-				handlerErr := &RetryableError{Err: errors.New("concurrency limit")}
-
-				w.Register("old_retryable_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					return handlerErr
-				})
-
-				mock.ExpectBegin()
-				// Job created 10 minutes ago — exceeds maxRetryableDuration (8 min)
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "old_retryable_job", payload, 0, 3, time.Now().Add(-10*time.Minute))
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				// Should dead-letter since job exceeded max retryable duration
-				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
-					WithArgs(pgxmock.AnyArg(), jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			},
-		},
-		{
-			name: "fatal error dead-letters immediately without retrying",
-			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
-				t.Helper()
-				jobID := uuid.New()
-				orgID := uuid.New()
-				payload := json.RawMessage(`{}`)
-				handlerErr := &FatalError{Err: errors.New("docker daemon unreachable")}
-
-				w.Register("fatal_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
-					return handlerErr
-				})
-
-				mock.ExpectBegin()
-				rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-					AddRow(jobID, orgID, "fatal_job", payload, 0, 3, time.Now()) // attempt 0 of 3 — should still dead-letter
-				mock.ExpectQuery("SELECT .+ FROM jobs").
-					WillReturnRows(rows)
-				mock.ExpectExec("UPDATE jobs SET status = 'running'").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectCommit()
-				mock.ExpectExec("UPDATE jobs SET status = 'dead_letter'").
-					WithArgs(handlerErr.Error(), jobID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				now := time.Now()
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"dedupe_key", "created_at", "updated_at", "completed_at",
+					}).AddRow(
+						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, now, now, nil,
+					))
 			},
 		},
 	}
@@ -521,91 +217,56 @@ func TestWorker_Poll(t *testing.T) {
 
 			tt.setupMock(t, w, mock)
 
-			// poll should not panic regardless of scenario
 			require.NotPanics(t, func() {
 				w.poll(context.Background())
 			}, "poll should not panic")
-
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }
 
-// TestWorker_Poll_RunsDeadLetterHooksOnAllTerminalPaths verifies that
-// handlers can rely on jobctx.RegisterDeadLetterHook to fire exactly once
-// on every dead-letter branch (FatalError, retryable timeout, retries
-// exhausted) and to stay silent when the worker retries without
-// dead-lettering. This is the invariant that lets downstream services
-// (e.g. the agent orchestrator) defer user-visible side effects until the
-// worker actually gives up.
-func TestWorker_Poll_RunsDeadLetterHooksOnAllTerminalPaths(t *testing.T) {
+func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 	t.Parallel()
-
-	type branch int
-	const (
-		branchDeadLetter branch = iota // deadLetterJob: WithArgs(errMsg, jobID)
-		branchRetry                    // retryJob:      WithArgs(errMsg, interval, jobID)
-	)
 
 	tests := []struct {
 		name        string
 		handlerErr  func() error
+		createdAt   time.Time
 		attempts    int
 		maxAttempts int
-		createdAt   time.Time
-		branch      branch
 		finalSQL    string
-		expectFires int
+		finalArgs   int
+		expectHooks int
 	}{
 		{
-			name:        "fatal error fires hook before dead-letter",
-			handlerErr:  func() error { return &FatalError{Err: errors.New("docker daemon unreachable")} },
-			attempts:    0,
-			maxAttempts: 3,
+			name:        "fatal error fires dead-letter hook",
+			handlerErr:  func() error { return &FatalError{Err: errors.New("docker down")} },
 			createdAt:   time.Now(),
-			branch:      branchDeadLetter,
-			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
-			expectFires: 1,
+			attempts:    1,
+			maxAttempts: 3,
+			finalSQL:    "UPDATE jobs\\s+SET status = 'dead_letter'",
+			finalArgs:   3,
+			expectHooks: 1,
 		},
 		{
-			name:        "retryable timeout fires hook before dead-letter",
-			handlerErr:  func() error { return &RetryableError{Err: errors.New("concurrency limit")} },
-			attempts:    0,
-			maxAttempts: 3,
+			name:        "retryable timeout fires dead-letter hook",
+			handlerErr:  func() error { return &RetryableError{Err: errors.New("capacity reached")} },
 			createdAt:   time.Now().Add(-10 * time.Minute),
-			branch:      branchDeadLetter,
-			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
-			expectFires: 1,
+			attempts:    1,
+			maxAttempts: 3,
+			finalSQL:    "UPDATE jobs\\s+SET status = 'dead_letter'",
+			finalArgs:   3,
+			expectHooks: 1,
 		},
 		{
-			name:        "retries exhausted fires hook before dead-letter",
-			handlerErr:  func() error { return errors.New("permanent failure") },
-			attempts:    2,
-			maxAttempts: 3,
+			name:        "plain retry does not fire dead-letter hook",
+			handlerErr:  func() error { return errors.New("temporary failure") },
 			createdAt:   time.Now(),
-			branch:      branchDeadLetter,
-			finalSQL:    "UPDATE jobs SET status = 'dead_letter'",
-			expectFires: 1,
-		},
-		{
-			name:        "plain error under the retry cap does not fire hook",
-			handlerErr:  func() error { return errors.New("transient failure") },
-			attempts:    0,
+			attempts:    1,
 			maxAttempts: 3,
-			createdAt:   time.Now(),
-			branch:      branchRetry,
-			finalSQL:    "UPDATE jobs SET status = 'pending'",
-			expectFires: 0,
-		},
-		{
-			name:        "retryable error within time budget does not fire hook",
-			handlerErr:  func() error { return &RetryableError{Err: errors.New("concurrency limit")} },
-			attempts:    0,
-			maxAttempts: 3,
-			createdAt:   time.Now(),
-			branch:      branchRetry,
-			finalSQL:    "UPDATE jobs SET status = 'pending'",
-			expectFires: 0,
+			finalSQL:    "UPDATE jobs\\s+SET status = 'pending'",
+			finalArgs:   4,
+			expectHooks: 0,
 		},
 	}
 
@@ -617,48 +278,149 @@ func TestWorker_Poll_RunsDeadLetterHooksOnAllTerminalPaths(t *testing.T) {
 			defer mock.Close()
 
 			jobID := uuid.New()
+			lockToken := uuid.New()
 			orgID := uuid.New()
-			payload := json.RawMessage(`{}`)
+			var fired int
 
-			var fires int
-			var gotErr error
-			handlerErr := tt.handlerErr()
-			w.Register("hook_job", func(ctx context.Context, jobType string, p json.RawMessage) error {
+			w.Register("hook_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
 				jobctx.RegisterDeadLetterHook(ctx, func(_ context.Context, err error) {
-					fires++
-					gotErr = err
+					fired++
 				})
-				return handlerErr
+				return tt.handlerErr()
 			})
 
-			mock.ExpectBegin()
-			rows := pgxmock.NewRows([]string{"id", "org_id", "job_type", "payload", "attempts", "max_attempts", "created_at"}).
-				AddRow(jobID, orgID, "hook_job", payload, tt.attempts, tt.maxAttempts, tt.createdAt)
-			mock.ExpectQuery("SELECT .+ FROM jobs").WillReturnRows(rows)
-			mock.ExpectExec("UPDATE jobs SET status = 'running'").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			mock.ExpectCommit()
-			switch tt.branch {
-			case branchDeadLetter:
+			expectClaimWithAttempts(mock, jobID, orgID, "hook_job", json.RawMessage(`{}`), tt.createdAt, lockToken, tt.attempts, tt.maxAttempts)
+			switch tt.finalArgs {
+			case 3:
 				mock.ExpectExec(tt.finalSQL).
-					WithArgs(pgxmock.AnyArg(), jobID).
+					WithArgs(pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			case branchRetry:
+			case 4:
 				mock.ExpectExec(tt.finalSQL).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), jobID).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			}
 
 			w.poll(context.Background())
 
-			require.NoError(t, mock.ExpectationsWereMet())
-			require.Equal(t, tt.expectFires, fires, "hook fire count mismatch for %s", tt.name)
-			if tt.expectFires > 0 {
-				require.Error(t, gotErr, "hook must receive the error being recorded on the job")
-			}
+			require.Equal(t, tt.expectHooks, fired, "dead-letter hooks should fire only on terminal give-up paths")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {
+	t.Parallel()
+
+	w, mock := newTestWorker(t)
+	defer mock.Close()
+
+	w.renewInterval = 5 * time.Millisecond
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	orgID := uuid.New()
+	releaseHandler := make(chan struct{})
+
+	w.Register("slow_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+		<-ctx.Done()
+		close(releaseHandler)
+		return nil
+	})
+
+	expectClaim(mock, jobID, orgID, "slow_job", json.RawMessage(`{}`), time.Now(), lockToken)
+	mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
+		WithArgs(int(defaultLeaseDuration.Seconds()), jobID, lockToken).
+		WillReturnError(pgx.ErrNoRows)
+
+	w.poll(context.Background())
+
+	select {
+	case <-releaseHandler:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("handler should be cancelled when lease ownership is lost")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type renewLeaseStoreStub struct {
+	renewLeaseFn func(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
+}
+
+func (s *renewLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	return nil, nil
+}
+
+func (s *renewLeaseStoreStub) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+	return s.renewLeaseFn(ctx, jobID, lockToken, leaseDuration)
+}
+
+func (s *renewLeaseStoreStub) MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	return false, nil
+}
+
+func (s *renewLeaseStoreStub) MarkFailedWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return false, nil
+}
+
+func (s *renewLeaseStoreStub) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *renewLeaseStoreStub) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *renewLeaseStoreStub) DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return false, nil
+}
+
+func TestWorker_RenewLeaseLoop_CancelsAfterLeaseExpiryOnRenewErrors(t *testing.T) {
+	t.Parallel()
+
+	var renewCalls atomic.Int32
+	store := &renewLeaseStoreStub{
+		renewLeaseFn: func(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+			renewCalls.Add(1)
+			return nil, false, errors.New("database unavailable")
+		},
+	}
+	w := &Worker{
+		jobs:          store,
+		logger:        zerolog.Nop(),
+		leaseDuration: 25 * time.Millisecond,
+		renewInterval: 5 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	var lostOwnership atomic.Bool
+	done := make(chan struct{})
+	handlerCancelled := make(chan struct{}, 1)
+	initialLeaseExpiry := time.Now().Add(20 * time.Millisecond)
+
+	go w.renewLeaseLoop(ctx, jobID, lockToken, initialLeaseExpiry, &lostOwnership, func() {
+		handlerCancelled <- struct{}{}
+		cancel()
+	}, done)
+
+	select {
+	case <-handlerCancelled:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("renewLeaseLoop should cancel the handler once lease renewal has failed past expiry")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("renewLeaseLoop should stop after declaring ownership lost")
+	}
+
+	require.True(t, lostOwnership.Load(), "renewLeaseLoop should mark ownership lost after the lease window expires")
+	require.GreaterOrEqual(t, renewCalls.Load(), int32(1), "renewLeaseLoop should attempt at least one renewal before giving up")
 }
 
 func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
@@ -667,19 +429,15 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w, mock := newTestWorker(t)
 	defer mock.Close()
 
-	// Set a very short poll interval so the test doesn't hang.
 	w.pollInterval = 10 * time.Millisecond
-
-	// The poll will try to begin a transaction. We'll let it run a few times,
-	// each returning no rows, then cancel.
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
-		mock.ExpectBegin()
-		mock.ExpectQuery("SELECT .+ FROM jobs").WillReturnError(pgx.ErrNoRows)
-		mock.ExpectRollback()
+		mock.ExpectQuery("WITH next_job AS").
+			WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+			WillReturnError(pgx.ErrNoRows)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -690,17 +448,141 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 
 	select {
 	case <-done:
-		// Worker stopped as expected.
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Worker.Start did not stop after context cancellation")
+		t.Fatal("worker should stop when context is cancelled")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type terminalLeaseStoreStub struct {
+	markSucceededFn  func(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
+	markFailedFn     func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+	retryFn          func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
+	retryNoAttemptFn func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
+	deadLetterFn     func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+}
+
+func (s *terminalLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	return nil, nil
+}
+
+func (s *terminalLeaseStoreStub) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+	return nil, false, nil
+}
+
+func (s *terminalLeaseStoreStub) MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	return s.markSucceededFn(ctx, jobID, lockToken)
+}
+
+func (s *terminalLeaseStoreStub) MarkFailedWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return s.markFailedFn(ctx, jobID, lockToken, errMsg)
+}
+
+func (s *terminalLeaseStoreStub) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return s.retryFn(ctx, jobID, lockToken, errMsg, runAt)
+}
+
+func (s *terminalLeaseStoreStub) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return s.retryNoAttemptFn(ctx, jobID, lockToken, errMsg, runAt)
+}
+
+func (s *terminalLeaseStoreStub) DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return s.deadLetterFn(ctx, jobID, lockToken, errMsg)
+}
+
+func TestWorker_StateAccessors(t *testing.T) {
+	t.Parallel()
+
+	w := &Worker{}
+	require.False(t, w.IsDraining(), "IsDraining should default to false")
+	require.Equal(t, 0, w.ActiveJobCount(), "ActiveJobCount should default to zero")
+	require.Equal(t, 0, w.ActiveRunAgentCount(), "ActiveRunAgentCount should default to zero")
+
+	w.RequestDrain()
+	w.activeJobs.Add(2)
+	w.activeRunAgentJobs.Add(1)
+
+	require.True(t, w.IsDraining(), "RequestDrain should flip the drain bit")
+	require.Equal(t, 2, w.ActiveJobCount(), "ActiveJobCount should expose the current counter")
+	require.Equal(t, 1, w.ActiveRunAgentCount(), "ActiveRunAgentCount should expose the current run-agent counter")
+}
+
+func TestWorker_TerminalWriteHelpers(t *testing.T) {
+	t.Parallel()
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+
+	tests := []struct {
+		name string
+		run  func(w *Worker)
+	}{
+		{
+			name: "succeedJob tolerates errors",
+			run: func(w *Worker) {
+				w.succeedJob(context.Background(), jobID, lockToken)
+			},
+		},
+		{
+			name: "failJob tolerates lost ownership",
+			run: func(w *Worker) {
+				w.failJob(context.Background(), jobID, lockToken, "boom")
+			},
+		},
+		{
+			name: "retryJob handles schedule errors",
+			run: func(w *Worker) {
+				w.retryJob(context.Background(), jobID, lockToken, "boom", 1, false)
+			},
+		},
+		{
+			name: "retryJob handles lost ownership for preserved attempts",
+			run: func(w *Worker) {
+				w.retryJob(context.Background(), jobID, lockToken, "boom", 1, true)
+			},
+		},
+		{
+			name: "deadLetterJob tolerates lost ownership",
+			run: func(w *Worker) {
+				w.deadLetterJob(context.Background(), jobID, lockToken, "boom")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &terminalLeaseStoreStub{
+				markSucceededFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID) (bool, error) {
+					require.Equal(t, jobID, gotJobID, "succeedJob should pass the claimed job ID")
+					require.Equal(t, lockToken, gotLockToken, "succeedJob should pass the claimed fencing token")
+					return false, errors.New("write failed")
+				},
+				markFailedFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string) (bool, error) {
+					require.Equal(t, "boom", errMsg, "failJob should pass the failure message through")
+					return false, nil
+				},
+				retryFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+					require.Equal(t, "boom", errMsg, "retryJob should pass the retry error through")
+					return false, errors.New("schedule failed")
+				},
+				retryNoAttemptFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+					require.Equal(t, "boom", errMsg, "retryJob should pass the retry error through")
+					return false, nil
+				},
+				deadLetterFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string) (bool, error) {
+					require.Equal(t, "boom", errMsg, "deadLetterJob should pass the dead-letter message through")
+					return false, nil
+				},
+			}
+			w := &Worker{jobs: store, logger: zerolog.Nop()}
+			tt.run(w)
+		})
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Backoff verification (separate since it tests retryJob directly)
-// ---------------------------------------------------------------------------
-
-func TestWorker_RetryJob_BackoffCalculation(t *testing.T) {
+func TestRetryBackoff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -708,40 +590,36 @@ func TestWorker_RetryJob_BackoffCalculation(t *testing.T) {
 		attempt     int
 		expectedSec int
 	}{
-		{name: "2^0 = 1 second", attempt: 0, expectedSec: 1},
-		{name: "2^1 = 2 seconds", attempt: 1, expectedSec: 2},
-		{name: "2^2 = 4 seconds", attempt: 2, expectedSec: 4},
-		{name: "2^3 = 8 seconds", attempt: 3, expectedSec: 8},
-		{name: "2^5 = 32 seconds", attempt: 5, expectedSec: 32},
-		{name: "2^10 = 1024 seconds (cap)", attempt: 10, expectedSec: 1024},
-		{name: "attempt 11 capped at 2^10 = 1024 seconds", attempt: 11, expectedSec: 1024},
-		{name: "attempt 20 capped at 2^10 = 1024 seconds", attempt: 20, expectedSec: 1024},
+		{name: "attempt zero waits one second", attempt: 0, expectedSec: 1},
+		{name: "attempt one waits two seconds", attempt: 1, expectedSec: 2},
+		{name: "attempt two waits four seconds", attempt: 2, expectedSec: 4},
+		{name: "attempt ten is capped at 1024 seconds", attempt: 10, expectedSec: 1024},
+		{name: "attempt above ten stays capped", attempt: 20, expectedSec: 1024},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			w, mock := newTestWorker(t)
-			defer mock.Close()
-
-			jobID := uuid.New()
-			exp := tt.attempt
-			if exp > 10 {
-				exp = 10
-			}
-			expectedBackoff := time.Duration(1<<uint(exp)) * time.Second
-			require.Equal(t, tt.expectedSec, int(expectedBackoff.Seconds()), "backoff formula should produce expected seconds")
-
-			intervalStr := fmt.Sprintf("%d seconds", tt.expectedSec)
-
-			mock.ExpectExec("UPDATE jobs SET status = 'pending'").
-				WithArgs("err", intervalStr, jobID).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-			w.retryJob(context.Background(), jobID, "err", tt.attempt)
-
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			require.Equal(t, time.Duration(tt.expectedSec)*time.Second, retryBackoff(tt.attempt), "retryBackoff should follow the capped exponential schedule")
 		})
 	}
+}
+
+func expectClaim(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID) {
+	expectClaimWithAttempts(mock, jobID, orgID, jobType, payload, createdAt, lockToken, 1, 3)
+}
+
+func expectClaimWithAttempts(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int) {
+	mock.ExpectQuery("WITH next_job AS").
+		WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+			"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+			"dedupe_key", "created_at", "updated_at", "completed_at",
+		}).AddRow(
+			jobID, orgID, "default", jobType, payload, 5, "running",
+			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
+			lockToken.String(), "test-node", nil, nil, createdAt, createdAt, nil,
+		))
 }
