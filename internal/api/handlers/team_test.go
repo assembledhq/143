@@ -241,6 +241,97 @@ func TestTeamHandler_GitHubInviteStatus_FallsBackToRepositoryInstallationID(t *t
 	require.True(t, resp.Data.Connected, "repo installation id fallback should mark github invite search connected")
 }
 
+func TestTeamHandler_SetRepositoryStore(t *testing.T) {
+	t.Parallel()
+
+	h := newTeamHandler(nil, nil, nil, nil, nil)
+	repositories := &mockTeamRepositoryStore{}
+
+	h.SetRepositoryStore(repositories)
+
+	require.Same(t, repositories, h.repositories, "SetRepositoryStore should store the repository dependency")
+}
+
+func TestTeamHandler_GetGitHubInstallationID_FallbackCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	tests := []struct {
+		name         string
+		integrations teamIntegrationStore
+		repositories teamRepositoryStore
+		expected     int64
+		expectErr    bool
+	}{
+		{
+			name:         "returns zero when neither integrations nor repositories are configured",
+			integrations: nil,
+			repositories: nil,
+			expected:     0,
+		},
+		{
+			name:         "returns zero when repository fallback has no rows",
+			integrations: nil,
+			repositories: &mockTeamRepositoryStore{},
+			expected:     0,
+		},
+		{
+			name:         "returns repository fallback error",
+			integrations: nil,
+			repositories: &mockTeamRepositoryStore{
+				getAnyInstallationIDByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int64, error) {
+					require.Equal(t, orgID, gotOrgID, "repository fallback should stay org-scoped")
+					return 0, context.DeadlineExceeded
+				},
+			},
+			expectErr: true,
+		},
+		{
+			name: "falls back after integrations without installation id",
+			integrations: &mockTeamIntegrationStore{
+				listByOrgAndProviderFn: func(ctx context.Context, gotOrgID uuid.UUID, provider string) ([]models.Integration, error) {
+					require.Equal(t, orgID, gotOrgID, "integration lookup should stay org-scoped")
+					require.Equal(t, string(models.IntegrationProviderGitHub), provider, "integration lookup should target github")
+					return []models.Integration{{
+						ID:       uuid.New(),
+						OrgID:    gotOrgID,
+						Provider: models.IntegrationProviderGitHub,
+						Config:   []byte(`{}`),
+						Status:   models.IntegrationStatusActive,
+					}}, nil
+				},
+			},
+			repositories: &mockTeamRepositoryStore{
+				getAnyInstallationIDByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int64, error) {
+					require.Equal(t, orgID, gotOrgID, "repository fallback should stay org-scoped")
+					return 67890, nil
+				},
+			},
+			expected: 67890,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newTeamHandler(nil, nil, nil, nil, nil)
+			h.integrations = tt.integrations
+			h.repositories = tt.repositories
+
+			installationID, err := h.getGitHubInstallationID(context.Background(), orgID)
+			if tt.expectErr {
+				require.Error(t, err, "getGitHubInstallationID should return an error for repository fallback failures")
+				return
+			}
+			require.NoError(t, err, "getGitHubInstallationID should not return an error")
+			require.Equal(t, tt.expected, installationID, "getGitHubInstallationID should return the expected installation id")
+		})
+	}
+}
+
 func teamCtx(orgID uuid.UUID, user *models.User) context.Context {
 	ctx := context.Background()
 	ctx = middleware.WithOrgID(ctx, orgID)
