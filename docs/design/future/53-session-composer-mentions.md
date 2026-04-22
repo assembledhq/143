@@ -1,10 +1,12 @@
 # Design: Session Composer Mentions
 
-> **Status:** Proposed
+> **Status:** Implemented in v1 for file and directory references
 >
 > **Last reviewed:** 2026-04-21
 >
 > **Depends on:** [../overall.md](../overall.md), [../03-frontend.md](../03-frontend.md), [45-global-command-palette.md](45-global-command-palette.md)
+>
+> **Implementation record:** [../implemented/53-session-composer-mentions.md](../implemented/53-session-composer-mentions.md)
 
 ## Problem
 

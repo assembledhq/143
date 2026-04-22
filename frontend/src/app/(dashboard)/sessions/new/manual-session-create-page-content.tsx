@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown } from "lucide-react";
+import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -26,6 +27,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { findActiveMention, insertMentionAtCaret, removeMentionReference, syncReferencesWithMessage } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
 import {
   AGENTS,
@@ -36,7 +38,7 @@ import {
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
-import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -80,6 +82,7 @@ export function ManualSessionCreatePageContent() {
 
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [references, setReferences] = useState<SessionInputReference[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
@@ -89,6 +92,10 @@ export function ManualSessionCreatePageContent() {
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
+  const [caretPosition, setCaretPosition] = useState(0);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const [mentionDismissed, setMentionDismissed] = useState(false);
+  const previousRepoIdRef = useRef<string>("");
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
 
@@ -132,7 +139,6 @@ export function ManualSessionCreatePageContent() {
   }, [userSelectedRepoId, repositories]);
 
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
-
   const { data: branchesResponse, isLoading: branchesLoading, isError: branchesFailed } = useQuery<ListResponse<BranchInfo>>({
     queryKey: queryKeys.repositories.branches(selectedRepoId),
     queryFn: () => api.repositories.branches(selectedRepoId),
@@ -147,6 +153,21 @@ export function ManualSessionCreatePageContent() {
     if (branchByRepoId[selectedRepoId] !== undefined) return branchByRepoId[selectedRepoId];
     return selectedRepo?.default_branch ?? "";
   }, [selectedRepoId, branchByRepoId, selectedRepo]);
+
+  const activeMention = useMemo(
+    () => findActiveMention(message, caretPosition),
+    [message, caretPosition],
+  );
+  const deferredMentionQuery = useDeferredValue(activeMention?.query ?? "");
+  const mentionQueryKey = `${selectedRepoId}:${selectedBranch}:${activeMention?.start ?? -1}:${activeMention?.query ?? ""}`;
+  const { data: fileMentionsResponse, isFetching: fileMentionsLoading } = useQuery<ListResponse<SessionInputReference>>({
+    queryKey: queryKeys.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
+    queryFn: () => api.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
+    enabled: !!selectedRepoId && activeMention !== null && !mentionDismissed,
+    staleTime: 30 * 1000,
+  });
+  const fileMentions = useMemo(() => fileMentionsResponse?.data ?? [], [fileMentionsResponse]);
+  const showMentionPicker = !!selectedRepoId && activeMention !== null && !mentionDismissed;
 
   const setSelectedRepoId = (id: string) => {
     setUserSelectedRepoId(id);
@@ -186,6 +207,7 @@ export function ManualSessionCreatePageContent() {
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
+        references,
         ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
@@ -242,6 +264,71 @@ export function ManualSessionCreatePageContent() {
   useEffect(() => {
     resizeMessageInput();
   }, [message]);
+
+  useEffect(() => {
+    if (!messageInputRef.current || document.activeElement !== messageInputRef.current) {
+      return;
+    }
+    setCaretPosition(messageInputRef.current.selectionStart ?? message.length);
+  }, [message]);
+
+  useEffect(() => {
+    setMentionDismissed(false);
+    setSelectedMentionIndex(0);
+  }, [mentionQueryKey]);
+
+  useEffect(() => {
+    const previousRepoID = previousRepoIdRef.current;
+    if (!previousRepoID) {
+      previousRepoIdRef.current = selectedRepoId;
+      return;
+    }
+    if (previousRepoID === selectedRepoId) {
+      return;
+    }
+    previousRepoIdRef.current = selectedRepoId;
+    setMessage((previous) => references.reduce((next, reference) => removeMentionReference(next, reference), previous));
+    setReferences([]);
+  }, [references, selectedRepoId]);
+
+  function updateMessage(nextMessage: string, nextCaret: number) {
+    setMessage(nextMessage);
+    setReferences((previous) => syncReferencesWithMessage(nextMessage, previous));
+    setCaretPosition(nextCaret);
+  }
+
+  function applyMention(reference: SessionInputReference) {
+    if (!activeMention || !messageInputRef.current) {
+      return;
+    }
+
+    const inserted = insertMentionAtCaret(message, activeMention, reference);
+    setMessage(inserted.text);
+    setReferences((previous) => {
+      const existing = previous.find((item) => (item.token ?? item.display) === (reference.token ?? reference.display));
+      if (existing) {
+        return syncReferencesWithMessage(inserted.text, previous);
+      }
+      return syncReferencesWithMessage(inserted.text, [...previous, reference]);
+    });
+    setCaretPosition(inserted.caret);
+    setMentionDismissed(false);
+
+    requestAnimationFrame(() => {
+      if (!messageInputRef.current) {
+        return;
+      }
+      messageInputRef.current.focus();
+      messageInputRef.current.setSelectionRange(inserted.caret, inserted.caret);
+    });
+  }
+
+  function removeReference(reference: SessionInputReference) {
+    const nextMessage = removeMentionReference(message, reference);
+    setMessage(nextMessage);
+    setReferences((previous) => previous.filter((item) => (item.token ?? item.display) !== (reference.token ?? reference.display)));
+    setCaretPosition(nextMessage.length);
+  }
 
   async function onUploadChange(event: React.ChangeEvent<HTMLInputElement>) {
     const fileList = event.target.files;
@@ -368,10 +455,35 @@ export function ManualSessionCreatePageContent() {
               ref={messageInputRef}
               value={message}
               onChange={(event) => {
-                setMessage(event.target.value);
+                updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
                 resizeMessageInput();
               }}
+              onClick={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+              onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
+              onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
               onKeyDown={(event) => {
+                if (showMentionPicker && fileMentions.length > 0) {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    applyMention(fileMentions[selectedMentionIndex]);
+                    return;
+                  }
+                }
+                if (showMentionPicker && event.key === "Escape") {
+                  event.preventDefault();
+                  setMentionDismissed(true);
+                  return;
+                }
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   submitManualSession();
@@ -383,6 +495,64 @@ export function ManualSessionCreatePageContent() {
               className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
               aria-label="Manual session prompt"
             />
+
+            {showMentionPicker && (
+              <Card className="mb-3 overflow-hidden border-border/70 shadow-sm">
+                <CardContent className="p-2">
+                  <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                    Files and directories
+                  </div>
+                  {fileMentionsLoading && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
+                  )}
+                  {!fileMentionsLoading && fileMentions.length === 0 && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
+                  )}
+                  {!fileMentionsLoading && fileMentions.length > 0 && (
+                    <div className="space-y-1">
+                      {fileMentions.map((reference, index) => (
+                        <Button
+                          key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                          type="button"
+                          variant="ghost"
+                          className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => applyMention(reference)}
+                        >
+                          {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
+                          <span className="truncate text-xs">{reference.display}</span>
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {references.length > 0 && (
+              <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
+                {references.map((reference) => (
+                  <Badge
+                    key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                    variant="secondary"
+                    className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
+                  >
+                    {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+                    <span className="max-w-[18rem] truncate">{reference.display}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 rounded-full"
+                      aria-label={`Remove ${reference.display}`}
+                      onClick={() => removeReference(reference)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </Badge>
+                ))}
+              </div>
+            )}
 
             <PendingAttachmentStrip
               attachments={attachments}
