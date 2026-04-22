@@ -477,14 +477,31 @@ interface ChatTimelineProps {
   onDiffClick?: () => void;
   onApprovePlan?: () => void;
   onAdjustPlan?: () => void;
+  getEntryContainerProps?: (
+    entry: TimelineEntry,
+    index: number,
+  ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan }: ChatTimelineProps) {
+export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
   let hiddenBatch: SessionLog[] = [];
   let lastDay: string | null = null;
+
+  function wrapEntry(node: React.ReactNode, entry: TimelineEntry, index: number, key: string) {
+    const props = getEntryContainerProps?.(entry, index);
+    if (!props) {
+      return node;
+    }
+
+    return (
+      <div key={`anchor-${key}`} {...props}>
+        {node}
+      </div>
+    );
+  }
 
   function flushHidden() {
     if (hiddenBatch.length > 0) {
@@ -504,7 +521,7 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
     rendered.push(<DaySeparator key={`day-${day}`} dateStr={dateStr} />);
   }
 
-  for (const entry of entries) {
+  for (const [index, entry] of entries.entries()) {
     if (entry.kind === "log") {
       hiddenBatch.push(entry.data);
       continue;
@@ -518,55 +535,89 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
 
     switch (entry.kind) {
       case "message":
-        rendered.push(<MessageBubble key={`msg-${entry.data.id}`} msg={entry.data} />);
+        rendered.push(
+          wrapEntry(
+            <MessageBubble key={`msg-${entry.data.id}`} msg={entry.data} />,
+            entry,
+            index,
+            `msg-${entry.data.id}`,
+          ),
+        );
         break;
       case "assistant_output":
         rendered.push(
-          <AssistantBubble key={`aout-${entry.data.id}`}>
-            <MarkdownContent content={entry.data.message} />
-          </AssistantBubble>
+          wrapEntry(
+            <AssistantBubble key={`aout-${entry.data.id}`}>
+              <MarkdownContent content={entry.data.message} />
+            </AssistantBubble>,
+            entry,
+            index,
+            `aout-${entry.data.id}`,
+          ),
         );
         break;
       case "plan_output":
         rendered.push(
-          <PlanOutputBubble
-            key={`plan-${entry.data.id}`}
-            onApprove={onApprovePlan}
-            onAdjust={onAdjustPlan}
-            isRunning={isRunning}
-          >
-            <MarkdownContent content={entry.data.message} />
-          </PlanOutputBubble>
+          wrapEntry(
+            <PlanOutputBubble
+              key={`plan-${entry.data.id}`}
+              onApprove={onApprovePlan}
+              onAdjust={onAdjustPlan}
+              isRunning={isRunning}
+            >
+              <MarkdownContent content={entry.data.message} />
+            </PlanOutputBubble>,
+            entry,
+            index,
+            `plan-${entry.data.id}`,
+          ),
         );
         break;
       case "plan_message":
         rendered.push(
-          <PlanOutputBubble
-            key={`planmsg-${entry.data.id}`}
-            onApprove={onApprovePlan}
-            onAdjust={onAdjustPlan}
-            isRunning={isRunning}
-          >
-            <MarkdownContent content={entry.data.content} />
-            <TimestampLabel
-              dateStr={entry.data.created_at}
-              formatter={formatMessageTime}
-              className="block text-xs mt-1 text-muted-foreground"
-            />
-          </PlanOutputBubble>
+          wrapEntry(
+            <PlanOutputBubble
+              key={`planmsg-${entry.data.id}`}
+              onApprove={onApprovePlan}
+              onAdjust={onAdjustPlan}
+              isRunning={isRunning}
+            >
+              <MarkdownContent content={entry.data.content} />
+              <TimestampLabel
+                dateStr={entry.data.created_at}
+                formatter={formatMessageTime}
+                className="block text-xs mt-1 text-muted-foreground"
+              />
+            </PlanOutputBubble>,
+            entry,
+            index,
+            `planmsg-${entry.data.id}`,
+          ),
         );
         break;
       case "tool_group":
         rendered.push(
-          <ToolGroupEntry
-            key={`tool-${entry.toolUse.id}`}
-            toolUse={entry.toolUse}
-            toolResult={entry.toolResult}
-          />
+          wrapEntry(
+            <ToolGroupEntry
+              key={`tool-${entry.toolUse.id}`}
+              toolUse={entry.toolUse}
+              toolResult={entry.toolResult}
+            />,
+            entry,
+            index,
+            `tool-${entry.toolUse.id}`,
+          ),
         );
         break;
       case "error":
-        rendered.push(<ErrorEntry key={`err-${entry.data.id}`} log={entry.data} />);
+        rendered.push(
+          wrapEntry(
+            <ErrorEntry key={`err-${entry.data.id}`} log={entry.data} />,
+            entry,
+            index,
+            `err-${entry.data.id}`,
+          ),
+        );
         break;
     }
   }
