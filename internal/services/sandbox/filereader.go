@@ -34,6 +34,17 @@ type FileLine struct {
 	Content string `json:"content"`
 }
 
+// FileContextResult is a directional file-context window plus metadata that
+// lets the caller know whether more lines exist above or below it.
+type FileContextResult struct {
+	Lines        []FileLine `json:"lines"`
+	StartLine    int        `json:"start_line"`
+	EndLine      int        `json:"end_line"`
+	HasMoreAbove bool       `json:"has_more_above"`
+	HasMoreBelow bool       `json:"has_more_below"`
+	TotalLines   int        `json:"total_lines"`
+}
+
 // FileReader reads files and directories from a sandbox environment.
 type FileReader interface {
 	// ListDir returns the entries in a directory inside the sandbox.
@@ -43,8 +54,9 @@ type FileReader interface {
 	// The bool return indicates whether the content was truncated.
 	ReadFile(ctx context.Context, containerID, workDir, filePath string) (string, bool, error)
 
-	// ReadFileContext returns a slice of lines around a specific line number.
-	ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) ([]FileLine, error)
+	// ReadFileContext returns a slice of lines around a specific line number plus
+	// enough metadata for directional expansion in the diff UI.
+	ReadFileContext(ctx context.Context, containerID, workDir, filePath string, line, above, below int) (FileContextResult, error)
 }
 
 // NoOpFileReader is a FileReader used when Docker is unavailable so callers
@@ -62,6 +74,6 @@ func (NoOpFileReader) ReadFile(_ context.Context, _, _, _ string) (string, bool,
 	return "", false, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
 }
 
-func (NoOpFileReader) ReadFileContext(_ context.Context, _, _, _ string, _, _, _ int) ([]FileLine, error) {
-	return nil, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
+func (NoOpFileReader) ReadFileContext(_ context.Context, _, _, _ string, _, _, _ int) (FileContextResult, error) {
+	return FileContextResult{}, fmt.Errorf("sandbox file browsing is not available: %w", ErrFileNotFound)
 }

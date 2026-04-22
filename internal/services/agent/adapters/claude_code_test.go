@@ -1105,35 +1105,55 @@ func TestCollectDiff(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		isGitRepo    bool // whether git rev-parse returns 0
-		diffStdout   string
-		diffExitCode int
-		execErr      error
-		wantDiff     string
-		wantErr      bool
+		name              string
+		isGitRepo         bool // whether git rev-parse returns 0
+		baseCommitSHA     string
+		diffStdout        string
+		diffExitCode      int
+		untrackedStdout   string
+		untrackedDiffs    map[string]string
+		untrackedExitCode int
+		execErr           error
+		wantDiff          string
+		wantErr           bool
 	}{
 		{
-			name:       "successful diff",
-			isGitRepo:  true,
-			diffStdout: "diff --git a/f.go b/f.go\n+fixed\n",
-			wantDiff:   "diff --git a/f.go b/f.go\n+fixed\n",
+			name:          "successful diff uses immutable base commit",
+			isGitRepo:     true,
+			baseCommitSHA: "abc123",
+			diffStdout:    "diff --git a/f.go b/f.go\n+fixed\n",
+			wantDiff:      "diff --git a/f.go b/f.go\n+fixed\n",
 		},
 		{
-			name:         "non-zero diff exit code",
-			isGitRepo:    true,
-			diffExitCode: 1,
-			wantErr:      true,
+			name:            "includes untracked files as synthetic additions",
+			isGitRepo:       true,
+			baseCommitSHA:   "abc123",
+			diffStdout:      "diff --git a/f.go b/f.go\n+fixed\n",
+			untrackedStdout: "new.txt\n",
+			untrackedDiffs: map[string]string{
+				"new.txt": "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+			},
+			untrackedExitCode: 1,
+			wantDiff:          "diff --git a/f.go b/f.go\n+fixed\ndiff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
 		},
 		{
-			name:    "exec error on rev-parse",
-			execErr: context.DeadlineExceeded,
-			wantErr: true,
+			name:          "non-zero diff exit code",
+			isGitRepo:     true,
+			baseCommitSHA: "abc123",
+			diffExitCode:  1,
+			wantErr:       true,
 		},
 		{
-			name:      "not a git repo returns empty diff",
-			isGitRepo: false,
-			wantDiff:  "",
+			name:          "exec error on rev-parse",
+			baseCommitSHA: "abc123",
+			execErr:       context.DeadlineExceeded,
+			wantErr:       true,
+		},
+		{
+			name:          "not a git repo returns empty diff",
+			baseCommitSHA: "abc123",
+			isGitRepo:     false,
+			wantDiff:      "",
 		},
 	}
 
@@ -1153,21 +1173,41 @@ func TestCollectDiff(t *testing.T) {
 					_, _ = stderr.Write([]byte("fatal: not a git repository\n"))
 					return 128, nil
 				}
-				if strings.HasPrefix(cmd, "git diff") {
+				if strings.HasPrefix(cmd, "git diff --find-renames --binary --no-index") {
+					for filePath, diff := range tt.untrackedDiffs {
+						if strings.Contains(cmd, filePath) {
+							_, _ = stdout.Write([]byte(diff))
+							return tt.untrackedExitCode, nil
+						}
+					}
+					return tt.untrackedExitCode, nil
+				}
+				if strings.HasPrefix(cmd, "git diff --find-renames --binary") {
 					_, _ = stdout.Write([]byte(tt.diffStdout))
 					return tt.diffExitCode, nil
+				}
+				if strings.HasPrefix(cmd, "git ls-files --others --exclude-standard") {
+					_, _ = stdout.Write([]byte(tt.untrackedStdout))
+					return 0, nil
 				}
 				return 0, nil
 			}
 
-			sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+			sandbox := &agent.Sandbox{
+				ID:      "test",
+				WorkDir: "/workspace",
+				HomeDir: "/home/sandbox",
+				Metadata: map[string]string{
+					"base_commit_sha": tt.baseCommitSHA,
+				},
+			}
 			diff, err := collectDiff(context.Background(), provider, sandbox)
 			if tt.wantErr {
-				require.Error(t, err)
+				require.Error(t, err, "collectDiff should return an error")
 				return
 			}
-			require.NoError(t, err)
-			require.Equal(t, tt.wantDiff, diff)
+			require.NoError(t, err, "collectDiff should not return an error")
+			require.Equal(t, tt.wantDiff, diff, "collectDiff should return the expected authoritative diff")
 		})
 	}
 }

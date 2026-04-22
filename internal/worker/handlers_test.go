@@ -34,8 +34,8 @@ var workerSessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
-	"target_branch", "working_branch", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
 func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
@@ -94,8 +94,8 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
-		nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, now,
+		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
 	}
 }
 
@@ -540,8 +540,8 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, nil, nil, nil, nil,
 		nil, nil,
 		nil, 0, now, "snapshotted", snapshotKey,
-		nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "queued", (*string)(nil), nil, now,
+		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
 	}
 }
 
