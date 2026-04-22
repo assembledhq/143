@@ -182,6 +182,12 @@ export function PreviewPanel({
         );
         return;
       }
+      if (code === PREVIEW_ERROR_CODES.SNAPSHOT_UNAVAILABLE) {
+        setMutationError(
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
+        );
+        return;
+      }
       if (code === PREVIEW_ERROR_CODES.NO_SANDBOX) {
         setMutationError(
           "Preview is unavailable on this server (Docker not configured). Contact an admin."

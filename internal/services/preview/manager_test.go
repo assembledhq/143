@@ -1389,9 +1389,10 @@ func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
 				AddRow(sessionID, "container-1", false),
 		)
 
-	// FinalizeContainerDestroy CAS: clears container_id + snapshotted state
-	// atomically. Matches one row since no new holder is present.
-	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL, sandbox_state = 'snapshotted'").
+	// FinalizeContainerDestroy CAS: clears container_id and derives
+	// sandbox_state from snapshot_key atomically. Matches one row since no new
+	// holder is present.
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+sandbox_state = CASE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -2152,7 +2153,7 @@ func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T)
 		)
 
 	// FinalizeContainerDestroy CAS succeeds (cleared=true).
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL, sandbox_state = 'snapshotted'`).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
