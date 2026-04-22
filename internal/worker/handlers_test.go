@@ -1893,6 +1893,38 @@ func TestRunAgentHandler_RunningSessionUsesRecoveryPath(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, string(models.SessionStatusPending), 0, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return errors.New("execute failed")
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent should propagate orchestrator failures")
+	require.Contains(t, err.Error(), "execute failed", "run_agent should preserve the orchestrator error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // ---------------------------------------------------------------------------
 // parseOrgID additional tests
 // ---------------------------------------------------------------------------

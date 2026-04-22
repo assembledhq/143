@@ -17,13 +17,14 @@ type NodeManager struct {
 	nodeID string
 	mode   string
 
-	mu               sync.RWMutex
-	draining         bool
-	metadataProvider func() map[string]any
+	mu                sync.RWMutex
+	draining          bool
+	heartbeatInterval time.Duration
+	metadataProvider  func() map[string]any
 }
 
 func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode string) *NodeManager {
-	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode}
+	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode, heartbeatInterval: 30 * time.Second}
 }
 
 func (n *NodeManager) Register(ctx context.Context, host string) error {
@@ -47,7 +48,11 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 }
 
 func (n *NodeManager) StartHeartbeat(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := n.heartbeatInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

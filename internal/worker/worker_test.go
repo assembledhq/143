@@ -185,6 +185,27 @@ func TestWorker_Poll(t *testing.T) {
 				w.RequestDrain()
 			},
 		},
+		{
+			name: "claimed job without fencing token is ignored",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				mock.ExpectQuery("WITH next_job AS").
+					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+						"lease_expires_at", "lock_token", "run_owner_id", "last_error",
+						"dedupe_key", "created_at", "updated_at", "completed_at",
+					}).AddRow(
+						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", nil, nil, now, now, nil,
+					))
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -431,6 +452,134 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 		t.Fatal("worker should stop when context is cancelled")
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type terminalLeaseStoreStub struct {
+	markSucceededFn  func(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
+	markFailedFn     func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+	retryFn          func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
+	retryNoAttemptFn func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
+	deadLetterFn     func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
+}
+
+func (s *terminalLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	return nil, nil
+}
+
+func (s *terminalLeaseStoreStub) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+	return nil, false, nil
+}
+
+func (s *terminalLeaseStoreStub) MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	return s.markSucceededFn(ctx, jobID, lockToken)
+}
+
+func (s *terminalLeaseStoreStub) MarkFailedWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return s.markFailedFn(ctx, jobID, lockToken, errMsg)
+}
+
+func (s *terminalLeaseStoreStub) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return s.retryFn(ctx, jobID, lockToken, errMsg, runAt)
+}
+
+func (s *terminalLeaseStoreStub) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	return s.retryNoAttemptFn(ctx, jobID, lockToken, errMsg, runAt)
+}
+
+func (s *terminalLeaseStoreStub) DeadLetterWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error) {
+	return s.deadLetterFn(ctx, jobID, lockToken, errMsg)
+}
+
+func TestWorker_StateAccessors(t *testing.T) {
+	t.Parallel()
+
+	w := &Worker{}
+	require.False(t, w.IsDraining(), "IsDraining should default to false")
+	require.Equal(t, 0, w.ActiveJobCount(), "ActiveJobCount should default to zero")
+	require.Equal(t, 0, w.ActiveRunAgentCount(), "ActiveRunAgentCount should default to zero")
+
+	w.RequestDrain()
+	w.activeJobs.Add(2)
+	w.activeRunAgentJobs.Add(1)
+
+	require.True(t, w.IsDraining(), "RequestDrain should flip the drain bit")
+	require.Equal(t, 2, w.ActiveJobCount(), "ActiveJobCount should expose the current counter")
+	require.Equal(t, 1, w.ActiveRunAgentCount(), "ActiveRunAgentCount should expose the current run-agent counter")
+}
+
+func TestWorker_TerminalWriteHelpers(t *testing.T) {
+	t.Parallel()
+
+	jobID := uuid.New()
+	lockToken := uuid.New()
+
+	tests := []struct {
+		name string
+		run  func(w *Worker)
+	}{
+		{
+			name: "succeedJob tolerates errors",
+			run: func(w *Worker) {
+				w.succeedJob(context.Background(), jobID, lockToken)
+			},
+		},
+		{
+			name: "failJob tolerates lost ownership",
+			run: func(w *Worker) {
+				w.failJob(context.Background(), jobID, lockToken, "boom")
+			},
+		},
+		{
+			name: "retryJob handles schedule errors",
+			run: func(w *Worker) {
+				w.retryJob(context.Background(), jobID, lockToken, "boom", 1, false)
+			},
+		},
+		{
+			name: "retryJob handles lost ownership for preserved attempts",
+			run: func(w *Worker) {
+				w.retryJob(context.Background(), jobID, lockToken, "boom", 1, true)
+			},
+		},
+		{
+			name: "deadLetterJob tolerates lost ownership",
+			run: func(w *Worker) {
+				w.deadLetterJob(context.Background(), jobID, lockToken, "boom")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &terminalLeaseStoreStub{
+				markSucceededFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID) (bool, error) {
+					require.Equal(t, jobID, gotJobID, "succeedJob should pass the claimed job ID")
+					require.Equal(t, lockToken, gotLockToken, "succeedJob should pass the claimed fencing token")
+					return false, errors.New("write failed")
+				},
+				markFailedFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string) (bool, error) {
+					require.Equal(t, "boom", errMsg, "failJob should pass the failure message through")
+					return false, nil
+				},
+				retryFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+					require.Equal(t, "boom", errMsg, "retryJob should pass the retry error through")
+					return false, errors.New("schedule failed")
+				},
+				retryNoAttemptFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+					require.Equal(t, "boom", errMsg, "retryJob should pass the retry error through")
+					return false, nil
+				},
+				deadLetterFn: func(ctx context.Context, gotJobID, gotLockToken uuid.UUID, errMsg string) (bool, error) {
+					require.Equal(t, "boom", errMsg, "deadLetterJob should pass the dead-letter message through")
+					return false, nil
+				},
+			}
+			w := &Worker{jobs: store, logger: zerolog.Nop()}
+			tt.run(w)
+		})
+	}
 }
 
 func TestRetryBackoff(t *testing.T) {

@@ -96,3 +96,41 @@ func TestRecoveryLoop_RunOnce(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryLoop_Start_StopsOnCancelAfterTick(t *testing.T) {
+	t.Parallel()
+
+	ticked := make(chan struct{}, 1)
+	nodes := &recoveryNodeStoreStub{
+		markDeadFn: func(ctx context.Context, staleBefore time.Time) (int64, error) {
+			ticked <- struct{}{}
+			return 1, nil
+		},
+	}
+	jobs := &recoveryJobStoreStub{
+		reclaimFn: func(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
+			return 1, nil
+		},
+	}
+
+	loop := NewRecoveryLoop(nodes, jobs, zerolog.Nop(), 90*time.Second, 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		loop.Start(ctx, 5*time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-ticked:
+		cancel()
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Start should execute runOnce on the configured interval")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Start should return after the context is cancelled")
+	}
+}
