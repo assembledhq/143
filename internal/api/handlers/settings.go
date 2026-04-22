@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -105,6 +106,18 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 			return
 		}
+	}
+	if req.Name != nil {
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
+			writeError(w, r, http.StatusBadRequest, "MISSING_NAME", "Name is required.")
+			return
+		}
+		if len([]rune(trimmed)) > maxOrgNameLen {
+			writeError(w, r, http.StatusBadRequest, "NAME_TOO_LONG", "Name must be 120 characters or fewer.")
+			return
+		}
+		req.Name = &trimmed
 	}
 
 	org, err := h.orgStore.GetByID(r.Context(), orgID)
