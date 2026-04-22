@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
+import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { ProjectSidebar } from './project-sidebar';
 import type { Project, ListResponse } from '@/lib/types';
@@ -20,6 +21,10 @@ vi.mock('next/navigation', () => ({
   useParams: () => ({}),
 }));
 
+vi.mock('@/hooks/use-auth', () => ({
+  useAuth: () => ({ isAuthenticated: true, user: { id: 'user-1' }, isLoading: false, logout: vi.fn() }),
+}));
+
 describe('ProjectSidebar', () => {
   beforeEach(() => {
     mockPathname = '/projects';
@@ -34,6 +39,48 @@ describe('ProjectSidebar', () => {
     renderWithProviders(<ProjectSidebar />);
     expect(await screen.findByText('Test Project')).toBeInTheDocument();
     expect(screen.getByText('Security Sweep')).toBeInTheDocument();
+  });
+
+  it('defaults the owner scope to Mine', async () => {
+    let capturedCreatedBy: string | null = null;
+    server.use(
+      http.get('*/api/v1/projects', ({ request }) => {
+        capturedCreatedBy = new URL(request.url).searchParams.get('created_by');
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
+      }),
+    );
+
+    renderWithProviders(<ProjectSidebar />);
+
+    await screen.findByRole('radio', { name: 'Mine' });
+    expect(capturedCreatedBy).toBe('user-1');
+  });
+
+  it('switches the owner scope to Everyone', async () => {
+    const createdByValues: string[] = [];
+    server.use(
+      http.get('*/api/v1/projects', ({ request }) => {
+        createdByValues.push(new URL(request.url).searchParams.get('created_by') ?? '');
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<Project>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<ProjectSidebar />);
+
+    await screen.findByRole('radio', { name: 'Mine' });
+    await user.click(screen.getByRole('radio', { name: 'Everyone' }));
+
+    expect(createdByValues).toContain('user-1');
+    expect(createdByValues).toContain('');
+  });
+
+  it('shows the owner scope toggle', async () => {
+    renderWithProviders(<ProjectSidebar />);
+    await screen.findByText('Test Project');
+
+    expect(screen.getByRole('radio', { name: 'Everyone' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Mine' })).toBeInTheDocument();
   });
 
   it('displays New project link at top', () => {

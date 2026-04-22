@@ -518,7 +518,7 @@ export const api = {
       ),
   },
   projects: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -526,6 +526,7 @@ export const api = {
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.search) searchParams.set('search', params.search);
       if (params?.proposed_by_pm !== undefined) searchParams.set('proposed_by_pm', String(params.proposed_by_pm));
+      if (params?.created_by) searchParams.set('created_by', params.created_by);
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').Project>>(`/api/v1/projects${qs ? `?${qs}` : ''}`);
     },

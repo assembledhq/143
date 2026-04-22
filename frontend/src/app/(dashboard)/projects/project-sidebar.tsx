@@ -6,10 +6,14 @@ import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
+import { OwnerScopeToggle } from "@/components/owner-scope-toggle";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { useProjectUserFilter } from "@/hooks/use-project-user-filter";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
 const filterTabs = [
@@ -32,13 +36,14 @@ export function ProjectSidebar() {
   const params = useParams();
   const pathname = usePathname();
   const selectedId = params?.id as string | undefined;
+  const { currentUserFilter, createdByUserId, setUserFilter } = useProjectUserFilter();
   const [search, setSearch] = useState("");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
 
   const { data, isLoading } = useQuery({
-    queryKey: ["projects", activeFilter, repo],
-    queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined }),
+    queryKey: ["projects", activeFilter, repo, currentUserFilter, createdByUserId],
+    queryFn: () => api.projects.list({ limit: 50, repository_id: repo ?? undefined, created_by: createdByUserId }),
     refetchInterval: 10000,
   });
 
@@ -71,27 +76,30 @@ export function ProjectSidebar() {
     <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-3">
-
-        {/* Search */}
-        <div className="relative">
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
-          <input
-            type="text"
+          <Input
             placeholder="Search projects..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-8 pl-8 pr-3 rounded-md border border-border bg-background text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+            className="h-8 pl-8 text-xs"
+          />
+        </div>
+          <OwnerScopeToggle
+            currentUserFilter={currentUserFilter}
+            onFilterChange={setUserFilter}
+            className="shrink-0"
           />
         </div>
 
         {/* New project button */}
-        <Link
-          href="/projects/new"
-          className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
-        >
-          <Plus className="h-4 w-4" />
-          New project
-        </Link>
+        <Button asChild variant="outline" className="w-full gap-2 bg-background text-xs shadow-sm">
+          <Link href="/projects/new">
+            <Plus className="h-4 w-4" />
+            New project
+          </Link>
+        </Button>
 
         {/* Filter tabs */}
         <Tabs

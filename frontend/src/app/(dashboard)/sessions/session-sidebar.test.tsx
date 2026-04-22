@@ -76,6 +76,21 @@ describe('SessionSidebar', () => {
     mockOptimisticSessions.length = 0;
   });
 
+  it('defaults the owner scope to Mine', async () => {
+    let capturedUserId: string | null = null;
+    server.use(
+      http.get('/api/v1/sessions', ({ request }) => {
+        capturedUserId = new URL(request.url).searchParams.get('triggered_by_user_id');
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByRole('radio', { name: 'Mine' });
+    expect(capturedUserId).toBe('user-1');
+  });
+
   // -----------------------------------------------------------------------
   // Search filtering
   // -----------------------------------------------------------------------
