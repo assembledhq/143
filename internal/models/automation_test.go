@@ -65,6 +65,32 @@ func TestValidateCronExpression(t *testing.T) {
 	}
 }
 
+func TestValidateIntervalRunAt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     string
+		expectErr bool
+	}{
+		{name: "valid five minute boundary", input: "09:35"},
+		{name: "invalid format", input: "9:35", expectErr: true},
+		{name: "invalid minute step", input: "09:37", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateIntervalRunAt(tt.input)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestNextCronRunTime(t *testing.T) {
 	t.Parallel()
 
@@ -103,6 +129,12 @@ func TestComputeNextRunAt(t *testing.T) {
 	got, err := interval.ComputeNextRunAt(from)
 	require.NoError(t, err)
 	require.Equal(t, from.Add(6*time.Hour), got)
+
+	runAt := "11:15"
+	interval.IntervalRunAt = &runAt
+	got, err = interval.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.Equal(t, time.Date(2026, 4, 17, 14, 15, 0, 0, time.UTC), got)
 
 	// Interval with missing companion fields is rejected (corrupt row).
 	bad := Automation{ScheduleType: AutomationScheduleInterval}

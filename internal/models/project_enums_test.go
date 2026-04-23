@@ -124,6 +124,53 @@ func TestNextRunTime(t *testing.T) {
 	}
 }
 
+func TestNextRunTimeAt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		from     time.Time
+		interval int
+		unit     string
+		runAt    string
+		expected time.Time
+	}{
+		{
+			name:     "hourly aligns minute",
+			from:     time.Date(2026, 3, 10, 8, 50, 0, 0, time.UTC),
+			interval: 3,
+			unit:     "hours",
+			runAt:    "11:15",
+			expected: time.Date(2026, 3, 10, 12, 15, 0, 0, time.UTC),
+		},
+		{
+			name:     "daily uses exact time",
+			from:     time.Date(2026, 3, 10, 21, 50, 0, 0, time.UTC),
+			interval: 1,
+			unit:     "days",
+			runAt:    "09:35",
+			expected: time.Date(2026, 3, 12, 9, 35, 0, 0, time.UTC),
+		},
+		{
+			name:     "weekly rolls one more day when base is later",
+			from:     time.Date(2026, 3, 10, 10, 10, 0, 0, time.UTC),
+			interval: 1,
+			unit:     "weeks",
+			runAt:    "09:00",
+			expected: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := NextRunTimeAt(tt.from, tt.interval, tt.unit, tt.runAt)
+			require.NoError(t, err, "NextRunTimeAt should parse runAt and compute the next aligned time")
+			require.Equal(t, tt.expected, got, "NextRunTimeAt should return the expected aligned timestamp")
+		})
+	}
+}
+
 func TestProjectTaskStatus_Validate(t *testing.T) {
 	t.Parallel()
 

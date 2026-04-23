@@ -45,7 +45,7 @@ func automationTestColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"agent_type", "model_override", "execution_mode", "max_concurrent", "base_branch",
-		"schedule_type", "interval_value", "interval_unit", "cron_expression", "timezone",
+		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
 	}
@@ -71,7 +71,7 @@ func newAutomationRow(mock pgxmock.PgxPoolIface, a models.Automation) *pgxmock.R
 	return pgxmock.NewRows(automationTestColumns()).AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.AgentType, a.ModelOverride, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
-		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.CronExpression, a.Timezone,
+		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
@@ -272,7 +272,7 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(19)...).
+		WithArgs(testAnyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -449,7 +449,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -502,7 +502,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(21)...).
+			WithArgs(testAnyArgs(22)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -538,7 +538,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(21)...).
+			WithArgs(testAnyArgs(22)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -709,7 +709,7 @@ func TestAutomationHandler_Pause_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -767,7 +767,7 @@ func TestAutomationHandler_Resume_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(21)...).
+		WithArgs(testAnyArgs(22)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1037,13 +1037,13 @@ func TestAutomationHandler_Bulk_PauseOK(t *testing.T) {
 
 	// BulkUpdateEnabled wraps the UPDATE in a tx so cron rows can be fixed up
 	// in the same atomic step. The UPDATE's RETURNING is narrowed to only the
-	// fields ComputeNextRunAt needs (schedule_type / cron_expression /
+	// fields ComputeNextRunAt needs (schedule_type / interval* / cron /
 	// timezone) plus id — mirror that here.
 	a1 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
 	a2 := models.Automation{ID: uuid.New(), ScheduleType: "interval", Timezone: "UTC"}
-	pauseRows := pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
-		AddRow(a1.ID, a1.ScheduleType, a1.CronExpression, a1.Timezone).
-		AddRow(a2.ID, a2.ScheduleType, a2.CronExpression, a2.Timezone)
+	pauseRows := pgxmock.NewRows([]string{"id", "schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone"}).
+		AddRow(a1.ID, a1.ScheduleType, a1.IntervalValue, a1.IntervalUnit, a1.IntervalRunAt, a1.CronExpression, a1.Timezone).
+		AddRow(a2.ID, a2.ScheduleType, a2.IntervalValue, a2.IntervalUnit, a2.IntervalRunAt, a2.CronExpression, a2.Timezone)
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
@@ -1113,15 +1113,15 @@ func TestAutomationHandler_Bulk_ResumeCronFixupFailure(t *testing.T) {
 	automationID := uuid.New()
 	brokenCron := "this is not a cron expression"
 
-	// BulkUpdateEnabled's UPDATE ... RETURNING returns only the four columns
+	// BulkUpdateEnabled's UPDATE ... RETURNING returns only the schedule columns
 	// the post-update cron-fixup pass needs. Match that narrow projection so
 	// the handler test reflects the real store contract.
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE automations SET").
 		WithArgs(testAnyArgs(5)...).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "schedule_type", "cron_expression", "timezone"}).
-				AddRow(automationID, "cron", &brokenCron, "UTC"),
+			pgxmock.NewRows([]string{"id", "schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone"}).
+				AddRow(automationID, "cron", nil, nil, nil, &brokenCron, "UTC"),
 		)
 	mock.ExpectCommit()
 

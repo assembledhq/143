@@ -27,6 +27,9 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 		if a.IntervalUnit != nil {
 			snap["interval_unit"] = *a.IntervalUnit
 		}
+		if a.IntervalRunAt != nil {
+			snap["interval_run_at"] = *a.IntervalRunAt
+		}
 	case models.AutomationScheduleCron:
 		if a.CronExpression != nil {
 			snap["cron_expression"] = *a.CronExpression
@@ -66,6 +69,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
 	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
 	track("interval_unit", optString(old.IntervalUnit), optString(new_.IntervalUnit))
+	track("interval_run_at", optString(old.IntervalRunAt), optString(new_.IntervalRunAt))
 	track("cron_expression", optString(old.CronExpression), optString(new_.CronExpression))
 	track("timezone", old.Timezone, new_.Timezone)
 	track("priority", old.Priority, new_.Priority)

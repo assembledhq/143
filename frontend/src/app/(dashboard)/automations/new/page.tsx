@@ -33,6 +33,7 @@ import {
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
 } from "@/lib/automation-templates";
+import { INTERVAL_RUN_AT_OPTIONS } from "@/lib/automation-schedule";
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -48,6 +49,7 @@ export default function NewAutomationPage() {
   const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">(
     initialTemplate?.defaultUnit ?? "days",
   );
+  const [intervalRunAt, setIntervalRunAt] = useState("09:00");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState(50);
@@ -85,6 +87,7 @@ export default function NewAutomationPage() {
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
+        interval_run_at: intervalRunAt,
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -239,48 +242,63 @@ export default function NewAutomationPage() {
 
           <div className="space-y-1.5">
             <Label id="schedule-label">Schedule</Label>
-            <div
-              className="flex items-center gap-2"
-              role="group"
-              aria-labelledby="schedule-label"
-            >
-              <span className="text-sm text-muted-foreground">Run every</span>
-              <Input
-                id="interval-value"
-                aria-label="Interval value"
-                type="number"
-                min={1}
-                max={365}
-                value={intervalValue}
-                onChange={(e) => {
-                  const parsed = parseInt(e.target.value, 10);
-                  setIntervalValue(
-                    Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
-                  );
-                }}
-                className="w-20"
-              />
-              <Select
-                value={intervalUnit}
-                onValueChange={(v) => {
-                  // Validated against the SelectItem values below; if the tuple
-                  // ever drifts from the Select options, fall back rather than
-                  // coercing an unexpected value through `as`.
-                  if (v === "hours" || v === "days" || v === "weeks") {
-                    setIntervalUnit(v);
-                  }
-                }}
+            <div className="grid gap-3 md:grid-cols-2">
+              <div
+                className="flex items-center gap-2"
+                role="group"
+                aria-labelledby="schedule-label"
               >
-                <SelectTrigger className="w-28" aria-label="Interval unit">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="hours">hours</SelectItem>
-                  <SelectItem value="days">days</SelectItem>
-                  <SelectItem value="weeks">weeks</SelectItem>
-                </SelectContent>
-              </Select>
+                <span className="text-sm text-muted-foreground">Run every</span>
+                <Input
+                  id="interval-value"
+                  aria-label="Interval value"
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={intervalValue}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    setIntervalValue(
+                      Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
+                    );
+                  }}
+                  className="w-20"
+                />
+                <Select
+                  value={intervalUnit}
+                  onValueChange={(v) => {
+                    if (v === "hours" || v === "days" || v === "weeks") {
+                      setIntervalUnit(v);
+                    }
+                  }}
+                >
+                  <SelectTrigger className="w-28" aria-label="Interval unit">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="hours">hours</SelectItem>
+                    <SelectItem value="days">days</SelectItem>
+                    <SelectItem value="weeks">weeks</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">At</span>
+                <Select value={intervalRunAt} onValueChange={setIntervalRunAt}>
+                  <SelectTrigger className="w-32" aria-label="Run at time">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {INTERVAL_RUN_AT_OPTIONS.map((timeLabel) => (
+                      <SelectItem key={timeLabel} value={timeLabel}>
+                        {timeLabel}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
+            <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>
           </div>
 
           {/* Advanced settings */}
