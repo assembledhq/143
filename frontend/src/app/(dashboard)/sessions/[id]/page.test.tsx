@@ -825,7 +825,7 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
-  it('shows disabled Create PR button with snapshot expiry explanation when diff exists but snapshot is missing', async () => {
+  it('shows snapshot expiry notice when diff exists but snapshot is missing', async () => {
     const sessionWithMissingSnapshot: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -849,9 +849,10 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
-    expect(createPRButton).toBeDisabled();
-    expect(screen.getByText('Session state expired — re-run to create a PR.')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('PR session expired');
+    expect(alert).toHaveTextContent('Session state expired — re-run to create a PR.');
+    expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('does not show Create PR button when session is running', async () => {
