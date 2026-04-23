@@ -16,6 +16,10 @@ export function useSetupStatus() {
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
   });
+  const { data: resolvedCredsResponse, isLoading: resolvedCredsLoading } = useQuery({
+    queryKey: queryKeys.credentials.resolved,
+    queryFn: () => api.userCredentials.listResolved(),
+  });
 
   const { data: integrationsResponse, isLoading: integrationsLoading } = useQuery<ListResponse<Integration>>({
     queryKey: queryKeys.integrations.all,
@@ -29,16 +33,16 @@ export function useSetupStatus() {
 
   const rawSettings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgent = rawSettings?.default_agent_type ?? "codex";
-  const agentConfig = rawSettings?.agent_config ?? {};
+  const resolvedCredentials = resolvedCredsResponse?.data ?? [];
 
-  const agentConnected = isAgentConnected(defaultAgent, agentConfig, codexAuthStatusResponse?.data);
+  const agentConnected = isAgentConnected(defaultAgent, resolvedCredentials, codexAuthStatusResponse?.data);
 
   const integrations = integrationsResponse?.data ?? [];
   const repositories = repositoriesResponse?.data ?? [];
   const githubReady = integrations.some((i) => i.provider === "github" && i.status === "active")
     && repositories.length > 0;
 
-  const isLoading = settingsLoading || codexAuthLoading || integrationsLoading || repositoriesLoading;
+  const isLoading = settingsLoading || codexAuthLoading || resolvedCredsLoading || integrationsLoading || repositoriesLoading;
   const isSetupComplete = agentConnected && githubReady;
 
   return {

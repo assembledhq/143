@@ -23,14 +23,14 @@ const rows: CodingAuth[] = [
     id: "auth-2",
     org_id: "org-1",
     priority: 2,
-    agent: "claude_code",
+    agent: "pi",
     auth_type: "api_key",
-    label: "Claude backup",
+    label: "Pi backup",
     scope: "organization",
-    provider: "anthropic",
+    provider: "pi",
     status: "never_verified",
     is_default: false,
-    usage_note: "sk-ant...1234",
+    usage_note: "pi_12...cdef",
     created_at: "2026-04-22T10:00:00Z",
     updated_at: "2026-04-22T10:00:00Z",
   },
@@ -51,6 +51,7 @@ describe("CodingAuthStack", () => {
     expect(screen.getByText("Team seat A")).toBeInTheDocument();
     expect(screen.getByText("Default")).toBeInTheDocument();
     expect(screen.getByText("Never verified")).toBeInTheDocument();
+    expect(screen.getByText("Pi")).toBeInTheDocument();
   });
 
   it("supports keyboard-accessible move controls", async () => {
@@ -68,10 +69,10 @@ describe("CodingAuthStack", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Move Claude backup up" }));
+    await user.click(screen.getByRole("button", { name: "Move Pi backup up" }));
     expect(onMove).toHaveBeenCalledWith("auth-2", "up");
 
-    await user.click(screen.getByRole("button", { name: "Move Claude backup to top" }));
+    await user.click(screen.getByRole("button", { name: "Move Pi backup to top" }));
     expect(onMoveToTop).toHaveBeenCalledWith("auth-2");
   });
 });

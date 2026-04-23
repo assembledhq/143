@@ -1,4 +1,4 @@
-import type { OrgSettings, PMDocument, PMPlan, PMStatus, CodexAuthStatus } from "@/lib/types";
+import type { OrgSettings, PMDocument, PMPlan, PMStatus, CodexAuthStatus, ResolvedCredential } from "@/lib/types";
 
 export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priority_weights"]>> = {
   customer_impact: 0.35,
@@ -9,29 +9,23 @@ export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priorit
 
 export function isAgentConnected(
   agentType: NonNullable<OrgSettings["default_agent_type"]>,
-  agentConfig: Record<string, Record<string, string>>,
+  resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus?: CodexAuthStatus | null,
 ): boolean {
+  const hasResolvedCredential = (provider: string) =>
+    resolvedCredentials.some((credential) => credential.provider === provider && credential.source !== "none");
+
   switch (agentType) {
     case "codex":
-      return codexAuthStatus?.status === "completed"
-        || Boolean(agentConfig.codex?.OPENAI_API_KEY);
+      return codexAuthStatus?.status === "completed" || hasResolvedCredential("openai");
     case "claude_code":
-      return Boolean(agentConfig.claude_code?.ANTHROPIC_API_KEY);
+      return hasResolvedCredential("anthropic");
     case "gemini_cli":
-      return Boolean(agentConfig.gemini_cli?.GEMINI_API_KEY);
+      return hasResolvedCredential("gemini");
     case "amp":
-      return Boolean(agentConfig.amp?.AMP_API_KEY);
+      return hasResolvedCredential("amp");
     case "pi":
-      // Pi routes to other providers and reuses their keys by default.
-      return Boolean(
-        agentConfig.pi?.PI_MODEL
-          || agentConfig.pi?.PI_MODEL_CUSTOM
-          || agentConfig.claude_code?.ANTHROPIC_API_KEY
-          || agentConfig.codex?.OPENAI_API_KEY
-          || agentConfig.gemini_cli?.GEMINI_API_KEY
-          || codexAuthStatus?.status === "completed",
-      );
+      return hasResolvedCredential("pi");
     default:
       return false;
   }
