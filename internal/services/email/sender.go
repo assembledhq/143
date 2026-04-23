@@ -3,7 +3,6 @@ package email
 import (
 	"context"
 	"fmt"
-	"html"
 	"net/smtp"
 	"strings"
 
@@ -34,20 +33,20 @@ func NewSMTPSender(cfg SMTPConfig) *SMTPSender {
 	return &SMTPSender{cfg: cfg}
 }
 
-// SendInvitation sends an HTML invitation email.
+// SendInvitation sends a plain-text invitation email.
 func (s *SMTPSender) SendInvitation(ctx context.Context, to, inviterName, orgName, acceptURL string) error {
-	subject := fmt.Sprintf("You've been invited to join %s", orgName)
+	subject := fmt.Sprintf("Invitation: join %s on 143.dev", orgName)
 
-	html := invitationHTML(inviterName, orgName, acceptURL)
+	body := invitationText(inviterName, orgName, acceptURL)
 
 	msg := strings.Join([]string{
 		"From: " + s.cfg.From,
 		"To: " + to,
 		"Subject: " + subject,
 		"MIME-Version: 1.0",
-		"Content-Type: text/html; charset=UTF-8",
+		"Content-Type: text/plain; charset=UTF-8",
 		"",
-		html,
+		body,
 	}, "\r\n")
 
 	addr := s.cfg.Host + ":" + s.cfg.Port
@@ -79,40 +78,25 @@ func (n *NoopSender) SendInvitation(ctx context.Context, to, inviterName, orgNam
 	return nil
 }
 
-// invitationHTML returns the HTML body for an invitation email.
-// All dynamic values are HTML-escaped to prevent injection.
-func invitationHTML(inviterName, orgName, acceptURL string) string {
+// invitationText returns the plain-text body for an invitation email.
+func invitationText(inviterName, orgName, acceptURL string) string {
 	inviterText := "Someone"
 	if inviterName != "" {
-		inviterText = html.EscapeString(inviterName)
+		inviterText = inviterName
 	}
-	safeOrg := html.EscapeString(orgName)
-	safeURL := html.EscapeString(acceptURL)
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <table width="100%%" cellpadding="0" cellspacing="0" style="padding:40px 20px;">
-    <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;">
-        <tr><td style="padding:32px 32px 24px;text-align:center;">
-          <h1 style="margin:0 0 8px;font-size:20px;font-weight:600;color:#18181b;">
-            Join %s
-          </h1>
-          <p style="margin:0 0 24px;font-size:14px;color:#71717a;line-height:1.5;">
-            %s has invited you to join <strong>%s</strong>.
-          </p>
-          <a href="%s" style="display:inline-block;padding:10px 24px;background-color:#18181b;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:500;">
-            Accept Invitation
-          </a>
-          <p style="margin:24px 0 0;font-size:12px;color:#a1a1aa;line-height:1.5;">
-            This invitation expires in 7 days. If you didn't expect this email, you can safely ignore it.
-          </p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`, safeOrg, inviterText, safeOrg, safeURL)
+	return fmt.Sprintf(`You’ve been invited to join %s on 143.dev
+
+%s invited you to collaborate with their team.
+
+What to do next:
+1. Open the invite link below
+2. Sign in or create your account
+3. You’ll join %s automatically
+
+Accept invitation:
+%s
+
+This link expires in 7 days.
+If you weren’t expecting this, you can ignore this email.`, orgName, inviterText, orgName, acceptURL)
 }
