@@ -29,7 +29,6 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { BranchPicker } from "@/components/branch-picker";
 import { api } from "@/lib/api";
-import { INTERVAL_RUN_AT_OPTIONS } from "@/lib/automation-schedule";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
 import { AutomationStatsCard } from "./automation-stats-card";
@@ -252,18 +251,14 @@ function SettingsTab({ automation }: { automation: Automation }) {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">At</span>
-            <Select value={intervalRunAt} onValueChange={setIntervalRunAt}>
-              <SelectTrigger className="w-32" aria-label="Run at time">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {INTERVAL_RUN_AT_OPTIONS.map((timeLabel) => (
-                  <SelectItem key={timeLabel} value={timeLabel}>
-                    {timeLabel}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Input
+              type="time"
+              step={300}
+              value={intervalRunAt}
+              onChange={(e) => setIntervalRunAt(e.target.value)}
+              className="w-32"
+              aria-label="Run at time"
+            />
           </div>
         </div>
         <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>

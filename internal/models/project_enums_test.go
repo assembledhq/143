@@ -169,6 +169,12 @@ func TestNextRunTimeAt(t *testing.T) {
 			require.Equal(t, tt.expected, got, "NextRunTimeAt should return the expected aligned timestamp")
 		})
 	}
+
+	t.Run("invalid runAt format returns parse error", func(t *testing.T) {
+		t.Parallel()
+		_, err := NextRunTimeAt(time.Now().UTC(), 1, "days", "ab:cd")
+		require.Error(t, err, "NextRunTimeAt should fail when runAt cannot be parsed")
+	})
 }
 
 func TestProjectTaskStatus_Validate(t *testing.T) {

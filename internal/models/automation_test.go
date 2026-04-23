@@ -75,6 +75,7 @@ func TestValidateIntervalRunAt(t *testing.T) {
 	}{
 		{name: "valid five minute boundary", input: "09:35"},
 		{name: "invalid format", input: "9:35", expectErr: true},
+		{name: "invalid parse with correct length", input: "ab:cd", expectErr: true},
 		{name: "invalid minute step", input: "09:37", expectErr: true},
 	}
 
@@ -135,6 +136,11 @@ func TestComputeNextRunAt(t *testing.T) {
 	got, err = interval.ComputeNextRunAt(from)
 	require.NoError(t, err)
 	require.Equal(t, time.Date(2026, 4, 17, 14, 15, 0, 0, time.UTC), got)
+
+	invalidRunAt := "ab:cd"
+	interval.IntervalRunAt = &invalidRunAt
+	_, err = interval.ComputeNextRunAt(from)
+	require.Error(t, err)
 
 	// Interval with missing companion fields is rejected (corrupt row).
 	bad := Automation{ScheduleType: AutomationScheduleInterval}

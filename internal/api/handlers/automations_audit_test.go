@@ -16,11 +16,13 @@ func TestAutomationAuditSnapshot_Interval(t *testing.T) {
 	t.Parallel()
 
 	v, u := 3, "days"
+	runAt := "09:35"
 	a := &models.Automation{
 		Name:          "Refresh caches",
 		ScheduleType:  models.AutomationScheduleInterval,
 		IntervalValue: &v,
 		IntervalUnit:  &u,
+		IntervalRunAt: &runAt,
 		Timezone:      "UTC",
 	}
 	snap := automationAuditSnapshot(a)
@@ -28,6 +30,7 @@ func TestAutomationAuditSnapshot_Interval(t *testing.T) {
 	require.Equal(t, models.AutomationScheduleInterval, snap["schedule_type"])
 	require.Equal(t, 3, snap["interval_value"])
 	require.Equal(t, "days", snap["interval_unit"])
+	require.Equal(t, "09:35", snap["interval_run_at"])
 	_, hasCron := snap["cron_expression"]
 	require.False(t, hasCron, "interval snapshot must not include cron fields")
 }

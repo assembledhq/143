@@ -33,7 +33,6 @@ import {
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
 } from "@/lib/automation-templates";
-import { INTERVAL_RUN_AT_OPTIONS } from "@/lib/automation-schedule";
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -284,18 +283,14 @@ export default function NewAutomationPage() {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">At</span>
-                <Select value={intervalRunAt} onValueChange={setIntervalRunAt}>
-                  <SelectTrigger className="w-32" aria-label="Run at time">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {INTERVAL_RUN_AT_OPTIONS.map((timeLabel) => (
-                      <SelectItem key={timeLabel} value={timeLabel}>
-                        {timeLabel}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Input
+                  type="time"
+                  step={300}
+                  value={intervalRunAt}
+                  onChange={(e) => setIntervalRunAt(e.target.value)}
+                  className="w-32"
+                  aria-label="Run at time"
+                />
               </div>
             </div>
             <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>

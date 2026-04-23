@@ -406,6 +406,32 @@ func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationStore_BulkUpdateEnabled_ReturningScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	mock.ExpectBegin()
+	// Bad UUID type in the first RETURNING column forces rows.Scan to error.
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(
+			pgxmock.NewRows(bulkUpdateEnabledColumns()).
+				AddRow("not-a-uuid", "interval", nil, nil, nil, nil, "UTC"),
+		)
+	mock.ExpectRollback()
+
+	_, _, err = store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	require.Error(t, err, "BulkUpdateEnabled should return an error when RETURNING rows cannot be scanned")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAutomationStore_BulkSoftDelete_EmptyIDsNoop(t *testing.T) {
 	t.Parallel()
 
