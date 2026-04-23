@@ -39,7 +39,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, []string{"http://localhost:8080"}, cfg.CORSAllowedOrigins, "CORS origins should default to FrontendURL")
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
-	require.Equal(t, 1, cfg.WorkerProcessCount, "Load should default worker process count to 1")
+	require.Equal(t, 2, cfg.WorkerProcessCount, "Load should default worker process count to 2")
 	require.Equal(t, "chat", cfg.OpenAIAPIType, "Load should default OpenAI API type to chat")
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 }

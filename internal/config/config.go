@@ -51,7 +51,7 @@ type Config struct {
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
-	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"1"`
+	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -224,7 +224,7 @@ func Load() *Config {
 		cfg.GitHubOAuthRedirectURI = cfg.BaseURL + "/api/v1/auth/github/callback"
 	}
 	if cfg.WorkerProcessCount <= 0 {
-		cfg.WorkerProcessCount = 1
+		cfg.WorkerProcessCount = 2
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
