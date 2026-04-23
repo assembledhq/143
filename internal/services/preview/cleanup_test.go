@@ -87,8 +87,8 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 	})
 
 	// --- Expect: ListExpiredPreviews returns one expired preview ---
-	mock.ExpectQuery("expires_at").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("worker_node_id = @worker_node_id.+expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(expiredID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-exp", now)...),
@@ -111,8 +111,8 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 	mock.ExpectCommit()
 
 	// --- Expect: ListIdlePreviews returns one idle preview ---
-	mock.ExpectQuery("last_accessed_at").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("worker_node_id = @worker_node_id.+last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newPreviewInstanceRow(idleID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-idle", now)...),
@@ -163,11 +163,11 @@ func TestCleanupWorker_CleanupNoResults(t *testing.T) {
 	})
 
 	// Both queries return empty.
-	mock.ExpectQuery("expires_at").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("worker_node_id = @worker_node_id.+expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("last_accessed_at").
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery("worker_node_id = @worker_node_id.+last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
 
 	w.cleanup()

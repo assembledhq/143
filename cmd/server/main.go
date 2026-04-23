@@ -79,6 +79,9 @@ func main() {
 	defer cancel()
 
 	hostname, _ := os.Hostname()
+	if cfg.NodeID == "" {
+		cfg.NodeID = hostname
+	}
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -163,25 +166,25 @@ func main() {
 
 	// Create Docker client for file browsing and preview provider (optional —
 	// gracefully degrades when Docker is not available).
-	var fileReader sandbox.FileReader
+	fileReader := sandbox.FileReader(sandbox.NoOpFileReader{})
 	var pvProvider preview.PreviewCapableProvider
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
-	apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
-	if dockerErr == nil {
-		defer apiDockerCli.Close()
-		fileReader = sandbox.NewDockerFileReader(apiDockerCli)
+	if cfg.Mode != "api" {
+		apiDockerCli, dockerErr := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+		if dockerErr == nil {
+			defer apiDockerCli.Close()
+			fileReader = sandbox.NewDockerFileReader(apiDockerCli)
 
-		// Build sandbox+preview provider so the preview subsystem can start,
-		// stop, and also hydrate sandboxes from snapshot when a user clicks
-		// Start Preview on a session whose container is already torn down.
-		sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
-		pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
-		snapshotExec = sandboxExec
-		apiSandboxProvider = sandboxExec
-	} else {
-		logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
-		fileReader = sandbox.NoOpFileReader{}
+			// Build sandbox+preview provider so worker-capable modes can start,
+			// stop, and hydrate previews locally.
+			sandboxExec := providers.NewDockerProvider(apiDockerCli, logger, providers.WithResolvConf(cfg.SandboxResolvConf))
+			pvProvider = previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			snapshotExec = sandboxExec
+			apiSandboxProvider = sandboxExec
+		} else {
+			logger.Warn().Err(dockerErr).Msg("Docker not available — file browsing and preview provider disabled")
+		}
 	}
 
 	// Snapshot store is shared across API (preview hydrate) and worker
@@ -243,11 +246,18 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
-	nodeManager := cluster.NewNodeManager(pool, logger, hostname, cfg.Mode)
+	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return map[string]any{
+		metadata := map[string]any{
 			"build_sha": version.BuildSHA,
 		}
+		if cfg.PreviewInternalBaseURL != "" {
+			metadata["preview_internal_base_url"] = cfg.PreviewInternalBaseURL
+		}
+		if (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil {
+			metadata["preview_capable"] = true
+		}
+		return metadata
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -257,7 +267,7 @@ func main() {
 	// Start worker if mode includes worker capability
 	var processWorker *worker.Worker
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
-		w := worker.New(pool, logger, hostname)
+		w := worker.New(pool, logger, cfg.NodeID)
 		processWorker = w
 
 		issueStore := db.NewIssueStore(pool)
@@ -380,7 +390,11 @@ func main() {
 			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
 		}
 		if previewManager != nil {
-			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(previewManager))
+			previewStore := db.NewPreviewStore(pool)
+			nodeStore := db.NewNodeStore(pool)
+			selector := preview.NewWorkerSelector(nodeStore, previewStore)
+			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
 		go reaper.Run(ctx)
@@ -646,6 +660,7 @@ func buildServices(
 		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
 		OrgSettingsCache: orgSettingsCache,
+		NodeID:           cfg.NodeID,
 		Logger:           logger,
 	})
 
