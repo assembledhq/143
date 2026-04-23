@@ -556,3 +556,16 @@ func TestUserCredentialHandler_ListResolved(t *testing.T) {
 		require.NotEmpty(t, byProvider[models.ProviderPi].MaskedKey, "ListResolved should mask Pi org auth rows")
 	})
 }
+
+func TestFindResolvedOrgCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	t.Run("returns nil when no org credential reader is configured", func(t *testing.T) {
+		t.Parallel()
+
+		cred := findResolvedOrgCredential(context.Background(), nil, orgID, models.ProviderAmp)
+		require.Nil(t, cred, "findResolvedOrgCredential should return nil when no org credential reader is configured")
+	})
+}

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -171,5 +172,37 @@ func TestOrganizationStore_MergeCodingAgentDefaults(t *testing.T) {
 		require.Error(t, err, "MergeCodingAgentDefaults should reject invalid agent defaults")
 		require.Contains(t, err.Error(), "agent_config.amp.AMP_MODE", "MergeCodingAgentDefaults should surface the validation error")
 		require.NoError(t, mock.ExpectationsWereMet(), "validation failures should not hit the database")
+	})
+
+	t.Run("returns early when no defaults are supplied", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewOrganizationStore(mock)
+		err = store.MergeCodingAgentDefaults(context.Background(), uuid.New(), models.AgentTypeAmp, nil)
+		require.NoError(t, err, "MergeCodingAgentDefaults should treat empty defaults as a no-op")
+		require.NoError(t, mock.ExpectationsWereMet(), "no-op merges should not hit the database")
+	})
+
+	t.Run("surfaces database update errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewOrganizationStore(mock)
+		orgID := uuid.New()
+
+		mock.ExpectQuery("UPDATE organizations").
+			WithArgs("amp", pgxmock.AnyArg(), orgID).
+			WillReturnError(errors.New("db failed"))
+
+		err = store.MergeCodingAgentDefaults(context.Background(), orgID, models.AgentTypeAmp, map[string]string{"AMP_MODE": models.AmpModeDeep})
+		require.Error(t, err, "MergeCodingAgentDefaults should return database errors")
+		require.Contains(t, err.Error(), "merge coding agent defaults", "MergeCodingAgentDefaults should wrap database failures")
 	})
 }

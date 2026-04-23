@@ -546,6 +546,8 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}), "compatibleCodingProviderConfig should accept OpenRouter API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.AmpConfig{APIKey: "amp-key"}), "compatibleCodingProviderConfig should accept Amp API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderPi, models.PiConfig{APIKey: "pi-key"}), "compatibleCodingProviderConfig should accept Pi API keys")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Amp configs for the Amp provider")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderPi, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Pi configs for the Pi provider")
 		require.Nil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{}), "compatibleCodingProviderConfig should reject empty OpenRouter configs")
 		require.Nil(t, compatibleCodingProviderConfig(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}), "compatibleCodingProviderConfig should reject unknown providers")
 	})

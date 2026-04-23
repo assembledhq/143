@@ -260,19 +260,6 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 	return nil
 }
 
-// piResolvedModel returns the Pi model string the CLI will run against, using
-// the same precedence as piStreamingConfig.BuildCmd: PI_MODEL_CUSTOM > PI_MODEL
-// > hardcoded default.
-func piResolvedModel(env map[string]string) string {
-	if m := env["PI_MODEL_CUSTOM"]; m != "" {
-		return m
-	}
-	if m := env["PI_MODEL"]; m != "" {
-		return m
-	}
-	return models.PiModelClaudeOpus47
-}
-
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
 // settings on top of the already-resolved provider credentials in `merged`.
 // Only called for Amp and Pi; agent_config stores their non-secret runtime

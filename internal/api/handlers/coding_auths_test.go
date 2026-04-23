@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -409,6 +410,74 @@ func TestCodingAuthHandlerCreate_MergesAgentDefaultsAndDeletesOnFailure(t *testi
 	require.True(t, deleteCalled, "Create should remove the created auth row if the settings write fails")
 }
 
+func TestCodingAuthHandlerCreate_AgentDefaultsBranches(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	t.Run("rejects defaults when org store is unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{
+			"agent":"amp",
+			"auth_type":"api_key",
+			"api_key":"amp_123456789",
+			"agent_defaults":{"AMP_MODE":"deep"}
+		}`))
+		req = withAdminUser(req, userID, orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Create(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "Create should reject defaults when no org store is configured")
+	})
+
+	t.Run("invalidates settings cache after merging defaults", func(t *testing.T) {
+		t.Parallel()
+
+		invalidator := &mockOrgSettingsInvalidator{}
+		store := &mockCodingAuthStore{
+			createFn: func(_ context.Context, _ uuid.UUID, _ *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+				return &models.CodingAuth{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Agent:    input.Agent,
+					AuthType: input.AuthType,
+					Label:    input.Label,
+					Provider: models.ProviderAmp,
+					Status:   models.CodingAuthStatusNeverVerified,
+				}, nil
+			},
+		}
+		orgStore := &mockCodingAuthOrgStore{
+			mergeAgentDefaultsFn: func(_ context.Context, gotOrgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+				require.Equal(t, orgID, gotOrgID, "Create should merge defaults into the request org")
+				require.Equal(t, models.AgentTypeAmp, agent, "Create should merge defaults for the selected agent")
+				require.Equal(t, map[string]string{"AMP_MODE": "deep"}, defaults, "Create should pass the submitted defaults")
+				return nil
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{
+			"agent":"amp",
+			"auth_type":"api_key",
+			"label":"Amp API key",
+			"api_key":"amp_123456789",
+			"agent_defaults":{"AMP_MODE":"deep"}
+		}`))
+		req = withAdminUser(req, userID, orgID)
+		rr := httptest.NewRecorder()
+
+		handler := NewCodingAuthHandler(store, orgStore)
+		handler.SetOrgSettingsInvalidator(invalidator)
+		handler.Create(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "Create should succeed when defaults merge succeeds")
+		require.Equal(t, []uuid.UUID{orgID}, invalidator.orgIDs, "Create should invalidate cached org settings after merging defaults")
+	})
+}
+
 func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
 	t.Parallel()
 
@@ -662,6 +731,59 @@ func TestCodingAuthHandlerLegacyStatus(t *testing.T) {
 	require.False(t, resp.Data.HasPiCredential, "LegacyStatus should reflect the missing Pi credential row")
 }
 
+func TestCodingAuthHandlerLegacyStatus_ErrorCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	t.Run("surfaces handler errors", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{}
+		orgStore := &mockCodingAuthOrgStore{
+			getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+				return models.Organization{}, errors.New("boom")
+			},
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/coding-auths/legacy-status", nil)
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store, orgStore).LegacyStatus(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "LegacyStatus should surface helper failures")
+	})
+
+	t.Run("returns zero status when org store is unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		status, err := NewCodingAuthHandler(&mockCodingAuthStore{}, nil).legacyStatus(context.Background(), orgID)
+		require.NoError(t, err, "legacyStatus should not fail when org store is unavailable")
+		require.Equal(t, models.LegacyCodingAuthStatus{}, status, "legacyStatus should return the zero value when org store is unavailable")
+	})
+
+	t.Run("surfaces provider lookup failures", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			listByProviderFn: func(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+				if provider == models.ProviderAmp {
+					return nil, errors.New("amp lookup failed")
+				}
+				return nil, nil
+			},
+		}
+		orgStore := &mockCodingAuthOrgStore{
+			getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+				return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{}}`)}, nil
+			},
+		}
+
+		_, err := NewCodingAuthHandler(store, orgStore).legacyStatus(context.Background(), orgID)
+		require.Error(t, err, "legacyStatus should surface provider lookup failures")
+	})
+}
+
 func TestCodingAuthHandlerMigrateLegacy(t *testing.T) {
 	t.Parallel()
 
@@ -752,4 +874,256 @@ func TestCodingAuthHandlerMigrateLegacy(t *testing.T) {
 	require.True(t, resp.Data.MigratedAmp, "MigrateLegacy should report the Amp backfill")
 	require.True(t, resp.Data.MigratedPi, "MigrateLegacy should report the Pi backfill")
 	require.True(t, resp.Data.RemovedLegacySecrets, "MigrateLegacy should report the settings cleanup")
+}
+
+func TestCodingAuthHandlerMigrateLegacy_ErrorCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	t.Run("requires an authenticated user", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths/migrate-legacy", nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}, &mockCodingAuthOrgStore{}).MigrateLegacy(rr, req)
+
+		require.Equal(t, http.StatusUnauthorized, rr.Code, "MigrateLegacy should require an authenticated user")
+	})
+
+	t.Run("requires an org store", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths/migrate-legacy", nil)
+		req = withAdminUser(req, userID, orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).MigrateLegacy(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "MigrateLegacy should require an org store")
+	})
+
+	t.Run("surfaces org lookup and parse failures", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name     string
+			orgStore *mockCodingAuthOrgStore
+			wantCode int
+		}{
+			{
+				name: "org not found",
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{}, errors.New("missing")
+					},
+				},
+				wantCode: http.StatusNotFound,
+			},
+			{
+				name: "invalid settings json",
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":`)}, nil
+					},
+				},
+				wantCode: http.StatusInternalServerError,
+			},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths/migrate-legacy", nil)
+				req = withAdminUser(req, userID, orgID)
+				rr := httptest.NewRecorder()
+
+				NewCodingAuthHandler(&mockCodingAuthStore{}, tt.orgStore).MigrateLegacy(rr, req)
+				require.Equal(t, tt.wantCode, rr.Code, "MigrateLegacy should surface %s", tt.name)
+			})
+		}
+	})
+
+	t.Run("surfaces provider, create, scrub, and update failures", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name     string
+			store    *mockCodingAuthStore
+			orgStore *mockCodingAuthOrgStore
+		}{
+			{
+				name: "amp lookup failure",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+						if provider == models.ProviderAmp {
+							return nil, errors.New("amp lookup failed")
+						}
+						return nil, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{}}`)}, nil
+					},
+				},
+			},
+			{
+				name: "pi lookup failure",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+						if provider == models.ProviderPi {
+							return nil, errors.New("pi lookup failed")
+						}
+						return nil, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{}}`)}, nil
+					},
+				},
+			},
+			{
+				name: "amp create failure",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+						return nil, nil
+					},
+					createFn: func(_ context.Context, _ uuid.UUID, _ *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+						if input.Agent == models.AgentTypeAmp {
+							return nil, errors.New("amp create failed")
+						}
+						return &models.CodingAuth{}, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{"amp":{"AMP_API_KEY":"amp_key"}}}`)}, nil
+					},
+				},
+			},
+			{
+				name: "pi create failure",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+						return nil, nil
+					},
+					createFn: func(_ context.Context, _ uuid.UUID, _ *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+						if input.Agent == models.AgentTypePi {
+							return nil, errors.New("pi create failed")
+						}
+						return &models.CodingAuth{}, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{"pi":{"PI_API_KEY":"pi_key"}}}`)}, nil
+					},
+				},
+			},
+			{
+				name: "scrub failure",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+						return nil, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":`)}, nil
+					},
+				},
+			},
+			{
+				name: "settings update failure after scrub",
+				store: &mockCodingAuthStore{
+					listByProviderFn: func(_ context.Context, _ uuid.UUID, _ models.ProviderName) ([]models.DecryptedCredential, error) {
+						return nil, nil
+					},
+				},
+				orgStore: &mockCodingAuthOrgStore{
+					getFn: func(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+						return models.Organization{ID: orgID, Settings: json.RawMessage(`{"agent_config":{"amp":{"AMP_API_KEY":"amp_key"}}}`)}, nil
+					},
+					updateFn: func(_ context.Context, _ *models.Organization) error {
+						return errors.New("update failed")
+					},
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths/migrate-legacy", nil)
+				req = withAdminUser(req, userID, orgID)
+				rr := httptest.NewRecorder()
+
+				NewCodingAuthHandler(tt.store, tt.orgStore).MigrateLegacy(rr, req)
+				require.Equal(t, http.StatusInternalServerError, rr.Code, "MigrateLegacy should surface %s", tt.name)
+			})
+		}
+	})
+}
+
+func TestCodingAuthLegacyHelpers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("parseCodingAuthID falls back to path value", func(t *testing.T) {
+		t.Parallel()
+
+		id := uuid.New()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/coding-auths/"+id.String(), nil)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, chi.NewRouteContext()))
+		req.SetPathValue("id", id.String())
+		rr := httptest.NewRecorder()
+
+		parsed, ok := parseCodingAuthID(rr, req)
+		require.True(t, ok, "parseCodingAuthID should accept path values when chi params are absent")
+		require.Equal(t, id, parsed, "parseCodingAuthID should return the parsed UUID")
+	})
+
+	t.Run("inspect legacy settings handles errors and missing config", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := inspectLegacyCodingAuthSettings(json.RawMessage(`{"agent_config":`))
+		require.Error(t, err, "inspectLegacyCodingAuthSettings should reject invalid JSON")
+
+		legacy, err := inspectLegacyCodingAuthSettings(json.RawMessage(`{"other":true}`))
+		require.NoError(t, err, "inspectLegacyCodingAuthSettings should allow settings with no agent config")
+		require.Equal(t, legacyCodingAuthSettings{}, legacy, "inspectLegacyCodingAuthSettings should return zero legacy settings when no agent config exists")
+	})
+
+	t.Run("scrub legacy secrets handles no-ops and malformed input", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := scrubLegacyCodingAuthSecrets(json.RawMessage(`{"agent_config":`))
+		require.Error(t, err, "scrubLegacyCodingAuthSecrets should reject malformed JSON")
+
+		cleaned, removed, err := scrubLegacyCodingAuthSecrets(json.RawMessage(`{"agent_config":{"amp":{"AMP_MODE":"deep"}}}`))
+		require.NoError(t, err, "scrubLegacyCodingAuthSecrets should allow settings with no secrets")
+		require.False(t, removed, "scrubLegacyCodingAuthSecrets should report no removal when no secrets exist")
+		require.JSONEq(t, `{"agent_config":{"amp":{"AMP_MODE":"deep"}}}`, string(cleaned), "scrubLegacyCodingAuthSecrets should preserve settings when no secrets are removed")
+
+		cleaned, removed, err = scrubLegacyCodingAuthSecrets(json.RawMessage(`{"agent_config":{"amp":{"AMP_API_KEY":"amp_key"},"pi":{"PI_API_KEY":"pi_key"}}}`))
+		require.NoError(t, err, "scrubLegacyCodingAuthSecrets should remove legacy secrets")
+		require.True(t, removed, "scrubLegacyCodingAuthSecrets should report when secrets are removed")
+		require.JSONEq(t, `{}`, string(cleaned), "scrubLegacyCodingAuthSecrets should drop empty agent config maps after removing secrets")
+	})
+
+	t.Run("nestedStringValue trims strings and ignores non-strings", func(t *testing.T) {
+		t.Parallel()
+
+		require.Equal(t, "trimmed", nestedStringValue(map[string]any{"x": " trimmed "}, "x"), "nestedStringValue should trim whitespace")
+		require.Equal(t, "", nestedStringValue(map[string]any{"x": 1}, "x"), "nestedStringValue should ignore non-string values")
+		require.Equal(t, "", nestedStringValue(map[string]any{}, "x"), "nestedStringValue should return empty when the key is missing")
+	})
 }

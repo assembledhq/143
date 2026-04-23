@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -927,6 +928,23 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		store := NewOrgCredentialStore(mock, nil)
 		err = store.DeleteCodingAuth(context.Background(), orgID, rowID)
 		require.NoError(t, err, "DeleteCodingAuth should not return an error")
+	})
+
+	t.Run("surfaces delete coding auth errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`DELETE FROM org_credentials WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnError(errors.New("delete failed"))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DeleteCodingAuth(context.Background(), orgID, rowID)
+		require.Error(t, err, "DeleteCodingAuth should return database errors")
+		require.Contains(t, err.Error(), "delete coding auth", "DeleteCodingAuth should wrap database failures")
 	})
 
 	t.Run("disables row by id", func(t *testing.T) {
