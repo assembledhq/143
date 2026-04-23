@@ -27,8 +27,8 @@ func (s ProjectStatus) Validate() error {
 type ProjectExecMode string
 
 const (
-	ProjectExecModeSequential     ProjectExecMode = "sequential"
-	ProjectExecModeParallel       ProjectExecMode = "parallel"
+	ProjectExecModeSequential      ProjectExecMode = "sequential"
+	ProjectExecModeParallel        ProjectExecMode = "parallel"
 	ProjectExecModeDependencyGraph ProjectExecMode = "dependency_graph"
 )
 
@@ -82,6 +82,31 @@ func NextRunTime(from time.Time, interval int, unit string) time.Time {
 		return from.AddDate(0, 0, interval*7)
 	default: // days
 		return from.AddDate(0, 0, interval)
+	}
+}
+
+// NextRunTimeAt computes the next run at a specific HH:MM wall-clock time.
+// The returned time is always >= NextRunTime(from, interval, unit).
+func NextRunTimeAt(from time.Time, interval int, unit string, runAt string) (time.Time, error) {
+	minNext := NextRunTime(from, interval, unit)
+	parsed, err := time.Parse("15:04", runAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse runAt %q: %w", runAt, err)
+	}
+
+	switch ScheduleUnit(unit) {
+	case ScheduleUnitHours:
+		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), minNext.Hour(), parsed.Minute(), 0, 0, minNext.Location())
+		if candidate.Before(minNext) {
+			candidate = candidate.Add(time.Hour)
+		}
+		return candidate, nil
+	default:
+		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), parsed.Hour(), parsed.Minute(), 0, 0, minNext.Location())
+		if candidate.Before(minNext) {
+			candidate = candidate.AddDate(0, 0, 1)
+		}
+		return candidate, nil
 	}
 }
 

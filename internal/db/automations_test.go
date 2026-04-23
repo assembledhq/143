@@ -17,7 +17,7 @@ func automationColumnSlice() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"agent_type", "model_override", "execution_mode", "max_concurrent", "base_branch",
-		"schedule_type", "interval_value", "interval_unit", "cron_expression", "timezone",
+		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
 	}
@@ -27,7 +27,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 	return rows.AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.AgentType, a.ModelOverride, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
-		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.CronExpression, a.Timezone,
+		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
@@ -36,11 +36,11 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 // bulkUpdateEnabledColumns mirrors the narrow RETURNING used by
 // BulkUpdateEnabled — only the fields ComputeNextRunAt needs for cron fixup.
 func bulkUpdateEnabledColumns() []string {
-	return []string{"id", "schedule_type", "cron_expression", "timezone"}
+	return []string{"id", "schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone"}
 }
 
 func addBulkUpdateEnabledRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
-	return rows.AddRow(a.ID, a.ScheduleType, a.CronExpression, a.Timezone)
+	return rows.AddRow(a.ID, a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone)
 }
 
 func TestAutomationStore_Create(t *testing.T) {
@@ -69,7 +69,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(19)...).
+		WithArgs(anyArgs(20)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -192,7 +192,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(21)...).
+		WithArgs(anyArgs(22)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
@@ -403,6 +403,32 @@ func TestAutomationStore_BulkUpdateEnabled_Resume_CronFixupFailure(t *testing.T)
 	require.Len(t, fixupFailures, 1, "operator must be told the cron next_run_at couldn't be computed")
 	require.Equal(t, ids[0], fixupFailures[0].AutomationID)
 	require.NotEmpty(t, fixupFailures[0].Reason)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationStore_BulkUpdateEnabled_ReturningScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	ids := []uuid.UUID{uuid.New()}
+
+	mock.ExpectBegin()
+	// Bad UUID type in the first RETURNING column forces rows.Scan to error.
+	mock.ExpectQuery("UPDATE automations SET").
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(
+			pgxmock.NewRows(bulkUpdateEnabledColumns()).
+				AddRow("not-a-uuid", "interval", nil, nil, nil, nil, "UTC"),
+		)
+	mock.ExpectRollback()
+
+	_, _, err = store.BulkUpdateEnabled(context.Background(), orgID, ids, true, nil)
+	require.Error(t, err, "BulkUpdateEnabled should return an error when RETURNING rows cannot be scanned")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
