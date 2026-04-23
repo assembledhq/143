@@ -49,6 +49,32 @@ www.{$DOMAIN:143.dev} {
 	redir https://{$DOMAIN:143.dev}{uri} permanent
 }
 
+*.preview.{$DOMAIN:143.dev} {
+	@safe method GET HEAD OPTIONS
+	handle @safe {
+		reverse_proxy {
+			dynamic a {
+				name api
+				port 9090
+				refresh 2s
+			}
+			lb_retries 5
+			import upstream_defaults
+		}
+	}
+	handle {
+		reverse_proxy {
+			dynamic a {
+				name api
+				port 9090
+				refresh 2s
+			}
+			lb_retries 0
+			import upstream_defaults
+		}
+	}
+}
+
 {$DOMAIN:143.dev} {
 	# Retries are gated by HTTP method. For idempotent requests (GET/HEAD/
 	# OPTIONS), Caddy retries transient 5xx against a different/healthy

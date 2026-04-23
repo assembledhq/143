@@ -30,6 +30,9 @@ type PreviewHandler struct {
 	fileReader      sandbox.FileReader
 	sandboxProvider agent.SandboxProvider
 	snapshots       storage.SnapshotStore
+	workerSelector  *preview.WorkerSelector
+	workerClient    *preview.WorkerPreviewClient
+	localNodeID     string
 	logger          zerolog.Logger
 	audit           *db.AuditEmitter
 }
@@ -64,6 +67,61 @@ func (h *PreviewHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
+// SetWorkerRuntime wires worker routing for app-node preview execution.
+func (h *PreviewHandler) SetWorkerRuntime(selector *preview.WorkerSelector, client *preview.WorkerPreviewClient, localNodeID string) {
+	h.workerSelector = selector
+	h.workerClient = client
+	h.localNodeID = localNodeID
+}
+
+type previewHTTPError struct {
+	status  int
+	code    string
+	message string
+	err     error
+}
+
+func (e *previewHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return e.message
+}
+
+func newPreviewHTTPError(status int, code, message string, err error) *previewHTTPError {
+	return &previewHTTPError{status: status, code: code, message: message, err: err}
+}
+
+func writePreviewHTTPError(w http.ResponseWriter, r *http.Request, err *previewHTTPError) {
+	if err == nil {
+		return
+	}
+	if err.err != nil {
+		writeError(w, r, err.status, err.code, err.message, err.err)
+		return
+	}
+	writeError(w, r, err.status, err.code, err.message)
+}
+
+func (h *PreviewHandler) workerRoutingEnabled() bool {
+	return h.workerSelector != nil && h.workerClient != nil
+}
+
+func (h *PreviewHandler) isLocalWorker(worker preview.WorkerNode) bool {
+	return worker.ID != "" && worker.ID == h.localNodeID
+}
+
+func (h *PreviewHandler) writeWorkerClientError(w http.ResponseWriter, r *http.Request, err error) {
+	if reqErr, ok := preview.AsWorkerRequestError(err); ok {
+		writeError(w, r, reqErr.StatusCode, reqErr.Code, reqErr.Message)
+		return
+	}
+	writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -87,6 +145,21 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	}
 
 	return instance, true
+}
+
+func (h *PreviewHandler) getActivePreviewBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, error) {
+	instance, err := h.store.GetActivePreviewForSession(ctx, orgID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return instance, nil
+}
+
+func (h *PreviewHandler) resolvePreviewWorker(ctx context.Context, workerNodeID string) (preview.WorkerNode, error) {
+	if h.workerSelector == nil {
+		return preview.WorkerNode{}, fmt.Errorf("worker selector is not configured")
+	}
+	return h.workerSelector.ResolveNode(ctx, workerNodeID)
 }
 
 // requireManager checks that the preview manager is configured.
@@ -348,31 +421,22 @@ func defaultPreviewConfig() *models.PreviewConfig {
 	}
 }
 
-func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
-	if !h.requireManager(w, r) {
-		return
-	}
-	orgID := middleware.OrgIDFromContext(r.Context())
-	user := middleware.UserFromContext(r.Context())
-	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
-		return
-	}
-
+func (h *PreviewHandler) decodeStartPreviewBody(r *http.Request) (startPreviewRequest, *previewHTTPError) {
 	var body startPreviewRequest
 	// Tolerate empty body (e.g., frontend sends no config when auto-detecting).
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
-			return
+			return body, newPreviewHTTPError(http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		}
 	}
+	return body, nil
+}
+
+func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, *previewHTTPError) {
 	// Look up the session to get its sandbox container.
-	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
+	session, err := h.sessionStore.GetByID(ctx, orgID, sessionID)
 	if err != nil {
-		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
-		return
+		return nil, newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
 	}
 
 	// Reserve the preview BEFORE touching docker. This (a) short-circuits
@@ -390,20 +454,18 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	input := preview.StartPreviewInput{
 		SessionID:     sessionID,
 		OrgID:         orgID,
-		UserID:        user.ID,
+		UserID:        userID,
 		Config:        initialConfig,
 		BaseCommitSHA: body.BaseCommitSHA,
 		ProfileName:   body.ProfileName,
 	}
-	reservation, err := h.manager.ReservePreview(r.Context(), input)
+	reservation, err := h.manager.ReservePreview(ctx, input)
 	if err != nil {
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview reserve failed")
 		if errors.Is(err, preview.ErrPreviewCapacity) {
-			writeError(w, r, http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error())
-			return
+			return nil, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_CAPACITY_REACHED", err.Error(), err)
 		}
-		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview")
-		return
+		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
 
 	// Three paths to a live sandbox, in preference order:
@@ -413,7 +475,7 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	//      create a new container and restore the snapshot.
 	//   3. SnapshotExpired / SnapshotUnavailable — neither a container nor a
 	//      usable snapshot exists.
-	acq := h.acquireSandbox(r.Context(), orgID, &session)
+	acq := h.acquireSandbox(ctx, orgID, &session)
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
 			Str("session_id", sessionID.String()).
@@ -422,18 +484,17 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		// hydratedContainerID is "" — either we never hydrated, or
 		// acquireSandbox's race-loss branch already destroyed the local
 		// container before returning.
-		h.manager.AbortReservation(r.Context(), reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		h.manager.AbortReservation(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		switch acq.ErrCode {
 		case "SNAPSHOT_EXPIRED":
-			writeError(w, r, http.StatusGone, acq.ErrCode, acq.Err.Error())
+			return nil, newPreviewHTTPError(http.StatusGone, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "SNAPSHOT_UNAVAILABLE":
-			writeError(w, r, http.StatusConflict, acq.ErrCode, acq.Err.Error())
+			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		case "NO_SANDBOX":
-			writeError(w, r, http.StatusConflict, acq.ErrCode, acq.Err.Error())
+			return nil, newPreviewHTTPError(http.StatusConflict, acq.ErrCode, acq.Err.Error(), acq.Err)
 		default:
-			writeError(w, r, http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
+			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_HYDRATE_FAILED", "failed to hydrate sandbox for preview", acq.Err)
 		}
-		return
 	}
 	sb := acq.Sandbox
 
@@ -448,14 +509,13 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		// Auto-detect: first try to read .143/preview.json from the session's
 		// workspace so repos with a committed config just work. Fall back to a
 		// Node.js default (npm start, port 3000) only if no config is present.
-		cfg, err := h.readWorkspacePreviewConfig(r.Context(), sb, sessionID)
+		cfg, err := h.readWorkspacePreviewConfig(ctx, sb, sessionID)
 		if err != nil {
 			// Infrastructure failure (docker exec, sandbox gone, etc.) — do
 			// not silently swap in Node.js defaults, which would start the
 			// wrong preview for a non-Node project and time out after minutes.
-			h.manager.AbortReservation(r.Context(), reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
-			writeError(w, r, http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
-			return
+			h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
+			return nil, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_CONFIG_READ_FAILED", "failed to read preview config from workspace", err)
 		}
 		if cfg != nil {
 			input.Config = cfg
@@ -468,15 +528,119 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Sandbox = sb
 
-	instance, err := h.manager.LaunchPreview(r.Context(), reservation, input)
+	instance, err := h.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
-		h.manager.AbortReservation(r.Context(), reservation, hydratedID, fmt.Sprintf("launch: %v", err))
+		h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("launch: %v", err))
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview launch failed")
-		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview")
+		return nil, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_START_FAILED", "failed to start preview", err)
+	}
+
+	if h.localNodeID != "" && (acq.Hydrated || (session.ContainerID != nil && *session.ContainerID != "")) {
+		containerID := sb.ID
+		if err := h.sessionStore.SetWorkerNodeIDForContainer(ctx, orgID, sessionID, containerID, h.localNodeID); err != nil {
+			h.logger.Warn().Err(err).
+				Str("session_id", sessionID.String()).
+				Str("container_id", containerID).
+				Str("worker_node_id", h.localNodeID).
+				Msg("failed to persist session worker ownership")
+		}
+	}
+
+	return instance, nil
+}
+
+func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.requireManager(w, r) {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+	body, reqErr := h.decodeStartPreviewBody(r)
+	if reqErr != nil {
+		writePreviewHTTPError(w, r, reqErr)
+		return
+	}
+
+	if !h.workerRoutingEnabled() {
+		instance, localErr := h.startPreviewLocal(r.Context(), orgID, user.ID, sessionID, body)
+		if localErr != nil {
+			writePreviewHTTPError(w, r, localErr)
+			return
+		}
+		writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+		return
+	}
+
+	session, err := h.sessionStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SESSION_NOT_FOUND", "session not found")
+		return
+	}
+	activePreview, err := h.getActivePreviewBySession(r.Context(), orgID, sessionID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to inspect current preview state", err)
+		return
+	}
+	coldStart := errors.Is(err, pgx.ErrNoRows) &&
+		(session.ContainerID == nil || *session.ContainerID == "" || session.SandboxState != string(models.SandboxStateRunning))
+
+	worker, err := h.workerSelector.SelectStartNode(r.Context(), orgID, &session)
+	if err != nil {
+		switch {
+		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
+			writeError(w, r, http.StatusConflict, "PREVIEW_WORKER_OWNERSHIP_REQUIRED", "live sandbox is missing worker ownership metadata; send a new message to rebuild it")
+		case errors.Is(err, preview.ErrNoPreviewWorkers):
+			writeError(w, r, http.StatusServiceUnavailable, "PREVIEW_NO_WORKERS", "no preview-capable workers are available")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to select preview worker", err)
+		}
+		return
+	}
+	if h.isLocalWorker(worker) {
+		instance, localErr := h.startPreviewLocal(r.Context(), orgID, user.ID, sessionID, body)
+		if localErr != nil {
+			writePreviewHTTPError(w, r, localErr)
+			return
+		}
+		writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+		return
+	}
+
+	triedWorkers := map[string]struct{}{}
+	for {
+		instance, err := h.workerClient.StartPreview(r.Context(), worker, preview.RemoteStartPreviewRequest{
+			OrgID:         orgID,
+			UserID:        user.ID,
+			SessionID:     sessionID,
+			Config:        body.Config,
+			BaseCommitSHA: body.BaseCommitSHA,
+			ProfileName:   body.ProfileName,
+		})
+		if err == nil {
+			writeJSON(w, http.StatusCreated, models.SingleResponse[*models.PreviewInstance]{Data: instance})
+			return
+		}
+
+		reqErr, ok := preview.AsWorkerRequestError(err)
+		if !coldStart || !ok || reqErr.Code != "PREVIEW_CAPACITY_REACHED" || activePreview != nil {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
+
+		triedWorkers[worker.ID] = struct{}{}
+		nextWorker, selectErr := h.workerSelector.SelectLeastLoadedNodeExcept(r.Context(), triedWorkers)
+		if selectErr != nil {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
+		worker = nextWorker
+	}
 }
 
 // =============================================================================
@@ -516,9 +680,28 @@ func (h *PreviewHandler) StopPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.manager.StopPreview(r.Context(), orgID, instance.ID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
-		return
+	if h.workerRoutingEnabled() {
+		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if err != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			if err := h.manager.StopPreview(r.Context(), orgID, instance.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
+				return
+			}
+		} else {
+			if err := h.workerClient.StopPreview(r.Context(), worker, orgID, instance.ID); err != nil {
+				h.writeWorkerClientError(w, r, err)
+				return
+			}
+		}
+	} else {
+		if err := h.manager.StopPreview(r.Context(), orgID, instance.ID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}})
@@ -538,9 +721,28 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.manager.RecyclePreview(r.Context(), orgID, instance.ID); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_RESTART_FAILED", "failed to restart preview", err)
-		return
+	if h.workerRoutingEnabled() {
+		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if err != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			if err := h.manager.RecyclePreview(r.Context(), orgID, instance.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "PREVIEW_RESTART_FAILED", "failed to restart preview", err)
+				return
+			}
+		} else {
+			if err := h.workerClient.RecyclePreview(r.Context(), worker, orgID, instance.ID); err != nil {
+				h.writeWorkerClientError(w, r, err)
+				return
+			}
+		}
+	} else {
+		if err := h.manager.RecyclePreview(r.Context(), orgID, instance.ID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_RESTART_FAILED", "failed to restart preview", err)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
@@ -714,9 +916,10 @@ type captureScreenshotResponse struct {
 }
 
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -748,8 +951,37 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
 	}
 
-	result, err := inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
+	var result *models.ScreenshotResult
+	var err error
+	if h.workerRoutingEnabled() {
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			result, err = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
+		} else {
+			result, err = h.workerClient.CaptureScreenshot(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, opts)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		result, err = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
+	}
 	if err != nil {
+		if h.workerRoutingEnabled() {
+			if _, ok := preview.AsWorkerRequestError(err); ok {
+				h.writeWorkerClientError(w, r, err)
+				return
+			}
+		}
 		writeError(w, r, http.StatusInternalServerError, "SCREENSHOT_FAILED", "failed to capture screenshot", err)
 		return
 	}
@@ -775,9 +1007,10 @@ type inspectElementRequest struct {
 }
 
 func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -797,8 +1030,36 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	element, err := inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+	var element *models.ElementInfo
+	var err error
+	if h.workerRoutingEnabled() {
+		var worker preview.WorkerNode
+		worker, err = h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if err != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+		} else {
+			element, err = h.workerClient.InspectElement(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.X, body.Y)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "INSPECT_FAILED", "failed to inspect element", err)
 		return
 	}
@@ -811,17 +1072,45 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 // =============================================================================
 
 func (h *PreviewHandler) ReadConsole(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
 		return
 	}
 
-	messages, err := inspector.ReadConsole(r.Context(), instance.ID.String())
+	var messages []preview.ConsoleMessage
+	var err error
+	if h.workerRoutingEnabled() {
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			messages, err = inspector.ReadConsole(r.Context(), instance.ID.String())
+		} else {
+			messages, err = h.workerClient.ReadConsole(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		messages, err = inspector.ReadConsole(r.Context(), instance.ID.String())
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "CONSOLE_READ_FAILED", "failed to read console messages", err)
 		return
 	}
@@ -889,9 +1178,10 @@ type executeInteractionRequest struct {
 }
 
 func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -918,8 +1208,36 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
 	defer cancel()
 
-	result, err := inspector.ExecuteInteraction(ctx, instance.ID.String(), body.Steps)
+	var result *models.InteractionResult
+	var err error
+	if h.workerRoutingEnabled() {
+		var worker preview.WorkerNode
+		worker, err = h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
+		if err != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			result, err = inspector.ExecuteInteraction(ctx, instance.ID.String(), body.Steps)
+		} else {
+			result, err = h.workerClient.ExecuteInteraction(ctx, worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Steps)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		result, err = inspector.ExecuteInteraction(ctx, instance.ID.String(), body.Steps)
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "INTERACTION_FAILED", "failed to execute interaction", err)
 		return
 	}
@@ -940,9 +1258,10 @@ type captureMultiViewportRequest struct {
 }
 
 func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -976,8 +1295,37 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 		opts.Delay = time.Duration(body.DelayMS) * time.Millisecond
 	}
 
-	result, err := inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
+	var (
+		result *models.MultiViewportResult
+		err    error
+	)
+	if h.workerRoutingEnabled() {
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			result, err = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
+		} else {
+			result, err = h.workerClient.CaptureMultiViewport(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, opts)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		result, err = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "MULTI_VIEWPORT_FAILED", "failed to capture multi-viewport screenshots", err)
 		return
 	}
@@ -995,9 +1343,10 @@ type computeVisualDiffRequest struct {
 }
 
 func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -1015,8 +1364,37 @@ func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	diff, err := inspector.ComputeVisualDiff(r.Context(), instance.ID.String(), body.BeforeSnapshotID, body.AfterSnapshotID)
+	var (
+		diff *models.VisualDiff
+		err  error
+	)
+	if h.workerRoutingEnabled() {
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			diff, err = inspector.ComputeVisualDiff(r.Context(), instance.ID.String(), body.BeforeSnapshotID, body.AfterSnapshotID)
+		} else {
+			diff, err = h.workerClient.ComputeVisualDiff(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.BeforeSnapshotID, body.AfterSnapshotID)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		diff, err = inspector.ComputeVisualDiff(r.Context(), instance.ID.String(), body.BeforeSnapshotID, body.AfterSnapshotID)
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "VISUAL_DIFF_FAILED", "failed to compute visual diff", err)
 		return
 	}
@@ -1033,9 +1411,10 @@ type runAssertionsRequest struct {
 }
 
 func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
-	inspector, ok := h.requireInspector(w, r)
-	if !ok {
-		return
+	if !h.workerRoutingEnabled() {
+		if _, ok := h.requireInspector(w, r); !ok {
+			return
+		}
 	}
 	instance, ok := h.getActivePreview(w, r)
 	if !ok {
@@ -1058,8 +1437,37 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
+	var (
+		result *preview.AssertionResult
+		err    error
+	)
+	if h.workerRoutingEnabled() {
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+			return
+		}
+		if h.isLocalWorker(worker) {
+			inspector, inspectorOK := h.requireInspector(w, r)
+			if !inspectorOK {
+				return
+			}
+			result, err = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
+		} else {
+			result, err = h.workerClient.RunAssertions(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Assertions)
+		}
+	} else {
+		inspector, inspectorOK := h.requireInspector(w, r)
+		if !inspectorOK {
+			return
+		}
+		result, err = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
+	}
 	if err != nil {
+		if _, ok := preview.AsWorkerRequestError(err); ok {
+			h.writeWorkerClientError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "ASSERTIONS_FAILED", "failed to run assertions", err)
 		return
 	}

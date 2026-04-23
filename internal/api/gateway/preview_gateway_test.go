@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -535,4 +537,233 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, secondResp.Code, "gateway should reject a session revoked after it was cached")
 	require.Contains(t, secondResp.Body.String(), "preview session has been revoked", "gateway should return the revoked-session error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/assets/app.js", r.URL.Path, "proxyToWorker should rewrite preview paths to the internal worker proxy endpoint")
+		require.Equal(t, "Bearer ", r.Header.Get("Authorization")[:7], "proxyToWorker should attach a bearer token to worker requests")
+		require.Empty(t, r.Header.Get("Cookie"), "proxyToWorker should strip preview cookies before proxying")
+		w.Header().Set("Content-Type", "text/plain")
+		_, writeErr := io.WriteString(w, "ok")
+		require.NoError(t, writeErr, "worker test server should write a response body")
+	}))
+	defer workerServer.Close()
+
+	metadata, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: workerServer.URL,
+	})
+	require.NoError(t, err, "worker metadata should marshal")
+
+	store := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+	selector := preview.NewWorkerSelector(nodeStore, store)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     selector,
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
+				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+				"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+				"preview_holding_container",
+			}).AddRow(
+				previewID, sessionID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
+				"docker", "worker-1", "handle-1", "web", 3000,
+				"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
+				"/", 512, 500, []byte(`{}`), []byte(`{}`), "", now, now, now, nil,
+				false,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}).
+				AddRow("worker-1", "worker", "worker.internal", "active", metadata, now, now),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: "secret"})
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusOK, rr.Code, "proxyToWorker should relay successful worker responses")
+	require.Equal(t, "ok", rr.Body.String(), "proxyToWorker should relay the worker response body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_Failures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preview lookup failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		previewID := uuid.New()
+
+		store := db.NewPreviewStore(mock)
+		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
+		gw := NewGateway(GatewayConfig{
+			Store:              store,
+			WorkerSelector:     selector,
+			Logger:             zerolog.Nop(),
+			AppOrigin:          "https://app.143.dev",
+			PreviewTokenSecret: "preview-secret",
+		})
+
+		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
+				"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+				"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+				"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+				"preview_holding_container",
+			}))
+
+		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+		rr := httptest.NewRecorder()
+
+		gw.proxyToWorker(rr, req, orgID, previewID)
+		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the preview instance lookup fails")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("worker resolve failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		sessionID := uuid.New()
+		previewID := uuid.New()
+		now := time.Now().UTC()
+
+		store := db.NewPreviewStore(mock)
+		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
+		gw := NewGateway(GatewayConfig{
+			Store:              store,
+			WorkerSelector:     selector,
+			Logger:             zerolog.Nop(),
+			AppOrigin:          "https://app.143.dev",
+			PreviewTokenSecret: "preview-secret",
+		})
+
+		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
+					"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+					"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+					"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+					"preview_holding_container",
+				}).AddRow(
+					previewID, sessionID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
+					"docker", "worker-missing", "handle-1", "web", 3000,
+					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
+					"/", 512, 500, []byte(`{}`), []byte(`{}`), "", now, now, now, nil,
+					false,
+				),
+			)
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}))
+
+		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+		rr := httptest.NewRecorder()
+
+		gw.proxyToWorker(rr, req, orgID, previewID)
+		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the worker cannot be resolved")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("worker base url parse failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		sessionID := uuid.New()
+		previewID := uuid.New()
+		now := time.Now().UTC()
+
+		metadata, err := json.Marshal(preview.WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewInternalBaseURL: "://bad-url",
+		})
+		require.NoError(t, err, "worker metadata should marshal")
+
+		store := db.NewPreviewStore(mock)
+		selector := preview.NewWorkerSelector(db.NewNodeStore(mock), store)
+		gw := NewGateway(GatewayConfig{
+			Store:              store,
+			WorkerSelector:     selector,
+			Logger:             zerolog.Nop(),
+			AppOrigin:          "https://app.143.dev",
+			PreviewTokenSecret: "preview-secret",
+		})
+
+		mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "session_id", "org_id", "user_id", "profile_name", "name", "status",
+					"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+					"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+					"last_path", "memory_limit_mb", "cpu_limit_millis", "recycle_config", "recycle_sandbox", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+					"preview_holding_container",
+				}).AddRow(
+					previewID, sessionID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
+					"docker", "worker-1", "handle-1", "web", 3000,
+					"sha256:abc", "deadbeef", now, now.Add(time.Minute), nil,
+					"/", 512, 500, []byte(`{}`), []byte(`{}`), "", now, now, now, nil,
+					false,
+				),
+			)
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at"}).
+					AddRow("worker-1", "worker", "worker.internal", "active", metadata, now, now),
+			)
+
+		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+		rr := httptest.NewRecorder()
+
+		gw.proxyToWorker(rr, req, orgID, previewID)
+		require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should fail closed when the worker base URL is invalid")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }

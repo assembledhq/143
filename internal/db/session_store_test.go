@@ -22,7 +22,7 @@ import (
 var sessionTestColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -43,7 +43,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 	return []interface{}{
 		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
-		nil, false, &startedAt, &completedAt, nil,
+		nil, nil, false, &startedAt, &completedAt, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
@@ -1436,7 +1436,7 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 		defer mock.Close()
 
 		store := NewSessionStore(mock)
-		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
+		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+sandbox_state = CASE`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1454,7 +1454,7 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 		defer mock.Close()
 
 		store := NewSessionStore(mock)
-		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
+		mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+sandbox_state = CASE`).
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1497,6 +1497,45 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 		_, err = store.FinalizeContainerDestroy(context.Background(), uuid.New(), uuid.New(), "c-1")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "finalize container destroy")
+	})
+}
+
+func TestSessionStore_SetWorkerNodeIDForContainer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("records worker ownership for matching container", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions\s+SET worker_node_id = @worker_node_id`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = store.SetWorkerNodeIDForContainer(context.Background(), uuid.New(), uuid.New(), "container-1", "worker-a")
+		require.NoError(t, err, "SetWorkerNodeIDForContainer should update ownership when the container still matches")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns an error when ownership can no longer be recorded", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectExec(`UPDATE sessions\s+SET worker_node_id = @worker_node_id`).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = store.SetWorkerNodeIDForContainer(context.Background(), uuid.New(), uuid.New(), "container-1", "worker-a")
+		require.Error(t, err, "SetWorkerNodeIDForContainer should fail when the row no longer matches the expected container")
+		require.Contains(t, err.Error(), "worker ownership could be recorded", "the error should explain the ownership race")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }
 

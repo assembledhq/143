@@ -973,6 +973,11 @@ func (m *Manager) SetInspector(inspector PreviewInspector) {
 	m.inspector = inspector
 }
 
+// HMRWatcher returns the worker-local HMR watcher, if configured.
+func (m *Manager) HMRWatcher() *HMRWatcher {
+	return m.hmrWatcher
+}
+
 // =============================================================================
 // RecyclePreview
 // =============================================================================

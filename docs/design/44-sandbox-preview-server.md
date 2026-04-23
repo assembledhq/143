@@ -1,8 +1,8 @@
 # Design: Sandbox Preview Server
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-04-22
 >
-> **Implementation notes:** Core preview tables, store/service layer, API handlers, frontend session preview flows, and repo preview guidance are implemented. Remaining work is in tightening full deployment coverage and finishing the outer edges of the design.
+> **Implementation notes:** Preview now runs with an app-owned public edge and worker-owned runtime. App nodes mint/bootstrap access and host the wildcard preview gateway; worker nodes own sandbox hydrate/reuse, preview lifecycle, inspector actions, cleanup, and browser proxying.
 
 This document describes how 143.dev can expose a live preview of code running inside a sandbox without giving untrusted preview content the same browser origin as the main app.
 
@@ -26,7 +26,7 @@ Preview is intended to replace local setup for **reviewing and iterating on supp
 
 - **Internal-only access by default**. Preview URLs are available only to authenticated 143 users in the same org.
 - **Trusted-internal with hard guardrails**. Internal access does not relax browser-origin isolation, sandboxing, or egress controls.
-- **Explicit single-node MVP**. Phase 1 runs the preview gateway, preview manager, and Docker runtime on one machine, but keeps node-aware data and interfaces so multi-node routing can be added later.
+- **Worker-owned multi-node execution**. Public preview URLs terminate on app nodes, but sandbox runtime work executes on preview-capable worker nodes selected and tracked through durable node ownership.
 
 ## Non-Goals for MVP
 
@@ -98,6 +98,19 @@ Instead:
 8. The bootstrap page exchanges the token for a preview-domain-only session cookie via a same-origin POST, then navigates to the preview root.
 9. The preview gateway proxies HTTP and WebSocket traffic to the owning worker/provider stream.
 10. Idle previews are stopped automatically based on activity-aware timeouts; the browser must request a fresh bootstrap token to resume.
+
+## Implementation Status (2026-04-22)
+
+The production contract now differs from the original single-node MVP in a few important ways:
+
+- App nodes still own `/api/v1/sessions/{id}/preview/*`, bootstrap token mint/exchange, and the public wildcard preview gateway.
+- Worker nodes own all preview runtime behavior: sandbox hydrate/reuse, `preview.Manager`, provider `Start/Stop/Dial`, inspector actions, WebSocket/HMR snooping, recycle, and idle/TTL cleanup.
+- `sessions.worker_node_id` durably records which worker currently owns a live session container so live-preview reuse can be routed back to the correct worker.
+- `preview_instances.worker_node_id` remains the source of truth for active-preview routing.
+- App-to-worker hops use short-lived signed preview tokens over the existing worker HTTP listener rather than direct Docker access from app nodes.
+- The public gateway no longer dials Docker-backed preview streams locally. It resolves the owning worker and reverse proxies to that worker's authenticated internal preview proxy.
+
+The detailed routing contract for this deployed architecture lives in [48-worker-owned-preview-routing.md](48-worker-owned-preview-routing.md).
 
 The bootstrap token is one-time and short-lived. It never appears in a URL, browser history, or server access logs. The preview domain does not receive the main app's session cookie.
 

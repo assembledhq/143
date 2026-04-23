@@ -5,6 +5,19 @@ include:
   - docker-compose.vector.yml
 
 services:
+  chrome:
+    image: chromedp/headless-shell:latest
+    shm_size: 256m
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
   gvisor-check:
     image: docker:27-cli
     entrypoint: ["/bin/sh", "-c"]
@@ -27,13 +40,18 @@ services:
   worker:
     image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
     depends_on:
+      chrome:
+        condition: service_started
       gvisor-check:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
       ENV: production
       MODE: worker
+      CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
+      NODE_ID: ${NODE_ID:-}
+      PREVIEW_INTERNAL_BASE_URL: ${PREVIEW_INTERNAL_BASE_URL:-}
       SANDBOX_IMAGE: ghcr.io/assembledhq/143-sandbox:${IMAGE_TAG:-latest}
       SANDBOX_RUNTIME: runsc
       SANDBOX_REQUIRE_GVISOR: "true"
