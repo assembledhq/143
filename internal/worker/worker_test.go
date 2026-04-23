@@ -293,6 +293,16 @@ func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	}
 }
 
+func TestWorker_Wake_DropsDuplicateSignalsWhenBufferFull(t *testing.T) {
+	t.Parallel()
+
+	w := &Worker{wakeCh: make(chan struct{}, 1)}
+	w.Wake()
+	require.NotPanics(t, func() {
+		w.Wake()
+	}, "Wake should drop duplicate signals instead of blocking when the channel buffer is full")
+}
+
 func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 	t.Parallel()
 

@@ -15,6 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type jsonStringer string
+
+func (s jsonStringer) String() string { return string(s) }
+
 func testRedisClient(t *testing.T) (*Client, *miniredis.Miniredis) {
 	t.Helper()
 
@@ -172,6 +176,10 @@ func TestParseLogStreamID(t *testing.T) {
 	got, err := ParseLogStreamID("12345-0")
 	require.NoError(t, err, "valid stream ID should parse")
 	require.Equal(t, int64(12345), got, "parser should return the durable log ID prefix")
+
+	got, err = ParseLogStreamID("")
+	require.NoError(t, err, "empty stream IDs should map to zero")
+	require.Equal(t, int64(0), got, "empty stream IDs should parse as zero")
 }
 
 func TestSessionStreams_RangeLogsSince_RedisUnavailable(t *testing.T) {
@@ -230,6 +238,13 @@ func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 func TestLogRingBufferAndSubscriptionHelpers(t *testing.T) {
 	t.Parallel()
 
+	emptyRing := newLogRingBuffer(0)
+	emptyRing.add(StreamedLog{StreamID: SessionLogStreamID(1), Log: models.SessionLog{ID: 1}})
+	require.Nil(t, emptyRing.snapshot(), "zero-sized rings should ignore added entries")
+	gotEmpty, ok := emptyRing.since("")
+	require.True(t, ok, "empty cursors should succeed even for zero-sized rings")
+	require.Nil(t, gotEmpty, "empty cursors should not require buffered entries")
+
 	ring := newLogRingBuffer(2)
 	ring.add(StreamedLog{StreamID: SessionLogStreamID(1), Log: models.SessionLog{ID: 1}})
 	ring.add(StreamedLog{StreamID: SessionLogStreamID(2), Log: models.SessionLog{ID: 2}})
@@ -254,6 +269,91 @@ func TestLogRingBufferAndSubscriptionHelpers(t *testing.T) {
 		nilLogSub.Close()
 		nilStatusSub.Close()
 	}, "nil subscriptions should close cleanly")
+}
+
+func TestSessionStreams_RunCleanupBatch_ListError(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	streams := NewSessionStreams(client, zerolog.Nop(), nil)
+
+	count, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{err: context.DeadlineExceeded})
+	require.Error(t, err, "cleanup batch should surface lister failures")
+	require.Equal(t, 0, count, "cleanup batch should report zero work when listing fails")
+}
+
+func TestSessionStreams_FanoutRun_StopsOnCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+
+	logCtx, logCancel := context.WithCancel(context.Background())
+	logSub := &logSubscriber{ch: make(chan StreamedLog, 1)}
+	logSub.reason.Store("")
+	logExited := make(chan struct{}, 1)
+	logFanout := &logFanout{
+		sessionID: uuid.New(),
+		streamKey: "logs",
+		client:    client,
+		logger:    zerolog.Nop(),
+		ctx:       logCtx,
+		cancel:    logCancel,
+		clients:   map[*logSubscriber]struct{}{logSub: {}},
+		ring:      newLogRingBuffer(1),
+		onExit: func() {
+			logExited <- struct{}{}
+		},
+	}
+	logCancel()
+	logFanout.run()
+	select {
+	case <-logExited:
+	case <-time.After(time.Second):
+		t.Fatal("log fan-out should invoke onExit after context cancellation")
+	}
+	require.Equal(t, "retry", logSub.reason.Load(), "canceling log fan-out should close subscribers with retry")
+
+	statusCtx, statusCancel := context.WithCancel(context.Background())
+	statusSub := &statusSubscriber{ch: make(chan models.Session, 1)}
+	statusSub.reason.Store("")
+	statusExited := make(chan struct{}, 1)
+	statusFanout := &statusFanout{
+		sessionID: uuid.New(),
+		streamKey: "status",
+		client:    client,
+		logger:    zerolog.Nop(),
+		ctx:       statusCtx,
+		cancel:    statusCancel,
+		clients:   map[*statusSubscriber]struct{}{statusSub: {}},
+		onExit: func() {
+			statusExited <- struct{}{}
+		},
+	}
+	statusCancel()
+	statusFanout.run()
+	select {
+	case <-statusExited:
+	case <-time.After(time.Second):
+		t.Fatal("status fan-out should invoke onExit after context cancellation")
+	}
+	require.Equal(t, "retry", statusSub.reason.Load(), "canceling status fan-out should close subscribers with retry")
+}
+
+func TestSessionStreams_DecodeHelpers_NonStringJSONValue(t *testing.T) {
+	t.Parallel()
+
+	logPayload := jsonStringer(`{"id":77,"session_id":"` + uuid.New().String() + `","org_id":"` + uuid.New().String() + `","level":"info","message":"coerce"}`)
+	logEntry, err := decodeLogEntry(redis.XMessage{Values: map[string]any{"json": logPayload}})
+	require.NoError(t, err, "decoder should coerce non-string JSON payloads")
+	require.Equal(t, int64(77), logEntry.ID, "decoder should unmarshal coerced log payloads")
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	issueID := uuid.New()
+	statusPayload := jsonStringer(`{"id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_id":"` + issueID.String() + `","agent_type":"codex","status":"running"}`)
+	session, err := decodeStatusEntry(redis.XMessage{Values: map[string]any{"json": statusPayload}})
+	require.NoError(t, err, "decoder should coerce non-string status payloads")
+	require.Equal(t, sessionID, session.ID, "decoder should unmarshal coerced status payloads")
 }
 
 func TestSessionStreams_NilAndDecodeHelpers(t *testing.T) {

@@ -123,6 +123,33 @@ func TestSessionLogStore_Create_PublishFailureIsBestEffort(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionLogStore_Create_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery("INSERT INTO session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).
+				AddRow(int64(1)),
+		)
+
+	err = store.Create(context.Background(), log)
+	require.Error(t, err, "Create should surface row scan failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

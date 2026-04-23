@@ -67,3 +67,54 @@ func TestJobNotifier_StartGuardsAndCanceledRun(t *testing.T) {
 		notifier.Start(ctx, func() {})
 	}, "Start should tolerate already-canceled contexts")
 }
+
+func TestJobNotifier_RunHandlesSubscribeFailure(t *testing.T) {
+	t.Parallel()
+
+	client, mr := testRedisClient(t)
+	notifier := NewJobNotifier(client, zerolog.Nop())
+	require.NotNil(t, notifier, "constructor should build a notifier when Redis is configured")
+	mr.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		notifier.run(ctx, func() {})
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("notifier should return promptly after subscribe failures once the context is canceled")
+	}
+}
+
+func TestJobNotifier_RunHandlesChannelClosure(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	notifier := NewJobNotifier(client, zerolog.Nop())
+	require.NotNil(t, notifier, "constructor should build a notifier when Redis is configured")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		notifier.run(ctx, func() {})
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, client.Close(), "closing the Redis client should tear down the subscriber channel")
+	time.Sleep(2200 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("notifier should return after the subscriber channel closes and the context is canceled")
+	}
+}

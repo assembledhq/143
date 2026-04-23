@@ -22,8 +22,10 @@ type Metrics struct {
 }
 
 func NewMetrics() (*Metrics, error) {
-	meter := otel.Meter("github.com/assembledhq/143/redis")
+	return newMetrics(otel.Meter("github.com/assembledhq/143/redis"))
+}
 
+func newMetrics(meter otelmetric.Meter) (*Metrics, error) {
 	commands, err := meter.Int64Counter("redis.commands",
 		otelmetric.WithDescription("Total Redis command calls"),
 	)

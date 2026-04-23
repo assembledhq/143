@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -90,6 +92,24 @@ func TestNew_StartupPingFailureOpensBreaker(t *testing.T) {
 	require.Equal(t, breakerStateOpen, created.breaker.State(), "startup ping failures should open the breaker")
 }
 
+func TestNew_StandaloneAppliesPasswordAndPoolOptions(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+	client := New(Config{
+		Topology: "standalone",
+		URL:      "redis://" + mr.Addr(),
+		Password: "secret",
+		PoolSize: 7,
+	}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "constructor should build a standalone client with overrides")
+
+	raw, ok := client.raw().(*redis.Client)
+	require.True(t, ok, "standalone topology should build a redis.Client")
+	require.Equal(t, "secret", raw.Options().Password, "constructor should override the parsed URL password when provided")
+	require.Equal(t, 7, raw.Options().PoolSize, "constructor should apply the configured pool size")
+}
+
 func TestClientNilHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +137,18 @@ func TestClientDoCommandAndAvailabilityFailure(t *testing.T) {
 	require.Equal(t, breakerStateOpen, client.breaker.State(), "failed recovery probes should leave the breaker open")
 }
 
+func TestClientAvailableHealthyAndCommandFailure(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	require.True(t, client.Available(), "healthy Redis clients should report available while the breaker is closed")
+
+	err := client.doCommand(context.Background(), "ping", func() error {
+		return errors.New("boom")
+	})
+	require.EqualError(t, err, "boom", "command wrapper should surface command failures")
+}
+
 func TestClientDoCommandBreakerOpenAndRaw(t *testing.T) {
 	t.Parallel()
 
@@ -124,4 +156,7 @@ func TestClientDoCommandBreakerOpenAndRaw(t *testing.T) {
 	client.breaker.ForceOpen()
 	require.Error(t, client.doCommand(context.Background(), "ping", func() error { return nil }), "open breaker should reject commands before invoking Redis")
 	require.NotNil(t, client.raw(), "raw client accessor should expose the underlying Redis client")
+
+	var nilClient *Client
+	require.Nil(t, nilClient.raw(), "nil client raw access should return nil")
 }
