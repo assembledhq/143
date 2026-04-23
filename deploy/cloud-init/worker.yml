@@ -12,6 +12,9 @@
 #   export DB_HOST="10.0.0.3"
 #   export GITHUB_APP_CLIENT_ID="Iv1.0123456789abcdef"
 #   export GITHUB_APP_CLIENT_SECRET="your_github_app_client_secret"
+#   export NODE_ID="worker-1"
+#   export PREVIEW_INTERNAL_BASE_URL="http://10.0.0.12:8080"
+#   export CHROME_WS_URL="ws://chrome:9222"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/worker.yml > /tmp/user-data.yml
 
@@ -51,6 +54,7 @@ runcmd:
   # Pull images
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-server:latest'
   - su - deploy -c 'docker pull ghcr.io/assembledhq/143-sandbox:latest'
+  - su - deploy -c 'docker pull chromedp/headless-shell:latest'
 
   # Create the shared sandbox egress network (idempotent). The worker also
   # self-heals this at startup, but pre-creating it on bootstrap means the
@@ -80,6 +84,9 @@ write_files:
       DB_HOST=${DB_HOST}
       GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}
       GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}
+      NODE_ID=${NODE_ID}
+      PREVIEW_INTERNAL_BASE_URL=${PREVIEW_INTERNAL_BASE_URL}
+      CHROME_WS_URL=${CHROME_WS_URL}
 
   - path: /opt/143/.ghcr-token
     owner: deploy:deploy

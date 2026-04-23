@@ -522,6 +522,23 @@ func (s *PreviewStore) ListExpiredPreviews(ctx context.Context, cutoff time.Time
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
 }
 
+// ListExpiredPreviewsForWorker returns active previews owned by the given worker
+// whose hard TTL has passed.
+// lint:allow-no-orgid reason="worker-scoped cleanup scan across orgs"
+func (s *PreviewStore) ListExpiredPreviewsForWorker(ctx context.Context, workerNodeID string, cutoff time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE status IN %s
+		AND worker_node_id = @worker_node_id
+		AND expires_at < @cutoff
+		ORDER BY expires_at ASC`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_node_id": workerNodeID, "cutoff": cutoff})
+	if err != nil {
+		return nil, fmt.Errorf("query expired previews by worker: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+}
+
 // ListIdlePreviews returns active previews with no activity since the cutoff.
 //
 // Previews whose session currently has an active agent turn
@@ -545,6 +562,35 @@ func (s *PreviewStore) ListIdlePreviews(ctx context.Context, idleSince time.Time
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"idle_since": idleSince})
 	if err != nil {
 		return nil, fmt.Errorf("query idle previews: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
+}
+
+// ListIdlePreviewsForWorker returns active previews owned by the given worker
+// with no activity since the cutoff.
+//
+// Previews whose session currently has an active agent turn
+// (sessions.turn_holding_container = TRUE) are excluded. While a user is
+// actively iterating — e.g. the agent is editing files and the preview is
+// hot-reloading — we do not want the idle sweeper to reap the preview out
+// from under them; turn activity is the user's implicit heartbeat.
+// lint:allow-no-orgid reason="worker-scoped cleanup scan across orgs"
+func (s *PreviewStore) ListIdlePreviewsForWorker(ctx context.Context, workerNodeID string, idleSince time.Time) ([]models.PreviewInstance, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_instances
+		WHERE status IN %s
+		AND worker_node_id = @worker_node_id
+		AND last_accessed_at < @idle_since
+		AND NOT EXISTS (
+			SELECT 1 FROM sessions s
+			WHERE s.id = preview_instances.session_id
+			  AND s.org_id = preview_instances.org_id
+			  AND s.turn_holding_container = TRUE
+		)
+		ORDER BY last_accessed_at ASC`, previewInstanceColumns, activeStatusFilter)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_node_id": workerNodeID, "idle_since": idleSince})
+	if err != nil {
+		return nil, fmt.Errorf("query idle previews by worker: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewInstance])
 }

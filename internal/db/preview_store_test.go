@@ -342,6 +342,32 @@ func TestPreviewStore_ListExpiredPreviews(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPreviewStore_ListExpiredPreviewsForWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	id1 := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+expires_at < .+ORDER BY expires_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(id1, uuid.New(), uuid.New(), uuid.New(), now)...),
+		)
+
+	results, err := store.ListExpiredPreviewsForWorker(context.Background(), "worker-1", now)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, id1, results[0].ID)
+	require.Equal(t, "worker-1", results[0].WorkerNodeID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // =============================================================================
 // Preview Service Tests
 // =============================================================================
@@ -1280,6 +1306,35 @@ func TestPreviewStore_ListIdlePreviews(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, previews, 1)
 	require.Equal(t, previewID, previews[0].ID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_ListIdlePreviewsForWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances.+worker_node_id = .+last_accessed_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	previews, err := store.ListIdlePreviewsForWorker(context.Background(), "worker-1", now.Add(-15*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, previews, 1)
+	require.Equal(t, previewID, previews[0].ID)
+	require.Equal(t, "worker-1", previews[0].WorkerNodeID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
