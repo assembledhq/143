@@ -1,6 +1,6 @@
 # Design: Team Management
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Implemented | **Last reviewed:** 2026-04-23
 
 This document describes how 143.dev enables organization admins to manage their team — inviting new members, assigning roles, and removing users. Today, users can only join via self-signup (GitHub OAuth, Google OAuth, or email registration), and there's no way for admins to control who's in their org or what role they have. This creates a gap: the RBAC middleware enforces three roles (`admin`, `member`, `viewer`), but nothing in the UI or API lets admins assign or change them.
 
@@ -566,26 +566,36 @@ The frontend lives at `frontend/src/` and uses Next.js (App Router), React, TanS
 
 ### Invite modal
 
-Clicking "Invite Member" opens a modal:
+Clicking "Invite Member" opens a modal with parallel email and GitHub invite flows. Both use the same two-stage pattern: collect an invitee in the top area, then move that person into a separate **Invite setup** card before the final submit action is enabled. This keeps the search/input control visually distinct from the actual invite being sent.
 
 ```
-┌─ Invite Member ─────────────────────┐
-│                                     │
-│  Email address                      │
-│  ┌─────────────────────────────┐    │
-│  │ carol@example.com           │    │
-│  └─────────────────────────────┘    │
-│                                     │
-│  Role                               │
-│  ┌─────────────────────────────┐    │
-│  │ Member                    ▾ │    │
-│  └─────────────────────────────┘    │
-│  Can trigger fixes and view data.   │
-│                                     │
-│         [Cancel]  [Send Invite]     │
-│                                     │
-└─────────────────────────────────────┘
+┌─ Invite Member ────────────────────────────────┐
+│                                                │
+│  [Email] [GitHub username]                     │
+│                                                │
+│  Email                                         │
+│  ┌──────────────────────┐  [Add email]         │
+│  │ carol@example.com    │                      │
+│  └──────────────────────┘                      │
+│                                                │
+│  Invite setup                                  │
+│  ┌──────────────────────────────────────────┐  │
+│  │ carol@example.com                        │  │
+│  │ Email invitee added to this invite.      │  │
+│  │                               [Change]   │  │
+│  └──────────────────────────────────────────┘  │
+│                                                │
+│  Role                                          │
+│  ┌──────────────────────────────────────────┐  │
+│  │ Member                                ▾  │  │
+│  └──────────────────────────────────────────┘  │
+│                                                │
+│          [Cancel] [Send invite to carol@…]     │
+│                                                │
+└────────────────────────────────────────────────┘
 ```
+
+GitHub invites follow the same structure. When GitHub App search is available, the combobox is only used to discover users; selecting a result moves that user into the separate Invite setup card and collapses the "search vs selected invitee" ambiguity that existed when the selected username stayed inside the input field.
 
 Role descriptions in the selector:
 
