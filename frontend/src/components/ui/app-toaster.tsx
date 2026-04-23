@@ -26,8 +26,8 @@ export function AppToaster() {
           loading: toastDefaultClassName,
           error: cn(errorSurfaceClassNames.container, "shadow-xl"),
           content: "min-w-0 flex-1 space-y-1",
-          title: "text-sm font-medium leading-5 text-foreground",
-          description: "text-sm leading-5 text-muted-foreground",
+          title: errorSurfaceClassNames.title,
+          description: errorSurfaceClassNames.description,
           actionButton:
             "inline-flex h-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-background/85 px-2.5 text-xs font-medium text-foreground transition-colors hover:border-primary/30 hover:bg-background",
           cancelButton:
