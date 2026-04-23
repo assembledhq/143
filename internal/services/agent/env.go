@@ -473,13 +473,67 @@ func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, u
 	}
 
 	// 3. Fall back to org credential.
-	if e.credentials != nil {
-		if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
-			return cred.Config
-		}
+	if cfg := e.resolveOrgProviderConfig(ctx, orgID, provider); cfg != nil {
+		return cfg
 	}
 
 	return nil
+}
+
+func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+	if e.credentials == nil {
+		return nil
+	}
+
+	if provider.IsCodingAgentProvider() {
+		if creds, err := e.credentials.ListByProvider(ctx, orgID, provider); err == nil {
+			for _, cred := range creds {
+				if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+					return cfg
+				}
+			}
+		}
+	}
+
+	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil {
+		if provider.IsCodingAgentProvider() {
+			return compatibleCodingProviderConfig(provider, cred.Config)
+		}
+		return cred.Config
+	}
+
+	return nil
+}
+
+func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.ProviderConfig) models.ProviderConfig {
+	switch provider {
+	case models.ProviderAnthropic:
+		anthropic, ok := cfg.(models.AnthropicConfig)
+		if !ok || anthropic.APIKey == "" || anthropic.Subscription != nil {
+			return nil
+		}
+		return anthropic
+	case models.ProviderOpenAI:
+		openAI, ok := cfg.(models.OpenAIConfig)
+		if !ok || openAI.APIKey == "" {
+			return nil
+		}
+		return openAI
+	case models.ProviderGemini:
+		gemini, ok := cfg.(models.GeminiConfig)
+		if !ok || gemini.APIKey == "" {
+			return nil
+		}
+		return gemini
+	case models.ProviderOpenRouter:
+		openRouter, ok := cfg.(models.OpenRouterConfig)
+		if !ok || openRouter.APIKey == "" {
+			return nil
+		}
+		return openRouter
+	default:
+		return nil
+	}
 }
 
 // InjectCodexAuth writes a ~/.codex/auth.json file into the sandbox if a

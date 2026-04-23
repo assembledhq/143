@@ -15,6 +15,7 @@ import (
 )
 
 var credColumns = []string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
+var codingAuthColumns = []string{"id", "org_id", "provider", "label", "config", "status", "priority", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 
 func TestOrgCredentialStore_Upsert(t *testing.T) {
 	t.Parallel()
@@ -217,6 +218,66 @@ func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 	}
 }
 
+func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	codexSub := crypto.DevEncrypt([]byte(`{"access_token":"tok","refresh_token":"ref","expires_at":"2030-01-01T00:00:00Z","account_type":"plus"}`))
+	claudeKey := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`))
+	geminiKey := crypto.DevEncrypt([]byte(`{"api_key":"AIza-test","model":"gemini-2.5-pro"}`))
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*priority`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+			AddRow(uuid.New(), orgID, "openai_chatgpt", "Team seat A", codexSub, "active", 1, &now, &now, nil, now, now).
+			AddRow(uuid.New(), orgID, "anthropic", "Claude backup", claudeKey, "active", 2, nil, nil, nil, now, now).
+			AddRow(uuid.New(), orgID, "gemini", "", geminiKey, "active", 3, nil, nil, nil, now, now))
+
+	store := NewOrgCredentialStore(mock, nil)
+	rows, err := store.ListCodingAuths(context.Background(), orgID)
+	require.NoError(t, err, "ListCodingAuths should not return an error")
+	require.Len(t, rows, 3, "ListCodingAuths should return every coding auth row")
+	require.Equal(t, models.AgentTypeCodex, rows[0].Agent, "ListCodingAuths should classify Codex subscription rows")
+	require.True(t, rows[0].IsDefault, "ListCodingAuths should mark the first runnable row as default")
+	require.Equal(t, models.CodingAuthTypeAPIKey, rows[1].AuthType, "ListCodingAuths should classify API key rows")
+	require.Equal(t, models.CodingAuthStatusNeverVerified, rows[1].Status, "ListCodingAuths should derive Never verified when last_verified_at is nil")
+	require.Equal(t, models.AgentTypeGeminiCLI, rows[2].Agent, "ListCodingAuths should classify Gemini API key rows")
+	require.Equal(t, "Gemini CLI API key", rows[2].Label, "ListCodingAuths should synthesize a default label when none is provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOrgCredentialStore_ReorderCodingAuths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	firstID := uuid.New()
+	secondID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE org_credentials SET priority = .*updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+		WithArgs(1, firstID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE org_credentials SET priority = .*updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+		WithArgs(2, secondID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	store := NewOrgCredentialStore(mock, nil)
+	err = store.ReorderCodingAuths(context.Background(), orgID, []uuid.UUID{firstID, secondID})
+	require.NoError(t, err, "ReorderCodingAuths should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	t.Parallel()
 
@@ -387,7 +448,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 			name: "returns active credential with oldest last_used_at",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				configData := crypto.DevEncrypt([]byte(`{"access_token":"abc","refresh_token":"def","account_id":"acct","id_token":"tok","expires_at":"2030-01-01T00:00:00Z"}`))
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
 						AddRow(uuid.New(), uuid.New(), "openai_chatgpt", "work", configData, "active", nil, nil, nil, time.Now(), time.Now()))
@@ -396,7 +457,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 		{
 			name: "no active credentials",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns))
 			},
@@ -405,7 +466,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 		{
 			name: "db error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
@@ -450,7 +511,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 			name: "returns labeled active credential",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				configData := crypto.DevEncrypt([]byte(`{"subscription":{"access_token":"a","refresh_token":"r","expires_at":"2030-01-01T00:00:00Z"}}`))
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
 						AddRow(uuid.New(), uuid.New(), "anthropic", "team-a", configData, "active", nil, nil, nil, time.Now(), time.Now()))
@@ -459,7 +520,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 		{
 			name: "no labeled active credentials",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns))
 			},
@@ -468,7 +529,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 		{
 			name: "db error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},

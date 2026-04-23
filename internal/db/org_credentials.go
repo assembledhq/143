@@ -34,7 +34,8 @@ func (e *ErrCredentialLabelTaken) Error() string {
 }
 
 // credentialColumns is the standard SELECT column list for org_credentials queries.
-const credentialColumns = "id, org_id, provider, label, config, status, last_verified_at, last_used_at, created_by, created_at, updated_at" // #nosec G101 -- SQL column list, not credentials
+const credentialColumns = "id, org_id, provider, label, config, status, last_verified_at, last_used_at, created_by, created_at, updated_at"                 // #nosec G101 -- SQL column list, not credentials
+const codingCredentialColumns = "id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at" // #nosec G101 -- SQL column list, not credentials
 
 // OrgCredentialStore manages org-level API credentials (e.g. Anthropic API keys, OpenAI keys).
 // These are distinct from integrations (which store third-party platform connections like GitHub,
@@ -196,7 +197,7 @@ func (s *OrgCredentialStore) Get(ctx context.Context, orgID uuid.UUID, provider 
 	if err != nil {
 		return nil, fmt.Errorf("query %s credential: %w", provider, err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("get %s credential: %w", provider, err)
 	}
@@ -218,7 +219,7 @@ func (s *OrgCredentialStore) GetByID(ctx context.Context, orgID uuid.UUID, id uu
 	if err != nil {
 		return nil, fmt.Errorf("query credential by id: %w", err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("get credential by id: %w", err)
 	}
@@ -241,7 +242,7 @@ func (s *OrgCredentialStore) GetByProviderAndLabel(ctx context.Context, orgID uu
 	if err != nil {
 		return nil, fmt.Errorf("query %s credential by label: %w", provider, err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("get %s credential by label: %w", provider, err)
 	}
@@ -268,7 +269,7 @@ func (s *OrgCredentialStore) GetAllLLM(ctx context.Context, orgID uuid.UUID) ([]
 	if err != nil {
 		return nil, fmt.Errorf("query LLM credentials: %w", err)
 	}
-	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.OrgCredential])
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("collect LLM credentials: %w", err)
 	}
@@ -296,7 +297,7 @@ func (s *OrgCredentialStore) ListSummaries(ctx context.Context, orgID uuid.UUID)
 	if err != nil {
 		return nil, fmt.Errorf("query credentials: %w", err)
 	}
-	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.OrgCredential])
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("collect credentials: %w", err)
 	}
@@ -332,10 +333,10 @@ func (s *OrgCredentialStore) ListSummaries(ctx context.Context, orgID uuid.UUID)
 // ListByProvider returns all active credentials for a given org+provider.
 func (s *OrgCredentialStore) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
 	query := `
-		SELECT ` + credentialColumns + `
+		SELECT ` + codingCredentialColumns + `
 		FROM org_credentials
 		WHERE org_id = @org_id AND provider = @provider AND status != 'disabled'
-		ORDER BY created_at`
+		ORDER BY priority, created_at`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":   orgID,
@@ -344,7 +345,7 @@ func (s *OrgCredentialStore) ListByProvider(ctx context.Context, orgID uuid.UUID
 	if err != nil {
 		return nil, fmt.Errorf("query %s credentials: %w", provider, err)
 	}
-	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.OrgCredential])
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("collect %s credentials: %w", provider, err)
 	}
@@ -361,18 +362,19 @@ func (s *OrgCredentialStore) ListByProvider(ctx context.Context, orgID uuid.UUID
 }
 
 // ClaimNextLabeledRoundRobin is the subscription-scoped variant of
-// ClaimNextRoundRobin: it claims the LRU active credential whose label is
-// non-empty. This is how providers that mix a singleton API-key row
+// ClaimNextRoundRobin: it claims the highest-priority active credential whose
+// label is non-empty, using last_used_at only as a tie-breaker within a
+// priority tier. This is how providers that mix a singleton API-key row
 // (label = ”) with multiple labeled subscription rows (e.g. ProviderAnthropic
 // holding both an Anthropic API key and Claude Code subscriptions) keep
-// round-robin scoped to the subscription set. Locking semantics and the
+// selection scoped to the subscription set. Locking semantics and the
 // "preemptive last_used_at" tradeoff match ClaimNextRoundRobin.
 func (s *OrgCredentialStore) ClaimNextLabeledRoundRobin(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	query := `
 		WITH next AS (
 			SELECT id FROM org_credentials
 			WHERE org_id = @org_id AND provider = @provider AND label != '' AND status = 'active'
-			ORDER BY last_used_at NULLS FIRST, created_at
+			ORDER BY priority, last_used_at NULLS FIRST, created_at
 			LIMIT 1
 			FOR UPDATE
 		)
@@ -389,7 +391,7 @@ func (s *OrgCredentialStore) ClaimNextLabeledRoundRobin(ctx context.Context, org
 	if err != nil {
 		return nil, fmt.Errorf("query next labeled round-robin %s credential: %w", provider, err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("get next labeled round-robin %s credential: %w", provider, err)
 	}
@@ -397,10 +399,11 @@ func (s *OrgCredentialStore) ClaimNextLabeledRoundRobin(ctx context.Context, org
 	return s.decryptRow(row)
 }
 
-// ClaimNextRoundRobin atomically selects the active credential with the oldest
-// last_used_at and marks it as used. The row-level FOR UPDATE lock serializes
-// concurrent claims so each request consistently sees the latest last_used_at,
-// preventing two callers from picking the same credential.
+// ClaimNextRoundRobin atomically selects the highest-priority active
+// credential, using last_used_at as a tie-breaker within a priority tier, and
+// marks it as used. The row-level FOR UPDATE lock serializes concurrent claims
+// so each request consistently sees the latest last_used_at, preventing two
+// callers from picking the same credential.
 //
 // We deliberately do NOT use SKIP LOCKED: if all candidate rows are briefly
 // locked by concurrent claims, SKIP LOCKED would return zero rows even though
@@ -418,7 +421,7 @@ func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid
 		WITH next AS (
 			SELECT id FROM org_credentials
 			WHERE org_id = @org_id AND provider = @provider AND status = 'active'
-			ORDER BY last_used_at NULLS FIRST, created_at
+			ORDER BY priority, last_used_at NULLS FIRST, created_at
 			LIMIT 1
 			FOR UPDATE
 		)
@@ -435,7 +438,7 @@ func (s *OrgCredentialStore) ClaimNextRoundRobin(ctx context.Context, orgID uuid
 	if err != nil {
 		return nil, fmt.Errorf("query next round-robin %s credential: %w", provider, err)
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgCredential])
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
 	if err != nil {
 		return nil, fmt.Errorf("get next round-robin %s credential: %w", provider, err)
 	}
@@ -586,10 +589,336 @@ func (s *OrgCredentialStore) decryptRow(row models.OrgCredential) (*models.Decry
 		Label:          row.Label,
 		Config:         cfg,
 		Status:         row.Status,
+		Priority:       row.Priority,
 		LastVerifiedAt: row.LastVerifiedAt,
 		LastUsedAt:     row.LastUsedAt,
 		CreatedBy:      row.CreatedBy,
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
 	}, nil
+}
+
+func (s *OrgCredentialStore) ListCodingAuths(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error) {
+	query := `
+		SELECT ` + codingCredentialColumns + `
+		FROM org_credentials
+		WHERE org_id = @org_id
+		  AND status != 'disabled'
+		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini')
+		ORDER BY priority, created_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query coding auths: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect coding auths: %w", err)
+	}
+
+	decrypted := make([]models.DecryptedCredential, 0, len(dbRows))
+	for _, row := range dbRows {
+		cred, derr := s.decryptRow(row)
+		if derr != nil {
+			return nil, derr
+		}
+		if !isSupportedCodingAuthCredential(*cred) {
+			continue
+		}
+		decrypted = append(decrypted, *cred)
+	}
+
+	result := make([]models.CodingAuth, 0, len(decrypted))
+	defaultAssigned := false
+	for _, cred := range decrypted {
+		codingAuth, ok := buildCodingAuthSummary(cred)
+		if !ok {
+			continue
+		}
+		if !defaultAssigned && isRunnableCodingAuthStatus(codingAuth.Status) {
+			codingAuth.IsDefault = true
+			defaultAssigned = true
+		}
+		result = append(result, codingAuth)
+	}
+
+	return result, nil
+}
+
+func (s *OrgCredentialStore) ReorderCodingAuths(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("org credential store db does not support transactions")
+	}
+
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	for idx, id := range ids {
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE org_credentials SET priority = @priority, updated_at = now() WHERE id = @id AND org_id = @org_id`,
+			pgx.NamedArgs{"priority": idx + 1, "id": id, "org_id": orgID},
+		)
+		if execErr != nil {
+			return fmt.Errorf("reorder coding auth %s: %w", id, execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("coding auth %s not found", id)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+	cfg, provider, err := providerConfigForCodingAuthInput(input)
+	if err != nil {
+		return nil, err
+	}
+
+	var nextPriority int
+	if scanErr := s.db.QueryRow(ctx, `
+		SELECT COALESCE(MAX(priority), 0) + 1
+		FROM org_credentials
+		WHERE org_id = @org_id
+		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini')
+		  AND status != 'disabled'`,
+		pgx.NamedArgs{"org_id": orgID},
+	).Scan(&nextPriority); scanErr != nil {
+		return nil, fmt.Errorf("get next coding auth priority: %w", scanErr)
+	}
+
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `
+		INSERT INTO org_credentials (org_id, provider, label, config, status, priority, created_by)
+		VALUES (@org_id, @provider, @label, @config, 'active', @priority, @created_by)
+		RETURNING id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"provider":   string(provider),
+		"label":      input.Label,
+		"config":     encrypted,
+		"priority":   nextPriority,
+		"created_by": createdBy,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create coding auth: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return nil, fmt.Errorf("create coding auth: %w", err)
+	}
+	cred, err := s.decryptRow(row)
+	if err != nil {
+		return nil, err
+	}
+	codingAuth, ok := buildCodingAuthSummary(*cred)
+	if !ok {
+		return nil, fmt.Errorf("unsupported coding auth row")
+	}
+	return &codingAuth, nil
+}
+
+func (s *OrgCredentialStore) UpdateCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID, input models.UpdateCodingAuthInput) (*models.CodingAuth, error) {
+	if input.Label == nil {
+		return nil, fmt.Errorf("no coding auth fields supplied")
+	}
+
+	rows, err := s.db.Query(ctx, `
+		UPDATE org_credentials
+		SET label = @label, updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		RETURNING id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at`,
+		pgx.NamedArgs{"label": *input.Label, "id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update coding auth: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return nil, fmt.Errorf("update coding auth: %w", err)
+	}
+	cred, err := s.decryptRow(row)
+	if err != nil {
+		return nil, err
+	}
+	codingAuth, ok := buildCodingAuthSummary(*cred)
+	if !ok {
+		return nil, fmt.Errorf("unsupported coding auth row")
+	}
+	return &codingAuth, nil
+}
+
+func (s *OrgCredentialStore) DisableCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE org_credentials SET status = 'disabled', updated_at = now() WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("disable coding auth: %w", err)
+	}
+	return nil
+}
+
+func providerConfigForCodingAuthInput(input models.CreateCodingAuthInput) (models.ProviderConfig, models.ProviderName, error) {
+	switch input.Agent {
+	case models.AgentTypeCodex:
+		return models.OpenAIConfig{
+			APIKey:  input.APIKey,
+			BaseURL: input.BaseURL,
+			APIType: defaultString(input.APIType, "responses"),
+		}, models.ProviderOpenAI, nil
+	case models.AgentTypeClaudeCode:
+		return models.AnthropicConfig{
+			APIKey:  input.APIKey,
+			BaseURL: input.BaseURL,
+		}, models.ProviderAnthropic, nil
+	case models.AgentTypeGeminiCLI:
+		return models.GeminiConfig{
+			APIKey: input.APIKey,
+			Model:  defaultString(input.APIType, models.GeminiCLIModelGemini25Pro),
+		}, models.ProviderGemini, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported coding auth agent: %s", input.Agent)
+	}
+}
+
+func buildCodingAuthSummary(cred models.DecryptedCredential) (models.CodingAuth, bool) {
+	authType := inferCodingAuthType(cred)
+	if authType == "" {
+		return models.CodingAuth{}, false
+	}
+
+	agent := inferCodingAuthAgent(cred)
+	if agent == "" {
+		return models.CodingAuth{}, false
+	}
+
+	return models.CodingAuth{
+		ID:             cred.ID,
+		OrgID:          cred.OrgID,
+		Priority:       cred.Priority,
+		Agent:          agent,
+		AuthType:       authType,
+		Label:          defaultString(cred.Label, fallbackLabel(agent, authType)),
+		Scope:          "organization",
+		Provider:       cred.Provider,
+		Status:         inferCodingAuthStatus(cred),
+		LastVerifiedAt: cred.LastVerifiedAt,
+		LastUsedAt:     cred.LastUsedAt,
+		UsageNote:      codingAuthUsageNote(cred),
+		CreatedBy:      cred.CreatedBy,
+		CreatedAt:      cred.CreatedAt,
+		UpdatedAt:      cred.UpdatedAt,
+	}, true
+}
+
+func isSupportedCodingAuthCredential(cred models.DecryptedCredential) bool {
+	return inferCodingAuthType(cred) != "" && inferCodingAuthAgent(cred) != ""
+}
+
+func inferCodingAuthAgent(cred models.DecryptedCredential) models.AgentType {
+	switch cred.Provider {
+	case models.ProviderOpenAI, models.ProviderOpenAIChatGPT:
+		return models.AgentTypeCodex
+	case models.ProviderAnthropic:
+		return models.AgentTypeClaudeCode
+	case models.ProviderGemini:
+		return models.AgentTypeGeminiCLI
+	default:
+		return ""
+	}
+}
+
+func inferCodingAuthType(cred models.DecryptedCredential) models.CodingAuthType {
+	switch cfg := cred.Config.(type) {
+	case models.OpenAIChatGPTConfig:
+		return models.CodingAuthTypeSubscription
+	case models.OpenAIConfig:
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	case models.AnthropicConfig:
+		if cfg.Subscription != nil {
+			return models.CodingAuthTypeSubscription
+		}
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	case models.GeminiConfig:
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	}
+	return ""
+}
+
+func inferCodingAuthStatus(cred models.DecryptedCredential) models.CodingAuthStatus {
+	switch cred.Status {
+	case "invalid":
+		return models.CodingAuthStatusInvalid
+	case "pending_auth":
+		return models.CodingAuthStatusNeedsReauth
+	case "active":
+		if cred.LastVerifiedAt == nil {
+			return models.CodingAuthStatusNeverVerified
+		}
+		return models.CodingAuthStatusHealthy
+	default:
+		return models.CodingAuthStatusNeedsReauth
+	}
+}
+
+func isRunnableCodingAuthStatus(status models.CodingAuthStatus) bool {
+	return status == models.CodingAuthStatusHealthy || status == models.CodingAuthStatusNeverVerified
+}
+
+func codingAuthUsageNote(cred models.DecryptedCredential) string {
+	switch cfg := cred.Config.(type) {
+	case models.OpenAIChatGPTConfig:
+		return defaultString(cfg.AccountType, "ChatGPT subscription")
+	case models.OpenAIConfig:
+		return cfg.MaskedSummary().MaskedKey
+	case models.AnthropicConfig:
+		if cfg.Subscription != nil {
+			return defaultString(cfg.Subscription.AccountType, "Claude subscription")
+		}
+		return cfg.MaskedSummary().MaskedKey
+	case models.GeminiConfig:
+		return cfg.MaskedSummary().MaskedKey
+	default:
+		return ""
+	}
+}
+
+func fallbackLabel(agent models.AgentType, authType models.CodingAuthType) string {
+	switch {
+	case agent == models.AgentTypeCodex && authType == models.CodingAuthTypeSubscription:
+		return "Codex subscription"
+	case agent == models.AgentTypeCodex && authType == models.CodingAuthTypeAPIKey:
+		return "Codex API key"
+	case agent == models.AgentTypeClaudeCode && authType == models.CodingAuthTypeSubscription:
+		return "Claude Code subscription"
+	case agent == models.AgentTypeClaudeCode && authType == models.CodingAuthTypeAPIKey:
+		return "Claude Code API key"
+	case agent == models.AgentTypeGeminiCLI && authType == models.CodingAuthTypeAPIKey:
+		return "Gemini CLI API key"
+	default:
+		return "Coding auth"
+	}
+}
+
+func defaultString(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
