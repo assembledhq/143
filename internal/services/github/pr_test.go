@@ -2733,9 +2733,12 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
-	mock.ExpectExec("UPDATE sessions SET status").
+	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "issue_id", "created_at", "last_activity_at"}).
+				AddRow(runID, orgID, issueID, now, now),
+		)
 	mock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

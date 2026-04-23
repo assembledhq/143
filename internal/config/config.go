@@ -176,6 +176,15 @@ type Config struct {
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
+
+	// Redis (optional)
+	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
+	RedisURL        string `env:"REDIS_URL"`
+	RedisPrivateIP  string `env:"REDIS_PRIVATE_IP"`
+	RedisAddrs      string `env:"REDIS_ADDRS"`
+	RedisMasterName string `env:"REDIS_MASTER_NAME"`
+	RedisPassword   string `env:"REDIS_PASSWORD"`
+	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
 }
 
 // Load reads configuration from env files and environment variables.
@@ -214,6 +223,10 @@ func Load() *Config {
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
 	if cfg.CSRFSigningKey == "" {
 		cfg.CSRFSigningKey = cfg.SessionSecret
+	}
+
+	if cfg.RedisURL == "" && cfg.RedisTopology == "standalone" && cfg.RedisPrivateIP != "" {
+		cfg.RedisURL = "redis://:" + cfg.RedisPassword + "@" + cfg.RedisPrivateIP + ":6379/0"
 	}
 
 	return cfg

@@ -17,6 +17,7 @@ import (
 type schedulerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	Notify(ctx context.Context, id uuid.UUID)
 	GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error)
 }
 
@@ -428,6 +429,7 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 		return
 	}
 
+	jobIDs := make([]uuid.UUID, 0, len(dueAutomations))
 	for _, a := range dueAutomations {
 		// Any DB error inside this loop leaves pgx's tx in an aborted state,
 		// so subsequent queries on the same tx will fail. On such errors we
@@ -525,12 +527,16 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			"automation_id":     a.ID.String(),
 			"automation_run_id": run.ID.String(),
 		}
-		if _, err := s.jobs.EnqueueInTx(ctx, tx, a.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
+		jobID, err := s.jobs.EnqueueInTx(ctx, tx, a.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey)
+		if err != nil {
 			s.logger.Error().Err(err).
 				Str("automation_id", a.ID.String()).
 				Str("automation_run_id", run.ID.String()).
 				Msg("failed to enqueue automation_run job; aborting tick")
 			return
+		}
+		if jobID != uuid.Nil {
+			jobIDs = append(jobIDs, jobID)
 		}
 		s.logger.Info().
 			Str("automation_id", a.ID.String()).
@@ -541,5 +547,8 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 	if err := tx.Commit(ctx); err != nil {
 		s.logger.Error().Err(err).Msg("scheduler failed to commit automation tx")
 		return
+	}
+	for _, jobID := range jobIDs {
+		s.jobs.Notify(ctx, jobID)
 	}
 }

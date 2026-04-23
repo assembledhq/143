@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -10,16 +12,29 @@ import (
 )
 
 type HealthHandler struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	redisHealth func(context.Context) bool
 }
 
 func NewHealthHandler(pool *pgxpool.Pool) *HealthHandler {
 	return &HealthHandler{pool: pool}
 }
 
+func (h *HealthHandler) SetRedisHealthCheck(check func(context.Context) bool) {
+	h.redisHealth = check
+}
+
 func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+	redisStatus := "unavailable"
+	if h.redisHealth != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if h.redisHealth(ctx) {
+			redisStatus = "ok"
+		}
+	}
+	_, _ = w.Write([]byte(`{"status":"ok","redis":"` + redisStatus + `"}`))
 }
 
 // Version returns the server deploy SHA and build metadata.

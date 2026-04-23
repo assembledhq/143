@@ -70,13 +70,17 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	}
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
+			),
+		)
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))

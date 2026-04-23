@@ -353,9 +353,14 @@ func TestSessionStore_UpdateStatus(t *testing.T) {
 			orgID := uuid.New()
 			runID := uuid.New()
 
-			mock.ExpectExec(tt.queryRE).
+			now := time.Now()
+			mock.ExpectQuery(tt.queryRE).
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				WillReturnRows(
+					pgxmock.NewRows(sessionTestColumns).AddRow(
+						newAgentSessionRow(runID, uuid.New(), orgID, now)...,
+					),
+				)
 
 			err = store.UpdateStatus(context.Background(), orgID, runID, tt.status)
 			require.NoError(t, err, "UpdateStatus should not return an error")

@@ -1,6 +1,6 @@
 # Design: Redis as Optional Cache and Pub/Sub Layer
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-21
+> **Status:** Implemented | **Last reviewed:** 2026-04-21
 
 ## 1. Motivation
 
