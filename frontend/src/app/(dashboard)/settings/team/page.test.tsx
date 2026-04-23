@@ -192,6 +192,8 @@ describe('TeamSettingsPage', () => {
     await user.click(screen.getByRole('button', { name: 'Add email' }));
 
     expect(await screen.findByText('newuser@test.com')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Email' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add email' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
 
     await user.click(

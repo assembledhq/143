@@ -253,6 +253,8 @@ export default function TeamSettingsPage() {
   };
 
   const inviteDraftMatchesMode = inviteDraft?.mode === inviteMode;
+  const emailDraftActive = inviteMode === "email" && inviteDraftMatchesMode;
+  const githubDraftActive = inviteMode === "github" && inviteDraftMatchesMode;
 
   return (
     <PageContainer size="default">
@@ -503,6 +505,7 @@ export default function TeamSettingsPage() {
                           type="email"
                           placeholder="colleague@company.com"
                           value={inviteEmail}
+                          disabled={emailDraftActive}
                           onChange={(e) => {
                             setInviteEmail(e.target.value);
                             setInviteError("");
@@ -513,6 +516,7 @@ export default function TeamSettingsPage() {
                           type="button"
                           variant="secondary"
                           className="h-9 shrink-0"
+                          disabled={emailDraftActive}
                           onClick={addEmailDraft}
                         >
                           Add email
@@ -536,6 +540,7 @@ export default function TeamSettingsPage() {
                                 id="invite-github"
                                 placeholder="Search GitHub users..."
                                 value={ghSearchQuery}
+                                disabled={githubDraftActive}
                                 onValueChange={(value) => {
                                   setGhSearchQuery(value);
                                   setInviteError("");
@@ -596,6 +601,7 @@ export default function TeamSettingsPage() {
                               type="button"
                               variant="secondary"
                               className="h-9 shrink-0"
+                              disabled={githubDraftActive}
                               onClick={() => addGitHubDraft(ghSearchQuery)}
                             >
                               Add GitHub username
@@ -609,6 +615,7 @@ export default function TeamSettingsPage() {
                               id="invite-github"
                               placeholder="octocat"
                               value={ghSearchQuery}
+                              disabled={githubDraftActive}
                               onChange={(e) => {
                                 setGhSearchQuery(e.target.value);
                                 setInviteError("");
@@ -619,6 +626,7 @@ export default function TeamSettingsPage() {
                               type="button"
                               variant="secondary"
                               className="h-9 shrink-0"
+                              disabled={githubDraftActive}
                               onClick={() => addGitHubDraft(ghSearchQuery)}
                             >
                               Add GitHub username
