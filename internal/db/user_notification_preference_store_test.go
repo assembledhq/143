@@ -41,6 +41,22 @@ func TestUserNotificationPreferenceStore_GetByUser(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "returns error when query fails",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT").WithArgs(orgID, userID).WillReturnError(context.DeadlineExceeded)
+			},
+			expectErr: true,
+		},
+		{
+			name: "returns error when row scan fails",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				rows := pgxmock.NewRows([]string{"org_id", "user_id", "session_completion_browser_enabled", "created_at", "updated_at"}).
+					AddRow("not-a-uuid", userID, true, now, now)
+				mock.ExpectQuery("SELECT").WithArgs(orgID, userID).WillReturnRows(rows)
+			},
+			expectErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -82,5 +98,23 @@ func TestUserNotificationPreferenceStore_Upsert(t *testing.T) {
 
 	upsertErr := store.Upsert(context.Background(), orgID, userID, true)
 	require.NoError(t, upsertErr, "Upsert should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserNotificationPreferenceStore_Upsert_Error(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	store := NewUserNotificationPreferenceStore(mock)
+	mock.ExpectExec("INSERT INTO user_notification_preferences").WithArgs(orgID, userID, false).WillReturnError(context.Canceled)
+
+	upsertErr := store.Upsert(context.Background(), orgID, userID, false)
+	require.Error(t, upsertErr, "Upsert should return an error when exec fails")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
