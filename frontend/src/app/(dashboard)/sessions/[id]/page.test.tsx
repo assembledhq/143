@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
@@ -1032,7 +1032,10 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 });
     });
-    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(alert).toHaveTextContent('GitHub rejected the branch push.');
+    expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
   it('shows the PR authorship modal and falls back to app mode when requested', async () => {
@@ -1285,7 +1288,10 @@ describe('SessionDetailPage', () => {
       },
       { timeout: 5000 },
     );
-    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(alert).toHaveTextContent('GitHub rejected the branch push.');
+    expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   }, 8000);
 
   it('shows file count badge on Changes tab when session has diff', async () => {
