@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -63,4 +64,23 @@ func TestValidatePreviewToken_Expired(t *testing.T) {
 
 	_, err = ValidatePreviewToken("secret", token)
 	require.Error(t, err, "ValidatePreviewToken should reject an expired token")
+}
+
+func TestValidatePreviewToken_InvalidFormatAndPayload(t *testing.T) {
+	t.Parallel()
+
+	_, err := ValidatePreviewToken("secret", "missing-dot")
+	require.Error(t, err, "ValidatePreviewToken should reject malformed tokens")
+
+	_, err = ValidatePreviewToken("secret", "###.###")
+	require.Error(t, err, "ValidatePreviewToken should reject invalid base64 segments")
+
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"org_id":"` + uuid.New().String() + `","target_node_id":"worker-1","action":"proxy","exp":"` + time.Now().Add(time.Minute).Format(time.RFC3339Nano) + `"}`))
+	_, err = ValidatePreviewToken("secret", payload+".###")
+	require.Error(t, err, "ValidatePreviewToken should reject invalid signature segments")
+
+	tokenPayload := base64.RawURLEncoding.EncodeToString([]byte("not-json"))
+	tokenSig := base64.RawURLEncoding.EncodeToString([]byte("signature"))
+	_, err = ValidatePreviewToken("secret", tokenPayload+"."+tokenSig)
+	require.Error(t, err, "ValidatePreviewToken should reject non-JSON payloads")
 }

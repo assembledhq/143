@@ -1,0 +1,231 @@
+package preview
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+)
+
+func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "", Mode: "worker"}
+	secret := "worker-secret"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		claims, err := auth.ValidatePreviewToken(secret, token)
+		require.NoError(t, err, "worker requests should carry a valid preview token")
+		require.Equal(t, orgID, claims.OrgID, "worker requests should preserve the org scope")
+		require.Equal(t, worker.ID, claims.TargetNodeID, "worker requests should preserve the target node")
+
+		switch r.URL.Path {
+		case "/internal/preview/start":
+			require.Equal(t, http.MethodPost, r.Method, "StartPreview should POST to the worker")
+			require.Equal(t, "start", claims.Action, "StartPreview should sign the start action")
+			var body RemoteStartPreviewRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body), "StartPreview should encode its request body")
+			require.Equal(t, sessionID, body.SessionID, "StartPreview should preserve the session id")
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewInstance]{
+				Data: &models.PreviewInstance{ID: previewID, SessionID: sessionID, OrgID: orgID, UserID: userID, WorkerNodeID: worker.ID},
+			}), "StartPreview should return the created preview")
+		case "/internal/preview/" + previewID.String() + "/stop":
+			require.Equal(t, "stop", claims.Action, "StopPreview should sign the stop action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}}), "StopPreview should decode a status response")
+		case "/internal/preview/" + previewID.String() + "/recycle":
+			require.Equal(t, "recycle", claims.Action, "RecyclePreview should sign the recycle action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}}), "RecyclePreview should decode a status response")
+		case "/internal/preview/" + previewID.String() + "/screenshot":
+			require.Equal(t, "screenshot", claims.Action, "CaptureScreenshot should sign the screenshot action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.ScreenshotResult]{
+				Data: &models.ScreenshotResult{PageTitle: "Preview Title", URL: "http://preview.local"},
+			}), "CaptureScreenshot should decode a screenshot response")
+		case "/internal/preview/" + previewID.String() + "/inspect":
+			require.Equal(t, "inspect", claims.Action, "InspectElement should sign the inspect action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.ElementInfo]{
+				Data: &models.ElementInfo{TagName: "div", DOMPath: "#app"},
+			}), "InspectElement should decode an element response")
+		case "/internal/preview/" + previewID.String() + "/console":
+			require.Equal(t, http.MethodGet, r.Method, "ReadConsole should use GET")
+			require.Equal(t, "console", claims.Action, "ReadConsole should sign the console action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.ListResponse[ConsoleMessage]{
+				Data: []ConsoleMessage{{Level: "info", Text: "ready"}},
+			}), "ReadConsole should decode a list response")
+		case "/internal/preview/" + previewID.String() + "/interact":
+			require.Equal(t, "interact", claims.Action, "ExecuteInteraction should sign the interact action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.InteractionResult]{
+				Data: &models.InteractionResult{
+					FinalURL: "http://preview.local/final",
+					Steps:    []models.StepResult{{StepIndex: 0, Action: "click", Success: true}},
+				},
+			}), "ExecuteInteraction should decode an interaction response")
+		case "/internal/preview/" + previewID.String() + "/multi-viewport":
+			require.Equal(t, "multi_viewport", claims.Action, "CaptureMultiViewport should sign the multi_viewport action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.MultiViewportResult]{
+				Data: &models.MultiViewportResult{},
+			}), "CaptureMultiViewport should decode a multi-viewport response")
+		case "/internal/preview/" + previewID.String() + "/visual-diff":
+			require.Equal(t, "visual_diff", claims.Action, "ComputeVisualDiff should sign the visual_diff action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.VisualDiff]{
+				Data: &models.VisualDiff{PixelDiffPercent: 1.5, Summary: "changed"},
+			}), "ComputeVisualDiff should decode a diff response")
+		case "/internal/preview/" + previewID.String() + "/assert":
+			require.Equal(t, "assert", claims.Action, "RunAssertions should sign the assert action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*AssertionResult]{
+				Data: &AssertionResult{
+					Passed: 1,
+					Failed: 0,
+					Total:  1,
+					Results: []AssertionCheck{{
+						Passed:  true,
+						Message: "ok",
+					}},
+				},
+			}), "RunAssertions should decode an assertions response")
+		case "/internal/preview/stop-session":
+			require.Equal(t, "stop_session", claims.Action, "StopActivePreviewForSession should sign the stop_session action")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*RemoteStopActivePreviewForSessionResponse]{
+				Data: &RemoteStopActivePreviewForSessionResponse{Stopped: true},
+			}), "StopActivePreviewForSession should decode the stop result")
+		default:
+			t.Fatalf("unexpected worker path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	worker.BaseURL = server.URL
+
+	client := NewWorkerPreviewClient(secret)
+	client.httpClient.Timeout = 5 * time.Second
+
+	started, err := client.StartPreview(context.Background(), worker, RemoteStartPreviewRequest{OrgID: orgID, UserID: userID, SessionID: sessionID})
+	require.NoError(t, err, "StartPreview should succeed")
+	require.Equal(t, previewID, started.ID, "StartPreview should decode the preview instance")
+
+	err = client.StopPreview(context.Background(), worker, orgID, previewID)
+	require.NoError(t, err, "StopPreview should succeed")
+
+	err = client.RecyclePreview(context.Background(), worker, orgID, previewID)
+	require.NoError(t, err, "RecyclePreview should succeed")
+
+	screenshot, err := client.CaptureScreenshot(context.Background(), worker, orgID, previewID, models.ScreenshotOpts{})
+	require.NoError(t, err, "CaptureScreenshot should succeed")
+	require.Equal(t, "Preview Title", screenshot.PageTitle, "CaptureScreenshot should decode the screenshot result")
+
+	element, err := client.InspectElement(context.Background(), worker, orgID, previewID, 10, 20)
+	require.NoError(t, err, "InspectElement should succeed")
+	require.Equal(t, "#app", element.DOMPath, "InspectElement should decode the element response")
+
+	consoleMessages, err := client.ReadConsole(context.Background(), worker, orgID, previewID)
+	require.NoError(t, err, "ReadConsole should succeed")
+	require.Len(t, consoleMessages, 1, "ReadConsole should decode console output")
+
+	interaction, err := client.ExecuteInteraction(context.Background(), worker, orgID, previewID, []models.InteractionStep{{Action: "click"}})
+	require.NoError(t, err, "ExecuteInteraction should succeed")
+	require.Equal(t, "http://preview.local/final", interaction.FinalURL, "ExecuteInteraction should decode the interaction response")
+
+	multiViewport, err := client.CaptureMultiViewport(context.Background(), worker, orgID, previewID, models.MultiViewportOpts{})
+	require.NoError(t, err, "CaptureMultiViewport should succeed")
+	require.NotNil(t, multiViewport, "CaptureMultiViewport should decode the response")
+
+	visualDiff, err := client.ComputeVisualDiff(context.Background(), worker, orgID, previewID, "before", "after")
+	require.NoError(t, err, "ComputeVisualDiff should succeed")
+	require.Equal(t, 1.5, visualDiff.PixelDiffPercent, "ComputeVisualDiff should decode the diff response")
+
+	assertions, err := client.RunAssertions(context.Background(), worker, orgID, previewID, []Assertion{{Type: "text"}})
+	require.NoError(t, err, "RunAssertions should succeed")
+	require.Equal(t, 1, assertions.Passed, "RunAssertions should decode the assertions response")
+
+	stopped, err := client.StopActivePreviewForSession(context.Background(), worker, orgID, sessionID)
+	require.NoError(t, err, "StopActivePreviewForSession should succeed")
+	require.True(t, stopped, "StopActivePreviewForSession should decode the stopped result")
+}
+
+func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", Mode: "worker"}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{Code: "PREVIEW_CAPACITY_REACHED", Message: "all preview slots are in use"},
+		}), "worker error responses should encode structured errors")
+	}))
+	defer server.Close()
+	worker.BaseURL = server.URL
+
+	client := NewWorkerPreviewClient("worker-secret")
+	_, err := client.StartPreview(context.Background(), worker, RemoteStartPreviewRequest{
+		OrgID: orgID, UserID: uuid.New(), SessionID: sessionID,
+	})
+	require.Error(t, err, "StartPreview should surface worker errors")
+
+	reqErr, ok := AsWorkerRequestError(err)
+	require.True(t, ok, "StartPreview should expose structured worker errors")
+	require.Equal(t, http.StatusServiceUnavailable, reqErr.StatusCode, "worker error status should be preserved")
+	require.Equal(t, "PREVIEW_CAPACITY_REACHED", reqErr.Code, "worker error code should be preserved")
+	require.Contains(t, reqErr.Error(), "PREVIEW_CAPACITY_REACHED", "worker error string should include the code")
+}
+
+func TestWorkerPreviewClient_DecodeFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "http://invalid-host", Mode: "worker"}
+
+	client := NewWorkerPreviewClient("worker-secret")
+	client.httpClient = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/console") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       ioNopCloserString("not-json"),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return nil, errors.New("network down")
+		}),
+	}
+
+	_, err := client.ReadConsole(context.Background(), worker, orgID, previewID)
+	require.Error(t, err, "ReadConsole should surface decode failures")
+	require.Contains(t, err.Error(), "decode response", "ReadConsole should wrap decode failures")
+
+	err = client.StopPreview(context.Background(), worker, orgID, previewID)
+	require.Error(t, err, "StopPreview should surface transport failures")
+	require.Contains(t, err.Error(), "stop preview", "StopPreview should wrap transport failures")
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+type stringReadCloser struct {
+	*strings.Reader
+}
+
+func (r stringReadCloser) Close() error { return nil }
+
+func ioNopCloserString(v string) stringReadCloser {
+	return stringReadCloser{Reader: strings.NewReader(v)}
+}

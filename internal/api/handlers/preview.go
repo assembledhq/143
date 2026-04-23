@@ -155,14 +155,6 @@ func (h *PreviewHandler) getActivePreviewBySession(ctx context.Context, orgID, s
 	return instance, nil
 }
 
-func (h *PreviewHandler) getPreviewByID(ctx context.Context, orgID, previewID uuid.UUID) (*models.PreviewInstance, error) {
-	instance, err := h.store.GetPreviewInstance(ctx, orgID, previewID)
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
-}
-
 func (h *PreviewHandler) resolvePreviewWorker(ctx context.Context, workerNodeID string) (preview.WorkerNode, error) {
 	if h.workerSelector == nil {
 		return preview.WorkerNode{}, fmt.Errorf("worker selector is not configured")
@@ -1041,7 +1033,8 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 	var element *models.ElementInfo
 	var err error
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		var worker preview.WorkerNode
+		worker, err = h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
 		if err != nil {
 			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
 			return
@@ -1218,7 +1211,8 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	var result *models.InteractionResult
 	var err error
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
+		var worker preview.WorkerNode
+		worker, err = h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
 		if err != nil {
 			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
 			return

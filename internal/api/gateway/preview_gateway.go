@@ -660,65 +660,6 @@ func spliceAt(body []byte, idx int, insert string) []byte {
 }
 
 // =============================================================================
-// WebSocket HMR snooping
-// =============================================================================
-
-// copyWithHMRSnoop copies data from src to dst while also passing each
-// chunk to the HMR watcher for pattern detection. This is a best-effort
-// approach — we forward raw TCP bytes (which may span multiple WebSocket
-// frames) to the watcher. We accumulate data across reads so that HMR
-// patterns split across read boundaries are still detected.
-//
-// NOTE: This operates on raw TCP bytes, not decoded WebSocket frames.
-// Server→client WebSocket frames are unmasked so substring matching works,
-// but frame headers (2-14 bytes) may cause false positives in rare cases.
-// This is acceptable for the HMR use case (screenshot on hot reload).
-func (g *Gateway) copyWithHMRSnoop(dst io.Writer, src io.Reader, previewID uuid.UUID) {
-	buf := make([]byte, 32*1024)
-	// Keep an overlap buffer so patterns split across read boundaries are
-	// still detected. 512 bytes covers the longest HMR pattern we match plus
-	// typical WebSocket frame-header padding (2-14 bytes).
-	var overlap []byte
-	const overlapSize = 512
-	for {
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			data := buf[:n]
-			// Combine overlap from previous read with current data for
-			// pattern matching, so patterns straddling reads are detected.
-			combined := data
-			if len(overlap) > 0 {
-				combined = append(overlap, data...)
-			}
-			g.hmrWatcher.OnWebSocketMessage(previewID, combined)
-			// Keep tail for next iteration.
-			if len(data) >= overlapSize {
-				overlap = make([]byte, overlapSize)
-				copy(overlap, data[len(data)-overlapSize:])
-			} else {
-				overlap = make([]byte, len(data))
-				copy(overlap, data)
-			}
-			// Write to the client.
-			if _, writeErr := dst.Write(data); writeErr != nil {
-				g.logger.Debug().Err(writeErr).
-					Str("preview_id", previewID.String()).
-					Msg("websocket: backend→client write ended")
-				return
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				g.logger.Debug().Err(readErr).
-					Str("preview_id", previewID.String()).
-					Msg("websocket: backend→client read ended")
-			}
-			return
-		}
-	}
-}
-
-// =============================================================================
 // Security headers
 // =============================================================================
 
@@ -765,12 +706,6 @@ func previewSessionCookie(value string, expiresAt time.Time, secure bool) *http.
 		SameSite: http.SameSiteStrictMode,
 		Expires:  expiresAt,
 	}
-}
-
-func cloneWebSocketRequestForBackend(req *http.Request) *http.Request {
-	cloned := req.Clone(req.Context())
-	stripPreviewCookie(cloned)
-	return cloned
 }
 
 // =============================================================================
