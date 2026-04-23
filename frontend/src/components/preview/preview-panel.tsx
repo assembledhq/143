@@ -371,17 +371,7 @@ export function PreviewPanel({
       <div className="flex items-center gap-2 flex-wrap">
         {/* Start / Stop / Restart */}
         <div className="flex items-center gap-1">
-          {!isActive ? (
-            <Button
-              size="sm"
-              onClick={() => startMutation.mutate()}
-              disabled={isMutating}
-              loading={startMutation.isPending}
-            >
-              <Play className="size-3.5" />
-              Start Preview
-            </Button>
-          ) : (
+          {isActive ? (
             <>
               <Button
                 size="sm"
@@ -404,7 +394,7 @@ export function PreviewPanel({
                 Restart
               </Button>
             </>
-          )}
+          ) : null}
         </div>
 
         {/* Status badge */}
