@@ -1300,9 +1300,9 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 		err    error
 	)
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
 			return
 		}
 		if h.isLocalWorker(worker) {
@@ -1369,9 +1369,9 @@ func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Reques
 		err  error
 	)
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
 			return
 		}
 		if h.isLocalWorker(worker) {
@@ -1442,9 +1442,9 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 		err    error
 	)
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		if resolveErr != nil {
+			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
 			return
 		}
 		if h.isLocalWorker(worker) {
