@@ -144,6 +144,10 @@ type Session struct {
 	// (TurnHoldingContainer or an active preview) is keeping it alive — see
 	// SessionStore.AcquireTurnHold / ReleaseTurnHold for the state machine.
 	ContainerID *string `db:"container_id" json:"container_id,omitempty"`
+	// WorkerNodeID is the worker node currently owning the live sandbox
+	// container referenced by ContainerID. Nil when the session has no live
+	// container or when the row predates worker ownership tracking.
+	WorkerNodeID *string `db:"worker_node_id" json:"worker_node_id,omitempty"`
 	// TurnHoldingContainer marks the agent turn as a holder of the session's
 	// sandbox container. Combined with PreviewInstance.PreviewHoldingContainer,
 	// it is the durable refcount that decides when the container is destroyed.

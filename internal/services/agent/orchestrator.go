@@ -94,6 +94,9 @@ type SessionStore interface {
 	// caller must destroy its just-created sandbox and attach to the
 	// actualContainerID instead.
 	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error)
+	// SetWorkerNodeIDForContainer records which worker currently owns the live
+	// container referenced by container_id.
+	SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error
 	// ReleaseTurnHold flips turn_holding_container=FALSE and reports whether
 	// the caller should destroy the container. destroyNow is true only when no
 	// preview is holding the container; otherwise the preview keeps it alive
@@ -215,6 +218,7 @@ type Orchestrator struct {
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
+	nodeID            string
 }
 
 // DurableCheckpoint is the latest fully committed resume boundary for a
@@ -256,6 +260,7 @@ type OrchestratorConfig struct {
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
 	// existing call sites (notably tests) don't have to change.
 	Env           *AgentEnv
+	NodeID        string
 	Logger        zerolog.Logger
 	MaxConcurrent int
 }
@@ -307,6 +312,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
+		nodeID:            cfg.NodeID,
 	}
 }
 
@@ -628,6 +634,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
 	}()
+	if o.nodeID != "" {
+		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, run.OrgID, run.ID, sandbox.ID, o.nodeID); err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("persist session worker ownership: %s", err))
+			return fmt.Errorf("persist session worker ownership: %w", err)
+		}
+	}
 
 	// Register sandbox with cancel registry so CancelSession can send SIGINT.
 	if o.cancels != nil {
@@ -1174,6 +1186,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
 	}()
+	if o.nodeID != "" {
+		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to persist sandbox worker ownership: %s\n\nPlease try again in a moment.", err),
+				"sandbox ownership",
+			)
+			return fmt.Errorf("persist session worker ownership: %w", err)
+		}
+	}
 
 	// Register sandbox with cancel registry so CancelSession can send SIGINT.
 	if o.cancels != nil {

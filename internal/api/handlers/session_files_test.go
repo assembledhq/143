@@ -72,7 +72,7 @@ func withSessionRoute(handler http.HandlerFunc) http.Handler {
 var sessionColumnsForFiles = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -90,7 +90,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 			pgxmock.NewRows(sessionColumnsForFiles).AddRow(
 				sessionID, issueID, orgID, "claude_code", "running", "supervised", "standard",
 				nil, nil, nil, nil, // complexity_tier through risk_factors
-				containerID, false, &now, nil, nil, // container_id, turn_holding_container, started_at, completed_at, token_usage
+				containerID, nil, false, &now, nil, nil, // container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage
 				nil, nil, nil, false, // failure fields
 				nil, nil, nil, nil, nil, // parent_session_id through diff
 				nil, nil, nil, nil, // pm_plan_id through pm_reasoning

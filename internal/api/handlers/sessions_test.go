@@ -141,7 +141,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -154,17 +154,36 @@ func sessionTestRow(values ...interface{}) []interface{} {
 	switch len(values) {
 	case len(sessionColumns):
 		return values
-	case len(sessionColumns) - 3:
+	case len(sessionColumns) - 1:
 		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:39]...)
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:]...)
+		return row
+	case len(sessionColumns) - 4:
+		row := make([]interface{}, 0, len(sessionColumns))
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:39]...)
 		row = append(row, nil) // base_commit_sha
 		row = append(row, values[39:48]...)
 		row = append(row, nil) // diff_collected_at
 		row = append(row, nil) // latest_diff_snapshot_id
 		row = append(row, values[48:]...)
 		return row
+	case len(sessionColumns) - 3:
+		row := make([]interface{}, 0, len(sessionColumns))
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:40]...)
+		row = append(row, nil) // base_commit_sha
+		row = append(row, values[40:49]...)
+		row = append(row, nil) // diff_collected_at
+		row = append(row, nil) // latest_diff_snapshot_id
+		row = append(row, values[49:]...)
+		return row
 	default:
-		panic(fmt.Sprintf("sessionTestRow received %d values, want %d or %d", len(values), len(sessionColumns), len(sessionColumns)-3))
+		panic(fmt.Sprintf("sessionTestRow received %d values, want %d, %d, %d, or %d", len(values), len(sessionColumns), len(sessionColumns)-1, len(sessionColumns)-3, len(sessionColumns)-4))
 	}
 }
 

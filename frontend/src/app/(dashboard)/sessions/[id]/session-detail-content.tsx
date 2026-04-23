@@ -57,6 +57,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
@@ -1493,6 +1494,23 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
+  const previousSessionStatusRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const currentStatus = session?.status;
+    if (!session?.id || !currentStatus) {
+      return;
+    }
+
+    void maybeNotifySessionCompleted({
+      previousStatus: previousSessionStatusRef.current,
+      nextStatus: currentStatus,
+      sessionId: session.id,
+      title: session.title,
+      visibilityState: document.visibilityState,
+    });
+
+    previousSessionStatusRef.current = currentStatus;
+  }, [session?.id, session?.status, session?.title]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
     if (id) {

@@ -24,7 +24,7 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	agent_type, model_override, execution_mode, max_concurrent, base_branch,
-	schedule_type, interval_value, interval_unit, cron_expression, timezone,
+	schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, created_at, updated_at, deleted_at`
 
@@ -41,7 +41,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 	err := row.Scan(
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
 		&a.AgentType, &a.ModelOverride, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
-		&a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.CronExpression, &a.Timezone,
+		&a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
@@ -65,12 +65,12 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		INSERT INTO automations (
 			org_id, repository_id, name, goal, scope,
 			agent_type, model_override, execution_mode, max_concurrent, base_branch,
-			schedule_type, interval_value, interval_unit, cron_expression, timezone,
+			schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			next_run_at, enabled, created_by, priority
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@agent_type, @model_override, @execution_mode, @max_concurrent, @base_branch,
-			@schedule_type, @interval_value, @interval_unit, @cron_expression, @timezone,
+			@schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@next_run_at, @enabled, @created_by, @priority
 		) RETURNING id, created_at, updated_at`
 
@@ -88,6 +88,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"schedule_type":   a.ScheduleType,
 		"interval_value":  a.IntervalValue,
 		"interval_unit":   a.IntervalUnit,
+		"interval_run_at": a.IntervalRunAt,
 		"cron_expression": a.CronExpression,
 		"timezone":        a.Timezone,
 		"next_run_at":     a.NextRunAt,
@@ -177,7 +178,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch,
 			schedule_type = @schedule_type, interval_value = @interval_value,
-			interval_unit = @interval_unit, cron_expression = @cron_expression,
+			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
 			timezone = @timezone, next_run_at = @next_run_at,
 			enabled = @enabled, paused_by = @paused_by, paused_at = @paused_at,
 			priority = @priority, updated_at = now()
@@ -198,6 +199,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"schedule_type":   a.ScheduleType,
 		"interval_value":  a.IntervalValue,
 		"interval_unit":   a.IntervalUnit,
+		"interval_run_at": a.IntervalRunAt,
 		"cron_expression": a.CronExpression,
 		"timezone":        a.Timezone,
 		"next_run_at":     a.NextRunAt,
@@ -352,8 +354,9 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Interval: compute next_run_at = now() + interval directly in SQL.
-	// Cron: leave next_run_at NULL here and fix up below in Go.
+	// Interval without interval_run_at: compute next_run_at directly in SQL.
+	// Cron and interval rows with interval_run_at: leave next_run_at NULL here
+	// and fix up below in Go.
 	// Pause: clear next_run_at so the scheduler skips the row.
 	//
 	// NOTE: the ELSE NULL branch is load-bearing for cron — the Go-side
@@ -364,7 +367,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	var nextRunAtExpr string
 	if enabled {
 		nextRunAtExpr = `CASE
-			WHEN schedule_type = 'interval' AND interval_value IS NOT NULL AND interval_unit IS NOT NULL
+			WHEN schedule_type = 'interval' AND interval_value IS NOT NULL AND interval_unit IS NOT NULL AND interval_run_at IS NULL
 			THEN now() + (interval_value::text || ' ' || interval_unit)::interval
 			ELSE NULL
 		END`
@@ -372,8 +375,8 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 		nextRunAtExpr = `NULL`
 	}
 
-	// RETURNING only the fields the Go-side cron fixup pass needs
-	// (ComputeNextRunAt reads schedule_type, cron_expression, timezone). Scanning
+	// RETURNING only the fields the Go-side fixup pass needs
+	// (ComputeNextRunAt reads schedule_type, interval fields, cron fields, timezone). Scanning
 	// the full row here would pull 20+ columns back over the wire on every bulk
 	// pause/resume for no reason.
 	query := fmt.Sprintf(`UPDATE automations SET
@@ -383,7 +386,7 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 			next_run_at = %s,
 			updated_at = now()
 		WHERE org_id = @org_id AND deleted_at IS NULL AND id = ANY(@ids)
-		RETURNING id, schedule_type, cron_expression, timezone`, nextRunAtExpr)
+		RETURNING id, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone`, nextRunAtExpr)
 
 	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
 		"org_id":    orgID,
@@ -398,13 +401,16 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	type affectedRow struct {
 		id             uuid.UUID
 		scheduleType   string
+		intervalValue  *int
+		intervalUnit   *string
+		intervalRunAt  *string
 		cronExpression *string
 		timezone       string
 	}
 	var affected []affectedRow
 	for rows.Next() {
 		var r affectedRow
-		if err := rows.Scan(&r.id, &r.scheduleType, &r.cronExpression, &r.timezone); err != nil {
+		if err := rows.Scan(&r.id, &r.scheduleType, &r.intervalValue, &r.intervalUnit, &r.intervalRunAt, &r.cronExpression, &r.timezone); err != nil {
 			rows.Close()
 			return nil, nil, err
 		}
@@ -420,15 +426,23 @@ func (s *AutomationStore) BulkUpdateEnabled(ctx context.Context, orgID uuid.UUID
 	for _, r := range affected {
 		affectedIDs = append(affectedIDs, r.id)
 
-		// Resume-side fixup for cron rows. On pause we leave next_run_at NULL.
-		if !enabled || r.scheduleType != models.AutomationScheduleCron {
+		// Resume-side fixup for cron rows and interval rows with interval_run_at.
+		// On pause we leave next_run_at NULL.
+		if !enabled {
 			continue
 		}
-		// ComputeNextRunAt only reads the schedule fields we populated above,
-		// so a partial Automation is safe here.
+		needsFixup := r.scheduleType == models.AutomationScheduleCron ||
+			(r.scheduleType == models.AutomationScheduleInterval && r.intervalRunAt != nil && *r.intervalRunAt != "")
+		if !needsFixup {
+			continue
+		}
+
 		partial := &models.Automation{
 			ID:             r.id,
 			ScheduleType:   r.scheduleType,
+			IntervalValue:  r.intervalValue,
+			IntervalUnit:   r.intervalUnit,
+			IntervalRunAt:  r.intervalRunAt,
 			CronExpression: r.cronExpression,
 			Timezone:       r.timezone,
 		}

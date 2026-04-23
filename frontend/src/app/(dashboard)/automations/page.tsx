@@ -23,7 +23,11 @@ function formatSchedule(a: Automation): string {
   }
   const val = a.interval_value ?? 1;
   const unit = a.interval_unit ?? "days";
-  return `every ${val} ${val === 1 ? unit.replace(/s$/, "") : unit}`;
+  const intervalText = `every ${val} ${val === 1 ? unit.replace(/s$/, "") : unit}`;
+  if (!a.interval_run_at) {
+    return intervalText;
+  }
+  return `${intervalText} at ${a.interval_run_at} UTC`;
 }
 
 function AutomationCard({ automation }: { automation: Automation }) {
