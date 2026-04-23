@@ -1,5 +1,7 @@
 # Design: 143.dev
 
+> **Status:** Partially Implemented | **Last reviewed:** 2026-04-23
+
 [143.dev](http://143.dev) is an open-source platform that turns customer pain and production errors into safe, validated code fixes that ship automatically.
 
 It’s an open-source platform that connects customer pain directly to code fixes.
