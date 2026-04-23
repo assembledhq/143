@@ -391,6 +391,10 @@ deploy-logging:
 	$(check-ssh-key)
 	@$(call resolve-host,logging)
 
+deploy-redis:
+	$(check-ssh-key)
+	@$(call resolve-host,redis)
+
 # Deploy all nodes in the fleet.
 # Uses FLEET_HOSTS env var or FLEET_HOSTS in .env.production.enc.
 deploy-fleet:
