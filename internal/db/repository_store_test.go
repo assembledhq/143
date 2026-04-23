@@ -337,11 +337,17 @@ func TestRepositoryStore_GetByFullNameAnyStatus(t *testing.T) {
 	tests := []struct {
 		name      string
 		status    string
+		queryErr  error
 		expectErr bool
 	}{
 		{
 			name:   "returns disconnected repository when found",
 			status: "disconnected",
+		},
+		{
+			name:      "returns error when query fails",
+			queryErr:  context.Canceled,
+			expectErr: true,
 		},
 		{
 			name:      "returns error when repository not found",
@@ -364,7 +370,11 @@ func TestRepositoryStore_GetByFullNameAnyStatus(t *testing.T) {
 			integrationID := uuid.New()
 			now := time.Now()
 
-			if tt.expectErr {
+			if tt.queryErr != nil {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(tt.queryErr)
+			} else if tt.expectErr {
 				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(repoColumns))
@@ -382,6 +392,7 @@ func TestRepositoryStore_GetByFullNameAnyStatus(t *testing.T) {
 			repo, err := store.GetByFullNameAnyStatus(context.Background(), orgID, "org/repo")
 			if tt.expectErr {
 				require.Error(t, err, "GetByFullNameAnyStatus should return an error")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 				return
 			}
 			require.NoError(t, err, "GetByFullNameAnyStatus should not return an error")

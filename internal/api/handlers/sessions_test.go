@@ -5877,6 +5877,182 @@ func TestSessionHandler_UpdateTitle_SyncFailureStillSucceeds(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_UpdateTitle_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	existingTitle := "Original title"
+
+	tests := []struct {
+		name           string
+		sessionParam   string
+		body           string
+		setupMock      func(mock pgxmock.PgxPoolIface)
+		expectedStatus int
+		expectedCode   string
+		expectSync     bool
+		expectedTitle  *string
+	}{
+		{
+			name:           "returns bad request for invalid session id",
+			sessionParam:   "not-a-uuid",
+			body:           `{"title":"Updated session title"}`,
+			expectedStatus: http.StatusBadRequest,
+			expectedCode:   "INVALID_ID",
+		},
+		{
+			name:           "returns bad request for invalid json body",
+			sessionParam:   sessionID.String(),
+			body:           `{"title":`,
+			expectedStatus: http.StatusBadRequest,
+			expectedCode:   "INVALID_BODY",
+		},
+		{
+			name:           "returns bad request when title is missing",
+			sessionParam:   sessionID.String(),
+			body:           `{}`,
+			expectedStatus: http.StatusBadRequest,
+			expectedCode:   "INVALID_BODY",
+		},
+		{
+			name:           "returns bad request for invalid title",
+			sessionParam:   sessionID.String(),
+			body:           `{"title":"   "}`,
+			expectedStatus: http.StatusBadRequest,
+			expectedCode:   "INVALID_TITLE",
+		},
+		{
+			name:         "returns not found when session does not exist",
+			sessionParam: sessionID.String(),
+			body:         `{"title":"Updated session title"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionColumns))
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedCode:   "NOT_FOUND",
+		},
+		{
+			name:         "returns existing session when title is unchanged",
+			sessionParam: sessionID.String(),
+			body:         `{"title":"Original title"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, &existingTitle, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "none", nil,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							now,
+						),
+					)
+			},
+			expectedStatus: http.StatusOK,
+			expectedTitle:  &existingTitle,
+		},
+		{
+			name:         "returns internal error when update fails",
+			sessionParam: sessionID.String(),
+			body:         `{"title":"Updated session title"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, &existingTitle, nil, nil,
+							nil, nil,
+							nil,
+							nil, 1, now, "none", nil,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							now,
+						),
+					)
+				mock.ExpectExec("UPDATE sessions SET title").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("write failed"))
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedCode:   "UPDATE_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool without error")
+			defer mock.Close()
+
+			handler := newSessionHandler(t, mock)
+			titleSyncer := &stubSessionPRTitleSyncer{}
+			handler.SetPRTitleSyncer(titleSyncer)
+
+			if tt.setupMock != nil {
+				tt.setupMock(mock)
+			}
+
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+tt.sessionParam, strings.NewReader(tt.body))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", tt.sessionParam)
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.Update(w, req)
+
+			require.Equal(t, tt.expectedStatus, w.Code, "update should return the expected status code")
+
+			if tt.expectedTitle != nil {
+				var resp models.SingleResponse[models.Session]
+				err = json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "response should decode")
+				require.NotNil(t, resp.Data.Title, "response should include the current title")
+				require.Equal(t, *tt.expectedTitle, *resp.Data.Title, "response should preserve the existing title")
+			} else if tt.expectedCode != "" {
+				var resp models.ErrorResponse
+				err = json.Unmarshal(w.Body.Bytes(), &resp)
+				require.NoError(t, err, "error response should decode")
+				require.Equal(t, tt.expectedCode, resp.Error.Code, "error response should include the expected code")
+			}
+
+			require.Equal(t, tt.expectSync, titleSyncer.called, "PR title syncer should only run for successful updates")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
 	t.Parallel()
 
