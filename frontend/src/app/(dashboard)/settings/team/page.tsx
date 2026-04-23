@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Github, Mail, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
@@ -48,14 +49,18 @@ import type {
   GitHubUserSuggestion,
 } from "@/lib/types";
 
+type InviteDraft =
+  | { mode: "email"; value: string }
+  | { mode: "github"; value: string; avatarUrl?: string };
+
 export default function TeamSettingsPage() {
   const queryClient = useQueryClient();
   const { user: currentUser } = useAuth();
   const canManageTeam = currentUser?.role === "admin";
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteGitHubUsername, setInviteGitHubUsername] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteMode, setInviteMode] = useState<"email" | "github">("email");
+  const [inviteDraft, setInviteDraft] = useState<InviteDraft | null>(null);
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
@@ -138,11 +143,7 @@ export default function TeamSettingsPage() {
       api.team.createInvitation(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["team-invitations"] });
-      setInviteEmail("");
-      setInviteGitHubUsername("");
-      setGhSearchQuery("");
-      setInviteRole("member");
-      setInviteError("");
+      resetInviteForm();
       setIsInviteDialogOpen(false);
     },
     onError: (error: Error & { code?: string }) => {
@@ -168,24 +169,77 @@ export default function TeamSettingsPage() {
   const members = membersData?.data ?? [];
   const invitations = invitationsData?.data ?? [];
 
+  const resetInviteForm = () => {
+    setInviteEmail("");
+    setInviteRole("member");
+    setInviteMode("email");
+    setInviteDraft(null);
+    setInviteError("");
+    setGhSearchQuery("");
+    setDebouncedGhQuery("");
+  };
+
+  const clearInviteDraft = () => {
+    setInviteDraft(null);
+    setInviteError("");
+  };
+
+  const addEmailDraft = () => {
+    const email = inviteEmail.trim();
+    if (!email) {
+      setInviteError("Add an email address to the invite.");
+      return;
+    }
+
+    setInviteDraft({ mode: "email", value: email });
+    setInviteError("");
+  };
+
+  const addGitHubDraft = (username: string, avatarUrl?: string) => {
+    const normalizedUsername = username.trim().replace(/^@/, "");
+    if (!normalizedUsername) {
+      setInviteError("Add a GitHub username to the invite.");
+      return;
+    }
+
+    setInviteDraft({ mode: "github", value: normalizedUsername, avatarUrl });
+    setInviteError("");
+    setGhSearchQuery("");
+    setDebouncedGhQuery("");
+  };
+
   function handleInvite(e: React.FormEvent) {
     e.preventDefault();
     setInviteError("");
-    if (inviteMode === "email") {
-      const email = inviteEmail.trim();
-      if (!email) return;
-      inviteMutation.mutate({ email, role: inviteRole });
-    } else {
-      const username = inviteGitHubUsername.trim().replace(/^@/, "");
-      if (!username) {
-        setInviteError("Enter a GitHub username.");
-        return;
-      }
-      inviteMutation.mutate({ github_username: username, role: inviteRole });
+    if (!inviteDraft || inviteDraft.mode !== inviteMode) {
+      setInviteError(
+        inviteMode === "email"
+          ? "Add an email address to the invite."
+          : "Add a GitHub username to the invite.",
+      );
+      return;
     }
+
+    if (inviteDraft.mode === "email") {
+      inviteMutation.mutate({ email: inviteDraft.value, role: inviteRole });
+      return;
+    }
+
+    inviteMutation.mutate({
+      github_username: inviteDraft.value,
+      role: inviteRole,
+    });
   }
 
   const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+  const inviteDraftLabel = inviteDraft
+    ? inviteDraft.mode === "github"
+      ? `@${inviteDraft.value}`
+      : inviteDraft.value
+    : "";
+  const submitInviteLabel = inviteDraft
+    ? `Send invite to ${inviteDraftLabel}`
+    : "Send invite";
 
   const roleBadgeVariant = (role: string) => {
     switch (role) {
@@ -197,6 +251,8 @@ export default function TeamSettingsPage() {
         return "outline" as const;
     }
   };
+
+  const inviteDraftMatchesMode = inviteDraft?.mode === inviteMode;
 
   return (
     <PageContainer size="default">
@@ -230,7 +286,7 @@ export default function TeamSettingsPage() {
             <Button
               size="sm"
               onClick={() => {
-                setInviteError("");
+                resetInviteForm();
                 setIsInviteDialogOpen(true);
               }}
             >
@@ -408,7 +464,7 @@ export default function TeamSettingsPage() {
           onOpenChange={(open) => {
             setIsInviteDialogOpen(open);
             if (!open) {
-              setInviteError("");
+              resetInviteForm();
             }
           }}
         >
@@ -423,8 +479,10 @@ export default function TeamSettingsPage() {
               <Tabs
                 value={inviteMode}
                 onValueChange={(v) => {
-                  setInviteMode(v as "email" | "github");
+                  const nextMode = v as "email" | "github";
+                  setInviteMode(nextMode);
                   setInviteError("");
+                  setInviteDraft(null);
                 }}
               >
                 <TabsList className="w-full">
@@ -436,96 +494,214 @@ export default function TeamSettingsPage() {
                   </TabsTrigger>
                 </TabsList>
                 <TabsContent value="email" className="mt-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="invite-email">Email</Label>
-                    <Input
-                      id="invite-email"
-                      type="email"
-                      placeholder="colleague@company.com"
-                      value={inviteEmail}
-                      onChange={(e) => setInviteEmail(e.target.value)}
-                      className="h-9"
-                    />
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="invite-email">Email</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="invite-email"
+                          type="email"
+                          placeholder="colleague@company.com"
+                          value={inviteEmail}
+                          onChange={(e) => {
+                            setInviteEmail(e.target.value);
+                            setInviteError("");
+                          }}
+                          className="h-9"
+                        />
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="h-9 shrink-0"
+                          onClick={addEmailDraft}
+                        >
+                          Add email
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Add the email to the invite setup below before sending.
+                      </p>
+                    </div>
                   </div>
                 </TabsContent>
                 <TabsContent value="github" className="mt-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="invite-github">GitHub username</Label>
-                    {githubConnected ? (
-                      <div className="rounded-md border border-input">
-                        <Command shouldFilter={false}>
-                          <CommandInput
-                            id="invite-github"
-                            placeholder="Search GitHub users..."
-                            value={ghSearchQuery}
-                            onValueChange={(value) => {
-                              setGhSearchQuery(value);
-                              setInviteGitHubUsername(value.replace(/^@/, ""));
-                            }}
-                          />
-                          {debouncedGhQuery.length > 0 && (
-                            <CommandList className="max-h-48">
-                              {ghSearchLoading ? (
-                                <div className="py-3 text-center text-xs text-muted-foreground">
-                                  Searching...
-                                </div>
-                              ) : ghSuggestions.length === 0 ? (
-                                <CommandEmpty>
-                                  No users found. You can still invite{" "}
-                                  <span className="font-mono">
-                                    @{debouncedGhQuery}
-                                  </span>
-                                  .
-                                </CommandEmpty>
-                              ) : (
-                                <CommandGroup>
-                                  {ghSuggestions.map((user) => (
-                                    <CommandItem
-                                      key={user.login}
-                                      value={user.login}
-                                      onSelect={() => {
-                                        setInviteGitHubUsername(user.login);
-                                        setGhSearchQuery(user.login);
-                                      }}
-                                    >
-                                      {user.avatar_url && (
-                                        /* eslint-disable-next-line @next/next/no-img-element */
-                                        <img
-                                          src={user.avatar_url}
-                                          alt=""
-                                          className="h-5 w-5 rounded-full"
-                                        />
-                                      )}
-                                      <span className="text-sm">
-                                        @{user.login}
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="invite-github">GitHub username</Label>
+                      {githubConnected ? (
+                        <>
+                          <div className="rounded-md border border-input">
+                            <Command shouldFilter={false}>
+                              <CommandInput
+                                id="invite-github"
+                                placeholder="Search GitHub users..."
+                                value={ghSearchQuery}
+                                onValueChange={(value) => {
+                                  setGhSearchQuery(value);
+                                  setInviteError("");
+                                }}
+                              />
+                              {debouncedGhQuery.length > 0 && (
+                                <CommandList className="max-h-48">
+                                  {ghSearchLoading ? (
+                                    <div className="py-3 text-center text-xs text-muted-foreground">
+                                      Searching...
+                                    </div>
+                                  ) : ghSuggestions.length === 0 ? (
+                                    <CommandEmpty>
+                                      No users found. You can still invite{" "}
+                                      <span className="font-mono">
+                                        @{debouncedGhQuery}
                                       </span>
-                                    </CommandItem>
-                                  ))}
-                                </CommandGroup>
+                                      .
+                                    </CommandEmpty>
+                                  ) : (
+                                    <CommandGroup>
+                                      {ghSuggestions.map((user) => (
+                                        <CommandItem
+                                          key={user.login}
+                                          value={user.login}
+                                          onSelect={() =>
+                                            addGitHubDraft(
+                                              user.login,
+                                              user.avatar_url,
+                                            )
+                                          }
+                                        >
+                                          {user.avatar_url && (
+                                            /* eslint-disable-next-line @next/next/no-img-element */
+                                            <img
+                                              src={user.avatar_url}
+                                              alt=""
+                                              className="h-5 w-5 rounded-full"
+                                            />
+                                          )}
+                                          <span className="text-sm">
+                                            @{user.login}
+                                          </span>
+                                        </CommandItem>
+                                      ))}
+                                    </CommandGroup>
+                                  )}
+                                </CommandList>
                               )}
-                            </CommandList>
-                          )}
-                        </Command>
-                      </div>
-                    ) : (
-                      <>
-                        <Input
-                          id="invite-github"
-                          placeholder="octocat"
-                          value={inviteGitHubUsername}
-                          onChange={(e) =>
-                            setInviteGitHubUsername(e.target.value)
-                          }
-                          className="h-9"
-                        />
-                        <p className="text-xs text-muted-foreground">
-                          Connect a GitHub App to search for users.
-                        </p>
-                      </>
-                    )}
+                            </Command>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs text-muted-foreground">
+                              Search GitHub and choose a result, or add the typed
+                              username directly.
+                            </p>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="h-9 shrink-0"
+                              onClick={() => addGitHubDraft(ghSearchQuery)}
+                            >
+                              Add GitHub username
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex gap-2">
+                            <Input
+                              id="invite-github"
+                              placeholder="octocat"
+                              value={ghSearchQuery}
+                              onChange={(e) => {
+                                setGhSearchQuery(e.target.value);
+                                setInviteError("");
+                              }}
+                              className="h-9"
+                            />
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="h-9 shrink-0"
+                              onClick={() => addGitHubDraft(ghSearchQuery)}
+                            >
+                              Add GitHub username
+                            </Button>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            Connect a GitHub App to search for users.
+                          </p>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </TabsContent>
               </Tabs>
+              <div className="space-y-2 rounded-lg border border-dashed border-border bg-muted/20 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      Invite setup
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Review the invitee below before sending the invite.
+                    </p>
+                  </div>
+                  {inviteDraftMatchesMode && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8"
+                      onClick={clearInviteDraft}
+                    >
+                      Change
+                    </Button>
+                  )}
+                </div>
+                {inviteDraftMatchesMode ? (
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      {inviteDraft.mode === "github" ? (
+                        inviteDraft.avatarUrl ? (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={inviteDraft.avatarUrl}
+                            alt=""
+                            className="h-10 w-10 rounded-full"
+                          />
+                        ) : (
+                          <Github className="h-4 w-4" />
+                        )
+                      ) : (
+                        <Mail className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        {inviteDraftLabel}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {inviteDraft.mode === "github"
+                          ? "GitHub invitee added to this invite."
+                          : "Email invitee added to this invite."}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-background/70 px-3 py-3 text-muted-foreground">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted">
+                      <UserPlus className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        No invitee added yet
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {inviteMode === "email"
+                          ? "Add an email above to create the invite draft."
+                          : "Choose a GitHub user above to create the invite draft."}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
               <div className="space-y-1.5">
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
@@ -547,9 +723,13 @@ export default function TeamSettingsPage() {
                 <Button
                   type="submit"
                   className="h-9"
-                  disabled={inviteMutation.isPending}
+                  disabled={
+                    inviteMutation.isPending ||
+                    !inviteDraft ||
+                    inviteDraft.mode !== inviteMode
+                  }
                 >
-                  {inviteMutation.isPending ? "Sending..." : "Send invite"}
+                  {inviteMutation.isPending ? "Sending..." : submitInviteLabel}
                 </Button>
               </AlertDialogFooter>
             </form>

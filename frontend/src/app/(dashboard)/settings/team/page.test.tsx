@@ -153,7 +153,9 @@ describe('TeamSettingsPage', () => {
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send invite' })).toBeInTheDocument();
+    expect(screen.getByText('Invite setup')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add email' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send invite' })).toBeDisabled();
   });
 
   it('uses consistent compact sizing for invite email input in modal', async () => {
@@ -176,7 +178,7 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
   });
 
-  it('submits invitation form', async () => {
+  it('adds an email invite draft before submission', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
@@ -187,7 +189,14 @@ describe('TeamSettingsPage', () => {
     });
 
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'newuser@test.com');
-    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+
+    expect(await screen.findByText('newuser@test.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole('button', { name: 'Send invite to newuser@test.com' }),
+    );
 
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({ email: 'newuser@test.com', role: 'member' });
@@ -369,7 +378,7 @@ describe('TeamSettingsPage', () => {
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('submits a github_username invite via the fallback input when GitHub is not connected', async () => {
+  it('adds a github invite draft via the fallback input when GitHub is not connected', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
@@ -382,7 +391,12 @@ describe('TeamSettingsPage', () => {
 
     const input = screen.getByPlaceholderText('octocat');
     await user.type(input, '@octocat');
-    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+    await user.click(screen.getByRole('button', { name: 'Add GitHub username' }));
+
+    expect(await screen.findByText('@octocat')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
 
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
@@ -392,21 +406,17 @@ describe('TeamSettingsPage', () => {
     });
   });
 
-  it('validates GitHub username required on submit', async () => {
+  it('keeps GitHub submit disabled until an invite draft exists', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
     await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
-    await user.click(screen.getByRole('button', { name: 'Send invite' }));
-
-    expect(
-      await screen.findByText('Enter a GitHub username.'),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send invite' })).toBeDisabled();
     expect(createInvitationMock).not.toHaveBeenCalled();
   });
 
-  it('shows GitHub user suggestions and submits selected username when connected', async () => {
+  it('moves a selected GitHub user into the invite setup when connected', async () => {
     githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
     searchGitHubUsersMock.mockResolvedValue({
       data: [{ login: 'octocat', avatar_url: 'https://example.com/a.png' }],
@@ -427,7 +437,11 @@ describe('TeamSettingsPage', () => {
     const suggestion = await screen.findByText('@octocat');
     await user.click(suggestion);
 
-    await user.click(screen.getByRole('button', { name: 'Send invite' }));
+    expect(await screen.findByText('Invite setup')).toBeInTheDocument();
+    expect(screen.getByText('@octocat')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
 
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
