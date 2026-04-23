@@ -553,6 +553,11 @@ func buildServices(
 		logger.Warn().Err(err).Msg("Platform LLM client initialization failed — LLM-dependent checks will be skipped")
 	}
 
+	var appUserAuthSvc *ghservice.AppUserAuthService
+	if cfg.GitHubAppClientID != "" && cfg.GitHubAppClientSecret != "" {
+		appUserAuthSvc = ghservice.NewAppUserAuthService(userCredentialStore, cfg.GitHubAppClientID, cfg.GitHubAppClientSecret, cfg.BaseURL, logger)
+	}
+
 	// Agent adapters.
 	agentAdapters := map[models.AgentType]agent.AgentAdapter{
 		models.AgentTypeClaudeCode: adapters.NewClaudeCodeAdapter(logger),
@@ -615,11 +620,24 @@ func buildServices(
 	)
 
 	// PR service.
+	userStore := db.NewUserStore(pool)
+	prTemplateStore := db.NewPRTemplateStore(pool)
 	prService := ghservice.NewPRService(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, validationStore, repoStore, jobStore, logger,
 	)
-	wireWorkerPRService(prService, sandboxProvider, snapshotStore)
+	wireWorkerPRService(
+		prService,
+		sandboxProvider,
+		snapshotStore,
+		integrationStore,
+		userCredentialStore,
+		appUserAuthSvc,
+		userStore,
+		orgStore,
+		llmClient,
+		prTemplateStore,
+	)
 
 	// Failure analysis service.
 	failureSvc := agent.NewFailureService(sessionStore, logger)
@@ -685,9 +703,27 @@ func buildServices(
 	}
 }
 
-func wireWorkerPRService(prService *ghservice.PRService, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore) {
+func wireWorkerPRService(
+	prService *ghservice.PRService,
+	sandboxProvider agent.SandboxProvider,
+	snapshotStore storage.SnapshotStore,
+	integrationStore *db.IntegrationStore,
+	userCredentialStore *db.UserCredentialStore,
+	appUserAuthSvc *ghservice.AppUserAuthService,
+	userStore *db.UserStore,
+	orgStore *db.OrganizationStore,
+	llmClient llm.Client,
+	prTemplateStore *db.PRTemplateStore,
+) {
 	if prService == nil {
 		return
 	}
 	prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
+	prService.SetIntegrationStore(integrationStore)
+	prService.SetUserCredentialStore(userCredentialStore)
+	prService.SetAppUserAuth(appUserAuthSvc)
+	prService.SetUserStore(userStore)
+	prService.SetOrgStore(orgStore)
+	prService.SetLLMClient(llmClient)
+	prService.SetPRTemplateStore(prTemplateStore)
 }

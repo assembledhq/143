@@ -33,4 +33,21 @@ describe("ErrorNotice", () => {
 
     expect(onAction).toHaveBeenCalledTimes(1);
   });
+
+  it("uses the shared compact typography for inline errors", () => {
+    render(
+      <ErrorNotice
+        title="Couldn't create the PR"
+        description="Check GitHub access or repo permissions and try again."
+      />
+    );
+
+    const title = screen.getByText("Couldn't create the PR");
+    const description = screen.getByText("Check GitHub access or repo permissions and try again.");
+
+    expect(title.className).toContain("text-xs");
+    expect(title.className).not.toContain("text-sm");
+    expect(description.className).toContain("text-xs");
+    expect(description.className).not.toContain("text-sm");
+  });
 });
