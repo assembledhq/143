@@ -17,7 +17,7 @@ import (
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -34,7 +34,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		id, issueID, orgID, "claude_code", "pending", "supervised", "low",
 		nil, nil, nil, []string{},
-		nil, false, nil, nil, json.RawMessage(`{}`),
+		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,

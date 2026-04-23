@@ -384,6 +384,10 @@ var handlerPreviewSnapshotTestCols = []string{
 	"viewport_width", "viewport_height", "console_errors", "file_changes", "created_at",
 }
 
+var handlerNodeTestCols = []string{
+	"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at",
+}
+
 // newReservedPreviewRow builds the pgxmock row that CreatePreviewInstance
 // returns on a successful Reserve: 'starting' status, default Node config,
 // preview_holding_container still FALSE (AcquirePreviewHold flips it in a
@@ -636,7 +640,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 var sessionRowColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -653,7 +657,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, false, nil, nil, json.RawMessage(`{}`),
+		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -676,7 +680,7 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, false, nil, nil, json.RawMessage(`{}`),
+		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -695,7 +699,7 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		nil, false, nil, nil, json.RawMessage(`{}`),
+		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -940,6 +944,121 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.Equal(t, "PREVIEW_CAPACITY_REACHED", resp.Error.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	worker1Calls := 0
+	worker2Calls := 0
+
+	worker1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		worker1Calls++
+		require.Equal(t, http.MethodPost, r.Method, "worker one should receive a start request")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "PREVIEW_CAPACITY_REACHED",
+				Message: "all preview slots are in use",
+			},
+		}), "worker one should encode the capacity error")
+	}))
+	defer worker1.Close()
+
+	returnedPreviewID := uuid.New()
+	worker2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		worker2Calls++
+		require.Equal(t, http.MethodPost, r.Method, "worker two should receive a start request")
+		w.WriteHeader(http.StatusCreated)
+		require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewInstance]{
+			Data: &models.PreviewInstance{
+				ID:           returnedPreviewID,
+				SessionID:    sessionID,
+				OrgID:        orgID,
+				UserID:       userID,
+				Status:       models.PreviewStatusReady,
+				WorkerNodeID: "worker-2",
+			},
+		}), "worker two should encode the preview response")
+	}))
+	defer worker2.Close()
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+
+	h := newPreviewTestHandlerWithManager()
+	h.store = previewStore
+	h.sessionStore = sessionStore
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+
+	worker1Meta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: worker1.URL,
+	})
+	require.NoError(t, err, "should marshal worker one metadata")
+	worker2Meta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: worker2.URL,
+	})
+	require.NoError(t, err, "should marshal worker two metadata")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "none")...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
+				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
+		)
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
+				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
+		)
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "cold-start preview should retry another worker after capacity races")
+	var resp models.SingleResponse[*models.PreviewInstance]
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
+	require.NotNil(t, resp.Data, "response should include a preview instance")
+	require.Equal(t, returnedPreviewID, resp.Data.ID, "response should return the preview started on the retry worker")
+	require.Equal(t, 1, worker1Calls, "first worker should be tried once")
+	require.Equal(t, 1, worker2Calls, "second worker should be tried once after capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // TestPreviewHandler_StartPreview_HydrateReachesLaunch verifies that when

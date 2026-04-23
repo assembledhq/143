@@ -35,7 +35,7 @@ var handlerPRColumns = []string{
 var sessionColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
@@ -146,7 +146,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 			pgxmock.NewRows(sessionColumns).
 				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "low",
 					nil, nil, nil, nil,
-					nil, false, nil, nil, nil,
+					nil, nil, false, nil, nil, nil,
 					nil, nil, nil, false,
 					nil, nil, nil, nil, nil,
 					nil, nil, nil, nil, nil,

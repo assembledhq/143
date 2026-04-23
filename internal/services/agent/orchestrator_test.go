@@ -144,9 +144,11 @@ type mockSessionStore struct {
 	turnUpdates      []turnUpdate
 	baseCommitSHAs   []string
 	failureUpdates   []failureUpdate
+	workerOwnerships []workerOwnershipUpdate
 	countRunningErr  error
 	acquireHoldFn    func(proposedContainerID string) (string, error)
 	acquireHoldErr   error
+	setWorkerNodeErr error
 	releaseHoldFn    func() (bool, string, error)
 	finalizeFn       func(expectedContainerID string) (bool, error)
 	acquireHoldCalls int
@@ -159,6 +161,11 @@ type failureUpdate struct {
 	category     string
 	nextSteps    []string
 	retryAdvised bool
+}
+
+type workerOwnershipUpdate struct {
+	containerID  string
+	workerNodeID string
 }
 
 type resultUpdate struct {
@@ -258,6 +265,16 @@ func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID
 	}
 	// Default: caller's proposal wins.
 	return proposedContainerID, nil
+}
+
+func (m *mockSessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workerOwnerships = append(m.workerOwnerships, workerOwnershipUpdate{
+		containerID:  expectedContainerID,
+		workerNodeID: workerNodeID,
+	})
+	return m.setWorkerNodeErr
 }
 
 func (m *mockSessionStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID uuid.UUID) (bool, string, error) {
@@ -635,6 +652,7 @@ type testDeps struct {
 	creds          *mockCredentialProvider
 	snapshots      *mockSnapshotStore
 	cancels        *agent.CancelRegistry
+	nodeID         string
 }
 
 func defaultDeps() testDeps {
@@ -688,6 +706,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Credentials:      d.creds,
 		Snapshots:        d.snapshots,
 		Cancels:          d.cancels,
+		NodeID:           d.nodeID,
 		Logger:           zerolog.Nop(),
 		MaxConcurrent:    3,
 	})
@@ -1088,6 +1107,26 @@ func TestRunAgent_AcquireHoldLosesRaceFailsRun(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must destroy the losing sandbox")
 	require.Equal(t, 0, d.sessions.releaseHoldCalls, "no release — we never held")
 	require.Equal(t, 0, d.sessions.finalizeCalls)
+}
+
+func TestRunAgent_SetWorkerNodeIDFailureFailsRun(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.nodeID = "worker-a"
+	d.sessions.setWorkerNodeErr = errors.New("persist failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when session worker ownership cannot be persisted")
+	require.Contains(t, err.Error(), "persist session worker ownership", "RunAgent should surface the worker ownership persistence failure")
+	require.Equal(t, 1, d.provider.GetDestroyCalls(), "RunAgent should destroy the sandbox when worker ownership persistence fails")
+	require.Equal(t, 1, d.sessions.releaseHoldCalls, "RunAgent should release the turn hold when worker ownership persistence fails")
+	require.Equal(t, 1, d.sessions.finalizeCalls, "RunAgent should finalize the container destroy when worker ownership persistence fails")
 }
 
 // TestRunAgent_FinalizeDestroyErrorSkipsDestroy covers the log-and-continue
@@ -2421,6 +2460,34 @@ func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls(), "must destroy the fresh sandbox to avoid a leak")
 	require.Equal(t, 0, d.sessions.releaseHoldCalls)
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "must revert to idle on hold error")
+}
+
+func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.nodeID = "worker-a"
+	d.sessions.setWorkerNodeErr = errors.New("persist failed")
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err, "ContinueSession should fail when session worker ownership cannot be persisted")
+	require.Contains(t, err.Error(), "persist session worker ownership", "ContinueSession should surface the worker ownership persistence failure")
+	require.Equal(t, 1, d.provider.GetDestroyCalls(), "ContinueSession should destroy the sandbox when worker ownership persistence fails")
+	require.Equal(t, 1, d.sessions.releaseHoldCalls, "ContinueSession should release the turn hold when worker ownership persistence fails")
+	require.Equal(t, 1, d.sessions.finalizeCalls, "ContinueSession should finalize the container destroy when worker ownership persistence fails")
+	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "ContinueSession should revert the session to idle when worker ownership persistence fails")
 }
 
 // TestContinueSession_SessionRepoSlug exercises every branch of

@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
@@ -25,6 +24,7 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/net/html"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/preview"
 )
@@ -51,10 +51,12 @@ const expiryExtendThreshold = 2 * time.Minute
 type Gateway struct {
 	store        *db.PreviewStore
 	manager      *preview.Manager
+	workerSelect *preview.WorkerSelector
 	hmrWatcher   *preview.HMRWatcher
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
+	tokenSecret  string
 	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
 
@@ -67,10 +69,12 @@ type Gateway struct {
 type GatewayConfig struct {
 	Store                 *db.PreviewStore
 	Manager               *preview.Manager
+	WorkerSelector        *preview.WorkerSelector
 	HMRWatcher            *preview.HMRWatcher // optional; enables HMR screenshot capture
 	Logger                zerolog.Logger
 	AppOrigin             string // e.g. "https://app.143.dev"
 	CookieSecret          []byte // HMAC key for signing preview session cookies
+	PreviewTokenSecret    string
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
 
@@ -106,10 +110,12 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
 		store:        cfg.Store,
 		manager:      cfg.Manager,
+		workerSelect: cfg.WorkerSelector,
 		hmrWatcher:   cfg.HMRWatcher,
 		logger:       cfg.Logger,
 		appOrigin:    cfg.AppOrigin,
 		cookieSecret: cfg.CookieSecret,
+		tokenSecret:  cfg.PreviewTokenSecret,
 		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
 		sessionCache: make(map[uuid.UUID]*sessionCacheEntry),
 		cspHeader: strings.Join([]string{
@@ -355,28 +361,50 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		}
 	}
 
-	// Check for WebSocket upgrade.
-	if isWebSocketUpgrade(r) {
-		g.handleWebSocket(w, r, orgID, previewID)
+	g.proxyToWorker(w, r, orgID, previewID)
+}
+
+func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+	instance, err := g.store.GetPreviewInstance(r.Context(), orgID, previewID)
+	if err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to resolve preview worker")
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		return
+	}
+	worker, err := g.workerSelect.ResolveNode(r.Context(), instance.WorkerNodeID)
+	if err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("worker_node_id", instance.WorkerNodeID).Msg("failed to resolve preview worker node")
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		return
+	}
+	targetURL, err := url.Parse(worker.BaseURL)
+	if err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("base_url", worker.BaseURL).Msg("failed to parse preview worker base url")
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
+		return
+	}
+	token, err := auth.GeneratePreviewToken(g.tokenSecret, auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: worker.ID,
+		PreviewID:    &previewID,
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(30 * time.Second),
+	})
+	if err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to sign preview worker token")
+		http.Error(w, "preview unavailable", http.StatusBadGateway)
 		return
 	}
 
-	// HTTP reverse proxy.
-	g.handleHTTPProxy(w, r, orgID, previewID)
-}
-
-func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL.Scheme = "http"
-			req.URL.Host = "preview-target"
-			// Strip the preview session cookie from forwarded requests.
+			req.URL.Scheme = targetURL.Scheme
+			req.URL.Host = targetURL.Host
+			req.URL.Path = fmt.Sprintf("/internal/preview/%s/proxy%s", previewID.String(), req.URL.Path)
+			req.Host = targetURL.Host
+			req.RequestURI = ""
 			stripPreviewCookie(req)
-		},
-		Transport: &previewTransport{
-			manager:   g.manager,
-			orgID:     orgID,
-			previewID: previewID,
+			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			g.injectSecurityHeaders(resp.Header)
@@ -403,119 +431,6 @@ func (g *Gateway) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID,
 		},
 	}
 	proxy.ServeHTTP(w, r)
-}
-
-func (g *Gateway) handleWebSocket(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
-	// Dial the preview backend.
-	backendConn, err := g.manager.DialPreview(r.Context(), orgID, previewID)
-	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("websocket dial failed")
-		http.Error(w, "preview unavailable", http.StatusBadGateway)
-		return
-	}
-	defer backendConn.Close()
-
-	// Hijack the client connection.
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "websocket hijack not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, clientBuf, err := hijacker.Hijack()
-	if err != nil {
-		g.logger.Warn().Err(err).Msg("websocket hijack failed")
-		return
-	}
-	defer clientConn.Close()
-
-	// Forward a sanitized copy of the original request to the backend.
-	backendReq := cloneWebSocketRequestForBackend(r)
-	if err := backendReq.Write(backendConn); err != nil {
-		g.logger.Warn().Err(err).Msg("websocket: failed to forward upgrade request")
-		return
-	}
-	// Also flush any buffered data.
-	if clientBuf.Reader.Buffered() > 0 {
-		buffered := make([]byte, clientBuf.Reader.Buffered())
-		_, _ = clientBuf.Read(buffered)
-		_, _ = backendConn.Write(buffered)
-	}
-
-	// Bidirectional copy.
-	done := make(chan struct{})
-	go func() {
-		if g.hmrWatcher != nil {
-			// Tee backend→client traffic through the HMR watcher so it
-			// can detect HMR update messages and trigger screenshots.
-			g.copyWithHMRSnoop(clientConn, backendConn, previewID)
-		} else {
-			if _, err := io.Copy(clientConn, backendConn); err != nil {
-				g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: backend→client copy ended")
-			}
-		}
-		close(done)
-	}()
-	if _, err := io.Copy(backendConn, clientConn); err != nil {
-		g.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("websocket: client→backend copy ended")
-	}
-	<-done
-}
-
-// =============================================================================
-// Transport for httputil.ReverseProxy
-// =============================================================================
-
-// previewTransport implements http.RoundTripper by dialing the preview
-// stream and performing the HTTP request over it.
-type previewTransport struct {
-	manager   *preview.Manager
-	orgID     uuid.UUID
-	previewID uuid.UUID
-}
-
-// connClosingBody wraps a response body so that closing it also closes the
-// underlying network connection. Without this, each proxied request would
-// leak a TCP connection because http.ReadResponse does not tie the body
-// lifetime to the connection.
-type connClosingBody struct {
-	io.ReadCloser
-	conn net.Conn
-}
-
-func (b *connClosingBody) Close() error {
-	bodyErr := b.ReadCloser.Close()
-	connErr := b.conn.Close()
-	if bodyErr != nil {
-		return bodyErr
-	}
-	return connErr
-}
-
-func (t *previewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	conn, err := t.manager.DialPreview(req.Context(), t.orgID, t.previewID)
-	if err != nil {
-		return nil, fmt.Errorf("dial preview: %w", err)
-	}
-
-	// Write the request to the preview connection.
-	if err := req.Write(conn); err != nil {
-		_ = conn.Close() // best-effort cleanup; returning the write error
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-
-	// Read the response.
-	resp, err := http.ReadResponse(
-		bufio.NewReader(conn), req,
-	)
-	if err != nil {
-		_ = conn.Close() // best-effort cleanup; returning the read error
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	// Wrap the response body so closing it also closes the underlying
-	// connection, preventing TCP connection leaks.
-	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: conn}
-	return resp, nil
 }
 
 // =============================================================================

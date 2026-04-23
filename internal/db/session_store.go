@@ -83,7 +83,7 @@ const sessionCountsCap = 100
 const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, turn_holding_container, started_at, completed_at, token_usage,
+	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -95,7 +95,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
 	org_id, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
-	container_id, turn_holding_container, started_at, completed_at, token_usage,
+	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
@@ -995,6 +995,32 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	return actualContainerID, nil
 }
 
+// SetWorkerNodeIDForContainer records the worker node currently owning the
+// session's live container. The update is CAS-scoped to the expected
+// container_id so callers do not accidentally stamp ownership onto a newer
+// container after a race.
+func (s *SessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error {
+	query := `UPDATE sessions
+		SET worker_node_id = @worker_node_id
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND container_id = @expected
+		  AND COALESCE(worker_node_id, '') IN ('', @worker_node_id)`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":             sessionID,
+		"org_id":         orgID,
+		"expected":       expectedContainerID,
+		"worker_node_id": workerNodeID,
+	})
+	if err != nil {
+		return fmt.Errorf("set worker node id for container: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session container ownership changed before worker ownership could be recorded")
+	}
+	return nil
+}
+
 // ClearContainerID is the startup reconciler's CAS-safe orphan cleanup: it
 // clears container_id only when the expected ID still matches AND no preview
 // hold has appeared between the reconciler's scan and this call. Returns
@@ -1059,6 +1085,7 @@ func (s *SessionStore) ClearContainerID(ctx context.Context, orgID, sessionID uu
 func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error) {
 	query := `UPDATE sessions
 		SET container_id = NULL,
+		    worker_node_id = NULL,
 		    sandbox_state = CASE
 		        WHEN snapshot_key IS NULL OR snapshot_key = '' THEN 'none'
 		        ELSE 'snapshotted'
