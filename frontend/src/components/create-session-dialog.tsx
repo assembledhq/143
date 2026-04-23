@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { BranchPicker } from "@/components/branch-picker";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
@@ -38,8 +39,6 @@ import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
-
-type BranchInfo = { name: string; protected: boolean };
 
 interface CreateSessionDialogProps {
   open: boolean;
@@ -98,14 +97,6 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   }, [userSelectedRepoId, repositories]);
 
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
-
-  const { data: branchesResponse, isLoading: branchesLoading, isError: branchesFailed } = useQuery<ListResponse<BranchInfo>>({
-    queryKey: queryKeys.repositories.branches(selectedRepoId),
-    queryFn: () => api.repositories.branches(selectedRepoId),
-    enabled: open && !!selectedRepoId,
-    staleTime: 5 * 60 * 1000,
-  });
-  const branches = useMemo(() => branchesResponse?.data ?? [], [branchesResponse]);
 
   const selectedBranch = useMemo(() => {
     if (!selectedRepoId) return "";
@@ -347,42 +338,15 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
           )}
 
           {selectedRepo && (
-            branchesFailed ? (
-              <div className="flex items-center gap-1">
-                <GitBranch className="h-3 w-3 text-muted-foreground shrink-0" />
-                <Input
-                  value={selectedBranch}
-                  onChange={(e) => setSelectedBranch(e.target.value)}
-                  placeholder={selectedRepo.default_branch || "main"}
-                  className="h-7 w-28 text-xs px-2"
-                  aria-label="Target branch"
-                />
-              </div>
-            ) : (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" className="h-7 gap-1.5 rounded-md px-2 text-xs text-muted-foreground hover:text-foreground" aria-label="Target branch">
-                    <GitBranch className="h-3 w-3" />
-                    <span className="max-w-[80px] truncate">{selectedBranch || selectedRepo.default_branch || "main"}</span>
-                    <ChevronDown className="h-2.5 w-2.5 opacity-50" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-64 max-h-72 overflow-y-auto">
-                  {branchesLoading && <DropdownMenuItem disabled>Loading branches...</DropdownMenuItem>}
-                  {!branchesLoading && branches.length === 0 && <DropdownMenuItem disabled>No branches found</DropdownMenuItem>}
-                  {branches.map((branch) => (
-                    <DropdownMenuItem
-                      key={branch.name}
-                      onClick={() => setSelectedBranch(branch.name)}
-                      className={selectedBranch === branch.name ? "font-medium" : ""}
-                    >
-                      <GitBranch className="mr-2 h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      <span className="truncate">{branch.name}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )
+            <BranchPicker
+              repositoryId={selectedRepoId}
+              value={selectedBranch}
+              defaultBranch={selectedRepo.default_branch}
+              onValueChange={setSelectedBranch}
+              label="Target branch"
+              buttonClassName="h-7 rounded-md border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground"
+              contentClassName="w-72"
+            />
           )}
 
           <Select value={selectedModel} onValueChange={(v) => setSelectedModel(v === "__default__" ? "" : v)}>
