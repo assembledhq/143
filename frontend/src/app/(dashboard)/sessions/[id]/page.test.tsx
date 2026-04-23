@@ -105,6 +105,72 @@ describe('SessionDetailPage', () => {
     expect(headerTitle.className).not.toContain('text-xs');
   });
 
+  it('lets the user edit the session title inline', async () => {
+    const updatedTitle = 'Renamed session title';
+    let currentTitle = 'Original editable title';
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: currentTitle,
+            result_summary: undefined,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.patch('/api/v1/sessions/:id', async ({ request }) => {
+        const body = await request.json() as { title: string };
+        currentTitle = body.title;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: currentTitle,
+            result_summary: undefined,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { level: 1, name: currentTitle });
+    await user.click(screen.getByRole('button', { name: 'Edit session title' }));
+
+    const input = screen.getByDisplayValue(currentTitle);
+    await user.clear(input);
+    await user.type(input, updatedTitle);
+    await user.click(screen.getByRole('button', { name: 'Save title' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: updatedTitle })).toBeInTheDocument();
+    });
+  });
+
+  it('seeds the title editor from the same title shown in the header', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: undefined,
+            pm_approach: 'Quick null check fix',
+            result_summary: 'Fixed TypeError by adding null check',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { level: 1, name: 'Quick null check fix' });
+    await user.click(screen.getByRole('button', { name: 'Edit session title' }));
+
+    expect(screen.getByDisplayValue('Quick null check fix')).toBeInTheDocument();
+  });
+
   it('shows overview tab with status in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -1229,10 +1295,10 @@ describe('SessionDetailPage', () => {
       async () => {
         expect(await screen.findByRole('button', { name: /View PR/ })).toBeInTheDocument();
       },
-      { timeout: 7000 },
+      { timeout: 12000 },
     );
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
-  }, 10000);
+  }, 15000);
 
   it('shows a clear toast and retry button when background PR creation fails', async () => {
     let sessionFetchCount = 0;

@@ -15,7 +15,9 @@ import {
   Loader2,
   RefreshCw,
   CheckCircle2,
+  Check,
   XCircle,
+  X,
   MinusCircle,
   Square,
   PanelRightOpen,
@@ -23,6 +25,7 @@ import {
   Clock,
   MessageSquare,
   Paperclip,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +52,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api, ApiError } from "@/lib/api";
@@ -62,7 +66,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
+import type { Session, SessionDetail, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -1340,6 +1344,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [showDetailPanel, setShowDetailPanel] = useState(true);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
 
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
@@ -1400,8 +1406,35 @@ export function SessionDetailContent({ id }: { id: string }) {
   const members = membersData?.data ?? [];
   const isActive = session ? !terminalStatuses.has(session.status) : false;
   const isRunning = session?.status === "running";
+  const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  const updateSessionMutation = useMutation({
+    mutationFn: (title: string) => api.sessions.update(id, { title }),
+    onSuccess: (response) => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", id], (existing) => {
+        if (!existing) return existing;
+        return {
+          ...existing,
+          data: {
+            ...existing.data,
+            ...response.data,
+            threads: existing.data.threads,
+          },
+        };
+      });
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      setIsEditingTitle(false);
+      setDraftTitle(response.data.title ?? "");
+    },
+    onError: (err) => {
+      const message = err instanceof ApiError ? err.message : "Failed to update session title";
+      toast.error(message);
+    },
+  });
 
   // PR state for the detail-panel header button
   const { data: prData } = useQuery({
@@ -1676,6 +1709,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       onClick: () => createPRMutation.mutate(undefined),
     },
   } : null;
+  const trimmedDraftTitle = draftTitle.trim();
+  const canSaveTitle = trimmedDraftTitle.length > 0 && trimmedDraftTitle !== currentTitle && !updateSessionMutation.isPending;
 
   return (
     <div className="flex h-full">
@@ -1684,9 +1719,56 @@ export function SessionDetailContent({ id }: { id: string }) {
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
-            <h1 className="text-sm font-medium text-foreground truncate">
-              {sessionTitle(session)}
-            </h1>
+            {isEditingTitle ? (
+              <div className="min-w-0 flex-1 flex items-center gap-2">
+                <Input
+                  aria-label="Session title"
+                  value={draftTitle}
+                  onChange={(e) => setDraftTitle(e.target.value)}
+                  className="h-8 max-w-xl"
+                  disabled={updateSessionMutation.isPending}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label="Save title"
+                  disabled={!canSaveTitle}
+                  onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                >
+                  <Check className="h-4 w-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label="Cancel title"
+                  disabled={updateSessionMutation.isPending}
+                  onClick={() => {
+                    setDraftTitle(currentTitle);
+                    setIsEditingTitle(false);
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <>
+                <h1 className="text-sm font-medium text-foreground truncate">
+                  {sessionTitle(session)}
+                </h1>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  aria-label="Edit session title"
+                  onClick={() => {
+                    setDraftTitle(currentTitle);
+                    setIsEditingTitle(true);
+                  }}
+                >
+                  <Pencil className="h-4 w-4" />
+                </Button>
+              </>
+            )}
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
               {status.label}
             </span>

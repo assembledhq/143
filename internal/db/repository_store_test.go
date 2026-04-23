@@ -331,6 +331,67 @@ func TestRepositoryStore_GetByFullName(t *testing.T) {
 	}
 }
 
+func TestRepositoryStore_GetByFullNameAnyStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    string
+		expectErr bool
+	}{
+		{
+			name:   "returns disconnected repository when found",
+			status: "disconnected",
+		},
+		{
+			name:      "returns error when repository not found",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewRepositoryStore(mock)
+			orgID := uuid.New()
+			repoID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now()
+
+			if tt.expectErr {
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(repoColumns))
+			} else {
+				row := newRepoRow(repoID, orgID, integrationID, now)
+				row[11] = tt.status
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = @org_id AND full_name = @full_name").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns).
+							AddRow(row...),
+					)
+			}
+
+			repo, err := store.GetByFullNameAnyStatus(context.Background(), orgID, "org/repo")
+			if tt.expectErr {
+				require.Error(t, err, "GetByFullNameAnyStatus should return an error")
+				return
+			}
+			require.NoError(t, err, "GetByFullNameAnyStatus should not return an error")
+			require.Equal(t, repoID, repo.ID, "should return the correct repository ID")
+			require.Equal(t, tt.status, repo.Status, "should preserve the repository status")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestRepositoryStore_Create(t *testing.T) {
 	t.Parallel()
 

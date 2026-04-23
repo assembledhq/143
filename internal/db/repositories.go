@@ -191,6 +191,22 @@ func (s *RepositoryStore) GetByFullName(ctx context.Context, orgID uuid.UUID, fu
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
+// GetByFullNameAnyStatus returns a repository by owner/name regardless of its
+// connection status. This is used by read-only flows that need metadata for an
+// already-linked repo after the user has intentionally disconnected it.
+func (s *RepositoryStore) GetByFullNameAnyStatus(ctx context.Context, orgID uuid.UUID, fullName string) (models.Repository, error) {
+	query := `
+		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
+		FROM repositories
+		WHERE org_id = @org_id AND full_name = @full_name`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "full_name": fullName})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("query repository by full name: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
+}
+
 // GetAnyInstallationIDByOrg returns one non-zero GitHub installation_id for an
 // active repo in the org. This is a repair-path fallback for orgs whose
 // integrations.github config is missing installation_id even though repo sync

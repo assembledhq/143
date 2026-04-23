@@ -84,6 +84,20 @@ func (s *stubSessionPRCredentialStore) Disable(_ context.Context, _, _ uuid.UUID
 	return nil
 }
 
+type stubSessionPRTitleSyncer struct {
+	called    bool
+	lastTitle string
+	err       error
+}
+
+func (s *stubSessionPRTitleSyncer) SyncSessionTitle(_ context.Context, session *models.Session) error {
+	s.called = true
+	if session.Title != nil {
+		s.lastTitle = *session.Title
+	}
+	return s.err
+}
+
 type archiveTestSnapshotStore struct {
 	deleted []string
 	err     error
@@ -5730,6 +5744,137 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 	require.True(t, canceller.called, "canceller should have been called")
 	require.Equal(t, sessionID, canceller.sessionID, "canceller should receive correct session ID")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_UpdateTitle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	existingTitle := "Original title"
+	handler := newSessionHandler(t, mock)
+	titleSyncer := &stubSessionPRTitleSyncer{}
+	handler.SetPRTitleSyncer(titleSyncer)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, &existingTitle, nil, nil,
+				nil, nil,
+				nil, // triggered_by_user_id
+				nil, 1, now, "none", nil,
+				nil, nil, nil, nil, nil,
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+
+	mock.ExpectExec("UPDATE sessions SET title").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{"title":"Updated session title"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "update should return 200 OK")
+
+	var resp models.SingleResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response should decode")
+	require.NotNil(t, resp.Data.Title, "updated session should include title")
+	require.Equal(t, "Updated session title", *resp.Data.Title, "response should include the updated title")
+	require.True(t, titleSyncer.called, "PR title syncer should be invoked")
+	require.Equal(t, "Updated session title", titleSyncer.lastTitle, "PR title syncer should receive the updated title")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_UpdateTitle_SyncFailureStillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	existingTitle := "Original title"
+	handler := newSessionHandler(t, mock)
+	titleSyncer := &stubSessionPRTitleSyncer{err: errors.New("github unavailable")}
+	handler.SetPRTitleSyncer(titleSyncer)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, &existingTitle, nil, nil,
+				nil, nil,
+				nil,
+				nil, 1, now, "none", nil,
+				nil, nil, nil, nil, nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+
+	mock.ExpectExec("UPDATE sessions SET title").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{"title":"Updated session title"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "update should still return 200 when PR sync fails")
+
+	var resp models.SingleResponse[models.Session]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response should decode")
+	require.NotNil(t, resp.Data.Title, "updated session should include title")
+	require.Equal(t, "Updated session title", *resp.Data.Title, "response should include the updated title")
+	require.True(t, titleSyncer.called, "PR title syncer should still be invoked")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_CancelSession_NotRunning(t *testing.T) {
