@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -48,10 +48,23 @@ vi.mock("lucide-react", () => {
     AlertTriangle: icon("AlertTriangle"),
     Clock: icon("Clock"),
     Target: icon("Target"),
+    GitBranch: icon("GitBranch"),
+    Check: icon("Check"),
+    ChevronsUpDown: icon("ChevronsUpDown"),
+    SearchIcon: icon("SearchIcon"),
   };
 });
 
 describe("ProjectDetailContent", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("*/api/v1/repositories/repo-1/branches", () => HttpResponse.json({
+        data: [{ name: "main", protected: true }],
+        meta: {},
+      })),
+    );
+  });
+
   it("shows loading state initially", () => {
     // Use a handler that never responds to keep loading state
     server.use(
@@ -251,8 +264,62 @@ describe("ProjectDetailContent", () => {
     expect(screen.getByLabelText("Sequential")).toBeInTheDocument();
     expect(screen.getByLabelText("Parallel")).toBeInTheDocument();
     expect(screen.getByText("Priority")).toBeInTheDocument();
-    expect(screen.getByLabelText("Base branch")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Base branch" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+  });
+
+  it("saves the selected base branch from the branch picker", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/projects/:id", () => {
+        return HttpResponse.json({
+          data: {
+            project: {
+              id: "proj-1", org_id: "org-1", repository_id: "repo-1",
+              title: "Config Project", goal: "Build great things",
+              scope: "Frontend only", completion_criteria: "All tests pass",
+              status: "draft", priority: 50, execution_mode: "sequential",
+              max_concurrent: 1, auto_merge: false, base_branch: "main",
+              total_tasks: 0, completed_tasks: 0, failed_tasks: 0,
+              proposed_by_pm: false, source_issue_ids: [],
+              created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+            },
+            tasks: [],
+            recent_cycles: [],
+            attachments: [],
+            specs: [],
+          },
+        });
+      }),
+      http.get("*/api/v1/repositories/repo-1/branches", () => HttpResponse.json({
+        data: [
+          { name: "main", protected: true },
+          { name: "release/project-settings", protected: false },
+        ],
+        meta: {},
+      })),
+      http.patch("*/api/v1/projects/:id", async ({ request }) => {
+        updateBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { ok: true } });
+      }),
+    );
+
+    renderWithProviders(<ProjectDetailContent id="proj-1" />);
+    await waitFor(() => {
+      expect(screen.getByText("Config Project")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    await user.click(screen.getByRole("button", { name: "Base branch" }));
+    await user.type(await screen.findByPlaceholderText("Search branches..."), "release");
+    await user.click(await screen.findByText("release/project-settings"));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(updateBody).toMatchObject({ base_branch: "release/project-settings" });
+    });
   });
 
   it("shows Max Concurrent field when Parallel execution mode is selected", async () => {

@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/api/sse"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
@@ -28,6 +31,35 @@ type stubSessionPRCredentialStore struct {
 	cred *models.DecryptedUserCredential
 	err  error
 }
+
+type failingSSEWriter struct {
+	header       http.Header
+	failOnSubstr string
+	failAfter    int
+	writes       int
+}
+
+func (w *failingSSEWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingSSEWriter) WriteHeader(int) {}
+
+func (w *failingSSEWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.failAfter > 0 && w.writes < w.failAfter {
+		return len(p), nil
+	}
+	if w.failOnSubstr == "" || strings.Contains(string(p), w.failOnSubstr) {
+		return 0, errors.New("sse write failed")
+	}
+	return len(p), nil
+}
+
+func (w *failingSSEWriter) Flush() {}
 
 func (s *stubSessionPRCredentialStore) GetForUser(_ context.Context, _, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedUserCredential, error) {
 	return s.cred, s.err
@@ -1999,6 +2031,601 @@ func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func newSessionTestStreams(t *testing.T) (*cache.SessionStreams, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for session handler tests")
+	return cache.NewSessionStreams(client, zerolog.Nop(), nil), mr
+}
+
+func TestSessionHandler_CatchUpLogs_UsesRedisRangeAndFallbacks(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 1, SessionID: sessionID, OrgID: orgID, Level: "info", Message: "one", Timestamp: time.Now()}), "first log publish should succeed")
+	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 2, SessionID: sessionID, OrgID: orgID, Level: "info", Message: "two", Timestamp: time.Now()}), "second log publish should succeed")
+
+	logs, err := handler.catchUpLogs(context.Background(), orgID, sessionID, cache.SessionLogStreamID(1))
+	require.NoError(t, err, "Redis XRANGE catch-up should succeed")
+	require.Len(t, logs, 1, "Redis XRANGE catch-up should only return newer logs")
+	require.Equal(t, int64(2), logs[0].ID, "Redis XRANGE catch-up should return the later log")
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	logs, err = handler.catchUpLogs(context.Background(), orgID, sessionID, "bad-id")
+	require.NoError(t, err, "invalid Last-Event-ID should fall back to a full Postgres replay")
+	require.Empty(t, logs, "fallback full replay should return the mocked empty result set")
+}
+
+func TestShouldSkipRedisLog(t *testing.T) {
+	t.Parallel()
+
+	seen, skip := shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(3), cache.SessionLogStreamID(4), uuid.New())
+	require.True(t, skip, "older log IDs should be skipped")
+	require.Equal(t, cache.SessionLogStreamID(4), seen, "skip helper should preserve the last delivered ID")
+
+	seen, skip = shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(5), cache.SessionLogStreamID(4), uuid.New())
+	require.False(t, skip, "newer log IDs should not be skipped")
+	require.Equal(t, "", seen, "non-skipped entries should not override the last delivered ID")
+
+	seen, skip = shouldSkipRedisLog(context.Background(), "bad-stream-id", cache.SessionLogStreamID(4), uuid.New())
+	require.False(t, skip, "invalid current stream IDs should not be skipped")
+	require.Equal(t, "", seen, "invalid current stream IDs should not preserve the last delivered ID")
+
+	seen, skip = shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(5), "bad-last-id", uuid.New())
+	require.False(t, skip, "invalid last delivered stream IDs should not skip newer entries")
+	require.Equal(t, "", seen, "invalid last delivered stream IDs should not be preserved")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	require.False(t, handler.streamLogsViaRedis(context.Background(), sw, orgID, run, ""), "Redis stream helper should fall back when Redis subscriptions are unavailable")
+	require.Empty(t, rec.Body.String(), "fallback path should not emit partial SSE output")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() {
+		done <- handler.streamLogsViaRedis(ctx, sw, orgID, run, "")
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case ok := <-done:
+		require.True(t, ok, "canceled contexts should exit the Redis stream helper cleanly after setup")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Redis stream helper did not return after context cancellation")
+	}
+	require.Contains(t, rec.Body.String(), "event: status", "Redis stream helper should still emit the initial status event before honoring cancellation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_ShutdownSignalAfterSetup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+	shutdownCh := make(chan struct{})
+	handler.SetShutdownSignal(shutdownCh)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+	close(shutdownCh)
+
+	require.True(t, handler.streamLogsViaRedis(context.Background(), sw, orgID, run, ""), "shutdown signals should exit the Redis stream helper cleanly")
+	require.Contains(t, rec.Body.String(), ": ping", "shutdown handling should emit a heartbeat before returning")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_ReplayAndStatusWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 11, SessionID: runID, OrgID: orgID, Level: "info", Message: "hello", Timestamp: time.Now()}), "test should seed Redis replay logs")
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(11), runID, orgID, nil, time.Now(), "info", "hello", nil, nil),
+		)
+
+	logFailWriter := &failingSSEWriter{}
+	logFailSW := sse.NewWriter(logFailWriter)
+	require.NotNil(t, logFailSW, "SSE writer should initialize")
+	require.False(t, handler.streamLogsViaRedis(context.Background(), logFailSW, orgID, run, ""), "replay write failures should abort the Redis stream helper")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	statusFailSW := sse.NewWriter(&failingSSEWriter{failOnSubstr: "event: status"})
+	require.NotNil(t, statusFailSW, "SSE writer should initialize")
+	require.False(t, handler.streamLogsViaRedis(context.Background(), statusFailSW, orgID, run, ""), "initial status write failures should abort the Redis stream helper")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_SubscriptionClosureWritesRetryEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, mr := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- handler.streamLogsViaRedis(context.Background(), sw, orgID, run, "")
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	mr.Close()
+
+	select {
+	case ok := <-done:
+		require.True(t, ok, "subscription closures should end the Redis stream helper cleanly")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Redis stream helper did not finish after Redis subscription closure")
+	}
+
+	body := rec.Body.String()
+	require.Contains(t, body, "event: error", "subscription closures should tell the client to reconnect")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: issueID, Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(9), runID, orgID, nil, now, "info", "done", nil, nil),
+		)
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("polling stream helper did not finish after terminal status")
+	}
+
+	body := rec.Body.String()
+	require.Contains(t, body, `event: done`, "polling stream should emit a done event for terminal statuses")
+	require.Contains(t, body, `id: 9-0`, "polling stream should emit incremental log events")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_InvalidLastEventIDFallsBackAndWriteFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(3), runID, orgID, nil, now, "info", "hello", nil, nil),
+		)
+
+	sw := sse.NewWriter(&failingSSEWriter{})
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "bad-id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_InitialLoadFailureReturns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), int64(2)).
+		WillReturnError(context.DeadlineExceeded)
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	handler.streamLogsViaPolling(context.Background(), sw, orgID, run, cache.SessionLogStreamID(2))
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("polling stream helper did not return after reload failure")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("initial status write failure returns immediately", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool without error")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		runID := uuid.New()
+		run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+		sw := sse.NewWriter(&failingSSEWriter{failOnSubstr: "event: status"})
+		require.NotNil(t, sw, "SSE writer should initialize")
+
+		handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("shutdown heartbeat failure still returns", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool without error")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		shutdownCh := make(chan struct{})
+		handler.SetShutdownSignal(shutdownCh)
+
+		orgID := uuid.New()
+		runID := uuid.New()
+		run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+		close(shutdownCh)
+		sw := sse.NewWriter(&failingSSEWriter{failOnSubstr: ": ping", failAfter: 2})
+		require.NotNil(t, sw, "SSE writer should initialize")
+
+		handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("status and done write failures during reload return", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name         string
+			status       string
+			failOnSubstr string
+			failAfter    int
+		}{
+			{name: "status event failure", status: string(models.SessionStatusCompleted), failOnSubstr: "event: status", failAfter: 2},
+			{name: "done event failure", status: string(models.SessionStatusCompleted), failOnSubstr: "event: done", failAfter: 3},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				mock, err := pgxmock.NewPool()
+				require.NoError(t, err, "should create mock pool without error")
+				defer mock.Close()
+
+				handler := newSessionHandler(t, mock)
+				orgID := uuid.New()
+				runID := uuid.New()
+				issueID := uuid.New()
+				now := time.Now()
+				run := models.Session{ID: runID, OrgID: orgID, IssueID: issueID, Status: string(models.SessionStatusRunning)}
+
+				mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							runID, issueID, orgID, "claude-code", tt.status, "supervised", "standard",
+							nil, nil, nil, nil,
+							nil, false, &now, &now, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 0, now, "none", nil,
+							nil, nil, nil, nil, nil, nil, nil, nil, nil,
+							"idle", (*string)(nil), nil, now,
+						),
+					)
+				mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+				sw := sse.NewWriter(&failingSSEWriter{failOnSubstr: tt.failOnSubstr, failAfter: tt.failAfter})
+				require.NotNil(t, sw, "SSE writer should initialize")
+
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+				}()
+
+				select {
+				case <-done:
+				case <-time.After(1500 * time.Millisecond):
+					t.Fatal("polling stream helper did not return after a status/done write failure")
+				}
+
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			})
+		}
+	})
+}
+
+func TestSessionHandler_StreamLogs_RedisFallbackToPolling(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+	handler.SetShutdownSignal(make(chan struct{}))
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, orgID, "claude-code", "running", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/stream", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.StreamLogs(w, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("StreamLogs did not finish after falling back to polling")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_CreateManual(t *testing.T) {
 	t.Parallel()
 
@@ -2293,9 +2920,33 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -2357,9 +3008,33 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectExec("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				&userID,
+				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
 	// Expect open_pr job instead of validate.
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

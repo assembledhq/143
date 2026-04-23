@@ -41,6 +41,8 @@ func (m *mockJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, 
 	return uuid.New(), nil
 }
 
+func (m *mockJobs) Notify(ctx context.Context, id uuid.UUID) {}
+
 func (m *mockJobs) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	return m.failedJob, nil
 }
@@ -87,6 +89,8 @@ func (m *trackingJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 	m.enqueuedTx = append(m.enqueuedTx, jobType)
 	return uuid.New(), nil
 }
+
+func (m *trackingJobs) Notify(ctx context.Context, id uuid.UUID) {}
 
 func (m *trackingJobs) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	return nil, nil

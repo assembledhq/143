@@ -1,0 +1,40 @@
+#cloud-config
+
+users:
+  - name: deploy
+    groups: docker
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${SSH_PUBLIC_KEY}
+
+packages:
+  - docker.io
+  - docker-compose-plugin
+
+write_files:
+  - path: /opt/143/.env
+    owner: deploy:deploy
+    permissions: "0600"
+    content: |
+      REDIS_PASSWORD=${REDIS_PASSWORD}
+      REDIS_PRIVATE_IP=${REDIS_PRIVATE_IP}
+
+  - path: /opt/143/docker-compose.redis.yml
+    owner: deploy:deploy
+    permissions: "0644"
+    encoding: b64
+    content: ${DOCKER_COMPOSE_REDIS_B64}
+
+  - path: /etc/sysctl.d/99-redis.conf
+    permissions: "0644"
+    content: |
+      vm.overcommit_memory = 1
+      net.core.somaxconn = 512
+
+runcmd:
+  - id deploy >/dev/null 2>&1 || adduser --disabled-password --gecos "" deploy
+  - mkdir -p /opt/143
+  - chown -R deploy:deploy /opt/143
+  - sysctl -p /etc/sysctl.d/99-redis.conf
+  - su - deploy -c 'cd /opt/143 && docker compose -f docker-compose.redis.yml up -d'

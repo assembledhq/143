@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/assembledhq/143/internal/models"
+	"github.com/rs/zerolog"
 )
 
 // safePassExprRE validates that a pass expression only contains safe SQL tokens
@@ -20,11 +21,25 @@ import (
 var safePassExprRE = regexp.MustCompile(`^[a-zA-Z0-9_():@, +]+$`)
 
 type SessionStore struct {
-	db DBTX
+	db      DBTX
+	streams *cache.SessionStreams
+	logger  zerolog.Logger
 }
 
 func NewSessionStore(db DBTX) *SessionStore {
-	return &SessionStore{db: db}
+	return &SessionStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetStreams injects the Redis stream helper used for live session status fan-out.
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis session status streaming"
+func (s *SessionStore) SetStreams(streams *cache.SessionStreams) {
+	s.streams = streams
+}
+
+// SetLogger injects the structured logger used for best-effort stream publishing.
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *SessionStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 // Begin starts a transaction on the underlying session store.
@@ -349,12 +364,20 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	} else if status == "completed" || status == "failed" || status == "cancelled" {
 		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
 		"status": status,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 // UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
@@ -419,7 +442,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	_, err := db.Exec(ctx, query, pgx.NamedArgs{
+	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":                   runID,
 		"org_id":               orgID,
 		"status":               status,
@@ -434,7 +457,46 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		"diff_collected_at":    result.DiffCollectedAt,
 		"diff_stats":           diffStats,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	s.publishStatus(ctx, &session)
+	return nil
+}
+
+func (s *SessionStore) publishStatus(ctx context.Context, session *models.Session) {
+	if s.streams == nil || session == nil {
+		return
+	}
+	if err := s.streams.PublishStatus(ctx, session); err != nil {
+		s.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to publish session status to Redis")
+	}
+}
+
+// ListTerminalEndedBefore returns terminal sessions whose completed_at is older than before.
+// lint:allow-no-orgid reason="cross-org Redis cleanup scans terminal sessions across all orgs"
+func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.Time, limit int) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE status IN ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')
+		  AND completed_at IS NOT NULL
+		  AND completed_at < @before
+		ORDER BY completed_at ASC
+		LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"before": before,
+		"limit":  limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list terminal sessions before: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
 }
 
 // ClaimIdle atomically transitions an idle session to running and returns the

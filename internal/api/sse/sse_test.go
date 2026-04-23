@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,6 +22,13 @@ func TestNewWriter_SupportsFlusher(t *testing.T) {
 
 // nonFlushWriter is an http.ResponseWriter that does NOT implement http.Flusher.
 type nonFlushWriter struct{ http.ResponseWriter }
+
+type failingWriteWriter struct{}
+
+func (failingWriteWriter) Header() http.Header        { return make(http.Header) }
+func (failingWriteWriter) WriteHeader(statusCode int) {}
+func (failingWriteWriter) Flush()                     {}
+func (failingWriteWriter) Write([]byte) (int, error)  { return 0, errors.New("write failed") }
 
 func TestNewWriter_NoFlusher(t *testing.T) {
 	t.Parallel()
@@ -69,6 +77,33 @@ func TestWriteData(t *testing.T) {
 	err := sw.WriteData(map[string]int{"count": 1})
 	require.NoError(t, err)
 	require.Contains(t, rec.Body.String(), `data: {"count":1}`)
+}
+
+func TestWriteEventIDAndWriteDataID(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw, "writer should initialize for response recorders")
+
+	require.NoError(t, sw.WriteEventID(EventStatus, "evt-1", map[string]string{"status": "running"}), "named event with ID should write successfully")
+	require.NoError(t, sw.WriteDataID("evt-2", map[string]int{"count": 2}), "default event with ID should write successfully")
+
+	body := rec.Body.String()
+	require.Contains(t, body, "id: evt-1\n", "named events should include their event ID")
+	require.Contains(t, body, "event: status\n", "named events should include the event name")
+	require.Contains(t, body, "id: evt-2\n", "default events should include their event ID")
+}
+
+func TestWriteEventID_WriteError(t *testing.T) {
+	t.Parallel()
+
+	sw := NewWriter(failingWriteWriter{})
+	require.NotNil(t, sw, "writer should initialize for custom flusher response writers")
+
+	err := sw.WriteEventID(EventStatus, "evt-1", map[string]string{"status": "running"})
+	require.Error(t, err, "write failures should be surfaced")
+	require.Contains(t, err.Error(), "event id", "error should identify the failing SSE write phase")
 }
 
 func TestWriteEvent_MarshalError(t *testing.T) {
