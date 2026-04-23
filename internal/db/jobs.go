@@ -7,19 +7,35 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/rs/zerolog"
 )
 
 type JobStore struct {
-	db DBTX
+	db       DBTX
+	notifier *cache.JobNotifier
+	logger   zerolog.Logger
 }
 
 func NewJobStore(db DBTX) *JobStore {
-	return &JobStore{db: db}
+	return &JobStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetNotifier injects the Redis-backed job notifier used for wake-up publishes.
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis job notifications"
+func (s *JobStore) SetNotifier(notifier *cache.JobNotifier) {
+	s.notifier = notifier
+}
+
+// SetLogger injects the structured logger used for best-effort notifier failures.
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *JobStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 // GetLatestFailedByType returns the most recent failed or dead_letter job for the given org and job type.
@@ -47,7 +63,12 @@ func (s *JobStore) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, j
 }
 
 func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
-	return enqueueOn(ctx, s.db, orgID, queue, jobType, payload, priority, dedupeKey)
+	id, err := enqueueOn(ctx, s.db, orgID, queue, jobType, payload, priority, dedupeKey)
+	if err != nil {
+		return id, err
+	}
+	s.notify(ctx, id)
+	return id, nil
 }
 
 // EnqueueInTx inserts a job inside an existing transaction so callers that
@@ -55,6 +76,21 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 // orphaned state when one side fails.
 func (s *JobStore) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return enqueueOn(ctx, tx, orgID, queue, jobType, payload, priority, dedupeKey)
+}
+
+// Notify publishes a best-effort wake-up for an already-created job row.
+// lint:allow-no-orgid reason="process-wide post-commit Redis wake-up for already-scoped job rows"
+func (s *JobStore) Notify(ctx context.Context, id uuid.UUID) {
+	s.notify(ctx, id)
+}
+
+func (s *JobStore) notify(ctx context.Context, id uuid.UUID) {
+	if s.notifier == nil || id == uuid.Nil {
+		return
+	}
+	if err := s.notifier.Publish(ctx); err != nil {
+		s.logger.Warn().Err(err).Str("job_id", id.String()).Msg("failed to publish Redis job wake-up")
+	}
 }
 
 type jobQuerier interface {

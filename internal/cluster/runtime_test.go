@@ -53,6 +53,8 @@ func (m *schedulerRuntimeJobsMock) EnqueueInTx(ctx context.Context, tx pgx.Tx, o
 	return m.Enqueue(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
 }
 
+func (m *schedulerRuntimeJobsMock) Notify(ctx context.Context, id uuid.UUID) {}
+
 func (m *schedulerRuntimeJobsMock) GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error) {
 	return nil, nil
 }
