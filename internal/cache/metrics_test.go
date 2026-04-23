@@ -69,6 +69,8 @@ func (m *failingMeter) Int64Histogram(string, ...otelmetric.Int64HistogramOption
 }
 
 func TestMetrics_NewMetrics_InstrumentInitFailures(t *testing.T) {
+	t.Parallel()
+
 	for _, failAt := range []int{1, 2, 3, 4, 5} {
 		meter := &failingMeter{failAt: failAt}
 		metrics, err := newMetrics(meter)
