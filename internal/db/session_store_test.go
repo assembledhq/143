@@ -8,11 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -471,17 +474,179 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 		ResultSummary: stringPtr("Fixed the bug"),
 	}
 
-	mock.ExpectExec("UPDATE sessions").
+	now := time.Now()
+	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).AddRow(
+				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
+			),
+		)
 
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should succeed for terminal transitions")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), 10).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	rows, err := store.ListTerminalEndedBefore(context.Background(), now, 10)
+	require.NoError(t, err, "ListTerminalEndedBefore should succeed")
+	require.Len(t, rows, 1, "ListTerminalEndedBefore should return the matching session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	mock.ExpectQuery("UPDATE sessions SET status = @status, started_at = now\\(\\), completed_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "running")
+	require.Error(t, err, "UpdateStatus should surface query failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "completed")
+	require.Error(t, err, "UpdateStatus should surface row collection failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("query error", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		mock.ExpectQuery("UPDATE sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
+			WillReturnError(context.DeadlineExceeded)
+
+		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), "completed", &models.SessionResult{})
+		require.Error(t, err, "UpdateResult should surface query failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("collect error and best-effort publish failure", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+		store.SetLogger(zerolog.Nop())
+
+		mr := miniredis.RunT(t)
+		client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+		require.NotNil(t, client, "Redis client should initialize")
+		store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+		mr.Close()
+
+		now := time.Now()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		orgID := uuid.New()
+
+		mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
+			)
+
+		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should tolerate best-effort Redis publish failures")
+
+		mock.ExpectQuery("UPDATE sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
+
+		err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", &models.SessionResult{})
+		require.Error(t, err, "UpdateResult should surface row collection failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+}
+
+func TestSessionStore_ListTerminalEndedBefore_Error(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), 10).
+		WillReturnError(context.DeadlineExceeded)
+
+	rows, err := store.ListTerminalEndedBefore(context.Background(), time.Now(), 10)
+	require.Error(t, err, "ListTerminalEndedBefore should surface query failures")
+	require.Nil(t, rows, "query failures should not return rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ClaimIdle(t *testing.T) {

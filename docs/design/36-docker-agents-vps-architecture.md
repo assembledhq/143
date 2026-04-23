@@ -1296,7 +1296,7 @@ instead of Postgres directly.
 
 Redis provides shared caching, pub/sub for real-time log streaming, distributed
 rate limiting, and job queue notifications. See
-[52-redis.md](../future/52-redis.md) for the full design. Redis is **optional** —
+[52-redis.md](../implemented/52-redis.md) for the full design. Redis is **optional** —
 all code paths fall back to current behavior (Postgres polling, per-node rate
 limiting) when Redis is unavailable.
 
@@ -1441,7 +1441,7 @@ internet — only allow it from the private network CIDR (e.g., `10.0.0.0/16`).
 
 **Move to managed Redis when:** you need HA (automatic failover), or you're
 managing 10+ nodes and want one fewer thing to operate. See
-[52-redis.md Section 6](../future/52-redis.md#6-production-migrating-to-hosted-redis)
+[52-redis.md Section 6](../implemented/52-redis.md#6-production-migrating-to-hosted-redis)
 for the migration path — it's a config change (update `REDIS_URL`), not a code
 change.
 
@@ -1704,7 +1704,7 @@ runs across the fleet.
 **Fix (required for Phase 3c):**
 - **Redis sliding-window counter (recommended):** With a Redis node deployed
   (Step 3d), use the distributed rate limiter described in
-  [52-redis.md Section 2.2](future/52-redis.md#22-distributed-rate-limiting).
+  [52-redis.md Section 2.2](implemented/52-redis.md#22-distributed-rate-limiting).
   A simple `INCR`/`EXPIRE` counter on Redis provides globally-consistent rate
   limiting across all nodes with sub-millisecond overhead. Falls back to per-node
   in-memory limiting if Redis is unavailable.
@@ -1736,7 +1736,7 @@ across all API nodes. Monitor `session_logs` query frequency in `pg_stat_stateme
 **Fix options:**
 - **Redis Streams (recommended):** With a Redis node deployed (Step 3d), use
   Redis Streams for log delivery as described in
-  [52-redis.md Section 2.1](future/52-redis.md#21-redis-streams-for-real-time-events-highest-value).
+  [52-redis.md Section 2.1](implemented/52-redis.md#21-redis-streams-for-real-time-events-highest-value).
   A fan-out goroutine per node per active session calls `XREAD BLOCK` and
   broadcasts to local SSE clients via Go channels, reducing per-client DB
   queries to zero. Falls back to 1s Postgres polling if Redis is unavailable.

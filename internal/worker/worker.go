@@ -78,6 +78,7 @@ type Worker struct {
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	renewInterval time.Duration
+	wakeCh        chan struct{}
 
 	draining           atomic.Bool
 	activeJobs         atomic.Int32
@@ -93,6 +94,14 @@ func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
 		pollInterval:  5 * time.Second,
 		leaseDuration: defaultLeaseDuration,
 		renewInterval: defaultRenewInterval,
+		wakeCh:        make(chan struct{}, 1),
+	}
+}
+
+func (w *Worker) Wake() {
+	select {
+	case w.wakeCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -110,6 +119,8 @@ func (w *Worker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			w.logger.Info().Msg("worker stopping")
 			return
+		case <-w.wakeCh:
+			w.poll(ctx)
 		case <-ticker.C:
 			w.poll(ctx)
 		}

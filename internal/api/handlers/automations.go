@@ -794,7 +794,8 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		"automation_id":     automation.ID.String(),
 		"automation_run_id": run.ID.String(),
 	}
-	if _, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey); err != nil {
+	jobID, err := h.jobStore.EnqueueInTx(r.Context(), tx, orgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue automation run job", err)
 		return
 	}
@@ -803,6 +804,9 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit transaction", err)
 		return
 	}
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
+	defer cancel()
+	h.jobStore.Notify(notifyCtx, jobID)
 
 	idStr := automationID.String()
 	details := map[string]any{

@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,6 +52,101 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	require.NoError(t, err, "should create agent run log without error")
 	require.Equal(t, int64(1), log.ID, "should set the generated ID on the log")
 	require.Equal(t, now, log.Timestamp, "should set the timestamp on the log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_PublishesToRedis(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+
+	store := NewSessionLogStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+
+	now := time.Now()
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+		Metadata:  json.RawMessage(`{"step": 1}`),
+	}
+
+	mock.ExpectQuery("INSERT INTO session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "timestamp"}).
+				AddRow(int64(7), now),
+		)
+
+	require.NoError(t, store.Create(context.Background(), log), "Create should publish the inserted log to Redis when streams are configured")
+	require.True(t, mr.Exists("143:stream:{ses:"+log.SessionID.String()+"}:logs"), "published log should create a Redis stream")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_PublishFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	mr.Close()
+
+	store := NewSessionLogStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+
+	now := time.Now()
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery("INSERT INTO session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(8), now))
+
+	require.NoError(t, store.Create(context.Background(), log), "Create should succeed even when the best-effort Redis publish fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery("INSERT INTO session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id"}).
+				AddRow(int64(1)),
+		)
+
+	err = store.Create(context.Background(), log)
+	require.Error(t, err, "Create should surface row scan failures")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
