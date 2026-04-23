@@ -38,6 +38,14 @@ export interface User {
   created_at: string;
 }
 
+export interface UserNotificationPreference {
+  org_id: string;
+  user_id: string;
+  session_completion_browser_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AuthProviders {
   github: boolean;
   google: boolean;

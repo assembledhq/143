@@ -99,6 +99,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
+	userNotificationPreferenceStore := db.NewUserNotificationPreferenceStore(pool)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -206,6 +207,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
+	userNotificationPreferenceHandler := handlers.NewUserNotificationPreferenceHandler(userNotificationPreferenceStore)
 	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
 	var emailSender email.Sender
 	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
@@ -518,6 +520,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
 			r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
 			r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+			r.Get("/api/v1/account/notification-preferences", userNotificationPreferenceHandler.Get)
+			r.Patch("/api/v1/account/notification-preferences", userNotificationPreferenceHandler.Update)
 
 			r.Get("/api/v1/repositories", repoHandler.List)
 			r.Get("/api/v1/repositories/summary", repoHandler.Summary)

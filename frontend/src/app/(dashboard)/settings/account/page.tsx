@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
+import { useAuth } from "@/hooks/use-auth";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { PageContainer } from "@/components/page-container";
@@ -16,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
 import type { ListResponse, UserCredentialSummary } from "@/lib/types";
@@ -53,10 +55,30 @@ function statusLabel(status?: string) {
 }
 
 export default function AccountPage() {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
   const [apiKey, setApiKey] = useState("");
+  const { data: notificationPreferenceResp } = useQuery({
+    queryKey: ["account", "notification-preferences"],
+    queryFn: () => api.auth.getNotificationPreferences(),
+    enabled: !!user,
+  });
+  const sessionCompletionNotificationsEnabled =
+    notificationPreferenceResp?.data?.session_completion_browser_enabled ?? false;
+
+  const notificationPreferenceMutation = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.auth.updateNotificationPreferences({ session_completion_browser_enabled: enabled }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["account", "notification-preferences"], response);
+    },
+    onError: (error) => {
+      captureError(error, { feature: "account-notification-preferences-update" });
+      toast.error("Could not update notification settings");
+    },
+  });
 
   const { data: personalResp } = useQuery<ListResponse<UserCredentialSummary>>({
     queryKey: ["user-credentials", "personal"],
@@ -156,6 +178,33 @@ export default function AccountPage() {
           </CardHeader>
           <CardContent className="pb-6">
             <ThemeSelect />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Notifications</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 pb-6">
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="session-complete-browser-notifications">Session completion browser notifications</Label>
+                <p className="text-xs text-muted-foreground">
+                  Notify me when a session finishes while this tab is in the background.
+                </p>
+              </div>
+              <Switch
+                id="session-complete-browser-notifications"
+                checked={sessionCompletionNotificationsEnabled}
+                onCheckedChange={(checked) => {
+                  notificationPreferenceMutation.mutate(checked);
+                }}
+                disabled={!user || notificationPreferenceMutation.isPending}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Off by default. You can turn this on when you want completion alerts.
+            </p>
           </CardContent>
         </Card>
       </div>

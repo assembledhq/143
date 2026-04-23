@@ -53,6 +53,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
@@ -1328,6 +1329,14 @@ const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 
 export function SessionDetailContent({ id }: { id: string }) {
+  const { user } = useAuth();
+  const { data: notificationPreferenceResp } = useQuery({
+    queryKey: ["account", "notification-preferences"],
+    queryFn: () => api.auth.getNotificationPreferences(),
+    enabled: !!user,
+  });
+  const sessionCompletionNotificationEnabled =
+    notificationPreferenceResp?.data?.session_completion_browser_enabled ?? false;
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -1460,6 +1469,24 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
+  const previousSessionStatusRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const currentStatus = session?.status;
+    if (!session?.id || !currentStatus) {
+      return;
+    }
+
+    void maybeNotifySessionCompleted({
+      enabled: sessionCompletionNotificationEnabled,
+      previousStatus: previousSessionStatusRef.current,
+      nextStatus: currentStatus,
+      sessionId: session.id,
+      title: session.title,
+      visibilityState: document.visibilityState,
+    });
+
+    previousSessionStatusRef.current = currentStatus;
+  }, [session?.id, session?.status, session?.title, sessionCompletionNotificationEnabled]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
     if (id) {

@@ -189,6 +189,10 @@ export const api = {
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+    getNotificationPreferences: () =>
+      get<import('./types').SingleResponse<import('./types').UserNotificationPreference>>('/api/v1/account/notification-preferences'),
+    updateNotificationPreferences: (data: { session_completion_browser_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').UserNotificationPreference>>('/api/v1/account/notification-preferences', data),
   },
   organizations: {
     create: (name: string) =>
