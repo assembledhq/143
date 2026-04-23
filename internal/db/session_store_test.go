@@ -476,7 +476,8 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,

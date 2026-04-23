@@ -2277,7 +2277,7 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -2287,10 +2287,17 @@ func TestSessionHandler_EndSession_EnqueuesValidation(t *testing.T) {
 				nil, nil,
 				nil,
 				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
-				nil, nil, nil, nil, nil, nil,
-				nil, nil,
-				nil,
-				nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)
@@ -2358,7 +2365,7 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumns).AddRow(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
 				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
 				nil, nil, nil, nil,
 				nil, false, &now, &now, nil,
@@ -2368,10 +2375,17 @@ func TestSessionHandler_EndSession_ManualSkipsValidation(t *testing.T) {
 				nil, nil,
 				&userID,
 				nil, 1, now, "snapshotted", stringPtr("snapshots/test.tar"),
-				nil, nil, nil, nil, nil, nil,
-				nil, nil,
-				nil,
-				nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
 				now,
 			),
 		)

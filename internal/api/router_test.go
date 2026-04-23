@@ -78,7 +78,7 @@ func TestNewRouter_GitHubAppConfigBuildsRouter(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully when GitHub App credentials are valid")
 	require.NotNil(t, router, "NewRouter should construct a router when GitHub App credentials are valid")
 }
