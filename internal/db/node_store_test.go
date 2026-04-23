@@ -132,4 +132,28 @@ func TestNodeStore_ListActive(t *testing.T) {
 		require.Contains(t, err.Error(), "list active nodes", "ListActive should wrap query failures with context")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+
+	t.Run("wraps scan errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		metadata, err := json.Marshal(map[string]any{"preview_capable": true})
+		require.NoError(t, err, "metadata should marshal")
+
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+			WillReturnRows(
+				pgxmock.NewRows(nodeStoreTestCols).
+					AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, "not-a-time", now),
+			)
+
+		store := NewNodeStore(mock)
+		_, err = store.ListActive(context.Background())
+		require.Error(t, err, "ListActive should surface scan failures")
+		require.Contains(t, err.Error(), "scan active nodes", "ListActive should wrap scan failures with context")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }

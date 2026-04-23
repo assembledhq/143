@@ -198,6 +198,51 @@ func TestWorkerStopper_StopActivePreviewForSession(t *testing.T) {
 		require.True(t, stopped, "StopActivePreviewForSession should report when it stopped a preview")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+
+	t.Run("surfaces stop errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		previewID := uuid.New()
+		now := time.Now().UTC()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
+				Error: models.ErrorDetail{Code: "NO_SANDBOX", Message: "preview missing"},
+			}), "remote worker should return a structured stop error")
+		}))
+		defer server.Close()
+
+		metadata, err := json.Marshal(WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewInternalBaseURL: server.URL,
+		})
+		require.NoError(t, err, "worker metadata should marshal")
+
+		store := db.NewPreviewStore(mock)
+		selector := NewWorkerSelector(db.NewNodeStore(mock), store)
+		stopper := NewWorkerStopper(store, selector, NewWorkerPreviewClient("worker-secret"), "api-node", nil)
+
+		mock.ExpectQuery("SELECT .+ FROM preview_instances").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...))
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerNodeTestCols).AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, now, now))
+
+		stopped, err := stopper.StopActivePreviewForSession(context.Background(), orgID, sessionID)
+		require.Error(t, err, "StopActivePreviewForSession should surface stop failures")
+		require.False(t, stopped, "StopActivePreviewForSession should not report a stop when the worker rejects it")
+		require.Contains(t, err.Error(), "NO_SANDBOX", "StopActivePreviewForSession should preserve the remote stop error")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }
 
 func TestWorkerStopper_StopPreview_WrapsLookupAndResolveErrors(t *testing.T) {

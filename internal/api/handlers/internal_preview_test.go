@@ -1,8 +1,12 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -64,6 +69,58 @@ func (internalPreviewTestInspector) RunAssertions(context.Context, string, []pre
 	}, nil
 }
 func (internalPreviewTestInspector) Close() error { return nil }
+
+type internalPreviewErrorInspector struct{}
+
+func (internalPreviewErrorInspector) CaptureScreenshot(context.Context, string, models.ScreenshotOpts) (*models.ScreenshotResult, error) {
+	return nil, errors.New("screenshot failed")
+}
+func (internalPreviewErrorInspector) CaptureDOM(context.Context, string, previewsvc.DOMCaptureOpts) (*previewsvc.DOMSnapshot, error) {
+	return nil, errors.New("dom failed")
+}
+func (internalPreviewErrorInspector) ReadConsole(context.Context, string) ([]previewsvc.ConsoleMessage, error) {
+	return nil, errors.New("console failed")
+}
+func (internalPreviewErrorInspector) InspectElement(context.Context, string, int, int) (*models.ElementInfo, error) {
+	return nil, errors.New("inspect failed")
+}
+func (internalPreviewErrorInspector) StartScreencast(context.Context, string, int) (string, error) {
+	return "", errors.New("screencast start failed")
+}
+func (internalPreviewErrorInspector) StopScreencast(context.Context, string) (*models.ScreencastResult, error) {
+	return nil, errors.New("screencast stop failed")
+}
+func (internalPreviewErrorInspector) ExecuteInteraction(context.Context, string, []models.InteractionStep) (*models.InteractionResult, error) {
+	return nil, errors.New("interaction failed")
+}
+func (internalPreviewErrorInspector) CaptureMultiViewport(context.Context, string, models.MultiViewportOpts) (*models.MultiViewportResult, error) {
+	return nil, errors.New("multi viewport failed")
+}
+func (internalPreviewErrorInspector) ComputeVisualDiff(context.Context, string, string, string) (*models.VisualDiff, error) {
+	return nil, errors.New("visual diff failed")
+}
+func (internalPreviewErrorInspector) RunAssertions(context.Context, string, []previewsvc.Assertion) (*previewsvc.AssertionResult, error) {
+	return nil, errors.New("assertions failed")
+}
+func (internalPreviewErrorInspector) Close() error { return nil }
+
+type internalPreviewTestProvider struct {
+	dialFn func(context.Context, string) (previewsvc.PreviewStream, error)
+}
+
+func (p internalPreviewTestProvider) StartPreview(context.Context, *agent.Sandbox, *models.PreviewConfig, map[string]string) (*previewsvc.PreviewHandle, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (p internalPreviewTestProvider) StopPreview(context.Context, string) error { return nil }
+
+func (p internalPreviewTestProvider) DialPreview(ctx context.Context, handle string) (previewsvc.PreviewStream, error) {
+	return p.dialFn(ctx, handle)
+}
+
+func (p internalPreviewTestProvider) PreviewStatus(context.Context, string) (*previewsvc.PreviewStatusSnapshot, error) {
+	return nil, nil
+}
 
 func newInternalPreviewTestHandler(manager *previewsvc.Manager) *InternalPreviewHandler {
 	return NewInternalPreviewHandler(&PreviewHandler{logger: zerolog.Nop()}, manager, "worker-1", "worker-secret", zerolog.Nop())
@@ -396,6 +453,108 @@ func TestInternalPreviewHandler_InspectorUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, rr.Code, "InspectElement should report when no inspector is configured")
 }
 
+func TestInternalPreviewHandler_InspectorEndpoints_RejectInvalidBodiesAndSurfaceFailures(t *testing.T) {
+	t.Parallel()
+
+	previewID := uuid.New()
+	orgID := uuid.New()
+
+	t.Run("invalid bodies", func(t *testing.T) {
+		t.Parallel()
+
+		manager := previewsvc.NewManager(previewsvc.ManagerConfig{Logger: zerolog.Nop(), WorkerNodeID: "worker-1"})
+		manager.SetInspector(internalPreviewTestInspector{})
+		handler := newInternalPreviewTestHandler(manager)
+
+		tests := []struct {
+			name       string
+			method     string
+			path       string
+			body       string
+			action     string
+			handlerFn  http.HandlerFunc
+			wantCode   string
+			wantStatus int
+		}{
+			{"screenshot", http.MethodPost, "/internal/preview/" + previewID.String() + "/screenshot", "{", "screenshot", handler.CaptureScreenshot, "INVALID_BODY", http.StatusBadRequest},
+			{"inspect", http.MethodPost, "/internal/preview/" + previewID.String() + "/inspect", "{", "inspect", handler.InspectElement, "INVALID_BODY", http.StatusBadRequest},
+			{"interact", http.MethodPost, "/internal/preview/" + previewID.String() + "/interact", "{", "interact", handler.ExecuteInteraction, "INVALID_BODY", http.StatusBadRequest},
+			{"multi viewport", http.MethodPost, "/internal/preview/" + previewID.String() + "/multi-viewport", "{", "multi_viewport", handler.CaptureMultiViewport, "INVALID_BODY", http.StatusBadRequest},
+			{"visual diff", http.MethodPost, "/internal/preview/" + previewID.String() + "/visual-diff", "{", "visual_diff", handler.ComputeVisualDiff, "INVALID_BODY", http.StatusBadRequest},
+			{"assertions", http.MethodPost, "/internal/preview/" + previewID.String() + "/assert", "{", "assert", handler.RunAssertions, "INVALID_BODY", http.StatusBadRequest},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+				req = withPreviewRouteParam(req, previewID.String())
+				req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+					OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: tt.action, ExpiresAt: time.Now().Add(time.Minute),
+				}))
+				rr := httptest.NewRecorder()
+
+				tt.handlerFn(rr, req)
+				require.Equal(t, tt.wantStatus, rr.Code, "internal preview handlers should reject malformed JSON")
+
+				var resp models.ErrorResponse
+				require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "internal preview handlers should return a JSON error for malformed JSON")
+				require.Equal(t, tt.wantCode, resp.Error.Code, "internal preview handlers should return the expected error code")
+			})
+		}
+	})
+
+	t.Run("inspector failures", func(t *testing.T) {
+		t.Parallel()
+
+		manager := previewsvc.NewManager(previewsvc.ManagerConfig{Logger: zerolog.Nop(), WorkerNodeID: "worker-1"})
+		manager.SetInspector(internalPreviewErrorInspector{})
+		handler := newInternalPreviewTestHandler(manager)
+
+		tests := []struct {
+			name       string
+			method     string
+			path       string
+			body       string
+			action     string
+			handlerFn  http.HandlerFunc
+			wantCode   string
+			wantStatus int
+		}{
+			{"screenshot", http.MethodPost, "/internal/preview/" + previewID.String() + "/screenshot", `{}`, "screenshot", handler.CaptureScreenshot, "SCREENSHOT_FAILED", http.StatusInternalServerError},
+			{"inspect", http.MethodPost, "/internal/preview/" + previewID.String() + "/inspect", `{"x":1,"y":2}`, "inspect", handler.InspectElement, "INSPECT_FAILED", http.StatusInternalServerError},
+			{"console", http.MethodGet, "/internal/preview/" + previewID.String() + "/console", ``, "console", handler.ReadConsole, "CONSOLE_READ_FAILED", http.StatusInternalServerError},
+			{"interact", http.MethodPost, "/internal/preview/" + previewID.String() + "/interact", `{"steps":[{"action":"click"}]}`, "interact", handler.ExecuteInteraction, "INTERACTION_FAILED", http.StatusInternalServerError},
+			{"multi viewport", http.MethodPost, "/internal/preview/" + previewID.String() + "/multi-viewport", `{}`, "multi_viewport", handler.CaptureMultiViewport, "MULTI_VIEWPORT_FAILED", http.StatusInternalServerError},
+			{"visual diff", http.MethodPost, "/internal/preview/" + previewID.String() + "/visual-diff", `{"before_snapshot_id":"before","after_snapshot_id":"after"}`, "visual_diff", handler.ComputeVisualDiff, "VISUAL_DIFF_FAILED", http.StatusInternalServerError},
+			{"assertions", http.MethodPost, "/internal/preview/" + previewID.String() + "/assert", `{"assertions":[{"type":"text"}]}`, "assert", handler.RunAssertions, "ASSERTIONS_FAILED", http.StatusInternalServerError},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+				req = withPreviewRouteParam(req, previewID.String())
+				req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+					OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: tt.action, ExpiresAt: time.Now().Add(time.Minute),
+				}))
+				rr := httptest.NewRecorder()
+
+				tt.handlerFn(rr, req)
+				require.Equal(t, tt.wantStatus, rr.Code, "internal preview handlers should surface inspector failures")
+
+				var resp models.ErrorResponse
+				require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "internal preview handlers should return a JSON error for inspector failures")
+				require.Equal(t, tt.wantCode, resp.Error.Code, "internal preview handlers should return the expected inspector failure code")
+			})
+		}
+	})
+}
+
 func TestInternalPreviewHandler_ProxyFailuresAndHelpers(t *testing.T) {
 	t.Parallel()
 
@@ -450,6 +609,167 @@ func TestInternalPreviewHandler_ProxyFailuresAndHelpers(t *testing.T) {
 	require.Equal(t, "/socket", trimInternalPreviewProxyPath("/internal/preview/"+previewID.String()+"/proxy/socket", previewID), "trimInternalPreviewProxyPath should return the backend path")
 	require.Equal(t, "/", trimInternalPreviewProxyPath("/internal/preview/"+previewID.String()+"/proxy", previewID), "trimInternalPreviewProxyPath should normalize the root path")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	go func() {
+		defer serverConn.Close()
+
+		req, readErr := http.ReadRequest(bufio.NewReader(serverConn))
+		if readErr != nil {
+			return
+		}
+		require.Equal(t, "/assets/app.js", req.URL.Path, "internal proxy should trim the worker proxy prefix before dialing the preview backend")
+		require.Empty(t, req.Header.Get("Authorization"), "internal proxy should strip authorization headers before dialing the preview backend")
+		require.Empty(t, req.Header.Get("Cookie"), "internal proxy should strip cookies before dialing the preview backend")
+		_, _ = io.WriteString(serverConn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok")
+	}()
+
+	store := db.NewPreviewStore(mock)
+	manager := previewsvc.NewManager(previewsvc.ManagerConfig{
+		Store:        store,
+		Provider:     internalPreviewTestProvider{dialFn: func(context.Context, string) (previewsvc.PreviewStream, error) { return clientConn, nil }},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	handler := newInternalPreviewTestHandler(manager)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy/assets/app.js", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	req.Header.Set("Cookie", "session=secret")
+	rr := httptest.NewRecorder()
+
+	handler.Proxy(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "Proxy should relay successful HTTP responses from the preview backend")
+	require.Equal(t, "ok", rr.Body.String(), "Proxy should relay the preview backend response body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestInternalPreviewHandler_ProxyWebSocket_HijackUnsupported(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	store := db.NewPreviewStore(mock)
+	manager := previewsvc.NewManager(previewsvc.ManagerConfig{
+		Store:        store,
+		Provider:     internalPreviewTestProvider{dialFn: func(context.Context, string) (previewsvc.PreviewStream, error) { return clientConn, nil }},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	handler := newInternalPreviewTestHandler(manager)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy/socket", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	rr := httptest.NewRecorder()
+
+	handler.Proxy(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "Proxy should report when websocket hijacking is unavailable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type closeTrackingConn struct {
+	net.Conn
+	closed bool
+}
+
+func (c *closeTrackingConn) Close() error {
+	c.closed = true
+	if c.Conn != nil {
+		return c.Conn.Close()
+	}
+	return nil
+}
+
+type errReadCloser struct{ err error }
+
+func (errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (e errReadCloser) Close() error           { return e.err }
+
+func TestConnClosingBody_ClosePrefersBodyError(t *testing.T) {
+	t.Parallel()
+
+	conn := &closeTrackingConn{}
+	body := &connClosingBody{ReadCloser: errReadCloser{err: errors.New("body close failed")}, conn: conn}
+
+	err := body.Close()
+	require.Error(t, err, "connClosingBody should surface body close failures")
+	require.Contains(t, err.Error(), "body close failed", "connClosingBody should prefer the body close error")
+	require.True(t, conn.closed, "connClosingBody should still close the underlying connection")
+}
+
+func TestCopyWithHMRSnoopToClient_ForwardsTraffic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	watcher, err := previewsvc.NewHMRWatcher(previewsvc.HMRWatcherConfig{
+		Inspector: internalPreviewTestInspector{},
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		BlobDir:   t.TempDir(),
+	})
+	require.NoError(t, err, "HMR watcher should be created for websocket snooping tests")
+
+	previewID := uuid.New()
+	watcher.StartWatching(previewID, uuid.New())
+
+	var dst strings.Builder
+	src := strings.NewReader(`{"type":"update","updates":[]}`)
+
+	copyWithHMRSnoopToClient(zerolog.Nop(), watcher, &dst, src, previewID)
+	require.Equal(t, `{"type":"update","updates":[]}`, dst.String(), "copyWithHMRSnoopToClient should forward websocket traffic unchanged")
 }
 
 func ptrUUID(id uuid.UUID) *uuid.UUID {

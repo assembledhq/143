@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -212,6 +213,293 @@ func TestWorkerPreviewClient_DecodeFailures(t *testing.T) {
 	err = client.StopPreview(context.Background(), worker, orgID, previewID)
 	require.Error(t, err, "StopPreview should surface transport failures")
 	require.Contains(t, err.Error(), "stop preview", "StopPreview should wrap transport failures")
+}
+
+func TestWorkerRequestError_ErrorAndUnwrap(t *testing.T) {
+	t.Parallel()
+
+	err := &WorkerRequestError{StatusCode: http.StatusBadGateway}
+	require.Equal(t, "worker preview request failed with 502", err.Error(), "Error should omit code details when no code is present")
+
+	err = &WorkerRequestError{StatusCode: http.StatusBadGateway, Code: "PREVIEW_FAILED", Message: "worker unavailable"}
+	require.Equal(t, "worker preview request failed with 502 (PREVIEW_FAILED): worker unavailable", err.Error(), "Error should include structured worker error details")
+
+	unwrapped, ok := AsWorkerRequestError(err)
+	require.True(t, ok, "AsWorkerRequestError should unwrap worker request errors")
+	require.Equal(t, err, unwrapped, "AsWorkerRequestError should return the original worker request error")
+
+	_, ok = AsWorkerRequestError(errors.New("plain error"))
+	require.False(t, ok, "AsWorkerRequestError should ignore non-worker errors")
+}
+
+func TestWorkerPreviewClient_NewRequest_Validation(t *testing.T) {
+	t.Parallel()
+
+	client := NewWorkerPreviewClient("worker-secret")
+	orgID := uuid.New()
+
+	_, err := client.newRequest(context.Background(), http.MethodGet, "http://[::1", auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: "worker-1",
+		Action:       "console",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}, nil)
+	require.Error(t, err, "newRequest should surface request construction errors")
+	require.Contains(t, err.Error(), "build request", "newRequest should wrap request construction errors")
+
+	_, err = client.newRequest(context.Background(), http.MethodPost, "http://worker/internal/preview/start", auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: "worker-1",
+		Action:       "start",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}, map[string]any{"bad": make(chan int)})
+	require.Error(t, err, "newRequest should surface JSON encoding failures")
+	require.Contains(t, err.Error(), "marshal request body", "newRequest should wrap JSON encoding failures")
+}
+
+func TestDecodeWorkerResponses_ErrorVariants(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single response structured worker error", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       ioNopCloserString(`{"error":{"code":"PREVIEW_CAPACITY_REACHED","message":"full"}}`),
+		}
+
+		_, err := decodeWorkerResponse[models.PreviewInstance](resp)
+		require.Error(t, err, "decodeWorkerResponse should surface structured worker errors")
+
+		reqErr, ok := AsWorkerRequestError(err)
+		require.True(t, ok, "decodeWorkerResponse should return a worker request error")
+		require.Equal(t, "PREVIEW_CAPACITY_REACHED", reqErr.Code, "decodeWorkerResponse should preserve the worker error code")
+	})
+
+	t.Run("single response plain worker error", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       ioNopCloserString("worker unavailable"),
+		}
+
+		_, err := decodeWorkerResponse[models.PreviewInstance](resp)
+		require.Error(t, err, "decodeWorkerResponse should surface plain-text worker errors")
+
+		reqErr, ok := AsWorkerRequestError(err)
+		require.True(t, ok, "decodeWorkerResponse should return a worker request error")
+		require.Equal(t, "worker unavailable", reqErr.Message, "decodeWorkerResponse should preserve the plain-text worker error message")
+	})
+
+	t.Run("single response decode failure", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       ioNopCloserString("not-json"),
+		}
+
+		_, err := decodeWorkerResponse[models.PreviewInstance](resp)
+		require.Error(t, err, "decodeWorkerResponse should surface JSON decode failures")
+		require.Contains(t, err.Error(), "decode response", "decodeWorkerResponse should wrap JSON decode failures")
+	})
+
+	t.Run("list response structured worker error", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       ioNopCloserString(`{"error":{"code":"WRONG_PREVIEW_WORKER","message":"wrong worker"}}`),
+		}
+
+		_, err := decodeWorkerListResponse[ConsoleMessage](resp)
+		require.Error(t, err, "decodeWorkerListResponse should surface structured worker errors")
+
+		reqErr, ok := AsWorkerRequestError(err)
+		require.True(t, ok, "decodeWorkerListResponse should return a worker request error")
+		require.Equal(t, "WRONG_PREVIEW_WORKER", reqErr.Code, "decodeWorkerListResponse should preserve the worker error code")
+	})
+
+	t.Run("list response decode failure", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       ioNopCloserString("not-json"),
+		}
+
+		_, err := decodeWorkerListResponse[ConsoleMessage](resp)
+		require.Error(t, err, "decodeWorkerListResponse should surface JSON decode failures")
+		require.Contains(t, err.Error(), "decode response", "decodeWorkerListResponse should wrap JSON decode failures")
+	})
+}
+
+func TestWorkerPreviewClient_MethodTransportFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "http://worker.internal", Mode: "worker"}
+
+	tests := []struct {
+		name        string
+		call        func(*WorkerPreviewClient) error
+		wantMessage string
+	}{
+		{
+			name: "start preview",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.StartPreview(context.Background(), worker, RemoteStartPreviewRequest{OrgID: orgID, UserID: uuid.New(), SessionID: sessionID})
+				return err
+			},
+			wantMessage: "start preview",
+		},
+		{
+			name: "stop preview",
+			call: func(client *WorkerPreviewClient) error {
+				return client.StopPreview(context.Background(), worker, orgID, previewID)
+			},
+			wantMessage: "stop preview",
+		},
+		{
+			name: "recycle preview",
+			call: func(client *WorkerPreviewClient) error {
+				return client.RecyclePreview(context.Background(), worker, orgID, previewID)
+			},
+			wantMessage: "recycle preview",
+		},
+		{
+			name: "capture screenshot",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.CaptureScreenshot(context.Background(), worker, orgID, previewID, models.ScreenshotOpts{})
+				return err
+			},
+			wantMessage: "capture screenshot",
+		},
+		{
+			name: "inspect element",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.InspectElement(context.Background(), worker, orgID, previewID, 1, 2)
+				return err
+			},
+			wantMessage: "inspect element",
+		},
+		{
+			name: "read console",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.ReadConsole(context.Background(), worker, orgID, previewID)
+				return err
+			},
+			wantMessage: "read console",
+		},
+		{
+			name: "execute interaction",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.ExecuteInteraction(context.Background(), worker, orgID, previewID, []models.InteractionStep{{Action: "click"}})
+				return err
+			},
+			wantMessage: "execute interaction",
+		},
+		{
+			name: "capture multi viewport",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.CaptureMultiViewport(context.Background(), worker, orgID, previewID, models.MultiViewportOpts{})
+				return err
+			},
+			wantMessage: "capture multi viewport",
+		},
+		{
+			name: "compute visual diff",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.ComputeVisualDiff(context.Background(), worker, orgID, previewID, "before", "after")
+				return err
+			},
+			wantMessage: "compute visual diff",
+		},
+		{
+			name: "run assertions",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.RunAssertions(context.Background(), worker, orgID, previewID, []Assertion{{Type: "text"}})
+				return err
+			},
+			wantMessage: "run assertions",
+		},
+		{
+			name: "stop active preview for session",
+			call: func(client *WorkerPreviewClient) error {
+				_, err := client.StopActivePreviewForSession(context.Background(), worker, orgID, sessionID)
+				return err
+			},
+			wantMessage: "stop active preview for session",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := NewWorkerPreviewClient("worker-secret")
+			client.httpClient = &http.Client{
+				Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errors.New("network down")
+				}),
+			}
+
+			err := tt.call(client)
+			require.Error(t, err, "worker client methods should surface transport failures")
+			require.Contains(t, err.Error(), tt.wantMessage, "worker client methods should wrap transport failures with method-specific context")
+		})
+	}
+}
+
+func TestWorkerPreviewClient_StopActivePreviewForSession_DecodeFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "http://worker.internal", Mode: "worker"}
+
+	client := NewWorkerPreviewClient("worker-secret")
+	client.httpClient = &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			require.Equal(t, "/internal/preview/stop-session", req.URL.Path, "StopActivePreviewForSession should target the stop-session endpoint")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       ioNopCloserString(`{"data":`),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	_, err := client.StopActivePreviewForSession(context.Background(), worker, orgID, sessionID)
+	require.Error(t, err, "StopActivePreviewForSession should surface JSON decode failures")
+	require.Contains(t, err.Error(), "decode response", "StopActivePreviewForSession should wrap JSON decode failures")
+}
+
+func TestWorkerPreviewClient_InvalidWorkerBaseURLFailsBuild(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "http://[::1", Mode: "worker"}
+
+	client := NewWorkerPreviewClient("worker-secret")
+
+	_, err := client.CaptureScreenshot(context.Background(), worker, orgID, previewID, models.ScreenshotOpts{})
+	require.Error(t, err, "worker client methods should surface request build failures")
+	require.Contains(t, err.Error(), "build request", "worker client methods should wrap request build failures")
+}
+
+func TestWorkerPreviewClient_ErrorContainsMethodSpecificContext(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("wrap: %w", &WorkerRequestError{StatusCode: http.StatusConflict, Code: "NO_SANDBOX", Message: "missing"})
+	reqErr, ok := AsWorkerRequestError(err)
+	require.True(t, ok, "AsWorkerRequestError should unwrap worker errors through wrapped error chains")
+	require.Equal(t, "NO_SANDBOX", reqErr.Code, "AsWorkerRequestError should preserve the wrapped code")
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

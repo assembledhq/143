@@ -192,6 +192,83 @@ func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
 	}
 }
 
+func TestPreviewHandler_HelperMethods(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preview http error string handling", func(t *testing.T) {
+		t.Parallel()
+
+		var nilErr *previewHTTPError
+		require.Equal(t, "", nilErr.Error(), "nil previewHTTPError should stringify to an empty string")
+
+		msgErr := newPreviewHTTPError(http.StatusBadRequest, "BAD", "bad request", nil)
+		require.Equal(t, "bad request", msgErr.Error(), "previewHTTPError should return its message when no wrapped error is present")
+
+		wrapped := newPreviewHTTPError(http.StatusBadGateway, "BAD_GATEWAY", "gateway failed", errors.New("boom"))
+		require.Equal(t, "boom", wrapped.Error(), "previewHTTPError should return the wrapped error when present")
+	})
+
+	t.Run("write preview http error variants", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = previewTestContext(req)
+
+		rr := httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, nil)
+		require.Equal(t, http.StatusOK, rr.Code, "writePreviewHTTPError should be a no-op for nil errors")
+
+		rr = httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, newPreviewHTTPError(http.StatusBadRequest, "INVALID", "bad input", nil))
+		require.Equal(t, http.StatusBadRequest, rr.Code, "writePreviewHTTPError should emit plain preview errors")
+
+		rr = httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, newPreviewHTTPError(http.StatusBadGateway, "FAILED", "worker failed", errors.New("boom")))
+		require.Equal(t, http.StatusBadGateway, rr.Code, "writePreviewHTTPError should emit wrapped preview errors")
+		require.Contains(t, rr.Body.String(), "FAILED", "writePreviewHTTPError should preserve the error code")
+	})
+
+	t.Run("worker runtime helpers", func(t *testing.T) {
+		t.Parallel()
+
+		h := newPreviewTestHandler()
+		require.False(t, h.workerRoutingEnabled(), "worker routing should be disabled until both selector and client are configured")
+		require.False(t, h.isLocalWorker(preview.WorkerNode{ID: "worker-a"}), "isLocalWorker should reject non-matching worker IDs")
+		require.Error(t, func() error {
+			_, err := h.resolvePreviewWorker(context.Background(), "worker-a")
+			return err
+		}(), "resolvePreviewWorker should fail when no selector is configured")
+
+		h.workerSelector = &preview.WorkerSelector{}
+		h.workerClient = preview.NewWorkerPreviewClient("secret")
+		h.localNodeID = "worker-a"
+		require.True(t, h.workerRoutingEnabled(), "worker routing should be enabled when selector and client are configured")
+		require.True(t, h.isLocalWorker(preview.WorkerNode{ID: "worker-a"}), "isLocalWorker should accept matching worker IDs")
+	})
+
+	t.Run("manager and worker error helpers", func(t *testing.T) {
+		t.Parallel()
+
+		h := newPreviewTestHandler()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = previewTestContext(req)
+
+		rr := httptest.NewRecorder()
+		require.False(t, h.requireManager(rr, req), "requireManager should reject handlers without a preview manager")
+		require.Equal(t, http.StatusNotImplemented, rr.Code, "requireManager should return 501 when no preview manager is configured")
+
+		rr = httptest.NewRecorder()
+		h.writeWorkerClientError(rr, req, &preview.WorkerRequestError{StatusCode: http.StatusConflict, Code: "NO_SANDBOX", Message: "missing sandbox"})
+		require.Equal(t, http.StatusConflict, rr.Code, "writeWorkerClientError should preserve structured worker status codes")
+		require.Contains(t, rr.Body.String(), "NO_SANDBOX", "writeWorkerClientError should preserve structured worker codes")
+
+		rr = httptest.NewRecorder()
+		h.writeWorkerClientError(rr, req, errors.New("boom"))
+		require.Equal(t, http.StatusBadGateway, rr.Code, "writeWorkerClientError should map generic worker failures to 502")
+		require.Contains(t, rr.Body.String(), "PREVIEW_WORKER_REQUEST_FAILED", "writeWorkerClientError should emit the generic worker failure code")
+	})
+}
+
 func TestPreviewHandler_DetectReadiness_NoConfig(t *testing.T) {
 	t.Parallel()
 	h := newPreviewTestHandler()

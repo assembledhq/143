@@ -2596,3 +2596,14 @@ func TestBuildStoredRecycleInputRoundTrip(t *testing.T) {
 	require.JSONEq(t, string(expectedConfig), string(actualConfig), "recycle config should survive a serialize/deserialize round trip")
 	require.Equal(t, sandbox, got.Sandbox, "recycle sandbox should survive a serialize/deserialize round trip")
 }
+
+func TestManager_HMRWatcherGetter(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(ManagerConfig{Logger: zerolog.Nop(), WorkerNodeID: "worker-1"})
+	require.Nil(t, manager.HMRWatcher(), "HMRWatcher should return nil when no watcher is configured")
+
+	watcher := &HMRWatcher{}
+	manager.hmrWatcher = watcher
+	require.Equal(t, watcher, manager.HMRWatcher(), "HMRWatcher should return the configured watcher")
+}
