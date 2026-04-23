@@ -20,12 +20,24 @@ type codingAuthStore interface {
 	DisableCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 }
 
+type codingAuthOrgStore interface{}
+
 type CodingAuthHandler struct {
-	store codingAuthStore
+	store       codingAuthStore
+	orgStore    codingAuthOrgStore
+	invalidator OrgSettingsInvalidator
 }
 
-func NewCodingAuthHandler(store codingAuthStore) *CodingAuthHandler {
-	return &CodingAuthHandler{store: store}
+func NewCodingAuthHandler(store codingAuthStore, orgStore ...codingAuthOrgStore) *CodingAuthHandler {
+	handler := &CodingAuthHandler{store: store}
+	if len(orgStore) > 0 {
+		handler.orgStore = orgStore[0]
+	}
+	return handler
+}
+
+func (h *CodingAuthHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInvalidator) {
+	h.invalidator = invalidator
 }
 
 func (h *CodingAuthHandler) List(w http.ResponseWriter, r *http.Request) {

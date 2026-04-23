@@ -10,6 +10,8 @@
 #   export GHCR_TOKEN="ghp_xxxx"
 #   export DB_PASSWORD="your-db-password"
 #   export DB_HOST="10.0.0.3"
+#   export GITHUB_APP_CLIENT_ID="Iv1.0123456789abcdef"
+#   export GITHUB_APP_CLIENT_SECRET="your_github_app_client_secret"
 #   export NODE_ID="worker-1"
 #   export PREVIEW_INTERNAL_BASE_URL="http://10.0.0.12:8080"
 #   export CHROME_WS_URL="ws://chrome:9222"
@@ -72,13 +74,16 @@ runcmd:
 
 write_files:
   # Workers only get the secrets they need — no age key or encrypted bundle.
-  # A worker compromise cannot decrypt the full production secret set.
+  # A worker compromise cannot decrypt the full production secret set, but it
+  # still needs GitHub App user-auth client creds to refresh user PR tokens.
   - path: /opt/143/.env
     owner: deploy:deploy
     permissions: '0600'
     content: |
       DB_PASSWORD=${DB_PASSWORD}
       DB_HOST=${DB_HOST}
+      GITHUB_APP_CLIENT_ID=${GITHUB_APP_CLIENT_ID}
+      GITHUB_APP_CLIENT_SECRET=${GITHUB_APP_CLIENT_SECRET}
       NODE_ID=${NODE_ID}
       PREVIEW_INTERNAL_BASE_URL=${PREVIEW_INTERNAL_BASE_URL}
       CHROME_WS_URL=${CHROME_WS_URL}
