@@ -210,8 +210,9 @@ elif [ "$ROLE" = "redis" ]; then
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
   # Workers only get the secrets they need — no age key or encrypted bundle.
-  # A worker compromise cannot decrypt the full production secret set.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
+  # A worker compromise cannot decrypt the full production secret set, but it
+  # still needs GitHub App user-auth client creds to refresh user PR tokens.
+  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
