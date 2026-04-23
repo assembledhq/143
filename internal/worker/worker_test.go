@@ -18,6 +18,39 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+type wakeTestStore struct {
+	claims atomic.Int32
+}
+
+func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.UUID, time.Duration) (*models.Job, error) {
+	s.claims.Add(1)
+	return nil, nil
+}
+
+func (s *wakeTestStore) RenewLease(context.Context, uuid.UUID, uuid.UUID, time.Duration) (*models.Job, bool, error) {
+	return nil, false, nil
+}
+
+func (s *wakeTestStore) MarkSucceededWithLease(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
+func (s *wakeTestStore) MarkFailedWithLease(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+	return false, nil
+}
+
+func (s *wakeTestStore) RetryWithLease(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *wakeTestStore) RetryWithoutConsumingAttemptWithLease(context.Context, uuid.UUID, uuid.UUID, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *wakeTestStore) DeadLetterWithLease(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+	return false, nil
+}
+
 func newTestWorker(t *testing.T) (*Worker, pgxmock.PgxPoolIface) {
 	t.Helper()
 
@@ -222,6 +255,41 @@ func TestWorker_Poll(t *testing.T) {
 			}, "poll should not panic")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
+	}
+}
+
+func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
+	t.Parallel()
+
+	store := &wakeTestStore{}
+	w := &Worker{
+		jobs:          store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		pollInterval:  time.Hour,
+		leaseDuration: defaultLeaseDuration,
+		renewInterval: defaultRenewInterval,
+		wakeCh:        make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Start(ctx)
+	}()
+
+	w.Wake()
+	require.Eventually(t, func() bool {
+		return store.claims.Load() > 0
+	}, time.Second, 20*time.Millisecond, "worker wake-ups should trigger an immediate poll")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker should stop promptly after context cancellation")
 	}
 }
 

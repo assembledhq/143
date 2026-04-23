@@ -30,11 +30,13 @@ func NewSessionStore(db DBTX) *SessionStore {
 	return &SessionStore{db: db, logger: zerolog.Nop()}
 }
 
+// SetStreams injects the Redis stream helper used for live session status fan-out.
 // lint:allow-no-orgid reason="process-wide dependency injection for Redis session status streaming"
 func (s *SessionStore) SetStreams(streams *cache.SessionStreams) {
 	s.streams = streams
 }
 
+// SetLogger injects the structured logger used for best-effort stream publishing.
 // lint:allow-no-orgid reason="process-wide dependency injection for store logging"
 func (s *SessionStore) SetLogger(logger zerolog.Logger) {
 	s.logger = logger

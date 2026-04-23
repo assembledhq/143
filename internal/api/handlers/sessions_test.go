@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/api/sse"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
@@ -1978,6 +1981,152 @@ func TestSessionHandler_StreamLogs_ShutdownSignal(t *testing.T) {
 	// flush before EOF; check for its SSE comment marker.
 	require.Contains(t, w.Body.String(), ": ping", "expected heartbeat on shutdown")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func newSessionTestStreams(t *testing.T) (*cache.SessionStreams, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for session handler tests")
+	return cache.NewSessionStreams(client, zerolog.Nop(), nil), mr
+}
+
+func TestSessionHandler_CatchUpLogs_UsesRedisRangeAndFallbacks(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	streams, _ := newSessionTestStreams(t)
+	handler.SetStreams(streams)
+
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 1, SessionID: sessionID, OrgID: orgID, Level: "info", Message: "one", Timestamp: time.Now()}), "first log publish should succeed")
+	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 2, SessionID: sessionID, OrgID: orgID, Level: "info", Message: "two", Timestamp: time.Now()}), "second log publish should succeed")
+
+	logs, err := handler.catchUpLogs(context.Background(), orgID, sessionID, cache.SessionLogStreamID(1))
+	require.NoError(t, err, "Redis XRANGE catch-up should succeed")
+	require.Len(t, logs, 1, "Redis XRANGE catch-up should only return newer logs")
+	require.Equal(t, int64(2), logs[0].ID, "Redis XRANGE catch-up should return the later log")
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+
+	logs, err = handler.catchUpLogs(context.Background(), orgID, sessionID, "bad-id")
+	require.NoError(t, err, "invalid Last-Event-ID should fall back to a full Postgres replay")
+	require.Empty(t, logs, "fallback full replay should return the mocked empty result set")
+}
+
+func TestShouldSkipRedisLog(t *testing.T) {
+	t.Parallel()
+
+	seen, skip := shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(3), cache.SessionLogStreamID(4), uuid.New())
+	require.True(t, skip, "older log IDs should be skipped")
+	require.Equal(t, cache.SessionLogStreamID(4), seen, "skip helper should preserve the last delivered ID")
+
+	seen, skip = shouldSkipRedisLog(context.Background(), cache.SessionLogStreamID(5), cache.SessionLogStreamID(4), uuid.New())
+	require.False(t, skip, "newer log IDs should not be skipped")
+	require.Equal(t, "", seen, "non-skipped entries should not override the last delivered ID")
+}
+
+func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	require.False(t, handler.streamLogsViaRedis(context.Background(), sw, orgID, run, ""), "Redis stream helper should fall back when Redis subscriptions are unavailable")
+	require.Empty(t, rec.Body.String(), "fallback path should not emit partial SSE output")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	handler := newSessionHandler(t, mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	run := models.Session{ID: runID, OrgID: orgID, IssueID: issueID, Status: string(models.SessionStatusRunning)}
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(9), runID, orgID, nil, now, "info", "done", nil, nil),
+		)
+
+	rec := httptest.NewRecorder()
+	sw := sse.NewWriter(rec)
+	require.NotNil(t, sw, "SSE writer should initialize")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.streamLogsViaPolling(context.Background(), sw, orgID, run, "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("polling stream helper did not finish after terminal status")
+	}
+
+	body := rec.Body.String()
+	require.Contains(t, body, `event: done`, "polling stream should emit a done event for terminal statuses")
+	require.Contains(t, body, `id: 9-0`, "polling stream should emit incremental log events")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_CreateManual(t *testing.T) {

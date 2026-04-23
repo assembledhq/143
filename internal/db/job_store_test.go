@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,6 +201,42 @@ func TestJobStore_DeleteExpiredCompleted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(42), deleted)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestJobStore_Notify_PublishesWakeUp(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for notifier tests")
+
+	store := NewJobStore(nil)
+	store.SetLogger(zerolog.Nop())
+	store.SetNotifier(cache.NewJobNotifier(client, zerolog.Nop()))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	delivered := make(chan struct{}, 1)
+	listener := cache.NewJobNotifier(client, zerolog.Nop())
+	listener.Start(ctx, func() {
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+	})
+
+	require.Eventually(t, func() bool {
+		store.Notify(context.Background(), uuid.New())
+		select {
+		case <-delivered:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 20*time.Millisecond, "Notify should publish a Redis wake-up when a notifier is configured")
+
+	store.Notify(context.Background(), uuid.Nil)
 }
 
 func TestJobStore_ClaimNextRunnable(t *testing.T) {

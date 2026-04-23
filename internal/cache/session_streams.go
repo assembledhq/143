@@ -121,13 +121,12 @@ type logFanout struct {
 	client    *Client
 	logger    zerolog.Logger
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	onExit   func()
-	mu       sync.Mutex
-	clients  map[*logSubscriber]struct{}
-	ring     *logRingBuffer
-	shutdown atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	onExit  func()
+	mu      sync.Mutex
+	clients map[*logSubscriber]struct{}
+	ring    *logRingBuffer
 }
 
 type statusFanout struct {
@@ -136,12 +135,11 @@ type statusFanout struct {
 	client    *Client
 	logger    zerolog.Logger
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	onExit   func()
-	mu       sync.Mutex
-	clients  map[*statusSubscriber]struct{}
-	shutdown atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	onExit  func()
+	mu      sync.Mutex
+	clients map[*statusSubscriber]struct{}
 }
 
 type LogSubscription struct {

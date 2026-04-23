@@ -71,6 +71,22 @@ func TestWriteData(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `data: {"count":1}`)
 }
 
+func TestWriteEventIDAndWriteDataID(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	require.NotNil(t, sw, "writer should initialize for response recorders")
+
+	require.NoError(t, sw.WriteEventID(EventStatus, "evt-1", map[string]string{"status": "running"}), "named event with ID should write successfully")
+	require.NoError(t, sw.WriteDataID("evt-2", map[string]int{"count": 2}), "default event with ID should write successfully")
+
+	body := rec.Body.String()
+	require.Contains(t, body, "id: evt-1\n", "named events should include their event ID")
+	require.Contains(t, body, "event: status\n", "named events should include the event name")
+	require.Contains(t, body, "id: evt-2\n", "default events should include their event ID")
+}
+
 func TestWriteEvent_MarshalError(t *testing.T) {
 	t.Parallel()
 

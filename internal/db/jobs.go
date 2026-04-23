@@ -26,11 +26,13 @@ func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db, logger: zerolog.Nop()}
 }
 
+// SetNotifier injects the Redis-backed job notifier used for wake-up publishes.
 // lint:allow-no-orgid reason="process-wide dependency injection for Redis job notifications"
 func (s *JobStore) SetNotifier(notifier *cache.JobNotifier) {
 	s.notifier = notifier
 }
 
+// SetLogger injects the structured logger used for best-effort notifier failures.
 // lint:allow-no-orgid reason="process-wide dependency injection for store logging"
 func (s *JobStore) SetLogger(logger zerolog.Logger) {
 	s.logger = logger
@@ -76,6 +78,7 @@ func (s *JobStore) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, 
 	return enqueueOn(ctx, tx, orgID, queue, jobType, payload, priority, dedupeKey)
 }
 
+// Notify publishes a best-effort wake-up for an already-created job row.
 // lint:allow-no-orgid reason="process-wide post-commit Redis wake-up for already-scoped job rows"
 func (s *JobStore) Notify(ctx context.Context, id uuid.UUID) {
 	s.notify(ctx, id)

@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"testing"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
@@ -81,4 +82,16 @@ func TestNewRouter_GitHubAppConfigBuildsRouter(t *testing.T) {
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully when GitHub App credentials are valid")
 	require.NotNil(t, router, "NewRouter should construct a router when GitHub App credentials are valid")
+}
+
+func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
+	require.NoError(t, err, "router construction should accept optional Redis dependencies")
+	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
 }

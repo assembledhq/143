@@ -148,14 +148,6 @@ func (c *Client) Healthy(ctx context.Context) bool {
 	return c.rdb.Ping(ctx).Err() == nil
 }
 
-func (c *Client) recordFallback(ctx context.Context, reason string) {
-	if c == nil {
-		return
-	}
-	c.logger.Warn().Str("reason", reason).Msg("redis fallback activated")
-	c.metrics.RecordFallback(ctx, reason)
-}
-
 func (c *Client) doCommand(ctx context.Context, command string, fn func() error) error {
 	if c == nil || c.rdb == nil {
 		return errors.New("redis unavailable")
