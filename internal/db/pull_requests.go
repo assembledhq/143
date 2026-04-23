@@ -99,6 +99,16 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	return err
 }
 
+func (s *PullRequestStore) UpdateTitle(ctx context.Context, orgID, id uuid.UUID, title string) error {
+	query := `UPDATE pull_requests SET title = @title, updated_at = now() WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     id,
+		"org_id": orgID,
+		"title":  title,
+	})
+	return err
+}
+
 // GetByRepoAndNumber looks up a PR by repo and number without org scoping.
 // This is intentionally org-agnostic because it is called from GitHub webhook
 // handlers where no org context exists. The returned pr.OrgID is used for
