@@ -192,6 +192,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
 	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
 	sessionHandler.SetStreams(sessionStreams)
+	if prService != nil {
+		sessionHandler.SetPRTitleSyncer(prService)
+	}
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -470,7 +473,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
 
 	apiRoutes.Group(func(r chi.Router) {
-
 		// Webhook routes (no auth — called by external services, signature verified per-provider)
 		r.Route("/api/v1/webhooks", func(r chi.Router) {
 			r.Post("/github", webhookHandler.HandleGitHub)
@@ -575,6 +577,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions", sessionHandler.List)
 				r.Get("/api/v1/sessions/counts", sessionHandler.Counts)
 				r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
+				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
 				r.Get("/api/v1/sessions/{id}/validation", sessionHandler.GetValidation)
