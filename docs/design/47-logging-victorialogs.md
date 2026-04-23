@@ -277,7 +277,7 @@ VictoriaLogs must not be exposed to the public internet. All inter-server commun
 ### Hetzner Private Network
 
 1. Create a Hetzner Cloud Network (e.g., `10.0.0.0/24`)
-2. Attach all four servers (app, worker, db, logging)
+2. Attach the shared infrastructure servers (app, worker, db, logging, plus redis if enabled)
 3. Bind VictoriaLogs to the private IP only (shown in compose above)
 4. Vector on app/worker connects via private IP
 5. No firewall rules needed — traffic stays on the private network
@@ -470,7 +470,7 @@ case "$ROLE" in
   worker)  COMPOSE_FILE="docker-compose.worker.yml" ;;
   db)      COMPOSE_FILE="docker-compose.db.yml" ;;
   logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
-  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
 esac
 ```
 
