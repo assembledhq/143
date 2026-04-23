@@ -661,7 +661,9 @@ func (s *PRService) pushSessionBranch(
 const (
 	pushCommitMsgPath = "/tmp/143-pr-commit-msg"
 	pushInputPath     = "/tmp/143-pr-input"
-	pushHelperPath    = "/tmp/143-pr-helper.sh"
+	// /tmp is mounted noexec in sandbox containers; the askpass helper must
+	// live on the exec-allowed scratch tmpfs so git can invoke it.
+	pushHelperPath = "/var/tmp/143-pr-helper.sh"
 )
 
 // pushExitNoChanges is the sentinel exit code the push script uses when the
