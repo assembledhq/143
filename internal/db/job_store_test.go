@@ -239,6 +239,22 @@ func TestJobStore_Notify_PublishesWakeUp(t *testing.T) {
 	store.Notify(context.Background(), uuid.Nil)
 }
 
+func TestJobStore_Notify_PublishFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for notifier failure tests")
+	store := NewJobStore(nil)
+	store.SetLogger(zerolog.Nop())
+	store.SetNotifier(cache.NewJobNotifier(client, zerolog.Nop()))
+	mr.Close()
+
+	require.NotPanics(t, func() {
+		store.Notify(context.Background(), uuid.New())
+	}, "Notify should log and continue when Redis publish fails")
+}
+
 func TestJobStore_ClaimNextRunnable(t *testing.T) {
 	t.Parallel()
 

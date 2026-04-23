@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -64,6 +65,18 @@ func TestNew_InvalidConfigsReturnNil(t *testing.T) {
 	}
 }
 
+func TestNew_SentinelAndClusterCreateClients(t *testing.T) {
+	t.Parallel()
+
+	mr := miniredis.RunT(t)
+
+	sentinel := New(Config{Topology: "sentinel", MasterName: "mymaster", Addrs: []string{mr.Addr()}, Password: "secret", PoolSize: 4}, zerolog.Nop(), nil)
+	require.NotNil(t, sentinel, "complete sentinel configs should build a client even if startup ping fails")
+
+	cluster := New(Config{Topology: "cluster", Addrs: []string{mr.Addr()}, Password: "secret", PoolSize: 4}, zerolog.Nop(), nil)
+	require.NotNil(t, cluster, "complete cluster configs should build a client even if startup ping fails")
+}
+
 func TestNew_StartupPingFailureOpensBreaker(t *testing.T) {
 	t.Parallel()
 
@@ -102,4 +115,13 @@ func TestClientDoCommandAndAvailabilityFailure(t *testing.T) {
 
 	require.False(t, client.Available(), "availability probe should fail when Redis is down")
 	require.Equal(t, breakerStateOpen, client.breaker.State(), "failed recovery probes should leave the breaker open")
+}
+
+func TestClientDoCommandBreakerOpenAndRaw(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	client.breaker.ForceOpen()
+	require.Error(t, client.doCommand(context.Background(), "ping", func() error { return nil }), "open breaker should reject commands before invoking Redis")
+	require.NotNil(t, client.raw(), "raw client accessor should expose the underlying Redis client")
 }

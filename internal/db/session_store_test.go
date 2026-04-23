@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -487,6 +488,58 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 	err = store.UpdateResult(context.Background(), orgID, sessionID, "completed", result)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, "completed"), "UpdateStatus should succeed for terminal transitions")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), 10).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	rows, err := store.ListTerminalEndedBefore(context.Background(), now, 10)
+	require.NoError(t, err, "ListTerminalEndedBefore should succeed")
+	require.Len(t, rows, 1, "ListTerminalEndedBefore should return the matching session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	mock.ExpectQuery("UPDATE sessions SET status = @status, started_at = now\\(\\), completed_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+
+	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), "running")
+	require.Error(t, err, "UpdateStatus should surface query failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ClaimIdle(t *testing.T) {

@@ -23,6 +23,12 @@ func testRedisClient(t *testing.T) (*Client, *miniredis.Miniredis) {
 	require.NoError(t, err, "Redis metrics should initialize")
 	client := New(Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), metrics)
 	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	t.Cleanup(func() {
+		err := client.Close()
+		if err != nil && !strings.Contains(err.Error(), "client is closed") {
+			require.NoError(t, err, "Redis test client should close cleanly")
+		}
+	})
 	return client, mr
 }
 
@@ -221,6 +227,49 @@ func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 	fanout.cancel()
 }
 
+func TestLogRingBufferAndSubscriptionHelpers(t *testing.T) {
+	t.Parallel()
+
+	ring := newLogRingBuffer(2)
+	ring.add(StreamedLog{StreamID: SessionLogStreamID(1), Log: models.SessionLog{ID: 1}})
+	ring.add(StreamedLog{StreamID: SessionLogStreamID(2), Log: models.SessionLog{ID: 2}})
+	ring.add(StreamedLog{StreamID: SessionLogStreamID(3), Log: models.SessionLog{ID: 3}})
+
+	got, ok := ring.since(SessionLogStreamID(2))
+	require.True(t, ok, "wrapped rings should replay in-order entries when the cursor is still within the ring")
+	require.Len(t, got, 1, "wrapped rings should return entries newer than the cursor")
+	require.Equal(t, int64(3), got[0].Log.ID, "wrapped rings should preserve oldest-first ordering")
+
+	_, ok = ring.since(SessionLogStreamID(1))
+	require.False(t, ok, "wrapped rings should report a miss when the cursor has fallen behind the ring buffer")
+
+	_, ok = ring.since("bad-id")
+	require.False(t, ok, "invalid stream IDs should invalidate ring-buffer replay")
+
+	var nilLogSub *LogSubscription
+	var nilStatusSub *StatusSubscription
+	require.Equal(t, "", nilLogSub.CloseReason(), "nil log subscriptions should report no close reason")
+	require.Equal(t, "", nilStatusSub.CloseReason(), "nil status subscriptions should report no close reason")
+	require.NotPanics(t, func() {
+		nilLogSub.Close()
+		nilStatusSub.Close()
+	}, "nil subscriptions should close cleanly")
+}
+
+func TestSessionStreams_NilAndDecodeHelpers(t *testing.T) {
+	t.Parallel()
+
+	var streams *SessionStreams
+	require.False(t, streams.Available(), "nil stream helpers should report unavailable")
+	require.Nil(t, NewSessionStreams(nil, zerolog.Nop(), nil), "constructor should return nil when Redis is disabled")
+	require.Equal(t, "foo", maxLenStreamKey("foo", 10), "maxLen helper should currently return the original stream key")
+
+	require.NoError(t, streams.PublishLog(context.Background(), nil), "nil stream helper should ignore nil log publishes")
+	require.NoError(t, streams.PublishStatus(context.Background(), nil), "nil stream helper should ignore nil status publishes")
+	require.NoError(t, streams.ScheduleExpiry(context.Background(), uuid.New(), time.Now()), "nil stream helper should ignore expiry scheduling")
+	require.NoError(t, streams.DeleteSessionStreams(context.Background(), uuid.New()), "nil stream helper should ignore stream deletion")
+}
+
 type cleanupTestLister struct {
 	sessions []models.Session
 	err      error
@@ -251,6 +300,23 @@ func TestSessionStreams_RunCleanupBatch(t *testing.T) {
 	require.False(t, mr.Exists(statusStreamKey(sessionID)), "cleanup should delete the status stream")
 }
 
+func TestSessionStreams_StartCleanup_StopsOnCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	streams := NewSessionStreams(client, zerolog.Nop(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NotPanics(t, func() {
+		streams.StartCleanup(ctx, cleanupTestLister{})
+	}, "cleanup startup should tolerate already-canceled contexts")
+	require.NotPanics(t, func() {
+		streams.StartCleanup(context.Background(), nil)
+	}, "cleanup startup should ignore nil listers")
+}
+
 func TestSessionStreams_DecodeStatusEntryAndInvalidStreamID(t *testing.T) {
 	t.Parallel()
 
@@ -276,4 +342,30 @@ func TestSessionStreams_DecodeLogEntry(t *testing.T) {
 	got, err := decodeLogEntry(redis.XMessage{ID: SessionLogStreamID(want.ID), Values: map[string]any{"json": string(payload)}})
 	require.NoError(t, err, "decoder should unmarshal the JSON payload")
 	require.Equal(t, want.ID, got.ID, "decoder should hydrate the log ID")
+}
+
+func TestSessionStreams_DecodeHelpers_MissingJSON(t *testing.T) {
+	t.Parallel()
+
+	_, err := decodeLogEntry(redis.XMessage{Values: map[string]any{}})
+	require.Error(t, err, "log decoder should reject missing payloads")
+
+	_, err = decodeStatusEntry(redis.XMessage{Values: map[string]any{}})
+	require.Error(t, err, "status decoder should reject missing payloads")
+}
+
+func TestSessionStreams_FanoutCloseHelpers(t *testing.T) {
+	t.Parallel()
+
+	logSub := &logSubscriber{ch: make(chan StreamedLog, 1)}
+	logSub.reason.Store("")
+	logFanout := &logFanout{clients: map[*logSubscriber]struct{}{logSub: {}}}
+	logFanout.closeAll("retry")
+	require.Equal(t, "retry", logSub.reason.Load(), "closeAll should store the close reason on log subscribers")
+
+	statusSub := &statusSubscriber{ch: make(chan models.Session, 1)}
+	statusSub.reason.Store("")
+	statusFanout := &statusFanout{clients: map[*statusSubscriber]struct{}{statusSub: {}}, cancel: func() {}}
+	statusFanout.removeClient(statusSub, "client_closed")
+	require.Equal(t, "client_closed", statusSub.reason.Load(), "removeClient should store the close reason on status subscribers")
 }

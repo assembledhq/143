@@ -91,6 +91,38 @@ func TestSessionLogStore_Create_PublishesToRedis(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionLogStore_Create_PublishFailureIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	mr.Close()
+
+	store := NewSessionLogStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+
+	now := time.Now()
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery("INSERT INTO session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(8), now))
+
+	require.NoError(t, store.Create(context.Background(), log), "Create should succeed even when the best-effort Redis publish fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

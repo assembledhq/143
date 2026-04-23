@@ -59,3 +59,14 @@ func TestClientAvailable_UsesPingProbeToRecoverBreaker(t *testing.T) {
 	require.Equal(t, breakerStateClosed, client.breaker.State(), "successful availability probes should close the breaker")
 	require.True(t, client.Healthy(context.Background()), "client should still report Redis healthy after the breaker recovery probe")
 }
+
+func TestCircuitBreaker_HalfOpenAndUnknownStatesBlock(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker(zerolog.Nop())
+	cb.state.Store(breakerStateHalfOpen)
+	require.False(t, cb.Allow(), "half-open breaker should block concurrent probes")
+
+	cb.state.Store(99)
+	require.False(t, cb.Allow(), "unknown breaker states should fail closed")
+}
