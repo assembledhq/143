@@ -1,6 +1,19 @@
 # Design: Coding Agent Settings Rethink
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-22
+> **Status:** Implemented | **Last reviewed:** 2026-04-22
+
+## Implementation Notes
+
+Implemented in this pass:
+
+- Added an organization-scoped coding-auth stack API with persisted row priority, create/update/disable operations, and reorder support.
+- Reworked the organization settings screen around a prioritized auth table with explicit default state, move actions, and a right-side detail sheet.
+- Reworked the personal settings screen around a default-auth card, backup list, and clearer effective-resolution summary.
+- Updated the system overview to reference this design from `implemented/`.
+
+Notable boundary:
+
+- The new settings UX and ordering metadata are fully implemented. Automatic cross-agent execution fallback remains bounded by the existing runtime model, which still selects an agent type at session start.
 
 ## Problem
 

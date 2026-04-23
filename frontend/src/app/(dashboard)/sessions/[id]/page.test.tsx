@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
+import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
@@ -825,6 +825,36 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
+  it('shows snapshot expiry notice when diff exists but snapshot is missing', async () => {
+    const sessionWithMissingSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithMissingSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('PR session expired');
+    expect(alert).toHaveTextContent('Session state expired — re-run to create a PR.');
+    expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
+  });
+
   it('does not show Create PR button when session is running', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
@@ -1003,7 +1033,10 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 });
     });
-    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(alert).toHaveTextContent('GitHub rejected the branch push.');
+    expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 
   it('shows the PR authorship modal and falls back to app mode when requested', async () => {
@@ -1256,7 +1289,10 @@ describe('SessionDetailPage', () => {
       },
       { timeout: 5000 },
     );
-    expect(screen.getByText('GitHub rejected the branch push.')).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't create the PR");
+    expect(alert).toHaveTextContent('GitHub rejected the branch push.');
+    expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   }, 8000);
 
   it('shows file count badge on Changes tab when session has diff', async () => {

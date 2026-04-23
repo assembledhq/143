@@ -15,6 +15,7 @@ import (
 )
 
 var credColumns = []string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
+var codingAuthColumns = []string{"id", "org_id", "provider", "label", "config", "status", "priority", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 
 func TestOrgCredentialStore_Upsert(t *testing.T) {
 	t.Parallel()
@@ -217,6 +218,155 @@ func TestOrgCredentialStore_GetAllLLM(t *testing.T) {
 	}
 }
 
+func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	codexSub := crypto.DevEncrypt([]byte(`{"access_token":"tok","refresh_token":"ref","expires_at":"2030-01-01T00:00:00Z","account_type":"plus"}`))
+	claudeKey := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`))
+	geminiKey := crypto.DevEncrypt([]byte(`{"api_key":"AIza-test","model":"gemini-2.5-pro"}`))
+
+	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*priority`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+			AddRow(uuid.New(), orgID, "openai_chatgpt", "Team seat A", codexSub, "active", 1, &now, &now, nil, now, now).
+			AddRow(uuid.New(), orgID, "anthropic", "Claude backup", claudeKey, "active", 2, nil, nil, nil, now, now).
+			AddRow(uuid.New(), orgID, "gemini", "", geminiKey, "active", 3, nil, nil, nil, now, now))
+
+	store := NewOrgCredentialStore(mock, nil)
+	rows, err := store.ListCodingAuths(context.Background(), orgID)
+	require.NoError(t, err, "ListCodingAuths should not return an error")
+	require.Len(t, rows, 3, "ListCodingAuths should return every coding auth row")
+	require.Equal(t, models.AgentTypeCodex, rows[0].Agent, "ListCodingAuths should classify Codex subscription rows")
+	require.True(t, rows[0].IsDefault, "ListCodingAuths should mark the first runnable row as default")
+	require.Equal(t, models.CodingAuthTypeAPIKey, rows[1].AuthType, "ListCodingAuths should classify API key rows")
+	require.Equal(t, models.CodingAuthStatusNeverVerified, rows[1].Status, "ListCodingAuths should derive Never verified when last_verified_at is nil")
+	require.Equal(t, models.AgentTypeGeminiCLI, rows[2].Agent, "ListCodingAuths should classify Gemini API key rows")
+	require.Equal(t, "Gemini CLI API key", rows[2].Label, "ListCodingAuths should synthesize a default label when none is provided")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOrgCredentialStore_ListCodingAuths_ErrorAndFilteringCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Now().UTC()
+
+	t.Run("surfaces query errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*priority`).
+			WithArgs(orgID).
+			WillReturnError(fmt.Errorf("connection refused"))
+
+		store := NewOrgCredentialStore(mock, nil)
+		rows, err := store.ListCodingAuths(context.Background(), orgID)
+		require.Error(t, err, "ListCodingAuths should return query failures")
+		require.Nil(t, rows, "ListCodingAuths should not return rows on query failure")
+	})
+
+	t.Run("filters unsupported rows and assigns first runnable default", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		openRouterKey := crypto.DevEncrypt([]byte(`{"api_key":"sk-or-test"}`))
+		invalidClaude := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`))
+		geminiKey := crypto.DevEncrypt([]byte(`{"api_key":"AIza-test"}`))
+
+		mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*priority`).
+			WithArgs(orgID).
+			WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+				AddRow(uuid.New(), orgID, "openrouter", "Unsupported", openRouterKey, "active", 1, nil, nil, nil, now, now).
+				AddRow(uuid.New(), orgID, "anthropic", "Needs reauth", invalidClaude, "invalid", 2, &now, nil, nil, now, now).
+				AddRow(uuid.New(), orgID, "gemini", "Gemini healthy", geminiKey, "active", 3, &now, nil, nil, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		rows, err := store.ListCodingAuths(context.Background(), orgID)
+		require.NoError(t, err, "ListCodingAuths should not return an error")
+		require.Len(t, rows, 2, "ListCodingAuths should filter out unsupported provider rows")
+		require.False(t, rows[0].IsDefault, "ListCodingAuths should not mark non-runnable rows as default")
+		require.True(t, rows[1].IsDefault, "ListCodingAuths should mark the first runnable row as default")
+	})
+}
+
+func TestOrgCredentialStore_ReorderCodingAuths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	firstID := uuid.New()
+	secondID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE org_credentials SET priority = .*updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+		WithArgs(1, firstID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE org_credentials SET priority = .*updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+		WithArgs(2, secondID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	store := NewOrgCredentialStore(mock, nil)
+	err = store.ReorderCodingAuths(context.Background(), orgID, []uuid.UUID{firstID, secondID})
+	require.NoError(t, err, "ReorderCodingAuths should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOrgCredentialStore_ReorderCodingAuths_ErrorCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+
+	t.Run("returns error when db does not support transactions", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.ReorderCodingAuths(context.Background(), orgID, []uuid.UUID{rowID})
+		require.Error(t, err, "ReorderCodingAuths should reject non-transactional stores")
+	})
+
+	t.Run("rolls back when an updated row is missing", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectBegin()
+		mock.ExpectExec(`UPDATE org_credentials SET priority = .*updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+			WithArgs(1, rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		mock.ExpectRollback()
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.ReorderCodingAuths(context.Background(), orgID, []uuid.UUID{rowID})
+		require.Error(t, err, "ReorderCodingAuths should fail when a row is not found")
+		require.Contains(t, err.Error(), "not found", "ReorderCodingAuths should explain missing rows")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+}
+
 func TestOrgCredentialStore_ListSummaries(t *testing.T) {
 	t.Parallel()
 
@@ -387,7 +537,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 			name: "returns active credential with oldest last_used_at",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				configData := crypto.DevEncrypt([]byte(`{"access_token":"abc","refresh_token":"def","account_id":"acct","id_token":"tok","expires_at":"2030-01-01T00:00:00Z"}`))
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
 						AddRow(uuid.New(), uuid.New(), "openai_chatgpt", "work", configData, "active", nil, nil, nil, time.Now(), time.Now()))
@@ -396,7 +546,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 		{
 			name: "no active credentials",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns))
 			},
@@ -405,7 +555,7 @@ func TestOrgCredentialStore_ClaimNextRoundRobin(t *testing.T) {
 		{
 			name: "db error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
@@ -450,7 +600,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 			name: "returns labeled active credential",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				configData := crypto.DevEncrypt([]byte(`{"subscription":{"access_token":"a","refresh_token":"r","expires_at":"2030-01-01T00:00:00Z"}}`))
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns).
 						AddRow(uuid.New(), uuid.New(), "anthropic", "team-a", configData, "active", nil, nil, nil, time.Now(), time.Now()))
@@ -459,7 +609,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 		{
 			name: "no labeled active credentials",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(credColumns))
 			},
@@ -468,7 +618,7 @@ func TestOrgCredentialStore_ClaimNextLabeledRoundRobin(t *testing.T) {
 		{
 			name: "db error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
+				mock.ExpectQuery(`(?s)WITH next AS.*label != ''.*ORDER BY priority, last_used_at NULLS FIRST, created_at.*FOR UPDATE.*UPDATE org_credentials.*RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
@@ -608,4 +758,273 @@ func TestOrgCredentialStore_DisableLabeled(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+
+	t.Run("gets a credential by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		configData := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`))
+		mock.ExpectQuery(`SELECT .* FROM org_credentials`).
+			WithArgs(rowID, orgID).
+			WillReturnRows(pgxmock.NewRows(credColumns).
+				AddRow(rowID, orgID, "anthropic", "", configData, "active", nil, nil, nil, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		cred, err := store.GetByID(context.Background(), orgID, rowID)
+		require.NoError(t, err, "GetByID should not return an error")
+		require.Equal(t, rowID, cred.ID, "GetByID should return the requested row")
+	})
+
+	t.Run("gets a credential by provider and label", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		configData := crypto.DevEncrypt([]byte(`{"subscription":{"access_token":"a","refresh_token":"r","expires_at":"2030-01-01T00:00:00Z"}}`))
+		mock.ExpectQuery(`SELECT .* FROM org_credentials`).
+			WithArgs(orgID, "anthropic", "team-a").
+			WillReturnRows(pgxmock.NewRows(credColumns).
+				AddRow(rowID, orgID, "anthropic", "team-a", configData, "active", nil, nil, nil, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		cred, err := store.GetByProviderAndLabel(context.Background(), orgID, models.ProviderAnthropic, "team-a")
+		require.NoError(t, err, "GetByProviderAndLabel should not return an error")
+		require.Equal(t, "team-a", cred.Label, "GetByProviderAndLabel should return the requested label")
+	})
+
+	t.Run("lists provider rows in priority order", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		first := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-first"}`))
+		second := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-second"}`))
+		mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*ORDER BY priority, created_at`).
+			WithArgs(orgID, "anthropic").
+			WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+				AddRow(uuid.New(), orgID, "anthropic", "first", first, "active", 1, nil, nil, nil, now, now).
+				AddRow(uuid.New(), orgID, "anthropic", "second", second, "active", 2, nil, nil, nil, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		creds, err := store.ListByProvider(context.Background(), orgID, models.ProviderAnthropic)
+		require.NoError(t, err, "ListByProvider should not return an error")
+		require.Len(t, creds, 2, "ListByProvider should return every active provider row")
+		require.Equal(t, "first", creds[0].Label, "ListByProvider should preserve priority ordering")
+	})
+
+	t.Run("creates a coding auth", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		configData := crypto.DevEncrypt([]byte(`{"api_key":"sk-test-123","api_type":"responses"}`))
+		mock.ExpectQuery(`(?s)SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
+			WithArgs(orgID).
+			WillReturnRows(pgxmock.NewRows([]string{"next_priority"}).AddRow(4))
+		mock.ExpectQuery(`INSERT INTO org_credentials`).
+			WithArgs(orgID, "openai", "Codex backup", pgxmock.AnyArg(), 4, &userID).
+			WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+				AddRow(rowID, orgID, "openai", "Codex backup", configData, "active", 4, nil, nil, &userID, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		row, err := store.CreateCodingAuth(context.Background(), orgID, &userID, models.CreateCodingAuthInput{
+			Agent:    models.AgentTypeCodex,
+			AuthType: models.CodingAuthTypeAPIKey,
+			Label:    "Codex backup",
+			APIKey:   "sk-test-123",
+		})
+		require.NoError(t, err, "CreateCodingAuth should not return an error")
+		require.Equal(t, models.AgentTypeCodex, row.Agent, "CreateCodingAuth should classify the created row")
+		require.Equal(t, 4, row.Priority, "CreateCodingAuth should append at the end of the stack")
+	})
+
+	t.Run("updates a coding auth label", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		configData := crypto.DevEncrypt([]byte(`{"api_key":"AIza-test","model":"gemini-2.5-pro"}`))
+		label := "Renamed"
+		mock.ExpectQuery(`(?s)UPDATE org_credentials.*SET label = .*RETURNING`).
+			WithArgs(label, rowID, orgID).
+			WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+				AddRow(rowID, orgID, "gemini", label, configData, "active", 2, nil, nil, nil, now, now))
+
+		store := NewOrgCredentialStore(mock, nil)
+		row, err := store.UpdateCodingAuth(context.Background(), orgID, rowID, models.UpdateCodingAuthInput{Label: &label})
+		require.NoError(t, err, "UpdateCodingAuth should not return an error")
+		require.Equal(t, label, row.Label, "UpdateCodingAuth should return the updated label")
+	})
+
+	t.Run("rejects empty update payloads", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		store := NewOrgCredentialStore(mock, nil)
+		row, err := store.UpdateCodingAuth(context.Background(), orgID, rowID, models.UpdateCodingAuthInput{})
+		require.Error(t, err, "UpdateCodingAuth should reject empty payloads")
+		require.Nil(t, row, "UpdateCodingAuth should not return a row for empty payloads")
+	})
+
+	t.Run("disables coding auth by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled', updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DisableCodingAuth(context.Background(), orgID, rowID)
+		require.NoError(t, err, "DisableCodingAuth should not return an error")
+	})
+
+	t.Run("disables row by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE org_credentials SET status = 'disabled', updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DisableByID(context.Background(), orgID, rowID)
+		require.NoError(t, err, "DisableByID should not return an error")
+	})
+
+	t.Run("checks provider ownership by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectQuery(`SELECT EXISTS`).
+			WithArgs(rowID, orgID, "anthropic").
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+		store := NewOrgCredentialStore(mock, nil)
+		exists, err := store.ExistsForProviderByID(context.Background(), orgID, rowID, models.ProviderAnthropic)
+		require.NoError(t, err, "ExistsForProviderByID should not return an error")
+		require.True(t, exists, "ExistsForProviderByID should report matching ownership")
+	})
+
+	t.Run("updates status by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`UPDATE org_credentials SET status = .*last_verified_at = now\(\), updated_at = now\(\) WHERE id = .* AND org_id = .*`).
+			WithArgs("invalid", rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.UpdateStatusByID(context.Background(), orgID, rowID, "invalid")
+		require.NoError(t, err, "UpdateStatusByID should not return an error")
+	})
+
+	t.Run("maps coding auth helper functions", func(t *testing.T) {
+		t.Parallel()
+
+		verified := now
+		cred := models.DecryptedCredential{
+			ID:             rowID,
+			OrgID:          orgID,
+			Provider:       models.ProviderOpenAIChatGPT,
+			Priority:       1,
+			Config:         models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "ref", AccountType: "plus"},
+			Status:         "active",
+			LastVerifiedAt: &verified,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+
+		summary, ok := buildCodingAuthSummary(cred)
+		require.True(t, ok, "buildCodingAuthSummary should support Codex subscription rows")
+		require.Equal(t, models.AgentTypeCodex, summary.Agent, "buildCodingAuthSummary should infer the agent from provider")
+		require.Equal(t, models.CodingAuthTypeSubscription, summary.AuthType, "buildCodingAuthSummary should infer subscription auth type")
+		require.Equal(t, "Codex subscription", summary.Label, "buildCodingAuthSummary should synthesize a fallback label")
+		require.Equal(t, "plus", summary.UsageNote, "buildCodingAuthSummary should surface subscription account type")
+		require.Equal(t, models.CodingAuthStatusHealthy, summary.Status, "buildCodingAuthSummary should map active verified rows to healthy")
+
+		require.Equal(t, models.CodingAuthStatusInvalid, inferCodingAuthStatus(models.DecryptedCredential{Status: "invalid"}), "inferCodingAuthStatus should map invalid rows")
+		require.Equal(t, models.CodingAuthStatusNeedsReauth, inferCodingAuthStatus(models.DecryptedCredential{Status: "pending_auth"}), "inferCodingAuthStatus should map pending auth rows")
+		require.Equal(t, models.CodingAuthStatusNeedsReauth, inferCodingAuthStatus(models.DecryptedCredential{Status: "other"}), "inferCodingAuthStatus should map unknown rows to needs reauth")
+		require.Equal(t, models.AgentType(""), inferCodingAuthAgent(models.DecryptedCredential{Provider: models.ProviderOpenRouter}), "inferCodingAuthAgent should reject unsupported providers")
+		require.Equal(t, models.CodingAuthType(""), inferCodingAuthType(models.DecryptedCredential{Config: models.OpenRouterConfig{APIKey: "sk-or"}}), "inferCodingAuthType should reject unsupported provider configs")
+		require.Equal(t, "Claude Code subscription", fallbackLabel(models.AgentTypeClaudeCode, models.CodingAuthTypeSubscription), "fallbackLabel should synthesize Claude subscription labels")
+		require.Equal(t, "Claude Code API key", fallbackLabel(models.AgentTypeClaudeCode, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Claude API key labels")
+		require.Equal(t, "Gemini CLI API key", fallbackLabel(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Gemini labels")
+		require.Equal(t, "Coding auth", fallbackLabel(models.AgentTypeAmp, models.CodingAuthTypeAPIKey), "fallbackLabel should fall back for unsupported combinations")
+		require.Equal(t, "fallback", defaultString("", "fallback"), "defaultString should return the fallback when empty")
+		require.Equal(t, "value", defaultString("value", "fallback"), "defaultString should preserve non-empty values")
+	})
+
+	t.Run("maps create input to provider configs", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, provider, err := providerConfigForCodingAuthInput(models.CreateCodingAuthInput{
+			Agent:    models.AgentTypeCodex,
+			AuthType: models.CodingAuthTypeAPIKey,
+			APIKey:   "sk-openai",
+		})
+		require.NoError(t, err, "providerConfigForCodingAuthInput should support Codex")
+		require.Equal(t, models.ProviderOpenAI, provider, "providerConfigForCodingAuthInput should map Codex to OpenAI")
+		require.Equal(t, "responses", cfg.(models.OpenAIConfig).APIType, "providerConfigForCodingAuthInput should default Codex API type to responses")
+
+		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{
+			Agent:    models.AgentTypeClaudeCode,
+			AuthType: models.CodingAuthTypeAPIKey,
+			APIKey:   "sk-ant",
+			BaseURL:  "https://anthropic.example",
+		})
+		require.NoError(t, err, "providerConfigForCodingAuthInput should support Claude Code")
+		require.Equal(t, models.ProviderAnthropic, provider, "providerConfigForCodingAuthInput should map Claude Code to Anthropic")
+		require.Equal(t, "https://anthropic.example", cfg.(models.AnthropicConfig).BaseURL, "providerConfigForCodingAuthInput should preserve Claude base URLs")
+
+		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{
+			Agent:    models.AgentTypeGeminiCLI,
+			AuthType: models.CodingAuthTypeAPIKey,
+			APIKey:   "AIza-test",
+		})
+		require.NoError(t, err, "providerConfigForCodingAuthInput should support Gemini")
+		require.Equal(t, models.ProviderGemini, provider, "providerConfigForCodingAuthInput should map Gemini to Gemini provider")
+		require.Equal(t, models.GeminiCLIModelGemini25Pro, cfg.(models.GeminiConfig).Model, "providerConfigForCodingAuthInput should default Gemini models")
+
+		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{Agent: models.AgentTypeAmp})
+		require.Error(t, err, "providerConfigForCodingAuthInput should reject unsupported agents")
+		require.Nil(t, cfg, "providerConfigForCodingAuthInput should not return a config for unsupported agents")
+		require.Equal(t, models.ProviderName(""), provider, "providerConfigForCodingAuthInput should not return a provider for unsupported agents")
+	})
 }

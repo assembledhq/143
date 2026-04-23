@@ -155,9 +155,7 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
-    // Two "Start Preview" buttons: one in controls bar, one in idle panel
-    const startButtons = screen.getAllByText("Start Preview");
-    expect(startButtons.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
   });
 
   it('shows idle state when phase is "stopped"', async () => {
@@ -531,8 +529,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    const startButtons = screen.getAllByText("Start Preview");
-    await user.click(startButtons[0]);
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
       expect(mockStart).toHaveBeenCalledWith("sess-1");
@@ -590,8 +587,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    const startButtons = screen.getAllByText("Start Preview");
-    await user.click(startButtons[0]);
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
@@ -611,8 +607,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    const startButtons = screen.getAllByText("Start Preview");
-    await user.click(startButtons[0]);
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
       expect(
@@ -634,8 +629,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    const startButtons = screen.getAllByText("Start Preview");
-    await user.click(startButtons[0]);
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();

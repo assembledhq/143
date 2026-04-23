@@ -192,6 +192,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
+	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore)
 	var emailSender email.Sender
 	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
 		emailSender = email.NewSMTPSender(email.SMTPConfig{
@@ -760,6 +761,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
+				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
+				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
+				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
+				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
+				r.Delete("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Delete)
 
 				// Team default credential management
 				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)

@@ -64,6 +64,7 @@ type ClaudeCodeAuthProvider interface {
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
 }
 
 // UserCredentialProvider abstracts retrieving user-scoped provider credentials.

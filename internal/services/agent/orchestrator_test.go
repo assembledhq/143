@@ -135,6 +135,14 @@ func (m *mockCredentialProvider) Get(ctx context.Context, orgID uuid.UUID, provi
 	return m.byProvider[provider], nil
 }
 
+func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+	cred, err := m.Get(ctx, orgID, provider)
+	if err != nil || cred == nil {
+		return nil, err
+	}
+	return []models.DecryptedCredential{*cred}, nil
+}
+
 // mockSessionStore implements agent.SessionStore.
 type mockSessionStore struct {
 	mu               sync.Mutex

@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -1470,7 +1471,9 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
+  const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const canCreatePR = hasSnapshot && !hasPR && !isRunning;
+  const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && !isRunning;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -1613,6 +1616,66 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const changesCount = diffStats?.filesChanged;
   const showValidationTab = !session.triggered_by_user_id;
+  const prState = session.pr_creation_state;
+  const snapshotExpired = !session.snapshot_key;
+  const snapshotExpiredMessage =
+    session.pr_creation_error || "Session state expired — re-run to create a PR.";
+  const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+  const succeededButNoPR = prState === "succeeded" && !hasPR;
+  const prActionError =
+    localPRActionError ||
+    (snapshotExpired ? snapshotExpiredMessage : null) ||
+    (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
+  const showPRAction =
+    canCreatePR ||
+    showExpiredPRAction ||
+    queueingPR ||
+    creatingPR ||
+    finalizingPR ||
+    prState === "failed" ||
+    Boolean(prActionError);
+
+  let prActionLabel = "Create PR";
+  let prActionSpinning = false;
+  let prActionDisabled = false;
+  let prActionTitle: string | undefined;
+
+  if (queueingPR) {
+    prActionLabel = "Queueing PR…";
+    prActionSpinning = true;
+    prActionDisabled = true;
+    prActionTitle = "Sending the PR request to the queue";
+  } else if (creatingPR) {
+    prActionLabel = "Creating PR…";
+    prActionSpinning = true;
+    prActionDisabled = true;
+    prActionTitle = "Pushing changes and opening the pull request";
+  } else if (localPRActionError) {
+    prActionLabel = "Retry";
+    prActionTitle = localPRActionError;
+  } else if (snapshotExpired) {
+    prActionDisabled = true;
+    prActionTitle = snapshotExpiredMessage;
+  } else if (succeededButNoPR) {
+    prActionLabel = "Finalizing PR…";
+    prActionSpinning = true;
+    prActionDisabled = true;
+  } else if (prState === "failed") {
+    prActionLabel = "Retry";
+    prActionTitle = session.pr_creation_error || "PR creation failed";
+  } else if (ghBlocked) {
+    prActionDisabled = true;
+    prActionTitle = "Connect your GitHub account to create PRs";
+  }
+
+  const prErrorNotice = prActionError ? {
+    title: snapshotExpired || /expired/i.test(prActionError) ? "PR session expired" : "Couldn't create the PR",
+    description: prActionError,
+    action: prActionDisabled ? undefined : {
+      label: prActionLabel,
+      onClick: () => createPRMutation.mutate(undefined),
+    },
+  } : null;
 
   return (
     <div className="flex h-full">
@@ -1715,107 +1778,61 @@ export function SessionDetailContent({ id }: { id: string }) {
             onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
             className="flex flex-col flex-1 min-h-0 gap-0"
           >
-            <div className="flex items-center border-b border-border px-2 shrink-0">
-              <TabsList variant="line" size="sm" className="border-b-0 flex-1">
-                <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="changes">
-                  Changes
-                  {changesCount != null && changesCount > 0 && (
-                    <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                      {changesCount}
-                    </Badge>
-                  )}
-                </TabsTrigger>
-                {showValidationTab && (
-                  <TabsTrigger value="validation">Validation</TabsTrigger>
-                )}
-                <TabsTrigger value="preview">
-                  <Eye className="h-3 w-3 mr-1" />
-                  Preview
-                </TabsTrigger>
-              </TabsList>
-              {(() => {
-                if (hasPR && prData?.data?.github_pr_url) {
-                  return (
-                    <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                        <ExternalLink className="h-3 w-3" />
-                        View PR
-                      </Button>
-                    </a>
-                  );
-                }
-                const prState = session.pr_creation_state;
-                const showPRAction = canCreatePR || queueingPR || creatingPR || finalizingPR || prState === "failed";
-                if (!showPRAction) return null;
-                const snapshotExpired = !session.snapshot_key;
-                const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
-                const succeededButNoPR = prState === "succeeded" && !hasPR;
-                const prActionError =
-                  localPRActionError ||
-                  (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
-
-                let label = "Create PR";
-                let spinning = false;
-                let disabled = false;
-                let title: string | undefined;
-
-                if (queueingPR) {
-                  label = "Queueing PR\u2026";
-                  spinning = true;
-                  disabled = true;
-                  title = "Sending the PR request to the queue";
-                } else if (creatingPR) {
-                  label = "Creating PR\u2026";
-                  spinning = true;
-                  disabled = true;
-                  title = "Pushing changes and opening the pull request";
-                } else if (snapshotExpired) {
-                  label = "Create PR";
-                  disabled = true;
-                  // Prefer the server-produced message (e.g. from the last
-                  // failed attempt) when available so the UI stays aligned
-                  // with server-side wording.
-                  title = session.pr_creation_error || "Session state expired — re-run to create a PR.";
-                } else if (succeededButNoPR) {
-                  label = "Finalizing PR\u2026";
-                  spinning = true;
-                  disabled = true;
-                } else if (prState === "failed") {
-                  label = "Retry";
-                  title = session.pr_creation_error || "PR creation failed";
-                } else if (ghBlocked) {
-                  disabled = true;
-                  title = "Connect your GitHub account to create PRs";
-                }
-
-                return (
-                  <div className="flex flex-col items-end gap-1 py-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs gap-1.5"
-                      disabled={disabled}
-                      title={title}
-                      onClick={() => createPRMutation.mutate(undefined)}
-                    >
-                      {spinning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : prState === "failed" || localPRActionError ? (
-                        <AlertTriangle className="h-3 w-3" />
-                      ) : (
-                        <GitPullRequest className="h-3 w-3" />
-                      )}
-                      {label}
-                    </Button>
-                    {prActionError && (
-                      <div className="max-w-64 text-right text-xs leading-4 text-destructive">
-                        {prActionError}
-                      </div>
+            <div className="border-b border-border px-2 py-2 shrink-0">
+              <div className="flex items-center gap-2">
+                <TabsList variant="line" size="sm" className="border-b-0 flex-1">
+                  <TabsTrigger value="overview">Overview</TabsTrigger>
+                  <TabsTrigger value="changes">
+                    Changes
+                    {changesCount != null && changesCount > 0 && (
+                      <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                        {changesCount}
+                      </Badge>
                     )}
-                  </div>
-                );
-              })()}
+                  </TabsTrigger>
+                  {showValidationTab && (
+                    <TabsTrigger value="validation">Validation</TabsTrigger>
+                  )}
+                  <TabsTrigger value="preview">
+                    <Eye className="h-3 w-3 mr-1" />
+                    Preview
+                  </TabsTrigger>
+                </TabsList>
+                {hasPR && prData?.data?.github_pr_url ? (
+                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                      <ExternalLink className="h-3 w-3" />
+                      View PR
+                    </Button>
+                  </a>
+                ) : showPRAction && !prErrorNotice ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs gap-1.5"
+                    disabled={prActionDisabled}
+                    title={prActionTitle}
+                    onClick={() => createPRMutation.mutate(undefined)}
+                  >
+                    {prActionSpinning ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : prState === "failed" || localPRActionError ? (
+                      <AlertTriangle className="h-3 w-3" />
+                    ) : (
+                      <GitPullRequest className="h-3 w-3" />
+                    )}
+                    {prActionLabel}
+                  </Button>
+                ) : null}
+              </div>
+              {prErrorNotice && (
+                <ErrorNotice
+                  className="mt-2"
+                  title={prErrorNotice.title}
+                  description={prErrorNotice.description}
+                  action={prErrorNotice.action}
+                />
+              )}
             </div>
 
             <TabsContent value="changes" className="flex-1 min-h-0">
