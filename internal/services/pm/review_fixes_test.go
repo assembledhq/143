@@ -217,7 +217,7 @@ func TestAnalyze_CodexRequiresInjectedAuth(t *testing.T) {
 	require.Equal(t, "failed", sessions.lastResultStatus, "Analyze should mark the PM session failed on Codex auth failure")
 }
 
-func TestAnalyze_PiNarrowsProviderKeysBeforeSandboxCreate(t *testing.T) {
+func TestAnalyze_PiUsesDedicatedCredentialBeforeSandboxCreate(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -227,9 +227,7 @@ func TestAnalyze_PiNarrowsProviderKeysBeforeSandboxCreate(t *testing.T) {
 	env := agent.NewAgentEnv(agent.AgentEnvDeps{
 		Credentials: &mockCredStore{
 			creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant-review"}},
-				models.ProviderOpenAI:    {Config: models.OpenAIConfig{APIKey: "sk-openai-review"}},
-				models.ProviderGemini:    {Config: models.GeminiConfig{APIKey: "sk-gemini-review"}},
+				models.ProviderPi: {Config: models.PiConfig{APIKey: "pi-review-key"}},
 			},
 		},
 		Provider: sandbox,
@@ -256,9 +254,10 @@ func TestAnalyze_PiNarrowsProviderKeysBeforeSandboxCreate(t *testing.T) {
 	require.Error(t, err, "Analyze should surface clone failures")
 	require.Contains(t, err.Error(), "clone repo", "Analyze should fail after sandbox creation so we can inspect the env")
 	require.Len(t, sandbox.createCfgs, 1, "Analyze should create one sandbox")
-	require.Equal(t, "sk-ant-review", sandbox.createCfgs[0].Env["ANTHROPIC_API_KEY"], "Pi should keep the Anthropic key for its default model")
-	require.NotContains(t, sandbox.createCfgs[0].Env, "OPENAI_API_KEY", "Pi should strip unrelated provider keys before sandbox creation")
-	require.NotContains(t, sandbox.createCfgs[0].Env, "GEMINI_API_KEY", "Pi should strip unrelated provider keys before sandbox creation")
+	require.Equal(t, "pi-review-key", sandbox.createCfgs[0].Env["PI_API_KEY"], "Pi should inject its dedicated API key before sandbox creation")
+	require.NotContains(t, sandbox.createCfgs[0].Env, "ANTHROPIC_API_KEY", "Pi should not inherit Anthropic credentials")
+	require.NotContains(t, sandbox.createCfgs[0].Env, "OPENAI_API_KEY", "Pi should not inherit OpenAI credentials")
+	require.NotContains(t, sandbox.createCfgs[0].Env, "GEMINI_API_KEY", "Pi should not inherit Gemini credentials")
 	require.Len(t, usage.stopped, 1, "Analyze should stop usage tracking on clone failure")
 	require.Equal(t, "failed", usage.stopped[0].exitReason, "Analyze should mark clone failures as failed usage")
 }

@@ -291,7 +291,7 @@ func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 			Settings: marshalAgentSettings(t, models.OrgSettings{
 				AgentConfig: models.AgentEnvConfig{
 					string(models.AgentTypeAmp): {
-						"AMP_API_KEY": "amp-from-settings",
+						"AMP_MODE": models.AmpModeDeep,
 					},
 					string(models.AgentTypePi): {
 						"PI_MODEL": "openai/gpt-5.1",
@@ -303,9 +303,8 @@ func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 	env := NewAgentEnv(AgentEnvDeps{
 		Credentials: &envCredentialProvider{
 			creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
-				models.ProviderOpenAI:    {Config: models.OpenAIConfig{APIKey: "sk-openai"}},
-				models.ProviderGemini:    {Config: models.GeminiConfig{APIKey: "sk-gem"}},
+				models.ProviderAmp: {Config: models.AmpConfig{APIKey: "amp-from-credential"}},
+				models.ProviderPi:  {Config: models.PiConfig{APIKey: "pi-from-credential"}},
 			},
 		},
 		Orgs:             store,
@@ -315,13 +314,15 @@ func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 	})
 
 	ampEnv := env.Resolve(ctx, orgID, models.AgentTypeAmp, nil)
-	require.Equal(t, "amp-from-settings", ampEnv["AMP_API_KEY"], "Resolve should apply AMP agent_config overrides from org settings")
+	require.Equal(t, "amp-from-credential", ampEnv["AMP_API_KEY"], "Resolve should source Amp auth from credentials")
+	require.Equal(t, models.AmpModeDeep, ampEnv["AMP_MODE"], "Resolve should apply AMP mode overrides from org settings")
 
 	piEnv := env.Resolve(ctx, orgID, models.AgentTypePi, nil)
 	require.Equal(t, "openai/gpt-5.1", piEnv["PI_MODEL"], "Resolve should apply PI model overrides from org settings")
-	require.Equal(t, "sk-ant", piEnv["ANTHROPIC_API_KEY"], "Resolve should inherit Anthropic credentials for Pi")
-	require.Equal(t, "sk-openai", piEnv["OPENAI_API_KEY"], "Resolve should inherit OpenAI credentials for Pi")
-	require.Equal(t, "sk-gem", piEnv["GEMINI_API_KEY"], "Resolve should inherit Gemini credentials for Pi")
+	require.Equal(t, "pi-from-credential", piEnv["PI_API_KEY"], "Resolve should source Pi auth from credentials")
+	require.NotContains(t, piEnv, "ANTHROPIC_API_KEY", "Resolve should not inherit sibling provider credentials for Pi")
+	require.NotContains(t, piEnv, "OPENAI_API_KEY", "Resolve should not inherit sibling provider credentials for Pi")
+	require.NotContains(t, piEnv, "GEMINI_API_KEY", "Resolve should not inherit sibling provider credentials for Pi")
 
 	_ = env.Resolve(ctx, orgID, models.AgentTypePi, nil)
 	require.Equal(t, 1, store.calls, "Resolve should use the org settings cache after the first load")
@@ -543,12 +544,16 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should accept OpenAI API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}), "compatibleCodingProviderConfig should accept Gemini API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}), "compatibleCodingProviderConfig should accept OpenRouter API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.AmpConfig{APIKey: "amp-key"}), "compatibleCodingProviderConfig should accept Amp API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderPi, models.PiConfig{APIKey: "pi-key"}), "compatibleCodingProviderConfig should accept Pi API keys")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAmp, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Amp configs for the Amp provider")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderPi, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should reject non-Pi configs for the Pi provider")
 		require.Nil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{}), "compatibleCodingProviderConfig should reject empty OpenRouter configs")
 		require.Nil(t, compatibleCodingProviderConfig(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}), "compatibleCodingProviderConfig should reject unknown providers")
 	})
 }
 
-func TestAgentEnvCheckAuthAndNarrowScopedCredentials(t *testing.T) {
+func TestAgentEnvCheckAuth(t *testing.T) {
 	t.Parallel()
 
 	env := NewAgentEnv(AgentEnvDeps{
@@ -561,25 +566,12 @@ func TestAgentEnvCheckAuthAndNarrowScopedCredentials(t *testing.T) {
 	require.Contains(t, err.Error(), "AMP_API_KEY", "CheckAuth should explain the missing Amp credential")
 
 	require.NoError(t, env.CheckAuth(models.AgentTypeAmp, map[string]string{"AMP_API_KEY": "amp-key"}), "CheckAuth should accept Amp runs with AMP_API_KEY configured")
-	require.Equal(t, "", env.NarrowScopedCredentials(models.AgentTypeClaudeCode, map[string]string{"OPENAI_API_KEY": "unused"}), "NarrowScopedCredentials should ignore non-Pi agents")
-	require.Equal(t, "", env.NarrowScopedCredentials(models.AgentTypePi, nil), "NarrowScopedCredentials should ignore nil env maps")
 
-	piEnv := map[string]string{
-		"PI_MODEL":          models.PiModelGPT54,
-		"ANTHROPIC_API_KEY": "sk-ant",
-		"OPENAI_API_KEY":    "sk-openai",
-	}
-	unknownPrefix := env.NarrowScopedCredentials(models.AgentTypePi, piEnv)
-	require.Equal(t, "", unknownPrefix, "NarrowScopedCredentials should narrow known Pi provider prefixes")
-	require.NotContains(t, piEnv, "ANTHROPIC_API_KEY", "NarrowScopedCredentials should remove unrelated Pi provider credentials")
-	require.Equal(t, "sk-openai", piEnv["OPENAI_API_KEY"], "NarrowScopedCredentials should keep the selected Pi provider key")
+	err = env.CheckAuth(models.AgentTypePi, map[string]string{})
+	require.Error(t, err, "CheckAuth should reject Pi runs with no PI_API_KEY")
+	require.Contains(t, err.Error(), "PI_API_KEY", "CheckAuth should explain the missing Pi credential")
 
-	unknownEnv := map[string]string{
-		"PI_MODEL_CUSTOM":   "moonshot/kimi-k2",
-		"OPENAI_API_KEY":    "sk-openai",
-		"ANTHROPIC_API_KEY": "sk-ant",
-	}
-	require.Equal(t, "moonshot", env.NarrowScopedCredentials(models.AgentTypePi, unknownEnv), "NarrowScopedCredentials should report unknown Pi provider prefixes")
+	require.NoError(t, env.CheckAuth(models.AgentTypePi, map[string]string{"PI_API_KEY": "pi-key"}), "CheckAuth should accept Pi runs with PI_API_KEY configured")
 }
 
 func TestAgentEnvInjectCodexAuth(t *testing.T) {

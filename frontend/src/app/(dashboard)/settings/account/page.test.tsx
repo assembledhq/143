@@ -41,7 +41,7 @@ describe("Account settings page", () => {
     expect(screen.queryByText(/Effective resolution:/)).not.toBeInTheDocument();
   });
 
-  it("uses the shared provider-card modal with Gemini support", async () => {
+  it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
     const user = userEvent.setup();
     server.use(
       http.get("/api/v1/settings/credentials/personal", () =>
@@ -56,8 +56,16 @@ describe("Account settings page", () => {
     expect(await screen.findByText("Codex")).toBeInTheDocument();
     expect(screen.getAllByText("Claude Code").length).toBeGreaterThan(0);
     expect(screen.getByText("Gemini CLI")).toBeInTheDocument();
+    expect(screen.getAllByText("Amp").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
 
     await user.click(screen.getByLabelText("Gemini CLI"));
     expect(screen.getByPlaceholderText("AIza...")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Amp"));
+    expect(screen.getByPlaceholderText("amp_...")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Pi"));
+    expect(screen.getByPlaceholderText("pi_...")).toBeInTheDocument();
   });
 });
