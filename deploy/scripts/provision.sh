@@ -211,11 +211,11 @@ elif [ "$ROLE" = "redis" ]; then
 elif [ "$ROLE" = "worker" ]; then
   # Workers only get the secrets they need — no age key or encrypted bundle.
   # A worker compromise cannot decrypt the full production secret set.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_URL=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_URL:-}" \
+  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_URL=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_URL:-}" \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
   # Copy encrypted production env (baked into the Docker image too, but
   # having it on disk lets you re-decrypt without rebuilding)

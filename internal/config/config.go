@@ -180,6 +180,7 @@ type Config struct {
 	// Redis (optional)
 	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
 	RedisURL        string `env:"REDIS_URL"`
+	RedisPrivateIP  string `env:"REDIS_PRIVATE_IP"`
 	RedisAddrs      string `env:"REDIS_ADDRS"`
 	RedisMasterName string `env:"REDIS_MASTER_NAME"`
 	RedisPassword   string `env:"REDIS_PASSWORD"`
@@ -222,6 +223,10 @@ func Load() *Config {
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
 	if cfg.CSRFSigningKey == "" {
 		cfg.CSRFSigningKey = cfg.SessionSecret
+	}
+
+	if cfg.RedisURL == "" && cfg.RedisTopology == "standalone" && cfg.RedisPrivateIP != "" {
+		cfg.RedisURL = "redis://:" + cfg.RedisPassword + "@" + cfg.RedisPrivateIP + ":6379/0"
 	}
 
 	return cfg
