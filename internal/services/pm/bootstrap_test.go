@@ -121,6 +121,13 @@ func (m *mockCredStore) Get(_ context.Context, _ uuid.UUID, provider models.Prov
 	return nil, pgx.ErrNoRows
 }
 
+func (m *mockCredStore) ListByProvider(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+	if c, ok := m.creds[provider]; ok {
+		return []models.DecryptedCredential{*c}, nil
+	}
+	return nil, pgx.ErrNoRows
+}
+
 // --- Tests ---
 // Note: mockOrgStore is defined in service_test.go (same package).
 
