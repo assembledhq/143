@@ -107,6 +107,11 @@ func (s *PRService) SetIntegrationStore(store *db.IntegrationStore) {
 	s.integrations = store
 }
 
+// IntegrationStore exposes the configured integration store for wiring tests.
+func (s *PRService) IntegrationStore() *db.IntegrationStore {
+	return s.integrations
+}
+
 // SetUserCredentialStore sets the user credential store for user-authored PRs.
 func (s *PRService) SetUserCredentialStore(store *db.UserCredentialStore) {
 	s.userCredentials = store
@@ -120,14 +125,30 @@ func (s *PRService) SetAppUserAuth(auth interface {
 	s.appUserAuth = auth
 }
 
+// HasAppUserAuth reports whether the refresh-aware GitHub App user auth
+// service has been wired. Exposed for worker wiring tests.
+func (s *PRService) HasAppUserAuth() bool {
+	return s.appUserAuth != nil
+}
+
 // SetLLMClient sets the LLM client for repo PR template filling.
 func (s *PRService) SetLLMClient(client llm.Client) {
 	s.llmClient = client
 }
 
+// LLMClient exposes the configured LLM client for wiring tests.
+func (s *PRService) LLMClient() llm.Client {
+	return s.llmClient
+}
+
 // SetUserStore sets the user store for fetching user info during PR creation.
 func (s *PRService) SetUserStore(store *db.UserStore) {
 	s.users = store
+}
+
+// UserStore exposes the configured user store for wiring tests.
+func (s *PRService) UserStore() *db.UserStore {
+	return s.users
 }
 
 // SetAuditEmitter sets the audit emitter used for webhook-triggered audit events.
@@ -140,9 +161,19 @@ func (s *PRService) SetOrgStore(store *db.OrganizationStore) {
 	s.orgs = store
 }
 
+// OrgStore exposes the configured organization store for wiring tests.
+func (s *PRService) OrgStore() *db.OrganizationStore {
+	return s.orgs
+}
+
 // SetPRTemplateStore sets the PR template cache store.
 func (s *PRService) SetPRTemplateStore(store *db.PRTemplateStore) {
 	s.prTemplates = store
+}
+
+// PRTemplateStore exposes the configured PR template store for wiring tests.
+func (s *PRService) PRTemplateStore() *db.PRTemplateStore {
+	return s.prTemplates
 }
 
 // SetPreviewTeardown wires the preview store and stopper used to stop any
