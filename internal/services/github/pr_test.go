@@ -1399,6 +1399,39 @@ func TestPRService_SetAppUserAuth(t *testing.T) {
 	require.Same(t, auth, svc.appUserAuth, "SetAppUserAuth should store the provided auth service")
 }
 
+func TestPRService_ConfigurationAccessors(t *testing.T) {
+	t.Parallel()
+
+	integrationStore := db.NewIntegrationStore(nil)
+	userStore := db.NewUserStore(nil)
+	orgStore := db.NewOrganizationStore(nil)
+	prTemplateStore := db.NewPRTemplateStore(nil)
+	llmClient := &mockLLMClient{}
+	auth := &stubPRAppUserAuth{}
+
+	svc := &PRService{}
+	svc.SetIntegrationStore(integrationStore)
+	svc.SetAppUserAuth(auth)
+	svc.SetLLMClient(llmClient)
+	svc.SetUserStore(userStore)
+	svc.SetOrgStore(orgStore)
+	svc.SetPRTemplateStore(prTemplateStore)
+
+	require.Same(t, integrationStore, svc.IntegrationStore(), "IntegrationStore should return the configured integration store")
+	require.True(t, svc.HasAppUserAuth(), "HasAppUserAuth should report true when app user auth is configured")
+	require.Same(t, llmClient, svc.LLMClient(), "LLMClient should return the configured client")
+	require.Same(t, userStore, svc.UserStore(), "UserStore should return the configured user store")
+	require.Same(t, orgStore, svc.OrgStore(), "OrgStore should return the configured org store")
+	require.Same(t, prTemplateStore, svc.PRTemplateStore(), "PRTemplateStore should return the configured PR template store")
+}
+
+func TestPRService_HasAppUserAuth_FalseWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{}
+	require.False(t, svc.HasAppUserAuth(), "HasAppUserAuth should report false when app user auth is not configured")
+}
+
 func TestResolveToken_AuthorModeAppUsesInstallationToken(t *testing.T) {
 	t.Parallel()
 
@@ -2701,9 +2734,12 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
-	mock.ExpectExec("UPDATE sessions SET status").
+	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "issue_id", "created_at", "last_activity_at"}).
+				AddRow(runID, orgID, issueID, now, now),
+		)
 	mock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

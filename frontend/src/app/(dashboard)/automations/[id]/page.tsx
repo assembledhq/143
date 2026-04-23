@@ -27,6 +27,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { BranchPicker } from "@/components/branch-picker";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
@@ -247,8 +248,16 @@ function SettingsTab({ automation }: { automation: Automation }) {
         </div>
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="baseBranch">Base branch</Label>
-        <Input id="baseBranch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
+        <Label>Base branch</Label>
+        <BranchPicker
+          repositoryId={automation.repository_id ?? ""}
+          value={baseBranch}
+          defaultBranch={automation.base_branch}
+          onValueChange={setBaseBranch}
+          label="Base branch"
+          buttonClassName="w-full justify-between"
+          contentClassName="w-[var(--radix-popover-trigger-width)]"
+        />
       </div>
       <div className="flex items-center gap-3 pt-2">
         <Button

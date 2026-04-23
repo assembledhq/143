@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import NewAutomationPage from "./page";
 
@@ -8,7 +8,10 @@ const pushMock = vi.fn();
 const searchParams = new URLSearchParams("template=security-sweep");
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => ({
+    push: pushMock,
+    replace: vi.fn(),
+  }),
   useSearchParams: () => searchParams,
 }));
 
@@ -58,5 +61,68 @@ describe("NewAutomationPage", () => {
     ).toContain(
       "Review the repository for concrete, actionable security risk",
     );
+  });
+
+  it("submits the selected base branch from the branch picker", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.get("*/api/v1/repositories/:id/branches", () => HttpResponse.json({
+        data: [
+          { name: "main", protected: true },
+          { name: "release/weekly", protected: false },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Weekly audit");
+    await user.clear(screen.getByLabelText("Goal"));
+    await user.type(screen.getByLabelText("Goal"), "Check the release branch every week");
+
+    await user.click(screen.getByText("Advanced options"));
+    await user.click(await screen.findByRole("button", { name: "Base branch" }));
+    await user.type(screen.getByPlaceholderText("Search branches..."), "weekly");
+    await user.click(await screen.findByText("release/weekly"));
+
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({
+        repository_id: "repo-1",
+        base_branch: "release/weekly",
+      });
+    });
   });
 });

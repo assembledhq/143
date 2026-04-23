@@ -15,6 +15,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
@@ -116,6 +117,28 @@ func main() {
 	}
 	middleware.SetHTTPMetrics(httpMetrics)
 
+	redisMetrics, err := cache.NewMetrics()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize Redis metrics")
+	}
+	redisClient := cache.New(cache.Config{
+		Topology:   cfg.RedisTopology,
+		URL:        cfg.RedisURL,
+		Addrs:      cache.ParseAddrs(cfg.RedisAddrs),
+		MasterName: cfg.RedisMasterName,
+		Password:   cfg.RedisPassword,
+		PoolSize:   cfg.RedisPoolSize,
+	}, logger, redisMetrics)
+	if redisClient != nil {
+		defer func() {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn().Err(err).Msg("failed to close Redis client")
+			}
+		}()
+	}
+	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
+	jobNotifier := cache.NewJobNotifier(redisClient, logger)
+
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
 	if cfg.EncryptionMasterKey != "" {
@@ -215,7 +238,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -263,6 +286,18 @@ func main() {
 
 		auditLogStore := db.NewAuditLogStore(pool)
 		sessionLogStore := db.NewSessionLogStore(pool)
+		sessionStore.SetLogger(logger)
+		sessionLogStore.SetLogger(logger)
+		jobStore.SetLogger(logger)
+		if sessionStreams != nil {
+			sessionStore.SetStreams(sessionStreams)
+			sessionLogStore.SetStreams(sessionStreams)
+			sessionStreams.StartCleanup(ctx, sessionStore)
+		}
+		if jobNotifier != nil {
+			jobStore.SetNotifier(jobNotifier)
+			jobNotifier.Start(ctx, w.Wake)
+		}
 
 		stores := &worker.Stores{
 			Issues:              issueStore,

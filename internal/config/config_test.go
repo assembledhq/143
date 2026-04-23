@@ -67,6 +67,18 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 }
 
 //nolint:paralleltest // uses t.Setenv
+func TestLoad_DerivesStandaloneRedisURL(t *testing.T) {
+	t.Setenv("REDIS_URL", "")
+	t.Setenv("REDIS_TOPOLOGY", "standalone")
+	t.Setenv("REDIS_PRIVATE_IP", "10.0.0.50")
+	t.Setenv("REDIS_PASSWORD", "secret")
+
+	cfg := Load()
+
+	require.Equal(t, "redis://:secret@10.0.0.50:6379/0", cfg.RedisURL, "Load should derive the standalone Redis URL from private IP and password")
+}
+
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_LLMConfig(t *testing.T) {
 	t.Setenv("LLM_MODEL", "claude-sonnet-4-5")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")

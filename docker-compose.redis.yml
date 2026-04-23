@@ -1,0 +1,35 @@
+# Dedicated Redis node for cache + pub/sub acceleration.
+# See docs/design/implemented/52-redis.md
+
+services:
+  redis:
+    image: redis:8.6-alpine
+    ports:
+      - "${REDIS_PRIVATE_IP}:6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$$REDIS_PASSWORD", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    command: >-
+      redis-server
+        --save 60 1
+        --loglevel warning
+        --maxmemory 400mb
+        --maxmemory-policy allkeys-lru
+        --bind 0.0.0.0
+        --protected-mode no
+        --requirepass ${REDIS_PASSWORD}
+
+volumes:
+  redisdata:

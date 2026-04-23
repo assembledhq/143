@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,7 +27,23 @@ func TestHealthz(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK for health check")
 	require.Contains(t, w.Body.String(), `"status":"ok"`, "response should contain ok status")
+	require.Contains(t, w.Body.String(), `"redis":"unavailable"`, "response should include Redis health status")
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"), "should set JSON content type")
+}
+
+func TestHealthz_WithRedisHealthy(t *testing.T) {
+	t.Parallel()
+
+	h := &HealthHandler{}
+	h.SetRedisHealthCheck(func(context.Context) bool { return true })
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+
+	h.Healthz(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "health check should still return 200")
+	require.Contains(t, w.Body.String(), `"redis":"ok"`, "health response should report healthy Redis")
 }
 
 func TestVersion(t *testing.T) {

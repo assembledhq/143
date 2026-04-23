@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { projectStatusConfig } from "@/lib/types";
+import { BranchPicker } from "@/components/branch-picker";
 import { ProgressBar } from "./shared";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { PlanTab } from "./plan-tab";
@@ -140,8 +141,16 @@ function SettingsTab({ project }: { project: import("@/lib/types").Project }) {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="s-branch">Base branch</Label>
-            <Input id="s-branch" value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
+            <Label>Base branch</Label>
+            <BranchPicker
+              repositoryId={project.repository_id}
+              value={baseBranch}
+              defaultBranch={project.base_branch}
+              onValueChange={setBaseBranch}
+              label="Base branch"
+              buttonClassName="w-full justify-between"
+              contentClassName="w-[var(--radix-popover-trigger-width)]"
+            />
           </div>
           <div className="flex items-center justify-end gap-3 pt-2">
             {updateMutation.isError && <p className="text-xs text-destructive">Failed to save.</p>}

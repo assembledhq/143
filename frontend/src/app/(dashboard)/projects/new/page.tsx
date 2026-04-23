@@ -27,9 +27,10 @@ import {
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
 import { AGENTS } from "@/lib/agents";
+import { BranchPicker } from "@/components/branch-picker";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { cn } from "@/lib/utils";
-import type { OrgSettings, Organization, SingleResponse } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse } from "@/lib/types";
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "Low", numeric: 75 },
@@ -59,7 +60,7 @@ export default function NewProjectPage() {
   const [executionMode, setExecutionMode] = useState("sequential");
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [priorityLevel, setPriorityLevel] = useState<PriorityLevel>("medium");
-  const [baseBranch, setBaseBranch] = useState("main");
+  const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [agentType, setAgentType] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [hasGenerated, setHasGenerated] = useState(false);
@@ -96,6 +97,10 @@ export default function NewProjectPage() {
   });
 
   const repos = reposData?.data ?? [];
+  const selectedRepo = repos.find((repo: Repository) => repo.id === repositoryId);
+  const selectedBaseBranch = repositoryId
+    ? baseBranchByRepoId[repositoryId] ?? selectedRepo?.default_branch ?? ""
+    : "";
 
   const generateMutation = useMutation({
     mutationFn: () =>
@@ -123,7 +128,7 @@ export default function NewProjectPage() {
         max_concurrent:
           executionMode === "parallel" ? maxConcurrent : undefined,
         priority: priorityLevelToNumeric(priorityLevel),
-        base_branch: baseBranch.trim() || undefined,
+        base_branch: selectedBaseBranch.trim() || undefined,
         agent_type: agentType || undefined,
         model: selectedModel || undefined,
       }),
@@ -418,12 +423,18 @@ export default function NewProjectPage() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label htmlFor="base-branch">Base branch</Label>
-                  <Input
-                    id="base-branch"
-                    value={baseBranch}
-                    onChange={(e) => setBaseBranch(e.target.value)}
-                    placeholder="main"
+                  <Label>Base branch</Label>
+                  <BranchPicker
+                    repositoryId={repositoryId}
+                    value={selectedBaseBranch}
+                    defaultBranch={selectedRepo?.default_branch}
+                    onValueChange={(branch) =>
+                      setBaseBranchByRepoId((prev) => ({ ...prev, [repositoryId]: branch }))
+                    }
+                    label="Base branch"
+                    disabled={!repositoryId}
+                    buttonClassName="w-full justify-between"
+                    contentClassName="w-[var(--radix-popover-trigger-width)]"
                   />
                 </div>
               </div>

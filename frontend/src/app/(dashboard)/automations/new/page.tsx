@@ -23,6 +23,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
+import { BranchPicker } from "@/components/branch-picker";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -48,7 +49,7 @@ export default function NewAutomationPage() {
     initialTemplate?.defaultUnit ?? "days",
   );
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [baseBranch, setBaseBranch] = useState("main");
+  const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState(50);
 
   // Load repos
@@ -61,6 +62,10 @@ export default function NewAutomationPage() {
   // Fall back to the first repo until the user picks one so the form has a
   // valid default without syncing state inside an effect.
   const repoId = selectedRepoId || repos[0]?.id || "";
+  const selectedRepo = repos.find((repo) => repo.id === repoId);
+  const selectedBaseBranch = repoId
+    ? baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? ""
+    : "";
 
   const applyTemplate = (templateId: string) => {
     const t = getAutomationTemplate(templateId);
@@ -80,7 +85,7 @@ export default function NewAutomationPage() {
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
-        base_branch: baseBranch.trim() || undefined,
+        base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
     onSuccess: (res) => {
@@ -291,12 +296,18 @@ export default function NewAutomationPage() {
             </CollapsibleTrigger>
             <CollapsibleContent className="space-y-4 pt-3">
               <div className="space-y-1.5">
-                <Label htmlFor="baseBranch">Base branch</Label>
-                <Input
-                  id="baseBranch"
-                  value={baseBranch}
-                  onChange={(e) => setBaseBranch(e.target.value)}
-                  placeholder="main"
+                <Label>Base branch</Label>
+                <BranchPicker
+                  repositoryId={repoId}
+                  value={selectedBaseBranch}
+                  defaultBranch={selectedRepo?.default_branch}
+                  onValueChange={(branch) =>
+                    setBaseBranchByRepoId((prev) => ({ ...prev, [repoId]: branch }))
+                  }
+                  label="Base branch"
+                  disabled={!repoId}
+                  buttonClassName="w-full justify-between"
+                  contentClassName="w-[var(--radix-popover-trigger-width)]"
                 />
               </div>
               <div className="space-y-1.5">

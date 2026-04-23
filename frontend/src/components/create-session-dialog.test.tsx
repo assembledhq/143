@@ -368,7 +368,7 @@ describe("CreateSessionDialog", () => {
     });
   });
 
-  it("shows branch fallback input when branch fetch fails", async () => {
+  it("keeps branch selection repo-backed when branch loading fails", async () => {
     setupRepoHandlers();
 
     server.use(
@@ -384,10 +384,10 @@ describe("CreateSessionDialog", () => {
       <CreateSessionDialog open onOpenChange={onOpenChange} />,
     );
 
-    // First repo is auto-selected and branch fetch fails, so fallback input should appear
     await waitFor(() => {
-      expect(screen.getByLabelText("Target branch")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Target branch/ })).toBeInTheDocument();
     });
+    expect(screen.queryByRole("textbox", { name: "Target branch" })).not.toBeInTheDocument();
   });
 
   it("does not add empty image URL", async () => {
