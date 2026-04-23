@@ -424,6 +424,23 @@ export const api = {
     listResolved: () =>
       get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
   },
+  codingAuths: {
+    list: () =>
+      get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
+    create: (body: { agent: string; auth_type: string; label?: string; api_key?: string; api_type?: string; base_url?: string }) =>
+      post<import('./types').SingleResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths', body),
+    reorder: (ids: string[]) =>
+      request('/api/v1/settings/coding-auths/reorder', {
+        method: 'PATCH',
+        body: JSON.stringify({ ids }),
+      }),
+    update: (id: string, body: { label?: string }) =>
+      request<import('./types').SingleResponse<import('./types').CodingAuth>>(`/api/v1/settings/coding-auths/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    delete: (id: string) => del(`/api/v1/settings/coding-auths/${id}`),
+  },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
     loginGitHub: () => {

@@ -714,3 +714,71 @@ func TestIsLLMProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateCodingAuthInputValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     CreateCodingAuthInput
+		expectErr string
+	}{
+		{
+			name: "valid api key auth",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeCodex,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "sk-test-123",
+			},
+		},
+		{
+			name: "invalid agent",
+			input: CreateCodingAuthInput{
+				Agent:    AgentType("nope"),
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "sk-test-123",
+			},
+			expectErr: `invalid agent type: "nope"`,
+		},
+		{
+			name: "invalid auth type",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeCodex,
+				AuthType: CodingAuthType("nope"),
+				APIKey:   "sk-test-123",
+			},
+			expectErr: "unknown coding auth type: nope",
+		},
+		{
+			name: "missing api key for api key auth",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeCodex,
+				AuthType: CodingAuthTypeAPIKey,
+			},
+			expectErr: "api_key is required for api_key auth",
+		},
+		{
+			name: "subscription must use provider flow",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeCodex,
+				AuthType: CodingAuthTypeSubscription,
+			},
+			expectErr: "subscription auth must be created through the provider-specific auth flow",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.input.Validate()
+			if tt.expectErr != "" {
+				require.Error(t, err, "Validate should reject invalid coding auth input")
+				require.Equal(t, tt.expectErr, err.Error(), "Validate should return the expected error message")
+				return
+			}
+			require.NoError(t, err, "Validate should accept valid coding auth input")
+		})
+	}
+}

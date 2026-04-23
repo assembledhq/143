@@ -17,8 +17,10 @@ import (
 )
 
 type envCredentialProvider struct {
-	creds map[models.ProviderName]*models.DecryptedCredential
-	errs  map[models.ProviderName]error
+	creds     map[models.ProviderName]*models.DecryptedCredential
+	listCreds map[models.ProviderName][]models.DecryptedCredential
+	errs      map[models.ProviderName]error
+	listErrs  map[models.ProviderName]error
 }
 
 func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
@@ -27,6 +29,19 @@ func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider mod
 	}
 	if cred, ok := m.creds[provider]; ok {
 		return cred, nil
+	}
+	return nil, nil
+}
+
+func (m *envCredentialProvider) ListByProvider(_ context.Context, _ uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+	if err, ok := m.listErrs[provider]; ok {
+		return nil, err
+	}
+	if creds, ok := m.listCreds[provider]; ok {
+		return creds, nil
+	}
+	if cred, ok := m.creds[provider]; ok && cred != nil {
+		return []models.DecryptedCredential{*cred}, nil
 	}
 	return nil, nil
 }
@@ -432,6 +447,105 @@ func TestAgentEnvResolveProviderConfigPrecedence(t *testing.T) {
 			require.Equal(t, tt.expected, cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should honor precedence for %s", tt.name)
 		})
 	}
+}
+
+func TestAgentEnvResolveProviderConfig_UsesPriorityOrderedOrgAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials: &envCredentialProvider{
+			listCreds: map[models.ProviderName][]models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					{
+						Provider: models.ProviderAnthropic,
+						Label:    "subscription-first",
+						Priority: 1,
+						Config: models.AnthropicConfig{
+							Subscription: &models.AnthropicSubscription{AccessToken: "sub-token", RefreshToken: "sub-refresh", ExpiresAt: time.Now().Add(time.Hour)},
+						},
+					},
+					{
+						Provider: models.ProviderAnthropic,
+						Label:    "api-key-second",
+						Priority: 2,
+						Config:   models.AnthropicConfig{APIKey: "priority-api-key"},
+					},
+					{
+						Provider: models.ProviderAnthropic,
+						Label:    "api-key-third",
+						Priority: 3,
+						Config:   models.AnthropicConfig{APIKey: "lower-priority-api-key"},
+					},
+				},
+			},
+		},
+		UserCredentials: &envUserCredentialProvider{},
+		Provider:        &envSandboxProvider{},
+		Logger:          zerolog.Nop(),
+	})
+
+	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
+	require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return an AnthropicConfig when org API keys exist")
+	require.Equal(t, "priority-api-key", cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should choose the highest-priority org API key row")
+}
+
+func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	t.Run("returns nil when credential store is missing", func(t *testing.T) {
+		t.Parallel()
+
+		env := NewAgentEnv(AgentEnvDeps{
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
+		})
+
+		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderAnthropic)
+		require.Nil(t, cfg, "resolveOrgProviderConfig should return nil when no org credential store is configured")
+	})
+
+	t.Run("falls back to singleton get when list lookup misses", func(t *testing.T) {
+		t.Parallel()
+
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				listErrs: map[models.ProviderName]error{
+					models.ProviderOpenAI: errors.New("list failed"),
+				},
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderOpenAI: {
+						Provider: models.ProviderOpenAI,
+						Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback"},
+					},
+				},
+			},
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
+		})
+
+		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderOpenAI)
+		require.IsType(t, models.OpenAIConfig{}, cfg, "resolveOrgProviderConfig should fall back to Get when list lookup fails")
+		require.Equal(t, "sk-openai-fallback", cfg.(models.OpenAIConfig).APIKey, "resolveOrgProviderConfig should use the fallback org API key")
+	})
+
+	t.Run("filters incompatible coding provider configs", func(t *testing.T) {
+		t.Parallel()
+
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}), "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}), "compatibleCodingProviderConfig should accept Anthropic API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should accept OpenAI API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}), "compatibleCodingProviderConfig should accept Gemini API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}), "compatibleCodingProviderConfig should accept OpenRouter API keys")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{}), "compatibleCodingProviderConfig should reject empty OpenRouter configs")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}), "compatibleCodingProviderConfig should reject unknown providers")
+	})
 }
 
 func TestAgentEnvCheckAuthAndNarrowScopedCredentials(t *testing.T) {
