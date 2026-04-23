@@ -255,10 +255,12 @@ func main() {
 	go nodeManager.StartHeartbeat(ctx)
 
 	// Start worker if mode includes worker capability
-	var processWorker *worker.Worker
+	var processWorkers []*worker.Worker
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
-		w := worker.New(pool, logger, hostname)
-		processWorker = w
+		workerCount := cfg.WorkerProcessCount
+		if workerCount <= 0 {
+			workerCount = 1
+		}
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
@@ -296,7 +298,6 @@ func main() {
 		}
 		if jobNotifier != nil {
 			jobStore.SetNotifier(jobNotifier)
-			jobNotifier.Start(ctx, w.Wake)
 		}
 
 		stores := &worker.Stores{
@@ -348,16 +349,18 @@ func main() {
 			LogsDays:    cfg.DataRetentionLogsDays,
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
-		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
-		nodeManager.SetMetadataProvider(func() map[string]any {
-			return map[string]any{
-				"build_sha":              version.BuildSHA,
-				"active_job_count":       w.ActiveJobCount(),
-				"active_run_agent_count": w.ActiveRunAgentCount(),
-			}
-		})
-		go w.Start(ctx)
-		logger.Info().Msg("worker started with registered handlers")
+		processWorkers = startProcessWorkers(
+			ctx,
+			pool,
+			logger,
+			hostname,
+			workerCount,
+			stores,
+			services,
+			retentionCfg,
+			jobNotifier,
+			nodeManager,
+		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		go recoveryLoop.Start(ctx, 30*time.Second)
@@ -426,21 +429,26 @@ func main() {
 		<-sigCh
 		logger.Info().Msg("shutting down server...")
 
-		if processWorker != nil {
-			processWorker.RequestDrain()
+		for _, w := range processWorkers {
+			w.RequestDrain()
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 110*time.Second)
 		if err := nodeManager.RequestDrain(drainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
 		}
-		if processWorker != nil {
-			for processWorker.ActiveJobCount() > 0 {
-				select {
-				case <-drainCtx.Done():
-					logger.Warn().Int("active_jobs", processWorker.ActiveJobCount()).Msg("worker drain timed out; continuing shutdown")
-					goto drained
-				case <-time.After(500 * time.Millisecond):
-				}
+		for {
+			activeJobs := 0
+			for _, w := range processWorkers {
+				activeJobs += w.ActiveJobCount()
+			}
+			if activeJobs == 0 {
+				break
+			}
+			select {
+			case <-drainCtx.Done():
+				logger.Warn().Int("active_jobs", activeJobs).Msg("worker drain timed out; continuing shutdown")
+				goto drained
+			case <-time.After(500 * time.Millisecond):
 			}
 		}
 	drained:
@@ -492,6 +500,64 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatal().Err(err).Msg("server failed")
 	}
+}
+
+func startProcessWorkers(
+	ctx context.Context,
+	pool db.DBTX,
+	logger zerolog.Logger,
+	hostname string,
+	workerCount int,
+	stores *worker.Stores,
+	services *worker.Services,
+	retentionCfg worker.DataRetentionConfig,
+	jobNotifier *cache.JobNotifier,
+	nodeManager *cluster.NodeManager,
+) []*worker.Worker {
+	workers := make([]*worker.Worker, 0, workerCount)
+	for i := 0; i < workerCount; i++ {
+		w := worker.New(pool, logger, hostname)
+		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
+		workers = append(workers, w)
+	}
+
+	if jobNotifier != nil {
+		jobNotifier.Start(ctx, func() {
+			for _, w := range workers {
+				w.Wake()
+			}
+		})
+	}
+
+	nodeManager.SetMetadataProvider(func() map[string]any {
+		return map[string]any{
+			"build_sha":              version.BuildSHA,
+			"active_job_count":       totalActiveJobs(workers),
+			"active_run_agent_count": totalActiveRunAgentJobs(workers),
+		}
+	})
+
+	for i, w := range workers {
+		go w.Start(ctx)
+		logger.Info().Int("worker_index", i).Msg("worker started with registered handlers")
+	}
+	return workers
+}
+
+func totalActiveJobs(workers []*worker.Worker) int {
+	total := 0
+	for _, w := range workers {
+		total += w.ActiveJobCount()
+	}
+	return total
+}
+
+func totalActiveRunAgentJobs(workers []*worker.Worker) int {
+	total := 0
+	for _, w := range workers {
+		total += w.ActiveRunAgentCount()
+	}
+	return total
 }
 
 // canBuildServices checks whether the runtime dependencies for Phase 3+
