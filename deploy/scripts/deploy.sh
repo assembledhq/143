@@ -4,7 +4,7 @@ set -euo pipefail
 # Deploy to a node via SSH.
 # Usage: ./deploy.sh <role> <host> <ssh-key-path> [image-tag]
 #
-# Roles: app, worker, db, logging
+# Roles: app, worker, db, logging, redis
 # Provider-agnostic — just needs SSH access to the target.
 
 ROLE="$1"
@@ -33,7 +33,11 @@ case "$ROLE" in
     COMPOSE_FILE="docker-compose.logging.yml"
     HEALTH_SERVICE="grafana"
     ;;
-  *)      echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+  redis)
+    COMPOSE_FILE="docker-compose.redis.yml"
+    HEALTH_SERVICE="redis"
+    ;;
+  *)      echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
 esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
@@ -78,6 +82,11 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for db role (set it or add to .env.production.enc)}"
     printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+  elif [ "$ROLE" = "redis" ]; then
+    : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
+    : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (set it or add to .env.production.enc)}"
+    printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
   elif [ "$ROLE" = "worker" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
@@ -87,8 +96,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
   else
-    # Both app and worker nodes need SOPS_AGE_KEY + the encrypted secrets file
-    # so the entrypoint can decrypt GitHub App creds, API keys, etc. at boot.
+    # App nodes need SOPS_AGE_KEY + the encrypted secrets file so the
+    # entrypoint can decrypt GitHub App creds, API keys, etc. at boot.
     : "${DB_PASSWORD:?DB_PASSWORD is required for app role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for app role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for app role (set it or add to .env.production.enc)}"
