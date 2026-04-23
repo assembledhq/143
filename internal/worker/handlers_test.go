@@ -950,7 +950,7 @@ func automationRowColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"agent_type", "model_override", "execution_mode", "max_concurrent", "base_branch",
-		"schedule_type", "interval_value", "interval_unit", "cron_expression", "timezone",
+		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "created_at", "updated_at", "deleted_at",
 	}
@@ -995,7 +995,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			&agentType, nil, "sequential", 1, "main",
-			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
 			50, now, now, nil,
 		))
@@ -1072,7 +1072,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			nil, nil, "sequential", 1, "main",
-			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
 			50, now, now, nil,
 		))
@@ -1207,7 +1207,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			nil, nil, "sequential", 1, "main",
-			models.AutomationScheduleInterval, nil, nil, nil, "UTC",
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
 			50, now, now, nil,
 		))
