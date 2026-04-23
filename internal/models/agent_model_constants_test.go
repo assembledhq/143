@@ -282,7 +282,7 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "accepts valid amp mode",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
-					"amp": {"AMP_MODE": AmpModeDeep, "AMP_API_KEY": "amp_x"},
+					"amp": {"AMP_MODE": AmpModeDeep},
 				},
 			},
 		},
@@ -299,7 +299,7 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "accepts empty amp mode",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
-					"amp": {"AMP_API_KEY": "amp_x"},
+					"amp": {},
 				},
 			},
 		},
@@ -338,7 +338,7 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "rejects unknown amp key",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
-					"amp": {"AMP_API_KEY": "amp_x", "PATH": "/evil/bin"},
+					"amp": {"AMP_MODE": AmpModeDeep, "PATH": "/evil/bin"},
 				},
 			},
 			wantErr: true,

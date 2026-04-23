@@ -51,6 +51,8 @@ func TestPiAdapter_Execute_StreamJSON(t *testing.T) {
 	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 		require.True(t, strings.HasPrefix(cmd, "pi "), "command should invoke pi CLI, got: %s", cmd)
 		require.Contains(t, cmd, "--mode json")
+		require.Contains(t, cmd, "--api-key")
+		require.Contains(t, cmd, "PI_API_KEY", "must inject the dedicated Pi API key")
 		require.Contains(t, cmd, "--model")
 		require.Contains(t, cmd, "PI_MODEL_CUSTOM", "must respect PI_MODEL_CUSTOM override")
 		require.Contains(t, cmd, "PI_MODEL", "must consult PI_MODEL fallback")

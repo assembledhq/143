@@ -1,7 +1,7 @@
-export type StackAgent = "codex" | "claude_code" | "gemini_cli";
-export type ModalProvider = StackAgent | "amp" | "pi";
-export type ApiKeyProvider = StackAgent | "amp";
-export type PersonalProvider = "openai" | "anthropic" | "gemini";
+export type StackAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+export type ModalProvider = StackAgent;
+export type ApiKeyProvider = StackAgent;
+export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi";
 
 export const ORG_PROVIDER_OPTIONS: Array<{
   key: ModalProvider;
@@ -36,24 +36,26 @@ export const ORG_PROVIDER_OPTIONS: Array<{
     label: "Amp",
     iconSrc: "/agents/amp.svg",
     supportsSubscription: false,
-    supportsStackOrder: false,
+    supportsStackOrder: true,
   },
   {
     key: "pi",
     label: "Pi",
     supportsSubscription: false,
-    supportsStackOrder: false,
+    supportsStackOrder: true,
   },
 ];
 
 export const PERSONAL_PROVIDER_OPTIONS: Array<{
   key: PersonalProvider;
   label: string;
-  iconSrc: string;
+  iconSrc?: string;
 }> = [
   { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg" },
   { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg" },
   { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg" },
+  { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg" },
+  { key: "pi", label: "Pi" },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
@@ -88,6 +90,13 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
         description: "Find your Amp access token in Amp settings, or use amp login for interactive setup.",
         href: "https://ampcode.com/settings",
         linkLabel: "Amp settings",
+      };
+    case "pi":
+      return {
+        label: "Pi",
+        description: "Create or manage your Pi API key in the Pi dashboard.",
+        href: "https://pi.dev/",
+        linkLabel: "Pi dashboard",
       };
   }
 }

@@ -427,7 +427,19 @@ export const api = {
   codingAuths: {
     list: () =>
       get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
-    create: (body: { agent: string; auth_type: string; label?: string; api_key?: string; api_type?: string; base_url?: string }) =>
+    legacyStatus: () =>
+      get<import('./types').SingleResponse<import('./types').LegacyCodingAuthStatus>>('/api/v1/settings/coding-auths/legacy-status'),
+    migrateLegacy: () =>
+      post<import('./types').SingleResponse<import('./types').LegacyCodingAuthMigrationResult>>('/api/v1/settings/coding-auths/migrate-legacy'),
+    create: (body: {
+      agent: string;
+      auth_type: string;
+      label?: string;
+      api_key?: string;
+      api_type?: string;
+      base_url?: string;
+      agent_defaults?: Record<string, string>;
+    }) =>
       post<import('./types').SingleResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths', body),
     reorder: (ids: string[]) =>
       request('/api/v1/settings/coding-auths/reorder', {

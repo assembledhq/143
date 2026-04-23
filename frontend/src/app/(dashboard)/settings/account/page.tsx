@@ -28,6 +28,10 @@ function providerLabel(provider: string) {
       return "Claude Code";
     case "gemini":
       return "Gemini CLI";
+    case "amp":
+      return "Amp";
+    case "pi":
+      return "Pi";
     case "openrouter":
       return "OpenRouter";
     default:
@@ -65,6 +69,7 @@ export default function AccountPage() {
     mutationFn: () => api.userCredentials.upsertPersonal(provider, { api_key: apiKey }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
       setAddOpen(false);
       toast.success("Personal auth saved");
@@ -79,6 +84,7 @@ export default function AccountPage() {
     mutationFn: (targetProvider: string) => api.userCredentials.deletePersonal(targetProvider),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
+      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       toast.success("Personal auth removed");
     },
     onError: (error) => {
@@ -182,7 +188,17 @@ export default function AccountPage() {
             type="password"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
-            placeholder={provider === "anthropic" ? "sk-ant-..." : provider === "gemini" ? "AIza..." : "sk-..."}
+            placeholder={
+              provider === "anthropic"
+                ? "sk-ant-..."
+                : provider === "gemini"
+                  ? "AIza..."
+                  : provider === "amp"
+                    ? "amp_..."
+                    : provider === "pi"
+                      ? "pi_..."
+                      : "sk-..."
+            }
           />
         </div>
       </CodingAuthDialog>

@@ -621,7 +621,7 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli";
+export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid" | "never_verified";
 
@@ -642,6 +642,23 @@ export interface CodingAuth {
   created_by?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface LegacyCodingAuthStatus {
+  has_legacy_amp_secret: boolean;
+  amp_masked_key?: string;
+  has_amp_credential: boolean;
+  has_legacy_pi_secret: boolean;
+  pi_masked_key?: string;
+  has_legacy_pi_defaults: boolean;
+  has_pi_credential: boolean;
+  pi_requires_manual_auth: boolean;
+}
+
+export interface LegacyCodingAuthMigrationResult {
+  migrated_amp: boolean;
+  migrated_pi: boolean;
+  removed_legacy_secrets: boolean;
 }
 
 export interface RepoSummary {

@@ -165,21 +165,19 @@ func IsSupportedPiModel(model string) bool {
 }
 
 // AllowedAgentConfigKeys lists the env-var keys that may be set in
-// settings.agent_config[<agent>] for agents whose agent_config is propagated
-// directly into the sandbox env (Amp, Pi). Bounds the blast radius of an org
-// admin smuggling arbitrary vars (PATH, LD_PRELOAD, NODE_OPTIONS, …) into
-// the container by way of agent_config.
+// settings.agent_config[<agent>] for agents whose non-secret defaults are
+// propagated directly into the sandbox env (Amp, Pi). Bounds the blast radius
+// of an org admin smuggling arbitrary vars (PATH, LD_PRELOAD, NODE_OPTIONS,
+// …) into the container by way of agent_config.
 //
 // Scoped to Amp and Pi today — those are the only agent types whose
-// agent_config the orchestrator's resolveAgentEnv injects (see
-// applyAgentConfigOverrides). Other agents pull credentials from the
-// encrypted credential store, so unknown agent_config keys for them are
-// stored-but-ignored rather than security-relevant. Add an agent here when
-// that changes.
+// agent_config the orchestrator injects (see applyAgentConfigOverrides).
+// Other agents pull credentials from the encrypted credential store, so
+// unknown agent_config keys for them are stored-but-ignored rather than
+// security-relevant. Add an agent here when that changes.
 var AllowedAgentConfigKeys = map[AgentType]map[string]struct{}{
 	AgentTypeAmp: {
-		"AMP_API_KEY": {},
-		"AMP_MODE":    {},
+		"AMP_MODE": {},
 	},
 	AgentTypePi: {
 		"PI_MODEL":        {},

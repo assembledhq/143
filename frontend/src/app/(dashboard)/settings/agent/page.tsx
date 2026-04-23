@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShieldAlert, Trash2 } from "lucide-react";
+import { AlertTriangle, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
@@ -38,8 +38,7 @@ import {
   clampNumber,
 } from "@/lib/settings-constants";
 
-type StackAgent = "codex" | "claude_code" | "gemini_cli";
-type ModalProvider = StackAgent | "amp" | "pi";
+type ModalProvider = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 type AddFlowAuthType = "subscription" | "api_key";
 type InsertionMode = "make_default" | "next_fallback";
 
@@ -95,7 +94,7 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
     case "amp":
       return "Amp API key";
     case "pi":
-      return "Pi";
+      return "Pi API key";
     default:
       return "Coding auth";
   }
@@ -129,8 +128,14 @@ export default function AgentPage() {
     queryFn: () => api.codingAuths.list(),
     enabled: isAdmin,
   });
+  const { data: legacyStatusResponse } = useQuery({
+    queryKey: ["coding-auths", "legacy-status"],
+    queryFn: () => api.codingAuths.legacyStatus(),
+    enabled: isAdmin,
+  });
   const rows = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse?.data]);
   const selected = rows.find((row) => row.id === selectedId) ?? null;
+  const legacyStatus = legacyStatusResponse?.data;
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -139,7 +144,6 @@ export default function AgentPage() {
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const agentConfig = settings.agent_config ?? {};
   const maxConcurrentServer = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
   const sessionMinutesServer = Math.round((settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60);
 
@@ -190,11 +194,19 @@ export default function AgentPage() {
         auth_type: "api_key",
         label: nextLabel,
         api_key: apiKey,
+        ...(provider === "amp"
+          ? { agent_defaults: { AMP_MODE: ampMode } }
+          : provider === "pi"
+            ? { agent_defaults: { PI_MODEL: piModel } }
+            : {}),
       });
       return created.data;
     },
     onSuccess: async (created) => {
       await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      await queryClient.invalidateQueries({ queryKey: ["coding-auths", "legacy-status"] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       closeAddModal();
       if (insertionMode === "make_default") {
         const nextRows = moveRowToTop([created, ...rows], created.id);
@@ -205,55 +217,6 @@ export default function AgentPage() {
     onError: (error) => {
       captureError(error, { feature: "coding-auth-create" });
       toast.error("Could not create auth");
-    },
-  });
-
-  const ampSaveMutation = useMutation({
-    mutationFn: () =>
-      api.settings.update({
-        settings: {
-          agent_config: {
-            ...agentConfig,
-            amp: {
-              ...(agentConfig.amp ?? {}),
-              AMP_API_KEY: apiKey,
-              AMP_MODE: ampMode,
-            },
-          },
-        },
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      closeAddModal();
-      toast.success("Amp access saved");
-    },
-    onError: (error) => {
-      captureError(error, { feature: "amp-auth-save" });
-      toast.error("Could not save Amp access");
-    },
-  });
-
-  const piSaveMutation = useMutation({
-    mutationFn: () =>
-      api.settings.update({
-        settings: {
-          agent_config: {
-            ...agentConfig,
-            pi: {
-              ...(agentConfig.pi ?? {}),
-              PI_MODEL: piModel,
-            },
-          },
-        },
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      closeAddModal();
-      toast.success("Pi defaults saved");
-    },
-    onError: (error) => {
-      captureError(error, { feature: "pi-config-save" });
-      toast.error("Could not save Pi defaults");
     },
   });
 
@@ -273,6 +236,7 @@ export default function AgentPage() {
     mutationFn: (id: string) => api.codingAuths.delete(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       setSelectedId(null);
       setRenameValue("");
       toast.success("Auth disabled");
@@ -283,12 +247,37 @@ export default function AgentPage() {
     },
   });
 
+  const migrateLegacyMutation = useMutation({
+    mutationFn: () => api.codingAuths.migrateLegacy(),
+    onSuccess: async (response) => {
+      await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      await queryClient.invalidateQueries({ queryKey: ["coding-auths", "legacy-status"] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
+      const migrated = [
+        response.data.migrated_amp ? "Amp" : null,
+        response.data.migrated_pi ? "Pi" : null,
+      ].filter(Boolean);
+      if (migrated.length > 0) {
+        toast.success(`Migrated legacy ${migrated.join(" and ")} auth`);
+      } else if (response.data.removed_legacy_secrets) {
+        toast.success("Removed legacy coding-agent secrets from org settings");
+      } else {
+        toast.success("No legacy coding-agent auth needed migration");
+      }
+    },
+    onError: (error) => {
+      captureError(error, { feature: "coding-auth-legacy-migrate" });
+      toast.error("Could not migrate legacy coding-agent auth");
+    },
+  });
+
   const selectedProvider = PROVIDER_OPTIONS.find((option) => option.key === provider) ?? PROVIDER_OPTIONS[0];
   const effectiveAuthType = selectedProvider.supportsSubscription ? authType : "api_key";
   const generatedLabel = label.trim() || defaultLabel(provider, effectiveAuthType);
   const showInsertionSelect = selectedProvider.supportsStackOrder;
   const showAuthTypeSelector = selectedProvider.supportsSubscription;
-  const addBusy = stackCreateMutation.isPending || ampSaveMutation.isPending || piSaveMutation.isPending;
+  const addBusy = stackCreateMutation.isPending;
 
   function closeAddModal() {
     setAddOpen(false);
@@ -301,15 +290,13 @@ export default function AgentPage() {
     setPiModel(PI_MODEL_CLAUDE_OPUS_47);
   }
 
+  function openAddModal(nextProvider: ModalProvider) {
+    setProvider(nextProvider);
+    setAuthType(PROVIDER_OPTIONS.find((option) => option.key === nextProvider)?.supportsSubscription ? "subscription" : "api_key");
+    setAddOpen(true);
+  }
+
   function handleContinueAdd() {
-    if (provider === "pi") {
-      piSaveMutation.mutate();
-      return;
-    }
-    if (provider === "amp") {
-      ampSaveMutation.mutate();
-      return;
-    }
     if (effectiveAuthType === "subscription") {
       if (provider === "codex") {
         setShowCodexModal(true);
@@ -349,13 +336,58 @@ export default function AgentPage() {
           action={(
             <div className="flex items-center gap-3">
               <AutosaveIndicator status={autosave.status} />
-              <Button onClick={() => setAddOpen(true)}>
+              <Button onClick={() => openAddModal("codex")}>
                 <Plus className="mr-2 h-4 w-4" />
                 Add auth
               </Button>
             </div>
           )}
         />
+
+        {(legacyStatus?.has_legacy_amp_secret || legacyStatus?.has_legacy_pi_secret || legacyStatus?.pi_requires_manual_auth) ? (
+          <Card className="border-amber-500/20 bg-amber-500/5">
+            <CardContent className="flex items-start justify-between gap-4 py-4">
+              <div className="flex min-w-0 gap-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div className="space-y-1.5 text-sm">
+                  {legacyStatus.has_legacy_amp_secret ? (
+                    <p>
+                      Legacy Amp auth is still stored in org settings
+                      {legacyStatus.amp_masked_key ? ` (${legacyStatus.amp_masked_key})` : ""}. Move it into the coding-auth stack so it follows the same encrypted credential path as the other agents.
+                    </p>
+                  ) : null}
+                  {legacyStatus.has_legacy_pi_secret ? (
+                    <p>
+                      Legacy Pi auth is still stored in org settings
+                      {legacyStatus.pi_masked_key ? ` (${legacyStatus.pi_masked_key})` : ""}. Move it into the coding-auth stack so Pi uses the same dedicated credential flow as the other coding agents.
+                    </p>
+                  ) : null}
+                  {legacyStatus.pi_requires_manual_auth ? (
+                    <p>
+                      Pi defaults are configured, but Pi still needs its own API key. Pi no longer borrows Claude Code, Codex, or Gemini CLI credentials.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                {(legacyStatus.has_legacy_amp_secret || legacyStatus.has_legacy_pi_secret) ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => migrateLegacyMutation.mutate()}
+                    disabled={migrateLegacyMutation.isPending}
+                  >
+                    Migrate legacy auth
+                  </Button>
+                ) : null}
+                {legacyStatus.pi_requires_manual_auth ? (
+                  <Button variant="outline" onClick={() => openAddModal("pi")}>
+                    Add Pi auth
+                  </Button>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         <section className="space-y-4">
           <div className="space-y-1.5">
@@ -430,7 +462,15 @@ export default function AgentPage() {
                     {selected.is_default ? <Badge>Default</Badge> : null}
                   </div>
                   <SheetDescription>
-                    {selected.agent === "codex" ? "Codex" : selected.agent === "claude_code" ? "Claude Code" : "Gemini CLI"} {selected.auth_type === "subscription" ? "subscription" : "API key"} auth
+                    {selected.agent === "codex"
+                      ? "Codex"
+                      : selected.agent === "claude_code"
+                        ? "Claude Code"
+                        : selected.agent === "gemini_cli"
+                          ? "Gemini CLI"
+                          : selected.agent === "amp"
+                            ? "Amp"
+                            : "Pi"} {selected.auth_type === "subscription" ? "subscription" : "API key"} auth
                   </SheetDescription>
                 </SheetHeader>
 
@@ -507,129 +547,120 @@ export default function AgentPage() {
               setAuthType("api_key");
             }
           }}
-          primaryLabel={provider === "pi" ? "Save Pi defaults" : effectiveAuthType === "subscription" ? "Continue" : "Save auth"}
+          primaryLabel={effectiveAuthType === "subscription" ? "Continue" : "Save auth"}
           onPrimary={handleContinueAdd}
-          primaryDisabled={addBusy || (provider !== "pi" && effectiveAuthType === "api_key" && !apiKey.trim())}
+          primaryDisabled={addBusy || (effectiveAuthType === "api_key" && !apiKey.trim())}
           onCancel={closeAddModal}
         >
-          {provider === "pi" ? (
-            <div className="space-y-4 rounded-xl border border-border bg-muted/20 p-4">
-              <div className="space-y-1">
-                <div className="font-medium text-sm">Pi reuses other auths</div>
-                <p className="text-xs text-muted-foreground">
-                  Pi does not have a dedicated API key. It uses the Codex, Claude Code, and Gemini auths you already configured.
-                </p>
-              </div>
+          <>
+            {showAuthTypeSelector ? (
               <div className="space-y-2">
-                <Label htmlFor="pi-model">Default model</Label>
-                <Select value={piModel} onValueChange={setPiModel}>
-                  <SelectTrigger id="pi-model">
+                <Label>Auth type</Label>
+                <RadioGroup
+                  value={effectiveAuthType}
+                  onValueChange={(value) => setAuthType(value as AddFlowAuthType)}
+                  className="grid gap-3 md:grid-cols-2"
+                >
+                  <Label htmlFor="auth-subscription" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                    <RadioGroupItem value="subscription" id="auth-subscription" />
+                    <div className="space-y-1">
+                      <div className="font-medium text-sm">Subscription</div>
+                      <p className="text-xs text-muted-foreground">
+                        Use this when a seat is already provisioned and you want managed sign-in.
+                      </p>
+                    </div>
+                  </Label>
+                  <Label htmlFor="auth-api-key" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
+                    <RadioGroupItem value="api_key" id="auth-api-key" />
+                    <div className="space-y-1">
+                      <div className="font-medium text-sm">API key</div>
+                      <p className="text-xs text-muted-foreground">
+                        Use this for service accounts, rotation, and pay-as-you-go billing.
+                      </p>
+                    </div>
+                  </Label>
+                </RadioGroup>
+              </div>
+            ) : null}
+
+            <div className="space-y-2">
+              <Label htmlFor="auth-label">Name</Label>
+              <Input
+                id="auth-label"
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
+                placeholder={`Optional — defaults to “${generatedLabel}”`}
+              />
+            </div>
+
+            {effectiveAuthType === "api_key" ? (
+              <>
+                {provider === "amp" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="amp-mode">Default mode</Label>
+                    <Select value={ampMode} onValueChange={setAmpMode}>
+                      <SelectTrigger id="amp-mode">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {AVAILABLE_AMP_MODES.map((mode) => (
+                          <SelectItem key={mode} value={mode}>{capitalizeWord(mode)}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+                {provider === "pi" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="pi-model">Default model</Label>
+                    <Select value={piModel} onValueChange={setPiModel}>
+                      <SelectTrigger id="pi-model">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {AVAILABLE_PI_MODELS.map((model) => (
+                          <SelectItem key={model} value={model}>{model}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+                <div className="space-y-2">
+                  <Label htmlFor="auth-api-key-input" className="flex items-center gap-2">
+                    API key
+                    <APIKeyHelpTooltip
+                      ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
+                      description={apiKeyHelp(provider).description}
+                      href={apiKeyHelp(provider).href}
+                      linkLabel={apiKeyHelp(provider).linkLabel}
+                    />
+                  </Label>
+                  <Input
+                    id="auth-api-key-input"
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
+                  />
+                </div>
+              </>
+            ) : null}
+
+            {showInsertionSelect ? (
+              <div className="space-y-2">
+                <Label htmlFor="insertion-mode">Insertion point</Label>
+                <Select value={insertionMode} onValueChange={(value) => setInsertionMode(value as InsertionMode)}>
+                  <SelectTrigger id="insertion-mode">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {AVAILABLE_PI_MODELS.map((model) => (
-                      <SelectItem key={model} value={model}>{model}</SelectItem>
-                    ))}
+                    <SelectItem value="next_fallback">Add as next fallback</SelectItem>
+                    <SelectItem value="make_default">Make default</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-          ) : (
-            <>
-              {showAuthTypeSelector ? (
-                <div className="space-y-2">
-                  <Label>Auth type</Label>
-                  <RadioGroup
-                    value={effectiveAuthType}
-                    onValueChange={(value) => setAuthType(value as AddFlowAuthType)}
-                    className="grid gap-3 md:grid-cols-2"
-                  >
-                    <Label htmlFor="auth-subscription" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
-                      <RadioGroupItem value="subscription" id="auth-subscription" />
-                      <div className="space-y-1">
-                        <div className="font-medium text-sm">Subscription</div>
-                        <p className="text-xs text-muted-foreground">
-                          Use this when a seat is already provisioned and you want managed sign-in.
-                        </p>
-                      </div>
-                    </Label>
-                    <Label htmlFor="auth-api-key" className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4">
-                      <RadioGroupItem value="api_key" id="auth-api-key" />
-                      <div className="space-y-1">
-                        <div className="font-medium text-sm">API key</div>
-                        <p className="text-xs text-muted-foreground">
-                          Use this for service accounts, rotation, and pay-as-you-go billing.
-                        </p>
-                      </div>
-                    </Label>
-                  </RadioGroup>
-                </div>
-              ) : null}
-
-              <div className="space-y-2">
-                <Label htmlFor="auth-label">Name</Label>
-                <Input
-                  id="auth-label"
-                  value={label}
-                  onChange={(event) => setLabel(event.target.value)}
-                  placeholder={`Optional — defaults to “${generatedLabel}”`}
-                />
-              </div>
-
-              {effectiveAuthType === "api_key" ? (
-                <>
-                  {provider === "amp" ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="amp-mode">Default mode</Label>
-                      <Select value={ampMode} onValueChange={setAmpMode}>
-                        <SelectTrigger id="amp-mode">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {AVAILABLE_AMP_MODES.map((mode) => (
-                            <SelectItem key={mode} value={mode}>{capitalizeWord(mode)}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ) : null}
-                  <div className="space-y-2">
-                    <Label htmlFor="auth-api-key-input" className="flex items-center gap-2">
-                      API key
-                      <APIKeyHelpTooltip
-                        ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
-                        description={apiKeyHelp(provider).description}
-                        href={apiKeyHelp(provider).href}
-                        linkLabel={apiKeyHelp(provider).linkLabel}
-                      />
-                    </Label>
-                    <Input
-                      id="auth-api-key-input"
-                      type="password"
-                      value={apiKey}
-                      onChange={(event) => setApiKey(event.target.value)}
-                      placeholder={provider === "amp" ? "amp_..." : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
-                    />
-                  </div>
-                </>
-              ) : null}
-
-              {showInsertionSelect ? (
-                <div className="space-y-2">
-                  <Label htmlFor="insertion-mode">Insertion point</Label>
-                  <Select value={insertionMode} onValueChange={(value) => setInsertionMode(value as InsertionMode)}>
-                    <SelectTrigger id="insertion-mode">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="next_fallback">Add as next fallback</SelectItem>
-                      <SelectItem value="make_default">Make default</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              ) : null}
-            </>
-          )}
+            ) : null}
+          </>
         </CodingAuthDialog>
 
         {showCodexModal ? (

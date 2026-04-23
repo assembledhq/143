@@ -27,6 +27,7 @@ type userCredentialStore interface {
 // orgCredentialReader reads org-level credentials for the resolution preview.
 type orgCredentialReader interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
 }
 
 // userLookup reads users by ID for showing who set team defaults.
@@ -293,7 +294,7 @@ func (h *UserCredentialHandler) ListResolved(w http.ResponseWriter, r *http.Requ
 
 		// 3. Check org credential.
 		if h.orgCreds != nil {
-			if cred, err := h.orgCreds.Get(r.Context(), orgID, provider); err == nil && cred != nil {
+			if cred := findResolvedOrgCredential(r.Context(), h.orgCreds, orgID, provider); cred != nil {
 				rc.Source = "org"
 				rc.MaskedKey = cred.Config.MaskedSummary().MaskedKey
 				resolved = append(resolved, rc)
@@ -305,4 +306,27 @@ func (h *UserCredentialHandler) ListResolved(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.ResolvedCredential]{Data: resolved})
+}
+
+func findResolvedOrgCredential(ctx context.Context, orgCreds orgCredentialReader, orgID uuid.UUID, provider models.ProviderName) *models.DecryptedCredential {
+	if orgCreds == nil {
+		return nil
+	}
+
+	if provider.IsCodingAgentProvider() {
+		if creds, err := orgCreds.ListByProvider(ctx, orgID, provider); err == nil {
+			for _, cred := range creds {
+				if masked := cred.Config.MaskedSummary().MaskedKey; masked != "" {
+					credCopy := cred
+					return &credCopy
+				}
+			}
+		}
+	}
+
+	cred, err := orgCreds.Get(ctx, orgID, provider)
+	if err != nil {
+		return nil
+	}
+	return cred
 }
