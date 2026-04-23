@@ -613,7 +613,7 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 
 	titleSession := *session
 	titleSession.ResultSummary = nil
-	title := formatPRTitle(&titleSession, issue)
+	title := formatSyncedPRTitle(&titleSession, issue)
 	if title == "" {
 		return nil
 	}
@@ -1593,6 +1593,28 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 		return title
 	}
 	return fmt.Sprintf("Session %s", session.ID.String()[:8])
+}
+
+func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
+	if issue != nil && issue.Source == models.IssueSourceLinear {
+		title := bestPRTitleSubject(session, issue.Title)
+		if title == "" {
+			title = normalizePRTitleCandidate(issue.Title)
+			if title == "" {
+				title = issue.Title
+			}
+		}
+
+		prefix := strings.TrimSpace(issue.ExternalID)
+		if prefix == "" {
+			return truncatePRTitle(title, maxPRTitleLen)
+		}
+
+		prefix += ": "
+		return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+	}
+
+	return formatPRTitle(session, issue)
 }
 
 func formatCommitMessage(session *models.Session, issue *models.Issue) string {

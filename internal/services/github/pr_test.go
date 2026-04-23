@@ -2214,6 +2214,94 @@ func TestSyncSessionTitle_UpdatesExistingPullRequestForDisconnectedRepo(t *testi
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSyncSessionTitle_UsesEditedSessionTitleForLinearIssue(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	updatedTitle := "Updated session title"
+	body := "body"
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/acme/repo/pull/42", "acme/repo",
+					"ENG-123: Old PR title", &body, "open", "pending", "app", "", nil, now, now),
+		)
+
+	mock.ExpectQuery("SELECT .+ FROM issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestIssueColumns).
+				AddRow(issueID, orgID, "ENG-123", "linear", nil, nil,
+					"Original Linear title", nil, json.RawMessage(`{}`), "open", now, now,
+					1, 1, "high", []string{"bug"}, "fp", now, now, nil),
+		)
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id =").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).
+				AddRow(uuid.New(), orgID, uuid.New(), int64(1001), "acme/repo", "main", false, nil, nil,
+					"https://github.com/acme/repo.git", int64(123), "active", nil, nil, []byte(`{}`), now, now),
+		)
+
+	mock.ExpectExec("UPDATE pull_requests SET title").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	tokenSvc, err := NewService(143, testPrivateKeyPEM(t))
+	require.NoError(t, err, "should create GitHub service with test private key")
+	tokenSvc.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/app/installations/123/access_tokens":
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Body:       io.NopCloser(strings.NewReader(`{"token":"installation-token"}`)),
+					Header:     make(http.Header),
+				}, nil
+			case "/repos/acme/repo/pulls/42":
+				require.Equal(t, http.MethodPatch, req.Method, "sync should PATCH the existing PR")
+				var body map[string]any
+				err := json.NewDecoder(req.Body).Decode(&body)
+				require.NoError(t, err, "sync should send valid JSON")
+				require.Equal(t, "ENG-123: Updated session title", body["title"], "sync should keep the Linear prefix and use the edited session title")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"number":42}`)),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
+			}
+		}),
+	}
+
+	svc := &PRService{
+		tokenProvider: tokenSvc,
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		issues:        db.NewIssueStore(mock),
+		httpClient:    tokenSvc.httpClient,
+		logger:        zerolog.Nop(),
+	}
+
+	err = svc.SyncSessionTitle(context.Background(), &models.Session{
+		ID:      sessionID,
+		OrgID:   orgID,
+		IssueID: issueID,
+		Title:   &updatedTitle,
+	})
+	require.NoError(t, err, "syncing the session title should succeed for Linear issues")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPRTemplatePaths(t *testing.T) {
 	t.Parallel()
 
