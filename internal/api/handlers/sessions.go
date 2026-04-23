@@ -14,6 +14,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
@@ -56,6 +57,7 @@ type SessionHandler struct {
 	canceller        SessionCanceller // optional — enables cancelling running sessions
 	prAuthSigningKey []byte
 	frontendURL      string
+	streams          *cache.SessionStreams
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
@@ -73,6 +75,10 @@ func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 // SetViewStore injects the session view store for tracking unread sessions.
 func (h *SessionHandler) SetViewStore(vs *db.SessionViewStore) {
 	h.viewStore = vs
+}
+
+func (h *SessionHandler) SetStreams(streams *cache.SessionStreams) {
+	h.streams = streams
 }
 
 // SetShutdownSignal wires a channel that is closed when the server is
@@ -614,73 +620,95 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send existing logs.
-	logs, err := h.logStore.ListByRunID(r.Context(), orgID, runID)
-	if err != nil {
-		return
+	lastEventID := r.Header.Get("Last-Event-ID")
+	if lastEventID == "" {
+		lastEventID = r.URL.Query().Get("last_event_id")
 	}
 
-	var lastSeenID int64
+	if h.streams != nil && h.streams.Available() {
+		if h.streamLogsViaRedis(r.Context(), sw, orgID, run, lastEventID) {
+			return
+		}
+		zerolog.Ctx(r.Context()).Warn().Str("session_id", runID.String()).Msg("Redis stream path unavailable, falling back to Postgres polling")
+	}
+
+	h.streamLogsViaPolling(r.Context(), sw, orgID, run, lastEventID)
+}
+
+func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Writer, orgID uuid.UUID, run models.Session, lastEventID string) {
+	logger := zerolog.Ctx(ctx)
+	var (
+		logs       []models.SessionLog
+		err        error
+		lastSeenID int64
+	)
+	if lastEventID == "" {
+		logs, err = h.logStore.ListByRunID(ctx, orgID, run.ID)
+	} else {
+		lastSeenID, err = cache.ParseLogStreamID(lastEventID)
+		if err != nil {
+			logs, err = h.logStore.ListByRunID(ctx, orgID, run.ID)
+			lastSeenID = 0
+		} else {
+			logs, err = h.logStore.ListByRunIDSince(ctx, orgID, run.ID, lastSeenID)
+		}
+	}
+	if err != nil {
+		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to load initial logs for SSE polling stream")
+		return
+	}
 	for _, log := range logs {
-		if err := sw.WriteData(log); err != nil {
-			zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+		if err := sw.WriteDataID(cache.SessionLogStreamID(log.ID), log); err != nil {
+			logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write log event to SSE stream")
 			return
 		}
 		lastSeenID = log.ID
 	}
 
-	// Send initial status event with the current session state.
 	lastStatus := run.Status
 	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
-		zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write initial status event to SSE stream")
+		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
 	sw.Flush()
 
-	// Poll for new logs.
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	// Send a keepalive comment on idle streams so intermediary proxies and
-	// browsers don't time out connections that have no log traffic.
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
-
-	// Local shutdown channel so we can safely `select` even when no signal
-	// has been wired up. A nil channel blocks forever, which is what we want
-	// as a default.
 	shutdownCh := h.shutdownCh
 
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		case <-shutdownCh:
-			// Server is shutting down — close the stream cleanly. The
-			// EventSource client sees an EOF, fires onerror, and reconnects
-			// to the new container via Caddy. Sending a final heartbeat
-			// triggers a flush so the browser isn't blocked reading a
-			// half-buffered chunk.
-			_ = sw.WriteHeartbeat()
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write shutdown heartbeat to SSE polling stream")
+			}
 			sw.Flush()
 			return
 		case <-heartbeat.C:
 			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write heartbeat to SSE polling stream")
 				return
 			}
 			sw.Flush()
 		case <-ticker.C:
-			run, err := h.runStore.GetByID(r.Context(), orgID, runID)
+			run, err := h.runStore.GetByID(ctx, orgID, run.ID)
 			if err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to reload session for SSE polling stream")
 				return
 			}
 
-			newLogs, err := h.logStore.ListByRunIDSince(r.Context(), orgID, runID, lastSeenID)
+			newLogs, err := h.logStore.ListByRunIDSince(ctx, orgID, run.ID, lastSeenID)
 			if err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Int64("last_seen_id", lastSeenID).Msg("failed to load incremental logs for SSE polling stream")
 				return
 			}
 			for _, log := range newLogs {
-				if err := sw.WriteData(log); err != nil {
-					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write log event to SSE stream")
+				if err := sw.WriteDataID(cache.SessionLogStreamID(log.ID), log); err != nil {
+					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write log event to SSE stream")
 					return
 				}
 				lastSeenID = log.ID
@@ -690,7 +718,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			if run.Status != lastStatus {
 				lastStatus = run.Status
 				if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
-					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write status event to SSE stream")
+					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write status event to SSE stream")
 					return
 				}
 			}
@@ -699,7 +727,7 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 
 			if isTerminalStatus(run.Status) {
 				if err := sw.WriteEvent(sse.EventDone, run); err != nil {
-					zerolog.Ctx(r.Context()).Error().Err(err).Str("session_id", runID.String()).Msg("failed to write done event to SSE stream")
+					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
 				sw.Flush()
@@ -707,6 +735,163 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer, orgID uuid.UUID, run models.Session, lastEventID string) bool {
+	logger := zerolog.Ctx(ctx)
+	logSub, err := h.streams.SubscribeLogs(run.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to subscribe to Redis session log stream")
+		return false
+	}
+	defer logSub.Close()
+
+	statusSub, err := h.streams.SubscribeStatus(run.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to subscribe to Redis session status stream")
+		return false
+	}
+	defer statusSub.Close()
+
+	logs, err := h.catchUpLogs(ctx, orgID, run.ID, lastEventID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("last_event_id", lastEventID).Msg("failed to catch up logs from Redis-backed stream")
+		return false
+	}
+	lastDeliveredStreamID := lastEventID
+	for _, log := range logs {
+		streamID := cache.SessionLogStreamID(log.ID)
+		if err := sw.WriteDataID(streamID, log); err != nil {
+			logger.Error().Err(err).Str("session_id", run.ID.String()).Str("stream_id", streamID).Msg("failed to write replayed log event to SSE stream")
+			return false
+		}
+		lastDeliveredStreamID = streamID
+	}
+	if err := sw.WriteEvent(sse.EventStatus, run); err != nil {
+		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to Redis-backed SSE stream")
+		return false
+	}
+	sw.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-h.shutdownCh:
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write shutdown heartbeat to Redis-backed SSE stream")
+			}
+			sw.Flush()
+			return true
+		case <-heartbeat.C:
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write heartbeat to Redis-backed SSE stream")
+				return true
+			}
+			sw.Flush()
+		case logEntry, ok := <-logSub.C:
+			if !ok {
+				closeReason := logSub.CloseReason()
+				logger.Warn().Str("session_id", run.ID.String()).Str("reason", closeReason).Msg("Redis log subscription closed; client should reconnect")
+				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
+					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis log subscription closed")
+				}
+				sw.Flush()
+				return true
+			}
+			if seen, skip := shouldSkipRedisLog(ctx, logEntry.StreamID, lastDeliveredStreamID, run.ID); skip {
+				if seen != "" {
+					lastDeliveredStreamID = seen
+				}
+				continue
+			}
+			if err := sw.WriteDataID(logEntry.StreamID, logEntry.Log); err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("stream_id", logEntry.StreamID).Msg("failed to write Redis log event to SSE stream")
+				return true
+			}
+			lastDeliveredStreamID = logEntry.StreamID
+			sw.Flush()
+		case updated, ok := <-statusSub.C:
+			if !ok {
+				closeReason := statusSub.CloseReason()
+				logger.Warn().Str("session_id", run.ID.String()).Str("reason", closeReason).Msg("Redis status subscription closed; client should reconnect")
+				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
+					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis status subscription closed")
+				}
+				sw.Flush()
+				return true
+			}
+			if err := sw.WriteEvent(sse.EventStatus, updated); err != nil {
+				logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis status event to SSE stream")
+				return true
+			}
+			sw.Flush()
+			if isTerminalStatus(updated.Status) {
+				if err := sw.WriteEvent(sse.EventDone, updated); err != nil {
+					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis done event to SSE stream")
+					return true
+				}
+				sw.Flush()
+				return true
+			}
+		}
+	}
+}
+
+func (h *SessionHandler) catchUpLogs(ctx context.Context, orgID, runID uuid.UUID, lastEventID string) ([]models.SessionLog, error) {
+	if lastEventID == "" {
+		return h.logStore.ListByRunID(ctx, orgID, runID)
+	}
+	if h.streams != nil {
+		if buffered, ok := h.streams.ReplayBufferedLogs(runID, lastEventID); ok {
+			out := make([]models.SessionLog, 0, len(buffered))
+			for _, item := range buffered {
+				out = append(out, item.Log)
+			}
+			return out, nil
+		}
+		ranged, err := h.streams.RangeLogsSince(ctx, runID, lastEventID, 10000)
+		if err == nil {
+			out := make([]models.SessionLog, 0, len(ranged))
+			for _, item := range ranged {
+				out = append(out, item.Log)
+			}
+			return out, nil
+		}
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", runID.String()).Str("last_event_id", lastEventID).Msg("failed to read Redis stream range, falling back to Postgres log catch-up")
+	}
+	lastSeenID, err := cache.ParseLogStreamID(lastEventID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", runID.String()).Str("last_event_id", lastEventID).Msg("invalid Last-Event-ID, replaying full session log history")
+		return h.logStore.ListByRunID(ctx, orgID, runID)
+	}
+	return h.logStore.ListByRunIDSince(ctx, orgID, runID, lastSeenID)
+}
+
+func shouldSkipRedisLog(ctx context.Context, streamID string, lastDeliveredStreamID string, sessionID uuid.UUID) (string, bool) {
+	if lastDeliveredStreamID == "" {
+		return "", false
+	}
+
+	currentID, err := cache.ParseLogStreamID(streamID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", sessionID.String()).Str("stream_id", streamID).Msg("failed to parse Redis log stream ID")
+		return "", false
+	}
+
+	lastSeenID, err := cache.ParseLogStreamID(lastDeliveredStreamID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", sessionID.String()).Str("last_stream_id", lastDeliveredStreamID).Msg("failed to parse last delivered Redis log stream ID")
+		return "", false
+	}
+
+	if currentID <= lastSeenID {
+		return lastDeliveredStreamID, true
+	}
+	return "", false
 }
 
 // GetValidation returns the validation results for an agent run.

@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
@@ -37,7 +38,7 @@ import (
 	threadservice "github.com/assembledhq/143/internal/services/thread"
 )
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -53,6 +54,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
+	sessionStore.SetLogger(logger)
+	sessionLogStore.SetLogger(logger)
+	jobStore.SetLogger(logger)
+	if sessionStreams != nil {
+		sessionStore.SetStreams(sessionStreams)
+		sessionLogStore.SetStreams(sessionStreams)
+	}
+	if redisClient != nil {
+		jobStore.SetNotifier(cache.NewJobNotifier(redisClient, logger))
+	}
 	pmPlanStore := db.NewPMPlanStore(pool)
 	pmDecisionLogStore := db.NewPMDecisionLogStore(pool)
 
@@ -115,6 +126,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
+	if redisClient != nil {
+		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
+	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
 	organizationsHandler := handlers.NewOrganizationsHandler(pool)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
@@ -176,6 +190,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
 	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
 	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
+	sessionHandler.SetStreams(sessionStreams)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,

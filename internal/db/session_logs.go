@@ -4,18 +4,31 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/assembledhq/143/internal/models"
+	"github.com/rs/zerolog"
 )
 
 type SessionLogStore struct {
-	db DBTX
+	db      DBTX
+	streams *cache.SessionStreams
+	logger  zerolog.Logger
 }
 
 func NewSessionLogStore(db DBTX) *SessionLogStore {
-	return &SessionLogStore{db: db}
+	return &SessionLogStore{db: db, logger: zerolog.Nop()}
+}
+
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis session log streaming"
+func (s *SessionLogStore) SetStreams(streams *cache.SessionStreams) {
+	s.streams = streams
+}
+
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *SessionLogStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
@@ -35,7 +48,15 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&log.ID, &log.Timestamp)
+	if err := row.Scan(&log.ID, &log.Timestamp); err != nil {
+		return err
+	}
+	if s.streams != nil {
+		if err := s.streams.PublishLog(ctx, log); err != nil {
+			s.logger.Warn().Err(err).Str("session_id", log.SessionID.String()).Msg("failed to publish session log to Redis")
+		}
+	}
+	return nil
 }
 
 func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error {

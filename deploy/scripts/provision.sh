@@ -4,7 +4,7 @@ set -euo pipefail
 # Provision a node by running bootstrap.sh + copying config files via SSH.
 # Usage: ./provision.sh <role> <host> <ssh-key-path> [--reprovision]
 #
-# Roles: app, worker, db, logging
+# Roles: app, worker, db, logging, redis
 # This is the SSH-based alternative to cloud-init for already-running servers.
 #
 # Pass --reprovision to tear down existing containers and volumes before reprovisioning.
@@ -37,7 +37,8 @@ case "$ROLE" in
   worker)  COMPOSE_FILE="docker-compose.worker.yml" ;;
   db)      COMPOSE_FILE="docker-compose.db.yml" ;;
   logging) COMPOSE_FILE="docker-compose.logging.yml" ;;
-  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging)"; exit 1 ;;
+  redis)   COMPOSE_FILE="docker-compose.redis.yml" ;;
+  *)       echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
 esac
 
 # Logging nodes use only public runtime images, but they still rely on values
@@ -80,11 +81,11 @@ else
 fi
 
 # Validate required secrets are available (from env or .env.production.enc)
-if [ "$ROLE" != "logging" ]; then
+if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_PASSWORD:?DB_PASSWORD is required (set it or add to .env.production.enc)}"
   : "${GHCR_TOKEN:?GHCR_TOKEN is required (set it or add to .env.production.enc)}"
 fi
-if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ]; then
+if [ "$ROLE" != "db" ] && [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
 fi
 if [ "$ROLE" = "logging" ]; then
@@ -92,7 +93,11 @@ if [ "$ROLE" = "logging" ]; then
   GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
 fi
-if [ "$ROLE" != "db" ]; then
+if [ "$ROLE" = "redis" ]; then
+  : "${REDIS_PASSWORD:?REDIS_PASSWORD is required for redis role (set it or add to .env.production.enc)}"
+  : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (Redis node private IP)}"
+fi
+if [ "$ROLE" != "db" ] && [ "$ROLE" != "redis" ]; then
   : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for $ROLE role (logging server private IP)}"
 fi
 
@@ -150,6 +155,23 @@ elif [ "$ROLE" = "logging" ]; then
     usermod -aG docker deploy
     echo "Bootstrap complete (logging)."
 BOOTSTRAP_LOGGING
+elif [ "$ROLE" = "redis" ]; then
+  ssh "${SSH_OPTS[@]}" root@"$HOST" << 'BOOTSTRAP_REDIS'
+    set -euo pipefail
+    id deploy &>/dev/null || adduser --disabled-password --gecos "" deploy
+    mkdir -p /home/deploy/.ssh /opt/143
+    [ -f /root/.ssh/authorized_keys ] && cp /root/.ssh/authorized_keys /home/deploy/.ssh/
+    chown -R deploy:deploy /home/deploy/.ssh /opt/143
+    chmod 700 /home/deploy/.ssh
+    command -v docker &>/dev/null || (curl -fsSL https://get.docker.com | sh)
+    usermod -aG docker deploy
+    cat > /etc/sysctl.d/99-redis.conf <<SYSCTL
+vm.overcommit_memory = 1
+net.core.somaxconn = 512
+SYSCTL
+    sysctl -p /etc/sysctl.d/99-redis.conf
+    echo "Bootstrap complete (redis)."
+BOOTSTRAP_REDIS
 else
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'bash -s -- '"$ROLE" < "$SCRIPT_DIR/bootstrap.sh"
 fi
@@ -183,14 +205,17 @@ if [ "$ROLE" = "logging" ]; then
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\n' "$DB_PASSWORD" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
+elif [ "$ROLE" = "redis" ]; then
+  printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "worker" ]; then
   # Workers only get the secrets they need — no age key or encrypted bundle.
   # A worker compromise cannot decrypt the full production secret set.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
+  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_URL=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_URL:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_URL=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_URL:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
   # Copy encrypted production env (baked into the Docker image too, but
   # having it on disk lets you re-decrypt without rebuilding)
@@ -203,7 +228,7 @@ fi
 # Step 4: GHCR login + pull images
 echo "--- Step 4/5: Pulling images ---"
 case "$ROLE" in
-  db|logging)
+  db|logging|redis)
     # Public images (postgres, victorialogs, grafana) are pulled automatically by compose
     ;;
   *)
@@ -253,7 +278,7 @@ RESOLV
       chmod 644 /etc/143/sandbox-resolv.conf
 PULL_WORKER
     ;;
-  db|logging)
+  db|logging|redis)
     # Public images are pulled automatically by compose
     ;;
 esac

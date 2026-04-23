@@ -176,6 +176,14 @@ type Config struct {
 	// Telemetry (OpenTelemetry)
 	OTLPEndpoint string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"` // e.g. "otel-collector:4318" or "https://otlp.grafana.net"
 	OTLPInsecure bool   `env:"OTEL_EXPORTER_OTLP_INSECURE" envDefault:"false"`
+
+	// Redis (optional)
+	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
+	RedisURL        string `env:"REDIS_URL"`
+	RedisAddrs      string `env:"REDIS_ADDRS"`
+	RedisMasterName string `env:"REDIS_MASTER_NAME"`
+	RedisPassword   string `env:"REDIS_PASSWORD"`
+	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
 }
 
 // Load reads configuration from env files and environment variables.

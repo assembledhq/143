@@ -59,11 +59,21 @@ func (sw *Writer) WriteHeartbeat() error {
 // WriteEvent marshals data as JSON and writes a named SSE event.
 // For EventLog (the default event type), the event field is omitted.
 func (sw *Writer) WriteEvent(eventType EventType, data any) error {
+	return sw.WriteEventID(eventType, "", data)
+}
+
+// WriteEventID marshals data as JSON and writes a named SSE event with an optional event ID.
+func (sw *Writer) WriteEventID(eventType EventType, id string, data any) error {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("sse: marshal %s event: %w", eventType, err)
 	}
 
+	if id != "" {
+		if _, err := fmt.Fprintf(sw.w, "id: %s\n", id); err != nil {
+			return fmt.Errorf("sse: write %s event id: %w", eventType, err)
+		}
+	}
 	if eventType != EventLog {
 		if _, err := fmt.Fprintf(sw.w, "event: %s\n", string(eventType)); err != nil {
 			return fmt.Errorf("sse: write %s event header: %w", eventType, err)
@@ -78,6 +88,10 @@ func (sw *Writer) WriteEvent(eventType EventType, data any) error {
 // WriteData is a convenience for writing the default (unnamed) event.
 func (sw *Writer) WriteData(data any) error {
 	return sw.WriteEvent(EventLog, data)
+}
+
+func (sw *Writer) WriteDataID(id string, data any) error {
+	return sw.WriteEventID(EventLog, id, data)
 }
 
 // Flush sends any buffered data to the client.

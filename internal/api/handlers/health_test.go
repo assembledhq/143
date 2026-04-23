@@ -26,6 +26,7 @@ func TestHealthz(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK for health check")
 	require.Contains(t, w.Body.String(), `"status":"ok"`, "response should contain ok status")
+	require.Contains(t, w.Body.String(), `"redis":"unavailable"`, "response should include Redis health status")
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"), "should set JSON content type")
 }
 
