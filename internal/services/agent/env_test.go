@@ -493,6 +493,61 @@ func TestAgentEnvResolveProviderConfig_UsesPriorityOrderedOrgAPIKeys(t *testing.
 	require.Equal(t, "priority-api-key", cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should choose the highest-priority org API key row")
 }
 
+func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	t.Run("returns nil when credential store is missing", func(t *testing.T) {
+		t.Parallel()
+
+		env := NewAgentEnv(AgentEnvDeps{
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
+		})
+
+		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderAnthropic)
+		require.Nil(t, cfg, "resolveOrgProviderConfig should return nil when no org credential store is configured")
+	})
+
+	t.Run("falls back to singleton get when list lookup misses", func(t *testing.T) {
+		t.Parallel()
+
+		env := NewAgentEnv(AgentEnvDeps{
+			Credentials: &envCredentialProvider{
+				listErrs: map[models.ProviderName]error{
+					models.ProviderOpenAI: errors.New("list failed"),
+				},
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderOpenAI: {
+						Provider: models.ProviderOpenAI,
+						Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback"},
+					},
+				},
+			},
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
+		})
+
+		cfg := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderOpenAI)
+		require.IsType(t, models.OpenAIConfig{}, cfg, "resolveOrgProviderConfig should fall back to Get when list lookup fails")
+		require.Equal(t, "sk-openai-fallback", cfg.(models.OpenAIConfig).APIKey, "resolveOrgProviderConfig should use the fallback org API key")
+	})
+
+	t.Run("filters incompatible coding provider configs", func(t *testing.T) {
+		t.Parallel()
+
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}), "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}), "compatibleCodingProviderConfig should accept Anthropic API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should accept OpenAI API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}), "compatibleCodingProviderConfig should accept Gemini API keys")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}), "compatibleCodingProviderConfig should accept OpenRouter API keys")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderOpenRouter, models.OpenRouterConfig{}), "compatibleCodingProviderConfig should reject empty OpenRouter configs")
+		require.Nil(t, compatibleCodingProviderConfig(models.ProviderName("unknown"), models.OpenAIConfig{APIKey: "sk"}), "compatibleCodingProviderConfig should reject unknown providers")
+	})
+}
+
 func TestAgentEnvCheckAuthAndNarrowScopedCredentials(t *testing.T) {
 	t.Parallel()
 

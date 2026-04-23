@@ -122,6 +122,49 @@ func TestCodingAuthHandlerList(t *testing.T) {
 	require.Equal(t, models.CodingAuthStatusNeverVerified, resp.Data[1].Status, "List should preserve row statuses")
 }
 
+func TestCodingAuthHandlerList_ErrorAndEmptyCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	t.Run("surfaces store errors", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			listFn: func(_ context.Context, _ uuid.UUID) ([]models.CodingAuth, error) {
+				return nil, errors.New("boom")
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/coding-auths", nil)
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).List(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "List should surface store failures")
+	})
+
+	t.Run("normalizes nil rows to an empty list", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			listFn: func(_ context.Context, _ uuid.UUID) ([]models.CodingAuth, error) {
+				return nil, nil
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/coding-auths", nil)
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).List(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "List should return 200 when the store returns nil rows")
+		require.JSONEq(t, `{"data":[],"meta":{}}`, rr.Body.String(), "List should serialize nil rows as an empty array")
+	})
+}
+
 func TestCodingAuthHandlerReorder(t *testing.T) {
 	t.Parallel()
 
@@ -163,6 +206,51 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		NewCodingAuthHandler(store).Reorder(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should reject invalid UUIDs")
+	})
+
+	t.Run("rejects invalid json", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{}
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/coding-auths/reorder", bytes.NewBufferString(`{`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).Reorder(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should reject invalid JSON")
+	})
+
+	t.Run("rejects empty ids", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{}
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/coding-auths/reorder", bytes.NewBufferString(`{"ids":[]}`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).Reorder(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should require at least one id")
+	})
+
+	t.Run("surfaces store errors", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			reorderFn: func(_ context.Context, _ uuid.UUID, _ []uuid.UUID) error {
+				return errors.New("boom")
+			},
+		}
+
+		body := bytes.NewBufferString(`{"ids":["` + secondID.String() + `"]}`)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/coding-auths/reorder", body)
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).Reorder(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "Reorder should surface store failures")
 	})
 }
 
@@ -211,6 +299,70 @@ func TestCodingAuthHandlerCreate(t *testing.T) {
 	var resp models.SingleResponse[models.CodingAuth]
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create response should be valid JSON")
 	require.Equal(t, createdID, resp.Data.ID, "Create should return the created row")
+}
+
+func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+
+	t.Run("rejects missing user", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{}`))
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+
+		require.Equal(t, http.StatusUnauthorized, rr.Code, "Create should require an authenticated user")
+	})
+
+	t.Run("rejects invalid json", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Create should reject invalid JSON")
+	})
+
+	t.Run("rejects invalid input", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{"agent":"codex","auth_type":"subscription"}`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Create should reject invalid inputs")
+	})
+
+	t.Run("surfaces store errors", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			createFn: func(_ context.Context, _ uuid.UUID, _ *uuid.UUID, _ models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+				return nil, errors.New("boom")
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{
+			"agent":"codex",
+			"auth_type":"api_key",
+			"api_key":"sk-test-123456789"
+		}`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).Create(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "Create should surface store failures")
+	})
 }
 
 func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
@@ -288,5 +440,63 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		NewCodingAuthHandler(store).Update(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Update should surface store failures")
+	})
+
+	t.Run("rejects invalid update id", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/coding-auths/bad-id", bytes.NewBufferString(`{"label":"Renamed"}`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		req.SetPathValue("id", "bad-id")
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Update(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject invalid ids")
+	})
+
+	t.Run("rejects invalid update json", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings/coding-auths/"+rowID.String(), bytes.NewBufferString(`{`))
+		req = withAdminUser(req, uuid.New(), orgID)
+		req.SetPathValue("id", rowID.String())
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Update(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject invalid JSON")
+	})
+
+	t.Run("rejects invalid delete id", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/coding-auths/bad-id", nil)
+		req = withAdminUser(req, uuid.New(), orgID)
+		req.SetPathValue("id", "bad-id")
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(&mockCodingAuthStore{}).Delete(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Delete should reject invalid ids")
+	})
+
+	t.Run("surfaces delete store errors", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockCodingAuthStore{
+			disableFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID) error {
+				return errors.New("boom")
+			},
+		}
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/settings/coding-auths/"+rowID.String(), nil)
+		req = withAdminUser(req, uuid.New(), orgID)
+		req.SetPathValue("id", rowID.String())
+		rr := httptest.NewRecorder()
+
+		NewCodingAuthHandler(store).Delete(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "Delete should surface store failures")
 	})
 }
