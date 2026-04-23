@@ -621,6 +621,29 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
+export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli";
+export type CodingAuthType = "subscription" | "api_key";
+export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid" | "never_verified";
+
+export interface CodingAuth {
+  id: string;
+  org_id: string;
+  priority: number;
+  agent: CodingAuthAgent;
+  auth_type: CodingAuthType;
+  label: string;
+  scope: string;
+  provider: string;
+  status: CodingAuthStatus;
+  is_default: boolean;
+  last_verified_at?: string;
+  last_used_at?: string;
+  usage_note?: string;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RepoSummary {
   repository_id: string;
   full_name: string;

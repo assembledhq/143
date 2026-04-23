@@ -586,6 +586,7 @@ type OrgCredential struct {
 	Label          string       `db:"label"`
 	Config         []byte       `db:"config"`
 	Status         string       `db:"status"`
+	Priority       int          `db:"priority"`
 	LastVerifiedAt *time.Time   `db:"last_verified_at"`
 	LastUsedAt     *time.Time   `db:"last_used_at"`
 	CreatedBy      *uuid.UUID   `db:"created_by"`
@@ -601,6 +602,7 @@ type DecryptedCredential struct {
 	Label          string         `json:"label,omitempty"`
 	Config         ProviderConfig `json:"-"`
 	Status         string         `json:"status"`
+	Priority       int            `json:"priority"`
 	LastVerifiedAt *time.Time     `json:"last_verified_at,omitempty"`
 	LastUsedAt     *time.Time     `json:"last_used_at,omitempty"`
 	CreatedBy      *uuid.UUID     `json:"created_by,omitempty"`
@@ -669,6 +671,89 @@ type ResolvedCredential struct {
 	Provider  ProviderName `json:"provider"`
 	Source    string       `json:"source"` // "personal", "team_default", "org", "none"
 	MaskedKey string       `json:"masked_key,omitempty"`
+}
+
+type CodingAuthType string
+
+const (
+	CodingAuthTypeSubscription CodingAuthType = "subscription"
+	CodingAuthTypeAPIKey       CodingAuthType = "api_key"
+)
+
+func (t CodingAuthType) Validate() error {
+	switch t {
+	case CodingAuthTypeSubscription, CodingAuthTypeAPIKey:
+		return nil
+	default:
+		return fmt.Errorf("unknown coding auth type: %s", t)
+	}
+}
+
+type CodingAuthStatus string
+
+const (
+	CodingAuthStatusHealthy       CodingAuthStatus = "healthy"
+	CodingAuthStatusRateLimited   CodingAuthStatus = "rate_limited"
+	CodingAuthStatusNeedsReauth   CodingAuthStatus = "needs_reauth"
+	CodingAuthStatusInvalid       CodingAuthStatus = "invalid"
+	CodingAuthStatusNeverVerified CodingAuthStatus = "never_verified"
+)
+
+func (s CodingAuthStatus) Validate() error {
+	switch s {
+	case CodingAuthStatusHealthy, CodingAuthStatusRateLimited, CodingAuthStatusNeedsReauth, CodingAuthStatusInvalid, CodingAuthStatusNeverVerified:
+		return nil
+	default:
+		return fmt.Errorf("unknown coding auth status: %s", s)
+	}
+}
+
+type CodingAuth struct {
+	ID             uuid.UUID        `json:"id"`
+	OrgID          uuid.UUID        `json:"org_id"`
+	Priority       int              `json:"priority"`
+	Agent          AgentType        `json:"agent"`
+	AuthType       CodingAuthType   `json:"auth_type"`
+	Label          string           `json:"label"`
+	Scope          string           `json:"scope"`
+	Provider       ProviderName     `json:"provider"`
+	Status         CodingAuthStatus `json:"status"`
+	IsDefault      bool             `json:"is_default"`
+	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
+	LastUsedAt     *time.Time       `json:"last_used_at,omitempty"`
+	UsageNote      string           `json:"usage_note,omitempty"`
+	CreatedBy      *uuid.UUID       `json:"created_by,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+type CreateCodingAuthInput struct {
+	Agent    AgentType      `json:"agent"`
+	AuthType CodingAuthType `json:"auth_type"`
+	Label    string         `json:"label"`
+	APIKey   string         `json:"api_key,omitempty"`
+	APIType  string         `json:"api_type,omitempty"`
+	BaseURL  string         `json:"base_url,omitempty"`
+}
+
+func (i CreateCodingAuthInput) Validate() error {
+	if err := i.Agent.Validate(); err != nil {
+		return err
+	}
+	if err := i.AuthType.Validate(); err != nil {
+		return err
+	}
+	if i.AuthType == CodingAuthTypeAPIKey && i.APIKey == "" {
+		return errors.New("api_key is required for api_key auth")
+	}
+	if i.AuthType == CodingAuthTypeSubscription {
+		return errors.New("subscription auth must be created through the provider-specific auth flow")
+	}
+	return nil
+}
+
+type UpdateCodingAuthInput struct {
+	Label *string `json:"label,omitempty"`
 }
 
 // CodingAgentProviders lists the LLM providers used as coding agent credentials.
