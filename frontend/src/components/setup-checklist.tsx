@@ -82,12 +82,12 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       ctaLabel: "Configure",
     },
     amp: {
-      description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush). Requires an AMP_API_KEY.",
+      description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush) and stores auth in the shared coding-agent credential stack.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
     pi: {
-      description: "Pi routes to many providers via one CLI. Reuses your other configured agent keys by default.",
+      description: "Pi uses its own API key and lets you choose the provider/model pair it should target by default.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
@@ -117,12 +117,16 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
+  const { data: resolvedCredsResponse } = useQuery({
+    queryKey: queryKeys.credentials.resolved,
+    queryFn: () => api.userCredentials.listResolved(),
+  });
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
-  const agentConfig = settings?.agent_config ?? {};
+  const resolvedCredentials = resolvedCredsResponse?.data ?? [];
 
   const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
-  const isSelectedAgentConnected = isAgentConnected(selectedAgentType, agentConfig, codexAuthResponse?.data);
+  const isSelectedAgentConnected = isAgentConnected(selectedAgentType, resolvedCredentials, codexAuthResponse?.data);
 
   const selectedAgent = agentOptions.find((agent) => agent.value === selectedAgentType) ?? agentOptions[0];
 

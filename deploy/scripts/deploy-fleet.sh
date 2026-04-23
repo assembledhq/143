@@ -8,7 +8,7 @@ set -euo pipefail
 #   1. FLEET_HOSTS env var             — comma-separated "role:IP" pairs
 #   2. .env.production.enc (FLEET_HOSTS) — encrypted, decrypted via SOPS
 #
-# FLEET_HOSTS format:  app:10.0.0.2,worker:10.0.0.4,worker:10.0.0.5
+# FLEET_HOSTS format:  app:10.0.0.2,worker:10.0.0.4,db:10.0.0.3,logging:10.0.0.6,redis:10.0.0.5
 
 SSH_KEY="$1"
 TAG="${2:-latest}"

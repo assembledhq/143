@@ -14,11 +14,10 @@ import (
 
 // PiAdapter runs the Pi CLI (npm: @mariozechner/pi-coding-agent) inside a sandbox.
 //
-// Pi is a meta-agent that can route to many providers (Anthropic, OpenAI,
-// Google, Moonshot, etc.) using a single CLI. The active model is selected
-// via the --model flag, with PI_MODEL_CUSTOM (free-form) winning over
-// PI_MODEL (curated dropdown). Provider auth env vars are inherited from
-// the other configured agents in the orchestrator.
+// Pi can route to many providers (Anthropic, OpenAI, Google, Moonshot, etc.)
+// using a single CLI. The active model is selected via the --model flag, with
+// PI_MODEL_CUSTOM (free-form) winning over PI_MODEL (curated dropdown). Pi
+// auth is passed through PI_API_KEY from the dedicated Pi credential store.
 type PiAdapter struct {
 	logger zerolog.Logger
 }
@@ -72,7 +71,7 @@ var piStreamingConfig = streamingAgentConfig{
 	CLIName:     "pi",
 	BuildCmd: func(escapedPromptPath string) string {
 		return fmt.Sprintf(
-			"pi -p \"$(cat '%s')\" --mode json --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\"",
+			"pi -p \"$(cat '%s')\" --mode json --api-key \"${PI_API_KEY}\" --model \"${PI_MODEL_CUSTOM:-${PI_MODEL:-%s}}\"",
 			escapedPromptPath,
 			models.PiModelClaudeOpus47,
 		)

@@ -22,7 +22,7 @@ func TestOrgSettingsCache_SetAndGet(t *testing.T) {
 	t.Parallel()
 	c := NewOrgSettingsCache(time.Minute)
 	orgID := uuid.New()
-	cfg := models.AgentEnvConfig{"amp": {"AMP_API_KEY": "amp_x"}}
+	cfg := models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}}
 
 	c.Set(orgID, cfg)
 
@@ -55,7 +55,7 @@ func TestOrgSettingsCache_Expiry(t *testing.T) {
 	c.SetClockForTest(func() time.Time { return current })
 
 	orgID := uuid.New()
-	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_API_KEY": "k"}})
+	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "smart"}})
 
 	// Advance just under the TTL — still a hit.
 	current = base.Add(59 * time.Second)
@@ -74,8 +74,8 @@ func TestOrgSettingsCache_InvalidateOrg(t *testing.T) {
 	orgID := uuid.New()
 	other := uuid.New()
 
-	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_API_KEY": "x"}})
-	c.Set(other, models.AgentEnvConfig{"amp": {"AMP_API_KEY": "y"}})
+	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}})
+	c.Set(other, models.AgentEnvConfig{"amp": {"AMP_MODE": "rush"}})
 
 	c.InvalidateOrg(orgID)
 
@@ -113,7 +113,7 @@ func TestOrgSettingsCache_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_API_KEY": "k"}})
+				c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "large"}})
 			}
 		}()
 		go func() {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -231,24 +232,32 @@ func TestOrgCredentialStore_ListCodingAuths(t *testing.T) {
 	codexSub := crypto.DevEncrypt([]byte(`{"access_token":"tok","refresh_token":"ref","expires_at":"2030-01-01T00:00:00Z","account_type":"plus"}`))
 	claudeKey := crypto.DevEncrypt([]byte(`{"api_key":"sk-ant-test"}`))
 	geminiKey := crypto.DevEncrypt([]byte(`{"api_key":"AIza-test","model":"gemini-2.5-pro"}`))
+	ampKey := crypto.DevEncrypt([]byte(`{"api_key":"sgamp_test_token"}`))
+	piKey := crypto.DevEncrypt([]byte(`{"api_key":"pi-provider-key"}`))
 
 	mock.ExpectQuery(`(?s)SELECT .* FROM org_credentials.*priority`).
 		WithArgs(orgID).
 		WillReturnRows(pgxmock.NewRows(codingAuthColumns).
 			AddRow(uuid.New(), orgID, "openai_chatgpt", "Team seat A", codexSub, "active", 1, &now, &now, nil, now, now).
 			AddRow(uuid.New(), orgID, "anthropic", "Claude backup", claudeKey, "active", 2, nil, nil, nil, now, now).
-			AddRow(uuid.New(), orgID, "gemini", "", geminiKey, "active", 3, nil, nil, nil, now, now))
+			AddRow(uuid.New(), orgID, "gemini", "", geminiKey, "active", 3, nil, nil, nil, now, now).
+			AddRow(uuid.New(), orgID, "amp", "", ampKey, "active", 4, nil, nil, nil, now, now).
+			AddRow(uuid.New(), orgID, "pi", "", piKey, "active", 5, nil, nil, nil, now, now))
 
 	store := NewOrgCredentialStore(mock, nil)
 	rows, err := store.ListCodingAuths(context.Background(), orgID)
 	require.NoError(t, err, "ListCodingAuths should not return an error")
-	require.Len(t, rows, 3, "ListCodingAuths should return every coding auth row")
+	require.Len(t, rows, 5, "ListCodingAuths should return every coding auth row")
 	require.Equal(t, models.AgentTypeCodex, rows[0].Agent, "ListCodingAuths should classify Codex subscription rows")
 	require.True(t, rows[0].IsDefault, "ListCodingAuths should mark the first runnable row as default")
 	require.Equal(t, models.CodingAuthTypeAPIKey, rows[1].AuthType, "ListCodingAuths should classify API key rows")
 	require.Equal(t, models.CodingAuthStatusNeverVerified, rows[1].Status, "ListCodingAuths should derive Never verified when last_verified_at is nil")
 	require.Equal(t, models.AgentTypeGeminiCLI, rows[2].Agent, "ListCodingAuths should classify Gemini API key rows")
 	require.Equal(t, "Gemini CLI API key", rows[2].Label, "ListCodingAuths should synthesize a default label when none is provided")
+	require.Equal(t, models.AgentTypeAmp, rows[3].Agent, "ListCodingAuths should classify Amp API key rows")
+	require.Equal(t, "Amp API key", rows[3].Label, "ListCodingAuths should synthesize an Amp label when none is provided")
+	require.Equal(t, models.AgentTypePi, rows[4].Agent, "ListCodingAuths should classify Pi API key rows")
+	require.Equal(t, "Pi API key", rows[4].Label, "ListCodingAuths should synthesize a Pi label when none is provided")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -905,6 +914,39 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		require.NoError(t, err, "DisableCodingAuth should not return an error")
 	})
 
+	t.Run("deletes coding auth by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`DELETE FROM org_credentials WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DeleteCodingAuth(context.Background(), orgID, rowID)
+		require.NoError(t, err, "DeleteCodingAuth should not return an error")
+	})
+
+	t.Run("surfaces delete coding auth errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`DELETE FROM org_credentials WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnError(errors.New("delete failed"))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DeleteCodingAuth(context.Background(), orgID, rowID)
+		require.Error(t, err, "DeleteCodingAuth should return database errors")
+		require.Contains(t, err.Error(), "delete coding auth", "DeleteCodingAuth should wrap database failures")
+	})
+
 	t.Run("disables row by id", func(t *testing.T) {
 		t.Parallel()
 
@@ -986,7 +1028,8 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		require.Equal(t, "Claude Code subscription", fallbackLabel(models.AgentTypeClaudeCode, models.CodingAuthTypeSubscription), "fallbackLabel should synthesize Claude subscription labels")
 		require.Equal(t, "Claude Code API key", fallbackLabel(models.AgentTypeClaudeCode, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Claude API key labels")
 		require.Equal(t, "Gemini CLI API key", fallbackLabel(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Gemini labels")
-		require.Equal(t, "Coding auth", fallbackLabel(models.AgentTypeAmp, models.CodingAuthTypeAPIKey), "fallbackLabel should fall back for unsupported combinations")
+		require.Equal(t, "Amp API key", fallbackLabel(models.AgentTypeAmp, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Amp labels")
+		require.Equal(t, "Pi API key", fallbackLabel(models.AgentTypePi, models.CodingAuthTypeAPIKey), "fallbackLabel should synthesize Pi labels")
 		require.Equal(t, "fallback", defaultString("", "fallback"), "defaultString should return the fallback when empty")
 		require.Equal(t, "value", defaultString("value", "fallback"), "defaultString should preserve non-empty values")
 	})
@@ -1022,9 +1065,22 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		require.Equal(t, models.ProviderGemini, provider, "providerConfigForCodingAuthInput should map Gemini to Gemini provider")
 		require.Equal(t, models.GeminiCLIModelGemini25Pro, cfg.(models.GeminiConfig).Model, "providerConfigForCodingAuthInput should default Gemini models")
 
-		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{Agent: models.AgentTypeAmp})
-		require.Error(t, err, "providerConfigForCodingAuthInput should reject unsupported agents")
-		require.Nil(t, cfg, "providerConfigForCodingAuthInput should not return a config for unsupported agents")
-		require.Equal(t, models.ProviderName(""), provider, "providerConfigForCodingAuthInput should not return a provider for unsupported agents")
+		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{
+			Agent:    models.AgentTypeAmp,
+			AuthType: models.CodingAuthTypeAPIKey,
+			APIKey:   "sgamp_test_token",
+		})
+		require.NoError(t, err, "providerConfigForCodingAuthInput should support Amp")
+		require.Equal(t, models.ProviderAmp, provider, "providerConfigForCodingAuthInput should map Amp to the Amp provider")
+		require.Equal(t, "sgamp_test_token", cfg.(models.AmpConfig).APIKey, "providerConfigForCodingAuthInput should preserve the Amp API key")
+
+		cfg, provider, err = providerConfigForCodingAuthInput(models.CreateCodingAuthInput{
+			Agent:    models.AgentTypePi,
+			AuthType: models.CodingAuthTypeAPIKey,
+			APIKey:   "pi-provider-key",
+		})
+		require.NoError(t, err, "providerConfigForCodingAuthInput should support Pi")
+		require.Equal(t, models.ProviderPi, provider, "providerConfigForCodingAuthInput should map Pi to the Pi provider")
+		require.Equal(t, "pi-provider-key", cfg.(models.PiConfig).APIKey, "providerConfigForCodingAuthInput should preserve the Pi API key")
 	})
 }

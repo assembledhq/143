@@ -15,7 +15,7 @@ func TestNoopSender_SendInvitation(t *testing.T) {
 	require.NoError(t, err, "NoopSender should never return an error")
 }
 
-func TestInvitationHTML(t *testing.T) {
+func TestInvitationText(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -34,7 +34,7 @@ func TestInvitationHTML(t *testing.T) {
 				"Acme Corp",
 				"Alice",
 				"https://example.com/accept?token=abc",
-				"Accept Invitation",
+				"Accept invitation:",
 			},
 		},
 		{
@@ -48,14 +48,14 @@ func TestInvitationHTML(t *testing.T) {
 			},
 		},
 		{
-			name:    "HTML special characters are escaped",
+			name:    "special characters are preserved in plain text",
 			inviter: "<script>alert('xss')</script>",
 			org:     "Org & Co <Ltd>",
 			url:     "https://example.com/invite?a=1&b=2",
 			mustContain: []string{
-				"&lt;script&gt;",
-				"Org &amp; Co &lt;Ltd&gt;",
-				"a=1&amp;b=2",
+				"<script>alert('xss')</script>",
+				"Org & Co <Ltd>",
+				"a=1&b=2",
 			},
 		},
 	}
@@ -64,9 +64,9 @@ func TestInvitationHTML(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			html := invitationHTML(tt.inviter, tt.org, tt.url)
+			text := invitationText(tt.inviter, tt.org, tt.url)
 			for _, s := range tt.mustContain {
-				require.Contains(t, html, s, "invitation HTML should contain %q", s)
+				require.Contains(t, text, s, "invitation text should contain %q", s)
 			}
 		})
 	}

@@ -3343,10 +3343,9 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 
 // --- Amp/Pi agent env resolution ---
 
-// TestRunAgent_AmpAgentConfigOverrides asserts that Amp sessions receive the
-// AMP_API_KEY from agent_config.amp.* (the only channel since there is no
-// ProviderAmp credential store).
-func TestRunAgent_AmpAgentConfigOverrides(t *testing.T) {
+// TestRunAgent_AmpCredentialEnv asserts that Amp sessions receive auth from
+// the credential store and non-secret mode defaults from agent_config.
+func TestRunAgent_AmpCredentialEnv(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3361,10 +3360,15 @@ func TestRunAgent_AmpAgentConfigOverrides(t *testing.T) {
 		capturedCfg = cfg
 		return &agent.Sandbox{ID: "amp-sb", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAmp: {Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp_live_key"}},
+		},
+	}
 
 	settings := models.OrgSettings{
 		AgentConfig: models.AgentEnvConfig{
-			"amp": {"AMP_API_KEY": "amp_live_key", "AMP_MODE": models.AmpModeDeep},
+			"amp": {"AMP_MODE": models.AmpModeDeep},
 		},
 	}
 	settingsJSON, err := json.Marshal(settings)
@@ -3390,15 +3394,14 @@ func TestRunAgent_AmpAgentConfigOverrides(t *testing.T) {
 
 	require.NoError(t, orch.RunAgent(context.Background(), run))
 	require.Equal(t, "amp_live_key", capturedCfg.Env["AMP_API_KEY"],
-		"AMP_API_KEY must flow from agent_config.amp into the sandbox env")
+		"AMP_API_KEY must flow from the Amp credential store into the sandbox env")
 	require.Equal(t, models.AmpModeDeep, capturedCfg.Env["AMP_MODE"],
 		"AMP_MODE from agent_config.amp should reach the sandbox")
 }
 
-// TestRunAgent_PiInheritsProviderKeys asserts Pi sessions inherit the
-// Anthropic/OpenAI/Gemini keys already configured for other agents and still
-// layer agent_config.pi.* overrides on top.
-func TestRunAgent_PiInheritsProviderKeys(t *testing.T) {
+// TestRunAgent_PiDedicatedCredentialEnv asserts Pi sessions use a dedicated Pi
+// credential and only layer model defaults from agent_config.
+func TestRunAgent_PiDedicatedCredentialEnv(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3416,122 +3419,10 @@ func TestRunAgent_PiInheritsProviderKeys(t *testing.T) {
 
 	d.creds = &mockCredentialProvider{
 		byProvider: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant-pi"}},
-			models.ProviderOpenAI:    {Provider: models.ProviderOpenAI, Config: models.OpenAIConfig{APIKey: "sk-openai-pi"}},
-			models.ProviderGemini:    {Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gem-pi"}},
+			models.ProviderPi: {Provider: models.ProviderPi, Config: models.PiConfig{APIKey: "pi-api-key"}},
 		},
 	}
 
-	settings := models.OrgSettings{
-		AgentConfig: models.AgentEnvConfig{
-			"pi": {"PI_MODEL": models.PiModelGPT54, "PI_MODEL_CUSTOM": "moonshot/kimi-k2"},
-		},
-	}
-	settingsJSON, err := json.Marshal(settings)
-	require.NoError(t, err)
-	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
-
-	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
-	})
-
-	require.NoError(t, orch.RunAgent(context.Background(), run))
-
-	require.Equal(t, "sk-ant-pi", capturedCfg.Env["ANTHROPIC_API_KEY"], "Pi should inherit Anthropic key")
-	require.Equal(t, "sk-openai-pi", capturedCfg.Env["OPENAI_API_KEY"], "Pi should inherit OpenAI key")
-	require.Equal(t, "gem-pi", capturedCfg.Env["GEMINI_API_KEY"], "Pi should inherit Gemini key")
-	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "PI_MODEL should flow from agent_config.pi")
-	require.Equal(t, "moonshot/kimi-k2", capturedCfg.Env["PI_MODEL_CUSTOM"], "PI_MODEL_CUSTOM should flow from agent_config.pi")
-}
-
-// TestRunAgent_AmpMissingAPIKeyFailsFast asserts that an Amp run without an
-// AMP_API_KEY in the resolved env fails the run with a clear user-facing
-// error before the sandbox is even created, rather than letting the Amp CLI
-// blow up with "invalid api key" inside the container. This covers both the
-// nil-orgs-store case and the case where the org simply hasn't configured
-// agent_config.amp.AMP_API_KEY yet.
-func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	run := testRun(orgID, testIssue(orgID).ID)
-	run.AgentType = models.AgentTypeAmp
-
-	d := defaultDeps()
-	d.adapter.name = models.AgentTypeAmp
-
-	var sandboxCreated bool
-	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-		sandboxCreated = true
-		return &agent.Sandbox{ID: "amp-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
-	}
-
-	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		// Orgs intentionally omitted to simulate "no agent_config.amp source".
-		Jobs:          d.jobs,
-		GitHub:        d.github,
-		Credentials:   d.creds,
-		Logger:        zerolog.Nop(),
-		MaxConcurrent: 3,
-	})
-
-	err := orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "Amp run without AMP_API_KEY must fail fast")
-	require.Contains(t, err.Error(), "AMP_API_KEY",
-		"error should name the missing credential so users know what to configure")
-	require.False(t, sandboxCreated,
-		"pre-flight auth check must fire before sandbox creation")
-}
-
-// TestRunAgent_PiProviderMismatchFailsFast asserts that a Pi run fails fast
-// when the *selected* model's provider has no inherited key, even if other
-// provider keys are configured. Before the cross-reference check, an org with
-// only Anthropic configured but PI_MODEL=openai/gpt-5.4 would get past
-// pre-flight and fail inside the container with an opaque upstream 401.
-func TestRunAgent_PiProviderMismatchFailsFast(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	run := testRun(orgID, testIssue(orgID).ID)
-	run.AgentType = models.AgentTypePi
-
-	d := defaultDeps()
-	d.adapter.name = models.AgentTypePi
-
-	var sandboxCreated bool
-	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-		sandboxCreated = true
-		return &agent.Sandbox{ID: "pi-mismatch", Provider: "mock", WorkDir: "/workspace"}, nil
-	}
-
-	// Only Anthropic configured.
-	d.creds = &mockCredentialProvider{
-		byProvider: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant"}},
-		},
-	}
-	// But PI_MODEL points at OpenAI.
 	settings := models.OrgSettings{
 		AgentConfig: models.AgentEnvConfig{
 			"pi": {"PI_MODEL": models.PiModelGPT54},
@@ -3558,23 +3449,65 @@ func TestRunAgent_PiProviderMismatchFailsFast(t *testing.T) {
 		MaxConcurrent:    3,
 	})
 
-	err = orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "Pi with provider mismatch must fail fast")
-	require.Contains(t, err.Error(), "OPENAI_API_KEY",
-		"error should name the provider key needed by the selected model")
-	require.Contains(t, err.Error(), models.PiModelGPT54,
-		"error should include the selected model so the user can correlate")
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+
+	require.Equal(t, "pi-api-key", capturedCfg.Env["PI_API_KEY"], "Pi should use its dedicated credential")
+	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "PI_MODEL should flow from agent_config.pi")
+	require.NotContains(t, capturedCfg.Env, "ANTHROPIC_API_KEY", "Pi should not inherit Anthropic credentials")
+	require.NotContains(t, capturedCfg.Env, "OPENAI_API_KEY", "Pi should not inherit OpenAI credentials")
+	require.NotContains(t, capturedCfg.Env, "GEMINI_API_KEY", "Pi should not inherit Gemini credentials")
+}
+
+// TestRunAgent_AmpMissingAPIKeyFailsFast asserts that an Amp run without an
+// AMP_API_KEY in the resolved env fails the run with a clear user-facing
+// error before the sandbox is even created, rather than letting the Amp CLI
+// blow up with "invalid api key" inside the container. This covers both the
+// nil-orgs-store case and the case where the org simply hasn't configured
+// any Amp credential yet.
+func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypeAmp
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+
+	var sandboxCreated bool
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		sandboxCreated = true
+		return &agent.Sandbox{ID: "amp-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         d.provider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:         d.sessions,
+		SessionLogs:      d.logs,
+		SessionQuestions: d.questions,
+		DecisionLog:      d.decisions,
+		Issues:           d.issues,
+		Repositories:     d.repos,
+		// Orgs intentionally omitted to simulate "no Amp/Pi default settings source".
+		Jobs:          d.jobs,
+		GitHub:        d.github,
+		Credentials:   d.creds,
+		Logger:        zerolog.Nop(),
+		MaxConcurrent: 3,
+	})
+
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "Amp run without AMP_API_KEY must fail fast")
+	require.Contains(t, err.Error(), "AMP_API_KEY",
+		"error should name the missing credential so users know what to configure")
 	require.False(t, sandboxCreated,
 		"pre-flight auth check must fire before sandbox creation")
 }
 
-// TestRunAgent_PiModelOverrideEvaluatedByPreflight asserts that when a per-run
-// ModelOverride switches Pi to a different provider, the pre-flight auth check
-// evaluates the *override* — not the agent_config default. Without applying
-// the override before AgentEnv.CheckAuth, an org with only ANTHROPIC_API_KEY plus
-// agent_config.pi.PI_MODEL = anthropic/... would let an OpenAI override past
-// the gate and fail at runtime with an opaque upstream 401.
-func TestRunAgent_PiModelOverrideEvaluatedByPreflight(t *testing.T) {
+// TestRunAgent_PiModelOverrideReachesSandbox asserts that a per-run override
+// still shapes Pi's model selection while auth comes from the dedicated Pi row.
+func TestRunAgent_PiModelOverrideReachesSandbox(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3586,20 +3519,17 @@ func TestRunAgent_PiModelOverrideEvaluatedByPreflight(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypePi
 
-	var sandboxCreated bool
+	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
-		sandboxCreated = true
+		capturedCfg = cfg
 		return &agent.Sandbox{ID: "pi-override", Provider: "mock", WorkDir: "/workspace"}, nil
 	}
 
-	// Only Anthropic configured.
 	d.creds = &mockCredentialProvider{
 		byProvider: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant"}},
+			models.ProviderPi: {Provider: models.ProviderPi, Config: models.PiConfig{APIKey: "pi-key"}},
 		},
 	}
-	// agent_config default points at Anthropic — without the override the
-	// pre-flight would (correctly) pass. The override is what flips it.
 	settings := models.OrgSettings{
 		AgentConfig: models.AgentEnvConfig{
 			"pi": {"PI_MODEL": models.PiModelClaudeSonnet46},
@@ -3626,21 +3556,14 @@ func TestRunAgent_PiModelOverrideEvaluatedByPreflight(t *testing.T) {
 		MaxConcurrent:    3,
 	})
 
-	err = orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "Pi with provider mismatch via ModelOverride must fail fast")
-	require.Contains(t, err.Error(), "OPENAI_API_KEY",
-		"error should name the provider key needed by the override model, not the agent_config default")
-	require.Contains(t, err.Error(), models.PiModelGPT54,
-		"error should reference the override model (proves pre-flight saw the override, not the default)")
-	require.False(t, sandboxCreated,
-		"pre-flight auth check must fire before sandbox creation")
+	require.NoError(t, orch.RunAgent(context.Background(), run))
+	require.Equal(t, "pi-key", capturedCfg.Env["PI_API_KEY"], "Pi should keep using the dedicated Pi credential")
+	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "per-run model override should reach the sandbox env")
 }
 
-// TestRunAgent_PiMissingProviderKeysFailsFast asserts that a Pi run fails
-// fast when no provider credentials (Anthropic/OpenAI/Gemini) are configured.
-// Pi routes through one of those providers based on its model string, so
-// without any key the CLI would just return an opaque upstream 401.
-func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
+// TestRunAgent_PiMissingCredentialFailsFast asserts that a Pi run fails fast
+// when no dedicated Pi credential is configured.
+func TestRunAgent_PiMissingCredentialFailsFast(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
@@ -3649,8 +3572,6 @@ func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypePi
-	// defaultDeps seeds an Anthropic API key so the Claude Code happy path
-	// works out of the box; strip it here so Pi fails its pre-flight key check.
 	d.creds = &mockCredentialProvider{}
 
 	var sandboxCreated bool
@@ -3668,7 +3589,7 @@ func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
 		DecisionLog:      d.decisions,
 		Issues:           d.issues,
 		Repositories:     d.repos,
-		// Orgs and credentials intentionally empty — no provider keys anywhere.
+		// Orgs and credentials intentionally empty — no Pi credential anywhere.
 		Jobs:          d.jobs,
 		GitHub:        d.github,
 		Credentials:   d.creds,
@@ -3677,9 +3598,9 @@ func TestRunAgent_PiMissingProviderKeysFailsFast(t *testing.T) {
 	})
 
 	err := orch.RunAgent(context.Background(), run)
-	require.Error(t, err, "Pi run without any provider credentials must fail fast")
-	require.Contains(t, err.Error(), "Pi",
-		"error should identify Pi so users know which agent is misconfigured")
+	require.Error(t, err, "Pi run without PI_API_KEY must fail fast")
+	require.Contains(t, err.Error(), "PI_API_KEY",
+		"error should name the missing Pi credential so users know what to configure")
 	require.False(t, sandboxCreated,
 		"pre-flight auth check must fire before sandbox creation")
 }
@@ -3707,7 +3628,7 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 
 	orgStoreSettings := models.OrgSettings{
 		AgentConfig: models.AgentEnvConfig{
-			"amp": {"AMP_API_KEY": "from-org-store"},
+			"amp": {"AMP_MODE": models.AmpModeRush},
 		},
 	}
 	settingsJSON, err := json.Marshal(orgStoreSettings)
@@ -3716,11 +3637,16 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 
 	cache := agent.NewOrgSettingsCache(time.Minute)
 	cache.Set(orgID, models.AgentEnvConfig{
-		"amp": {"AMP_API_KEY": "from-cache"},
+		"amp": {"AMP_MODE": models.AmpModeDeep},
 	})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAmp: {Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-cache-test"}},
+		},
+	}
 
 	var captured []map[string]string
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -3755,7 +3681,7 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	run1.AgentType = models.AgentTypeAmp
 	require.NoError(t, orch.RunAgent(context.Background(), run1))
 	require.Len(t, captured, 1)
-	require.Equal(t, "from-cache", captured[0]["AMP_API_KEY"],
+	require.Equal(t, models.AmpModeDeep, captured[0]["AMP_MODE"],
 		"warm cache must short-circuit the org store read for agent_config")
 
 	// Invalidate and re-run: the orchestrator must re-read the org store and
@@ -3767,7 +3693,7 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	run2.AgentType = models.AgentTypeAmp
 	require.NoError(t, orch.RunAgent(context.Background(), run2))
 	require.Len(t, captured, 2)
-	require.Equal(t, "from-org-store", captured[1]["AMP_API_KEY"],
+	require.Equal(t, models.AmpModeRush, captured[1]["AMP_MODE"],
 		"after InvalidateOrg the orchestrator must re-read agent_config from the org store")
 }
 
@@ -3788,7 +3714,7 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 
 	orgStoreSettings := models.OrgSettings{
 		AgentConfig: models.AgentEnvConfig{
-			"amp": {"AMP_API_KEY": "from-org-store"},
+			"amp": {"AMP_MODE": models.AmpModeRush},
 		},
 	}
 	settingsJSON, err := json.Marshal(orgStoreSettings)
@@ -3804,11 +3730,16 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	// is observable in the captured sandbox env. The Set timestamp uses the
 	// current (base) clock, so the entry expires at base + 1 minute.
 	cache.Set(orgID, models.AgentEnvConfig{
-		"amp": {"AMP_API_KEY": "from-cache"},
+		"amp": {"AMP_MODE": models.AmpModeDeep},
 	})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAmp: {Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-cache-test"}},
+		},
+	}
 
 	var captured []map[string]string
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -3844,7 +3775,7 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	run1.AgentType = models.AgentTypeAmp
 	require.NoError(t, orch.RunAgent(context.Background(), run1))
 	require.Len(t, captured, 1)
-	require.Equal(t, "from-cache", captured[0]["AMP_API_KEY"],
+	require.Equal(t, models.AmpModeDeep, captured[0]["AMP_MODE"],
 		"pre-expiry run must hit the cache")
 
 	// Advance past the TTL without calling InvalidateOrg. The next read
@@ -3856,7 +3787,7 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	run2.AgentType = models.AgentTypeAmp
 	require.NoError(t, orch.RunAgent(context.Background(), run2))
 	require.Len(t, captured, 2)
-	require.Equal(t, "from-org-store", captured[1]["AMP_API_KEY"],
+	require.Equal(t, models.AmpModeRush, captured[1]["AMP_MODE"],
 		"post-TTL run must miss the cache and re-read from the org store")
 }
 
