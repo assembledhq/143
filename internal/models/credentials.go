@@ -821,8 +821,17 @@ func (i CreateCodingAuthInput) Validate() error {
 	if i.AuthType == CodingAuthTypeSubscription {
 		return errors.New("subscription auth must be created through the provider-specific auth flow")
 	}
-	if len(i.AgentDefaults) > 0 && i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
-		return errors.New("agent_defaults are only supported for amp and pi")
+	if len(i.AgentDefaults) > 0 {
+		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
+			return errors.New("agent_defaults are only supported for amp and pi")
+		}
+		if err := ValidateSettingsModels(OrgSettings{
+			AgentConfig: AgentEnvConfig{
+				string(i.Agent): i.AgentDefaults,
+			},
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

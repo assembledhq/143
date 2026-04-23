@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -67,4 +68,48 @@ func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization
 
 	row := s.db.QueryRow(ctx, query, args)
 	return row.Scan(&org.UpdatedAt)
+}
+
+// MergeCodingAgentDefaults merges non-secret Amp/Pi defaults into
+// settings.agent_config.<agent> without replacing unrelated settings keys.
+// lint:allow-no-orgid reason="organizations is the root tenant table; orgID IS the org"
+func (s *OrganizationStore) MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+	if len(defaults) == 0 {
+		return nil
+	}
+	if err := models.ValidateSettingsModels(models.OrgSettings{
+		AgentConfig: models.AgentEnvConfig{
+			string(agent): defaults,
+		},
+	}); err != nil {
+		return err
+	}
+
+	defaultsJSON, err := json.Marshal(defaults)
+	if err != nil {
+		return fmt.Errorf("marshal coding agent defaults: %w", err)
+	}
+
+	query := `
+		UPDATE organizations
+		SET settings = jsonb_set(
+			COALESCE(settings, '{}'::jsonb),
+			ARRAY['agent_config', @agent],
+			COALESCE(COALESCE(settings, '{}'::jsonb)->'agent_config'->@agent, '{}'::jsonb) || @defaults::jsonb,
+			true
+		),
+		    updated_at = now()
+		WHERE id = @id
+		RETURNING updated_at`
+
+	var updatedAt any
+	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"id":       orgID,
+		"agent":    string(agent),
+		"defaults": defaultsJSON,
+	}).Scan(&updatedAt)
+	if err != nil {
+		return fmt.Errorf("merge coding agent defaults: %w", err)
+	}
+	return nil
 }

@@ -21,11 +21,13 @@ type codingAuthStore interface {
 	CreateCodingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error)
 	UpdateCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID, input models.UpdateCodingAuthInput) (*models.CodingAuth, error)
 	DisableCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
+	DeleteCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 }
 
 type codingAuthOrgStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
 	Update(ctx context.Context, org *models.Organization) error
+	MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
 }
 
 type CodingAuthHandler struct {
@@ -106,24 +108,9 @@ func (h *CodingAuthHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var org *models.Organization
-	if len(input.AgentDefaults) > 0 {
-		if h.orgStore == nil {
-			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "agent default writes are unavailable")
-			return
-		}
-		currentOrg, err := h.orgStore.GetByID(r.Context(), orgID)
-		if err != nil {
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "organization not found")
-			return
-		}
-		mergedSettings, err := mergeCodingAuthAgentDefaults(currentOrg.Settings, input)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
-			return
-		}
-		currentOrg.Settings = mergedSettings
-		org = &currentOrg
+	if len(input.AgentDefaults) > 0 && h.orgStore == nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "agent default writes are unavailable")
+		return
 	}
 
 	row, err := h.store.CreateCodingAuth(r.Context(), orgID, &user.ID, input)
@@ -132,10 +119,10 @@ func (h *CodingAuthHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if org != nil {
-		if err := h.orgStore.Update(r.Context(), org); err != nil {
-			if rollbackErr := h.store.DisableCodingAuth(r.Context(), orgID, row.ID); rollbackErr != nil {
-				err = fmt.Errorf("persist agent defaults: %w; rollback coding auth: %v", err, rollbackErr)
+	if len(input.AgentDefaults) > 0 {
+		if err := h.orgStore.MergeCodingAgentDefaults(r.Context(), orgID, input.Agent, input.AgentDefaults); err != nil {
+			if rollbackErr := h.store.DeleteCodingAuth(r.Context(), orgID, row.ID); rollbackErr != nil {
+				err = fmt.Errorf("persist agent defaults: %w; rollback coding auth delete: %v", err, rollbackErr)
 			}
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to save coding auth defaults", err)
 			return
@@ -414,34 +401,4 @@ func nestedStringValue(values map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(str)
-}
-
-func mergeCodingAuthAgentDefaults(existing json.RawMessage, input models.CreateCodingAuthInput) (json.RawMessage, error) {
-	if len(input.AgentDefaults) == 0 {
-		return existing, nil
-	}
-
-	patch, err := json.Marshal(map[string]any{
-		"agent_config": map[string]any{
-			string(input.Agent): input.AgentDefaults,
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	merged, err := mergeSettingsJSON(existing, patch)
-	if err != nil {
-		return nil, err
-	}
-
-	var parsed models.OrgSettings
-	if err := json.Unmarshal(merged, &parsed); err != nil {
-		return nil, err
-	}
-	if err := models.ValidateSettingsModels(parsed); err != nil {
-		return nil, err
-	}
-
-	return merged, nil
 }

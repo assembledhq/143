@@ -768,6 +768,17 @@ func (s *OrgCredentialStore) DisableCodingAuth(ctx context.Context, orgID uuid.U
 	return nil
 }
 
+func (s *OrgCredentialStore) DeleteCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM org_credentials WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	)
+	if err != nil {
+		return fmt.Errorf("delete coding auth: %w", err)
+	}
+	return nil
+}
+
 func providerConfigForCodingAuthInput(input models.CreateCodingAuthInput) (models.ProviderConfig, models.ProviderName, error) {
 	switch input.Agent {
 	case models.AgentTypeCodex:

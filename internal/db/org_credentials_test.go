@@ -913,6 +913,22 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		require.NoError(t, err, "DisableCodingAuth should not return an error")
 	})
 
+	t.Run("deletes coding auth by id", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "creating mock pool should not error")
+		defer mock.Close()
+
+		mock.ExpectExec(`DELETE FROM org_credentials WHERE id = .* AND org_id = .*`).
+			WithArgs(rowID, orgID).
+			WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+		store := NewOrgCredentialStore(mock, nil)
+		err = store.DeleteCodingAuth(context.Background(), orgID, rowID)
+		require.NoError(t, err, "DeleteCodingAuth should not return an error")
+	})
+
 	t.Run("disables row by id", func(t *testing.T) {
 		t.Parallel()
 

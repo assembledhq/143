@@ -24,6 +24,7 @@ type mockCodingAuthStore struct {
 	createFn         func(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error)
 	updateFn         func(ctx context.Context, orgID uuid.UUID, id uuid.UUID, input models.UpdateCodingAuthInput) (*models.CodingAuth, error)
 	disableFn        func(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
+	deleteFn         func(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 }
 
 func (m *mockCodingAuthStore) ListCodingAuths(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error) {
@@ -68,6 +69,13 @@ func (m *mockCodingAuthStore) DisableCodingAuth(ctx context.Context, orgID uuid.
 	return nil
 }
 
+func (m *mockCodingAuthStore) DeleteCodingAuth(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
+	if m.deleteFn != nil {
+		return m.deleteFn(ctx, orgID, id)
+	}
+	return nil
+}
+
 func withAdminUser(r *http.Request, userID, orgID uuid.UUID) *http.Request {
 	ctx := middleware.WithOrgID(r.Context(), orgID)
 	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
@@ -76,8 +84,9 @@ func withAdminUser(r *http.Request, userID, orgID uuid.UUID) *http.Request {
 }
 
 type mockCodingAuthOrgStore struct {
-	getFn    func(ctx context.Context, id uuid.UUID) (models.Organization, error)
-	updateFn func(ctx context.Context, org *models.Organization) error
+	getFn                func(ctx context.Context, id uuid.UUID) (models.Organization, error)
+	updateFn             func(ctx context.Context, org *models.Organization) error
+	mergeAgentDefaultsFn func(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
 }
 
 func (m *mockCodingAuthOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
@@ -90,6 +99,13 @@ func (m *mockCodingAuthOrgStore) GetByID(ctx context.Context, id uuid.UUID) (mod
 func (m *mockCodingAuthOrgStore) Update(ctx context.Context, org *models.Organization) error {
 	if m.updateFn != nil {
 		return m.updateFn(ctx, org)
+	}
+	return nil
+}
+
+func (m *mockCodingAuthOrgStore) MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+	if m.mergeAgentDefaultsFn != nil {
+		return m.mergeAgentDefaultsFn(ctx, orgID, agent, defaults)
 	}
 	return nil
 }
@@ -336,13 +352,13 @@ func TestCodingAuthHandlerCreate(t *testing.T) {
 	require.Equal(t, createdID, resp.Data.ID, "Create should return the created row")
 }
 
-func TestCodingAuthHandlerCreate_AppliesAgentDefaultsAndRollsBackOnSettingsFailure(t *testing.T) {
+func TestCodingAuthHandlerCreate_MergesAgentDefaultsAndDeletesOnFailure(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
 	userID := uuid.New()
 	createdID := uuid.New()
-	disableCalled := false
+	deleteCalled := false
 
 	store := &mockCodingAuthStore{
 		createFn: func(_ context.Context, gotOrgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
@@ -361,24 +377,18 @@ func TestCodingAuthHandlerCreate_AppliesAgentDefaultsAndRollsBackOnSettingsFailu
 				Status:   models.CodingAuthStatusNeverVerified,
 			}, nil
 		},
-		disableFn: func(_ context.Context, gotOrgID uuid.UUID, id uuid.UUID) error {
-			require.Equal(t, orgID, gotOrgID, "DisableCodingAuth should scope the rollback to the org")
-			require.Equal(t, createdID, id, "DisableCodingAuth should roll back the created row")
-			disableCalled = true
+		deleteFn: func(_ context.Context, gotOrgID uuid.UUID, id uuid.UUID) error {
+			require.Equal(t, orgID, gotOrgID, "DeleteCodingAuth should scope the rollback to the org")
+			require.Equal(t, createdID, id, "DeleteCodingAuth should remove the created row")
+			deleteCalled = true
 			return nil
 		},
 	}
 	orgStore := &mockCodingAuthOrgStore{
-		getFn: func(_ context.Context, id uuid.UUID) (models.Organization, error) {
-			require.Equal(t, orgID, id, "Create should load the organization settings before applying defaults")
-			return models.Organization{
-				ID:       orgID,
-				Name:     "Acme",
-				Settings: json.RawMessage(`{"agent_config":{}}`),
-			}, nil
-		},
-		updateFn: func(_ context.Context, org *models.Organization) error {
-			require.JSONEq(t, `{"agent_config":{"amp":{"AMP_MODE":"deep"}}}`, string(org.Settings), "Create should merge agent defaults into org settings")
+		mergeAgentDefaultsFn: func(_ context.Context, gotOrgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+			require.Equal(t, orgID, gotOrgID, "Create should merge defaults into the selected org")
+			require.Equal(t, models.AgentTypeAmp, agent, "Create should target the created agent when merging defaults")
+			require.Equal(t, map[string]string{"AMP_MODE": "deep"}, defaults, "Create should merge the submitted defaults")
 			return errors.New("settings write failed")
 		},
 	}
@@ -396,7 +406,7 @@ func TestCodingAuthHandlerCreate_AppliesAgentDefaultsAndRollsBackOnSettingsFailu
 	NewCodingAuthHandler(store, orgStore).Create(rr, req)
 
 	require.Equal(t, http.StatusInternalServerError, rr.Code, "Create should fail when writing agent defaults fails")
-	require.True(t, disableCalled, "Create should roll back the created auth row if the settings write fails")
+	require.True(t, deleteCalled, "Create should remove the created auth row if the settings write fails")
 }
 
 func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {

@@ -131,3 +131,45 @@ func TestOrganizationStore_Update(t *testing.T) {
 	require.Equal(t, now, org.UpdatedAt, "should set the updated_at timestamp on the organization")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestOrganizationStore_MergeCodingAgentDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("merges defaults into the nested agent_config path", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewOrganizationStore(mock)
+		orgID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("UPDATE organizations").
+			WithArgs("amp", pgxmock.AnyArg(), orgID).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"updated_at"}).
+					AddRow(now),
+			)
+
+		err = store.MergeCodingAgentDefaults(context.Background(), orgID, models.AgentTypeAmp, map[string]string{"AMP_MODE": models.AmpModeDeep})
+		require.NoError(t, err, "MergeCodingAgentDefaults should not return an error for valid defaults")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("rejects invalid defaults before touching the database", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewOrganizationStore(mock)
+
+		err = store.MergeCodingAgentDefaults(context.Background(), uuid.New(), models.AgentTypeAmp, map[string]string{"AMP_MODE": "turbo"})
+		require.Error(t, err, "MergeCodingAgentDefaults should reject invalid agent defaults")
+		require.Contains(t, err.Error(), "agent_config.amp.AMP_MODE", "MergeCodingAgentDefaults should surface the validation error")
+		require.NoError(t, mock.ExpectationsWereMet(), "validation failures should not hit the database")
+	})
+}
