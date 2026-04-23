@@ -191,7 +191,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
-	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore)
+	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
 	var emailSender email.Sender
 	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
 		emailSender = email.NewSMTPSender(email.SMTPConfig{
@@ -259,6 +259,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	settingsHandler.SetLogger(logger)
 	if orgSettingsInvalidator != nil {
 		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
+		codingAuthHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
 	projectHandler.SetAuditEmitter(auditEmitter)
@@ -723,6 +724,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
 			r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 			r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
+			r.Get("/api/v1/settings/coding-auths/legacy-status", codingAuthHandler.LegacyStatus)
+			r.Post("/api/v1/settings/coding-auths/migrate-legacy", codingAuthHandler.MigrateLegacy)
 			r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
 			r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
 			r.Delete("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Delete)

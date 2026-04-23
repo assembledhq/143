@@ -172,12 +172,6 @@ func (s *Service) pickAdapter(agentType models.AgentType) (agent.AgentAdapter, e
 }
 
 func (s *Service) finalizeSandboxEnv(agentType models.AgentType, env map[string]string) error {
-	if unknownPrefix := s.env.NarrowScopedCredentials(agentType, env); unknownPrefix != "" {
-		s.logger.Warn().
-			Str("agent_type", string(agentType)).
-			Str("provider_prefix", unknownPrefix).
-			Msg("pm: unrecognized Pi provider prefix, exporting all inherited provider keys to sandbox")
-	}
 	return s.env.CheckAuth(agentType, env)
 }
 

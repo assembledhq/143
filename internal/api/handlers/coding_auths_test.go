@@ -18,16 +18,24 @@ import (
 )
 
 type mockCodingAuthStore struct {
-	listFn    func(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error)
-	reorderFn func(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) error
-	createFn  func(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error)
-	updateFn  func(ctx context.Context, orgID uuid.UUID, id uuid.UUID, input models.UpdateCodingAuthInput) (*models.CodingAuth, error)
-	disableFn func(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
+	listFn           func(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error)
+	listByProviderFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
+	reorderFn        func(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) error
+	createFn         func(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error)
+	updateFn         func(ctx context.Context, orgID uuid.UUID, id uuid.UUID, input models.UpdateCodingAuthInput) (*models.CodingAuth, error)
+	disableFn        func(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 }
 
 func (m *mockCodingAuthStore) ListCodingAuths(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error) {
 	if m.listFn != nil {
 		return m.listFn(ctx, orgID)
+	}
+	return nil, nil
+}
+
+func (m *mockCodingAuthStore) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+	if m.listByProviderFn != nil {
+		return m.listByProviderFn(ctx, orgID, provider)
 	}
 	return nil, nil
 }
@@ -65,6 +73,33 @@ func withAdminUser(r *http.Request, userID, orgID uuid.UUID) *http.Request {
 	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
 	ctx = middleware.WithActiveRole(ctx, "admin")
 	return r.WithContext(ctx)
+}
+
+type mockCodingAuthOrgStore struct {
+	getFn    func(ctx context.Context, id uuid.UUID) (models.Organization, error)
+	updateFn func(ctx context.Context, org *models.Organization) error
+}
+
+func (m *mockCodingAuthOrgStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, id)
+	}
+	return models.Organization{}, nil
+}
+
+func (m *mockCodingAuthOrgStore) Update(ctx context.Context, org *models.Organization) error {
+	if m.updateFn != nil {
+		return m.updateFn(ctx, org)
+	}
+	return nil
+}
+
+type mockOrgSettingsInvalidator struct {
+	orgIDs []uuid.UUID
+}
+
+func (m *mockOrgSettingsInvalidator) InvalidateOrg(orgID uuid.UUID) {
+	m.orgIDs = append(m.orgIDs, orgID)
 }
 
 func TestCodingAuthHandlerList(t *testing.T) {
@@ -110,7 +145,7 @@ func TestCodingAuthHandlerList(t *testing.T) {
 	req = withAdminUser(req, uuid.New(), orgID)
 	rr := httptest.NewRecorder()
 
-	NewCodingAuthHandler(store).List(rr, req)
+	NewCodingAuthHandler(store, nil).List(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code, "List should return 200")
 
@@ -140,7 +175,7 @@ func TestCodingAuthHandlerList_ErrorAndEmptyCases(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).List(rr, req)
+		NewCodingAuthHandler(store, nil).List(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "List should surface store failures")
 	})
@@ -158,7 +193,7 @@ func TestCodingAuthHandlerList_ErrorAndEmptyCases(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).List(rr, req)
+		NewCodingAuthHandler(store, nil).List(rr, req)
 
 		require.Equal(t, http.StatusOK, rr.Code, "List should return 200 when the store returns nil rows")
 		require.JSONEq(t, `{"data":[],"meta":{}}`, rr.Body.String(), "List should serialize nil rows as an empty array")
@@ -189,7 +224,7 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Reorder(rr, req)
+		NewCodingAuthHandler(store, nil).Reorder(rr, req)
 
 		require.Equal(t, http.StatusNoContent, rr.Code, "Reorder should return 204")
 		require.Equal(t, []uuid.UUID{secondID, firstID}, gotIDs, "Reorder should pass the submitted order to the store")
@@ -203,7 +238,7 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Reorder(rr, req)
+		NewCodingAuthHandler(store, nil).Reorder(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should reject invalid UUIDs")
 	})
@@ -216,7 +251,7 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Reorder(rr, req)
+		NewCodingAuthHandler(store, nil).Reorder(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should reject invalid JSON")
 	})
@@ -229,7 +264,7 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Reorder(rr, req)
+		NewCodingAuthHandler(store, nil).Reorder(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Reorder should require at least one id")
 	})
@@ -248,7 +283,7 @@ func TestCodingAuthHandlerReorder(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Reorder(rr, req)
+		NewCodingAuthHandler(store, nil).Reorder(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Reorder should surface store failures")
 	})
@@ -292,13 +327,76 @@ func TestCodingAuthHandlerCreate(t *testing.T) {
 	req = withAdminUser(req, userID, orgID)
 	rr := httptest.NewRecorder()
 
-	NewCodingAuthHandler(store).Create(rr, req)
+	NewCodingAuthHandler(store, nil).Create(rr, req)
 
 	require.Equal(t, http.StatusOK, rr.Code, "Create should return 200")
 
 	var resp models.SingleResponse[models.CodingAuth]
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create response should be valid JSON")
 	require.Equal(t, createdID, resp.Data.ID, "Create should return the created row")
+}
+
+func TestCodingAuthHandlerCreate_AppliesAgentDefaultsAndRollsBackOnSettingsFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	createdID := uuid.New()
+	disableCalled := false
+
+	store := &mockCodingAuthStore{
+		createFn: func(_ context.Context, gotOrgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+			require.Equal(t, orgID, gotOrgID, "CreateCodingAuth should scope writes to the org")
+			require.NotNil(t, createdBy, "CreateCodingAuth should record the creating user")
+			require.Equal(t, userID, *createdBy, "CreateCodingAuth should pass the creating user")
+			require.Equal(t, map[string]string{"AMP_MODE": "deep"}, input.AgentDefaults, "Create should preserve agent defaults")
+
+			return &models.CodingAuth{
+				ID:       createdID,
+				OrgID:    orgID,
+				Agent:    models.AgentTypeAmp,
+				AuthType: models.CodingAuthTypeAPIKey,
+				Label:    "Amp API key",
+				Provider: models.ProviderAmp,
+				Status:   models.CodingAuthStatusNeverVerified,
+			}, nil
+		},
+		disableFn: func(_ context.Context, gotOrgID uuid.UUID, id uuid.UUID) error {
+			require.Equal(t, orgID, gotOrgID, "DisableCodingAuth should scope the rollback to the org")
+			require.Equal(t, createdID, id, "DisableCodingAuth should roll back the created row")
+			disableCalled = true
+			return nil
+		},
+	}
+	orgStore := &mockCodingAuthOrgStore{
+		getFn: func(_ context.Context, id uuid.UUID) (models.Organization, error) {
+			require.Equal(t, orgID, id, "Create should load the organization settings before applying defaults")
+			return models.Organization{
+				ID:       orgID,
+				Name:     "Acme",
+				Settings: json.RawMessage(`{"agent_config":{}}`),
+			}, nil
+		},
+		updateFn: func(_ context.Context, org *models.Organization) error {
+			require.JSONEq(t, `{"agent_config":{"amp":{"AMP_MODE":"deep"}}}`, string(org.Settings), "Create should merge agent defaults into org settings")
+			return errors.New("settings write failed")
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths", bytes.NewBufferString(`{
+		"agent":"amp",
+		"auth_type":"api_key",
+		"label":"Amp API key",
+		"api_key":"amp_123456789",
+		"agent_defaults":{"AMP_MODE":"deep"}
+	}`))
+	req = withAdminUser(req, userID, orgID)
+	rr := httptest.NewRecorder()
+
+	NewCodingAuthHandler(store, orgStore).Create(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "Create should fail when writing agent defaults fails")
+	require.True(t, disableCalled, "Create should roll back the created auth row if the settings write fails")
 }
 
 func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
@@ -313,7 +411,7 @@ func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
 		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Create(rr, req)
 
 		require.Equal(t, http.StatusUnauthorized, rr.Code, "Create should require an authenticated user")
 	})
@@ -325,7 +423,7 @@ func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Create(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Create should reject invalid JSON")
 	})
@@ -337,7 +435,7 @@ func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Create(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Create(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Create should reject invalid inputs")
 	})
@@ -359,7 +457,7 @@ func TestCodingAuthHandlerCreate_ErrorCases(t *testing.T) {
 		req = withAdminUser(req, uuid.New(), orgID)
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Create(rr, req)
+		NewCodingAuthHandler(store, nil).Create(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Create should surface store failures")
 	})
@@ -397,7 +495,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", rowID.String())
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Update(rr, req)
+		NewCodingAuthHandler(store, nil).Update(rr, req)
 
 		require.Equal(t, http.StatusOK, rr.Code, "Update should return 200")
 	})
@@ -418,7 +516,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", rowID.String())
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Delete(rr, req)
+		NewCodingAuthHandler(store, nil).Delete(rr, req)
 
 		require.Equal(t, http.StatusNoContent, rr.Code, "Delete should return 204")
 	})
@@ -437,7 +535,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", rowID.String())
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Update(rr, req)
+		NewCodingAuthHandler(store, nil).Update(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Update should surface store failures")
 	})
@@ -450,7 +548,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", "bad-id")
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Update(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Update(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject invalid ids")
 	})
@@ -463,7 +561,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", rowID.String())
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Update(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Update(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Update should reject invalid JSON")
 	})
@@ -476,7 +574,7 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", "bad-id")
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(&mockCodingAuthStore{}).Delete(rr, req)
+		NewCodingAuthHandler(&mockCodingAuthStore{}, nil).Delete(rr, req)
 
 		require.Equal(t, http.StatusBadRequest, rr.Code, "Delete should reject invalid ids")
 	})
@@ -495,8 +593,153 @@ func TestCodingAuthHandlerUpdateAndDisable(t *testing.T) {
 		req.SetPathValue("id", rowID.String())
 		rr := httptest.NewRecorder()
 
-		NewCodingAuthHandler(store).Delete(rr, req)
+		NewCodingAuthHandler(store, nil).Delete(rr, req)
 
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Delete should surface store failures")
 	})
+}
+
+func TestCodingAuthHandlerLegacyStatus(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	store := &mockCodingAuthStore{
+		listByProviderFn: func(_ context.Context, gotOrgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+			require.Equal(t, orgID, gotOrgID, "legacy status should scope provider lookups to the org")
+			switch provider {
+			case models.ProviderAmp, models.ProviderPi:
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+	orgStore := &mockCodingAuthOrgStore{
+		getFn: func(_ context.Context, id uuid.UUID) (models.Organization, error) {
+			require.Equal(t, orgID, id, "legacy status should load the current org")
+			return models.Organization{
+				ID: orgID,
+				Settings: json.RawMessage(`{
+					"agent_config": {
+						"amp": {
+							"AMP_API_KEY": "amp_1234567890abcdef",
+							"AMP_MODE": "deep"
+						},
+						"pi": {
+							"PI_MODEL": "anthropic/claude-sonnet-4-6"
+						}
+					}
+				}`),
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/coding-auths/legacy-status", nil)
+	req = withAdminUser(req, uuid.New(), orgID)
+	rr := httptest.NewRecorder()
+
+	NewCodingAuthHandler(store, orgStore).LegacyStatus(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "LegacyStatus should return 200")
+
+	var resp models.SingleResponse[models.LegacyCodingAuthStatus]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "LegacyStatus response should be valid JSON")
+	require.True(t, resp.Data.HasLegacyAmpSecret, "LegacyStatus should report the legacy Amp secret")
+	require.Equal(t, "amp_12...cdef", resp.Data.AmpMaskedKey, "LegacyStatus should mask the legacy Amp key")
+	require.True(t, resp.Data.HasLegacyPiDefaults, "LegacyStatus should report legacy Pi defaults")
+	require.True(t, resp.Data.PiRequiresManualAuth, "LegacyStatus should tell the UI Pi still needs a dedicated auth")
+	require.False(t, resp.Data.HasAmpCredential, "LegacyStatus should reflect the missing migrated Amp row")
+	require.False(t, resp.Data.HasPiCredential, "LegacyStatus should reflect the missing Pi credential row")
+}
+
+func TestCodingAuthHandlerMigrateLegacy(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	var created []models.CreateCodingAuthInput
+	var updatedOrgSettings json.RawMessage
+	invalidator := &mockOrgSettingsInvalidator{}
+	store := &mockCodingAuthStore{
+		listByProviderFn: func(_ context.Context, gotOrgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+			require.Equal(t, orgID, gotOrgID, "migrate should scope provider lookups to the org")
+			switch provider {
+			case models.ProviderAmp, models.ProviderPi:
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		createFn: func(_ context.Context, gotOrgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+			require.Equal(t, orgID, gotOrgID, "migrate should create rows in the current org")
+			require.NotNil(t, createdBy, "migrate should attribute created rows to the current user")
+			require.Equal(t, userID, *createdBy, "migrate should attribute created rows to the current user")
+			created = append(created, input)
+			return &models.CodingAuth{
+				ID:       uuid.New(),
+				OrgID:    gotOrgID,
+				Priority: len(created),
+				Agent:    input.Agent,
+				AuthType: input.AuthType,
+				Label:    input.Label,
+				Status:   models.CodingAuthStatusNeverVerified,
+			}, nil
+		},
+	}
+	orgStore := &mockCodingAuthOrgStore{
+		getFn: func(_ context.Context, id uuid.UUID) (models.Organization, error) {
+			require.Equal(t, orgID, id, "migrate should load the current org")
+			return models.Organization{
+				ID: orgID,
+				Settings: json.RawMessage(`{
+					"agent_config": {
+						"amp": {
+							"AMP_API_KEY": "amp_1234567890abcdef",
+							"AMP_MODE": "deep"
+						},
+						"pi": {
+							"PI_API_KEY": "pi_1234567890abcdef",
+							"PI_MODEL": "anthropic/claude-sonnet-4-6"
+						}
+					}
+				}`),
+			}, nil
+		},
+		updateFn: func(_ context.Context, org *models.Organization) error {
+			updatedOrgSettings = append(json.RawMessage(nil), org.Settings...)
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/coding-auths/migrate-legacy", nil)
+	req = withAdminUser(req, userID, orgID)
+	rr := httptest.NewRecorder()
+
+	handler := NewCodingAuthHandler(store, orgStore)
+	handler.SetOrgSettingsInvalidator(invalidator)
+	handler.MigrateLegacy(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "MigrateLegacy should return 200")
+	require.Len(t, created, 2, "MigrateLegacy should backfill both Amp and Pi when legacy secrets exist")
+	require.Equal(t, models.AgentTypeAmp, created[0].Agent, "MigrateLegacy should create an Amp coding auth row")
+	require.Equal(t, "amp_1234567890abcdef", created[0].APIKey, "MigrateLegacy should preserve the legacy Amp key")
+	require.Equal(t, models.AgentTypePi, created[1].Agent, "MigrateLegacy should create a Pi coding auth row")
+	require.Equal(t, "pi_1234567890abcdef", created[1].APIKey, "MigrateLegacy should preserve the legacy Pi key")
+	require.JSONEq(t, `{
+		"agent_config": {
+			"amp": {
+				"AMP_MODE": "deep"
+			},
+			"pi": {
+				"PI_MODEL": "anthropic/claude-sonnet-4-6"
+			}
+		}
+	}`, string(updatedOrgSettings), "MigrateLegacy should scrub only the migrated secrets and keep non-secret defaults")
+	require.Equal(t, []uuid.UUID{orgID}, invalidator.orgIDs, "MigrateLegacy should invalidate the org settings cache after scrubbing legacy secrets")
+
+	var resp models.SingleResponse[models.LegacyCodingAuthMigrationResult]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "MigrateLegacy response should be valid JSON")
+	require.True(t, resp.Data.MigratedAmp, "MigrateLegacy should report the Amp backfill")
+	require.True(t, resp.Data.MigratedPi, "MigrateLegacy should report the Pi backfill")
+	require.True(t, resp.Data.RemovedLegacySecrets, "MigrateLegacy should report the settings cleanup")
 }

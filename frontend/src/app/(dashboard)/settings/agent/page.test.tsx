@@ -50,6 +50,20 @@ function installHandlers() {
         },
       }),
     ),
+    http.get("/api/v1/settings/coding-auths/legacy-status", () =>
+      HttpResponse.json({
+        data: {
+          has_legacy_amp_secret: false,
+          amp_masked_key: "",
+          has_amp_credential: false,
+          has_legacy_pi_secret: false,
+          pi_masked_key: "",
+          has_legacy_pi_defaults: false,
+          has_pi_credential: false,
+          pi_requires_manual_auth: false,
+        },
+      }),
+    ),
   );
 }
 
@@ -98,7 +112,7 @@ describe("Agent settings page", () => {
     expect(screen.getByPlaceholderText("Optional — defaults to “Codex subscription”")).toBeInTheDocument();
   });
 
-  it("hides auth type selection for API-key-only providers and capitalizes Amp modes", async () => {
+  it("hides auth type selection for API-key-only providers and shows Amp/Pi defaults", async () => {
     const user = userEvent.setup();
     installHandlers();
 
@@ -118,6 +132,126 @@ describe("Agent settings page", () => {
     expect(screen.getByRole("option", { name: "Deep" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Large" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Rush" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByLabelText("Pi"));
+    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
+    expect(within(dialog).getByPlaceholderText("pi_...")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save auth" })).toBeDisabled();
+  });
+
+  it("shows legacy migration guidance and triggers the backfill flow", async () => {
+    const user = userEvent.setup();
+    let migrateCalled = false;
+
+    installHandlers();
+    server.use(
+      http.get("/api/v1/settings/coding-auths/legacy-status", () =>
+        HttpResponse.json({
+          data: {
+            has_legacy_amp_secret: true,
+            amp_masked_key: "amp_12...cdef",
+            has_amp_credential: false,
+            has_legacy_pi_secret: false,
+            pi_masked_key: "",
+            has_legacy_pi_defaults: true,
+            has_pi_credential: false,
+            pi_requires_manual_auth: true,
+          },
+        }),
+      ),
+      http.post("/api/v1/settings/coding-auths/migrate-legacy", () => {
+        migrateCalled = true;
+        return HttpResponse.json({
+          data: {
+            migrated_amp: true,
+            migrated_pi: false,
+            removed_legacy_secrets: true,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText(/Legacy Amp auth is still stored in org settings/)).toBeInTheDocument();
+    expect(screen.getByText(/Pi defaults are configured, but Pi still needs its own API key/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Migrate legacy auth" }));
+
+    await waitFor(() => {
+      expect(migrateCalled).toBe(true);
+    });
+  });
+
+  it("creates Amp auth and defaults in a single coding-auth request", async () => {
+    const user = userEvent.setup();
+    let capturedBody: Record<string, unknown> | null = null;
+    let settingsPatched = false;
+
+    installHandlers();
+    server.use(
+      http.post("/api/v1/settings/coding-auths", async ({ request }) => {
+        capturedBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            id: "auth-2",
+            org_id: "org-1",
+            priority: 2,
+            agent: "amp",
+            auth_type: "api_key",
+            label: "Amp API key",
+            scope: "organization",
+            provider: "amp",
+            status: "never_verified",
+            is_default: false,
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        });
+      }),
+      http.patch("/api/v1/settings", () => {
+        settingsPatched = true;
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Acme",
+            settings: {
+              default_agent_type: "codex",
+              max_concurrent_runs: 5,
+              max_session_duration_seconds: 1500,
+              agent_config: {},
+            },
+            created_at: "2026-04-22T10:00:00Z",
+            updated_at: "2026-04-22T10:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await user.click(screen.getByRole("button", { name: "Add auth" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(screen.getByLabelText("Amp"));
+    await user.type(within(dialog).getByPlaceholderText("amp_..."), "amp_123");
+    await user.click(within(dialog).getByRole("combobox", { name: "Default mode" }));
+    await user.click(await screen.findByRole("option", { name: "Deep" }));
+    await user.click(within(dialog).getByRole("button", { name: "Save auth" }));
+
+    await waitFor(() => {
+      expect(capturedBody).not.toBeNull();
+    });
+    expect(capturedBody).toMatchObject({
+      agent: "amp",
+      auth_type: "api_key",
+      api_key: "amp_123",
+      agent_defaults: {
+        AMP_MODE: "deep",
+      },
+    });
+    expect(settingsPatched).toBe(false);
   });
 
   it("uses concise auth type helper text", async () => {
@@ -182,6 +316,11 @@ describe("Agent settings page", () => {
     await user.hover(within(dialog).getByRole("button", { name: "Where to get a Amp API key" }));
     const ampLinks = await screen.findAllByRole("link", { name: "Amp settings" });
     expect(ampLinks[0]).toHaveAttribute("href", "https://ampcode.com/settings");
+
+    await user.click(screen.getByLabelText("Pi"));
+    await user.hover(within(dialog).getByRole("button", { name: "Where to get a Pi API key" }));
+    const piLinks = await screen.findAllByRole("link", { name: "Pi dashboard" });
+    expect(piLinks[0]).toHaveAttribute("href", "https://pi.dev/");
   });
 
   it("does not render the agent-specific access card", async () => {

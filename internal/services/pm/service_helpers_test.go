@@ -152,11 +152,14 @@ func TestServiceFinalizeSandboxEnv(t *testing.T) {
 	require.Contains(t, err.Error(), "AMP_API_KEY", "finalizeSandboxEnv should surface the missing Amp credential")
 
 	piEnv := map[string]string{
-		"PI_MODEL_CUSTOM":   "moonshot/kimi-k2",
-		"OPENAI_API_KEY":    "sk-openai",
-		"ANTHROPIC_API_KEY": "sk-ant",
+		"PI_MODEL_CUSTOM": "moonshot/kimi-k2",
+		"PI_API_KEY":      "pi-key",
 	}
-	require.NoError(t, svc.finalizeSandboxEnv(models.AgentTypePi, piEnv), "finalizeSandboxEnv should allow unknown Pi provider prefixes when some credential exists")
+	require.NoError(t, svc.finalizeSandboxEnv(models.AgentTypePi, piEnv), "finalizeSandboxEnv should allow Pi runs with PI_API_KEY configured")
+
+	err = svc.finalizeSandboxEnv(models.AgentTypePi, map[string]string{})
+	require.Error(t, err, "finalizeSandboxEnv should fail Pi auth preflight without PI_API_KEY")
+	require.Contains(t, err.Error(), "PI_API_KEY", "finalizeSandboxEnv should surface the missing Pi credential")
 }
 
 func TestServiceInjectRequiredAgentAuth(t *testing.T) {

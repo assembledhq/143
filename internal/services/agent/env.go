@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,7 +35,7 @@ func (e *AuthError) Error() string {
 // setup for a coding agent run. It is the single source of truth for:
 //   - per-agent-type provider credential resolution (user → team → org)
 //   - integration credentials (Sentry / Linear / Notion)
-//   - agent_config overrides (Amp / Pi only)
+//   - agent_config overrides for non-secret agent defaults (Amp / Pi only)
 //   - auth pre-flight checks
 //   - Codex auth.json injection
 //
@@ -178,28 +177,14 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			}
 		}
 	case models.AgentTypeAmp:
-		// Amp authenticates to Sourcegraph's API with a dedicated AMP_API_KEY
-		// that lives in agent_config.amp.AMP_API_KEY — applied by the
-		// per-agent override block below. No first-class credential store
-		// (no ProviderAmp) exists today, so we intentionally do nothing here.
+		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
+		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
+			merged["AMP_API_KEY"] = amp.APIKey
+		}
 	case models.AgentTypePi:
-		// Pi is a meta-agent: route to many providers via one CLI. Inherit
-		// every provider key the org already configured for the other agents,
-		// then let agent_config.pi.* override at the call site below.
-		if cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic); cfg != nil {
-			if ac, ok := cfg.(models.AnthropicConfig); ok && ac.APIKey != "" {
-				merged["ANTHROPIC_API_KEY"] = ac.APIKey
-			}
-		}
-		if cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI); cfg != nil {
-			if oc, ok := cfg.(models.OpenAIConfig); ok && oc.APIKey != "" {
-				merged["OPENAI_API_KEY"] = oc.APIKey
-			}
-		}
-		if cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini); cfg != nil {
-			if gc, ok := cfg.(models.GeminiConfig); ok && gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
+		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderPi)
+		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
+			merged["PI_API_KEY"] = pi.APIKey
 		}
 	}
 
@@ -228,10 +213,9 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 	}
 
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
-	// Scoped to Amp and Pi only — these agents have no first-class provider
-	// credential store (no ProviderAmp / ProviderPi), so agent_config is the
-	// only channel for their auth (AMP_API_KEY) and routing (PI_MODEL,
-	// PI_MODEL_CUSTOM). For claude_code/codex/gemini_cli we keep the legacy
+	// Scoped to Amp and Pi only — these are non-secret runtime defaults
+	// (AMP_MODE, PI_MODEL, PI_MODEL_CUSTOM), while auth itself comes from the
+	// credential stores. For claude_code/codex/gemini_cli we keep the legacy
 	// behavior: provider creds come exclusively from resolveProviderConfig,
 	// and agent_config is treated as model-default metadata (validated,
 	// stored, but not injected here) — changing that would silently flip
@@ -251,18 +235,11 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 // authenticating against its upstream because the required credential is
 // missing from the resolved sandbox env. This is a pre-flight check intended
 // to beat the generic "CLI exited 1" failure with something the user can act
-// on — "configure AMP_API_KEY" instead of "amp: invalid api key".
-//
-// Scoped to agent types whose auth lives exclusively in agent_config (Amp,
-// Pi) — for the others, resolveProviderConfig already surfaces richer errors,
-// and we don't want to duplicate those rules here.
+// on — "configure Pi auth" instead of "pi: invalid api key".
 //
 // Invariant: callers must pass the already-merged sandbox env — i.e. after
-// Resolve has run (which layers agent_config overrides on top of inherited
-// provider creds) and after any per-run ModelOverride + Pi-specific narrowing
-// have been applied. CheckAuth reads credentials and the resolved Pi model
-// directly from `env`, so invoking it on a partial env would either pass a
-// misconfigured run or fail a valid one.
+// Resolve has run (which layers agent_config overrides on top of resolved
+// provider creds) and after any per-run ModelOverride has been applied.
 func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) error {
 	switch agentType {
 	case models.AgentTypeAmp:
@@ -273,41 +250,11 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 			}
 		}
 	case models.AgentTypePi:
-		return checkPiProviderKey(agentType, env)
-	}
-	return nil
-}
-
-// checkPiProviderKey asserts the provider key for Pi's *selected model* is
-// present. PI_MODEL_CUSTOM wins over PI_MODEL, with a hardcoded fallback that
-// matches piStreamingConfig.BuildCmd.
-//
-// For curated providers (anthropic/openai/google) we can pinpoint which key
-// Pi will actually need and return a precise error — cheaper than letting the
-// CLI fail with an opaque upstream 401 that doesn't say "you set PI_MODEL to
-// openai/... but only Anthropic is configured." For unknown provider prefixes
-// that users reach via PI_MODEL_CUSTOM (moonshot, etc.), we can't know which
-// env var is required, so we fall back to the weaker "at least one inherited
-// key" guarantee.
-func checkPiProviderKey(agentType models.AgentType, env map[string]string) error {
-	model := piResolvedModel(env)
-	prefix, _, _ := strings.Cut(model, "/")
-	switch strings.ToLower(prefix) {
-	case "anthropic":
-		if env["ANTHROPIC_API_KEY"] == "" {
-			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing ANTHROPIC_API_KEY for Pi model %q: configure Claude Code under Settings → Default Agent so Pi can inherit its API key", model)}
-		}
-	case "openai":
-		if env["OPENAI_API_KEY"] == "" {
-			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing OPENAI_API_KEY for Pi model %q: configure Codex under Settings → Default Agent so Pi can inherit its API key", model)}
-		}
-	case "google", "gemini":
-		if env["GEMINI_API_KEY"] == "" {
-			return &AuthError{AgentType: agentType, Detail: fmt.Sprintf("missing GEMINI_API_KEY for Pi model %q: configure Gemini CLI under Settings → Default Agent so Pi can inherit its API key", model)}
-		}
-	default:
-		if env["ANTHROPIC_API_KEY"] == "" && env["OPENAI_API_KEY"] == "" && env["GEMINI_API_KEY"] == "" {
-			return &AuthError{AgentType: agentType, Detail: "missing provider credentials for Pi: configure at least one of Claude Code, Codex, or Gemini CLI under Settings → Default Agent so Pi can inherit its API key"}
+		if env["PI_API_KEY"] == "" {
+			return &AuthError{
+				AgentType: agentType,
+				Detail:    "missing PI_API_KEY: configure Pi under Settings → Default Agent or My settings before starting a session",
+			}
 		}
 	}
 	return nil
@@ -326,70 +273,11 @@ func piResolvedModel(env map[string]string) string {
 	return models.PiModelClaudeOpus47
 }
 
-// NarrowScopedCredentials removes inherited credentials that are irrelevant for
-// the effective agent configuration. Today only Pi needs narrowing: it inherits
-// multiple provider keys up front, then keeps just the single provider required
-// by its resolved model. Returns the unknown provider prefix when the env could
-// not be narrowed (or "" when no warning is needed).
-func (e *AgentEnv) NarrowScopedCredentials(agentType models.AgentType, env map[string]string) string {
-	if agentType != models.AgentTypePi || env == nil {
-		return ""
-	}
-	return narrowPiProviderKeys(env)
-}
-
-// narrowPiProviderKeys strips inherited provider keys that don't match Pi's
-// resolved model. Called after ModelOverride is applied, so the env reflects
-// the *effective* model — a per-run override that flips Pi from Anthropic to
-// OpenAI removes the Anthropic key from the sandbox env, even if the
-// agent_config default pointed at Anthropic.
-//
-// Only narrows for known provider prefixes (anthropic/openai/google/gemini):
-// for unknown prefixes (moonshot via PI_MODEL_CUSTOM, etc.) we can't tell
-// which key Pi will use upstream, so the weaker "keep all inherited keys"
-// posture is intentional. Returns the unknown prefix in that case (or "" when
-// narrowing happened), so callers can log a warning that all inherited
-// provider credentials were exported to the sandbox.
-//
-// Known limitation — inherited-key leak for unknown prefixes: a run with
-// PI_MODEL_CUSTOM=moonshot/kimi-k2 (or any other non-curated provider) ships
-// every configured provider key (Anthropic, OpenAI, Gemini) into the sandbox
-// process env, even though Pi only needs Moonshot's. The keys never leave the
-// container under normal operation, but a compromised Pi CLI / prompt-injection
-// that tricked the agent into exfiltrating env vars would expose siblings too.
-// To tighten this, add the new provider's prefix and env-var name to the switch
-// above so narrowing kicks in — an explicit entry is intentionally required
-// rather than a deny-by-default so operators adopting a new Pi-supported
-// provider don't silently get auth failures.
-func narrowPiProviderKeys(env map[string]string) string {
-	model := piResolvedModel(env)
-	prefix, _, _ := strings.Cut(model, "/")
-	const (
-		ak = "ANTHROPIC_API_KEY"
-		ok = "OPENAI_API_KEY"
-		gk = "GEMINI_API_KEY"
-	)
-	switch strings.ToLower(prefix) {
-	case "anthropic":
-		delete(env, ok)
-		delete(env, gk)
-	case "openai":
-		delete(env, ak)
-		delete(env, gk)
-	case "google", "gemini":
-		delete(env, ak)
-		delete(env, ok)
-	default:
-		return prefix
-	}
-	return ""
-}
-
 // applyAgentConfigOverrides layers agent_config.<agentType>.* entries from org
 // settings on top of the already-resolved provider credentials in `merged`.
-// Only called for agent types (amp, pi) that lack a first-class provider
-// credential store — for those, agent_config is the sole channel for auth
-// and routing. Non-empty values win over inherited provider creds.
+// Only called for Amp and Pi; agent_config stores their non-secret runtime
+// defaults while auth is resolved from the credential stores. Non-empty values
+// win over any prior env value.
 //
 // Reads go through OrgSettingsCache when configured so a burst of Amp/Pi
 // session starts for the same org amortizes to one DB lookup per TTL window.
@@ -531,6 +419,18 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			return nil
 		}
 		return openRouter
+	case models.ProviderAmp:
+		amp, ok := cfg.(models.AmpConfig)
+		if !ok || amp.APIKey == "" {
+			return nil
+		}
+		return amp
+	case models.ProviderPi:
+		pi, ok := cfg.(models.PiConfig)
+		if !ok || pi.APIKey == "" {
+			return nil
+		}
+		return pi
 	default:
 		return nil
 	}

@@ -34,7 +34,6 @@ import {
   AGENTS,
   AGENTS_BY_KEY,
   agentTypeForModel,
-  hasPiCredentials,
 } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
@@ -201,17 +200,9 @@ export function ManualSessionCreatePageContent() {
   // Determine which agent type would be used and whether credentials exist.
   const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
   const requiredProvider = AGENTS_BY_KEY[effectiveAgentType]?.providerKey ?? "";
-  // Pi routes to Anthropic/OpenAI/Gemini depending on the *selected model*. For
-  // curated prefixes we mirror checkPiProviderKey's per-model lookup so the
-  // banner matches what the orchestrator will accept. When no model has been
-  // picked we mirror piResolvedModel's hardcoded fallback (Claude Opus 4.7 →
-  // Anthropic) so the UI doesn't show "Ready to run" for a run that would hit
-  // "missing ANTHROPIC_API_KEY" from the backend.
   const hasAgentCredentials =
-    effectiveAgentType === "pi"
-      ? hasPiCredentials(resolvedCredentials, selectedModel)
-      : resolvedCredentials.some((c) => c.provider === requiredProvider)
-        || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
+    resolvedCredentials.some((c) => c.provider === requiredProvider && c.source !== "none")
+      || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 
   const createManualSessionMutation = useMutation({
     mutationFn: () =>

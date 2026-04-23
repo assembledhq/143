@@ -604,7 +604,7 @@ func (s *OrgCredentialStore) ListCodingAuths(ctx context.Context, orgID uuid.UUI
 		FROM org_credentials
 		WHERE org_id = @org_id
 		  AND status != 'disabled'
-		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini')
+		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
 		ORDER BY priority, created_at`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
@@ -684,7 +684,7 @@ func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UU
 		SELECT COALESCE(MAX(priority), 0) + 1
 		FROM org_credentials
 		WHERE org_id = @org_id
-		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini')
+		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
 		  AND status != 'disabled'`,
 		pgx.NamedArgs{"org_id": orgID},
 	).Scan(&nextPriority); scanErr != nil {
@@ -786,6 +786,14 @@ func providerConfigForCodingAuthInput(input models.CreateCodingAuthInput) (model
 			APIKey: input.APIKey,
 			Model:  defaultString(input.APIType, models.GeminiCLIModelGemini25Pro),
 		}, models.ProviderGemini, nil
+	case models.AgentTypeAmp:
+		return models.AmpConfig{
+			APIKey: input.APIKey,
+		}, models.ProviderAmp, nil
+	case models.AgentTypePi:
+		return models.PiConfig{
+			APIKey: input.APIKey,
+		}, models.ProviderPi, nil
 	default:
 		return nil, "", fmt.Errorf("unsupported coding auth agent: %s", input.Agent)
 	}
@@ -833,6 +841,10 @@ func inferCodingAuthAgent(cred models.DecryptedCredential) models.AgentType {
 		return models.AgentTypeClaudeCode
 	case models.ProviderGemini:
 		return models.AgentTypeGeminiCLI
+	case models.ProviderAmp:
+		return models.AgentTypeAmp
+	case models.ProviderPi:
+		return models.AgentTypePi
 	default:
 		return ""
 	}
@@ -854,6 +866,14 @@ func inferCodingAuthType(cred models.DecryptedCredential) models.CodingAuthType 
 			return models.CodingAuthTypeAPIKey
 		}
 	case models.GeminiConfig:
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	case models.AmpConfig:
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	case models.PiConfig:
 		if cfg.APIKey != "" {
 			return models.CodingAuthTypeAPIKey
 		}
@@ -894,6 +914,10 @@ func codingAuthUsageNote(cred models.DecryptedCredential) string {
 		return cfg.MaskedSummary().MaskedKey
 	case models.GeminiConfig:
 		return cfg.MaskedSummary().MaskedKey
+	case models.AmpConfig:
+		return cfg.MaskedSummary().MaskedKey
+	case models.PiConfig:
+		return cfg.MaskedSummary().MaskedKey
 	default:
 		return ""
 	}
@@ -911,6 +935,10 @@ func fallbackLabel(agent models.AgentType, authType models.CodingAuthType) strin
 		return "Claude Code API key"
 	case agent == models.AgentTypeGeminiCLI && authType == models.CodingAuthTypeAPIKey:
 		return "Gemini CLI API key"
+	case agent == models.AgentTypeAmp && authType == models.CodingAuthTypeAPIKey:
+		return "Amp API key"
+	case agent == models.AgentTypePi && authType == models.CodingAuthTypeAPIKey:
+		return "Pi API key"
 	default:
 		return "Coding auth"
 	}

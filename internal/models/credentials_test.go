@@ -145,6 +145,30 @@ func TestParseProviderConfig_Gemini(t *testing.T) {
 	require.Equal(t, "gemini-2.5-pro", gc.Model, "should parse model")
 }
 
+func TestParseProviderConfig_Amp(t *testing.T) {
+	t.Parallel()
+
+	input := `{"api_key":"sgamp_test_token"}`
+	cfg, err := ParseProviderConfig(ProviderAmp, []byte(input))
+	require.NoError(t, err, "ParseProviderConfig should not return an error")
+
+	ac, ok := cfg.(AmpConfig)
+	require.True(t, ok, "config should be AmpConfig")
+	require.Equal(t, "sgamp_test_token", ac.APIKey, "should parse api_key")
+}
+
+func TestParseProviderConfig_Pi(t *testing.T) {
+	t.Parallel()
+
+	input := `{"api_key":"pi-provider-key"}`
+	cfg, err := ParseProviderConfig(ProviderPi, []byte(input))
+	require.NoError(t, err, "ParseProviderConfig should not return an error")
+
+	pc, ok := cfg.(PiConfig)
+	require.True(t, ok, "config should be PiConfig")
+	require.Equal(t, "pi-provider-key", pc.APIKey, "should parse api_key")
+}
+
 func TestParseProviderConfig_OpenRouter(t *testing.T) {
 	t.Parallel()
 
@@ -467,6 +491,28 @@ func TestMaskedSummary_Gemini(t *testing.T) {
 	require.Equal(t, "gm-tes...2345", summary.MaskedKey, "summary should mask api key")
 }
 
+func TestMaskedSummary_Amp(t *testing.T) {
+	t.Parallel()
+
+	cfg := AmpConfig{APIKey: "sgamp_test_token"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderAmp, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.NotEmpty(t, summary.MaskedKey, "summary should mask api key")
+}
+
+func TestMaskedSummary_Pi(t *testing.T) {
+	t.Parallel()
+
+	cfg := PiConfig{APIKey: "pi-provider-key"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderPi, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.NotEmpty(t, summary.MaskedKey, "summary should mask api key")
+}
+
 func TestMaskedSummary_GitHubApp(t *testing.T) {
 	t.Parallel()
 
@@ -673,6 +719,8 @@ func TestIsCodingAgentProvider(t *testing.T) {
 		{"openai is coding agent", ProviderOpenAI, true},
 		{"gemini is coding agent", ProviderGemini, true},
 		{"openrouter is coding agent", ProviderOpenRouter, true},
+		{"amp is coding agent", ProviderAmp, true},
+		{"pi is coding agent", ProviderPi, true},
 		{"github_app is not coding agent", ProviderGitHubApp, false},
 		{"github_oauth is not coding agent", ProviderGitHubOAuth, false},
 		{"sentry is not coding agent", ProviderSentry, false},
@@ -730,6 +778,41 @@ func TestCreateCodingAuthInputValidate(t *testing.T) {
 				AuthType: CodingAuthTypeAPIKey,
 				APIKey:   "sk-test-123",
 			},
+		},
+		{
+			name: "valid amp api key auth",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeAmp,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "sgamp_test_token",
+			},
+		},
+		{
+			name: "valid pi api key auth",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypePi,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "pi-provider-key",
+			},
+		},
+		{
+			name: "valid amp defaults",
+			input: CreateCodingAuthInput{
+				Agent:         AgentTypeAmp,
+				AuthType:      CodingAuthTypeAPIKey,
+				APIKey:        "sgamp_test_token",
+				AgentDefaults: map[string]string{"AMP_MODE": "deep"},
+			},
+		},
+		{
+			name: "rejects agent defaults for unsupported agents",
+			input: CreateCodingAuthInput{
+				Agent:         AgentTypeCodex,
+				AuthType:      CodingAuthTypeAPIKey,
+				APIKey:        "sk-test-123",
+				AgentDefaults: map[string]string{"OPENAI_MODEL": "gpt-5.4"},
+			},
+			expectErr: "agent_defaults are only supported for amp and pi",
 		},
 		{
 			name: "invalid agent",

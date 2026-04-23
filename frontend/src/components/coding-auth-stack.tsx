@@ -4,21 +4,13 @@ import { GripVertical, MoveUp, MoveDown, ChevronsUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { AGENTS_BY_KEY } from "@/lib/agents";
 import type { CodingAuth } from "@/lib/types";
 
 type MoveDirection = "up" | "down";
 
 function agentLabel(agent: CodingAuth["agent"]) {
-  switch (agent) {
-    case "codex":
-      return "Codex";
-    case "claude_code":
-      return "Claude Code";
-    case "gemini_cli":
-      return "Gemini CLI";
-    default:
-      return agent;
-  }
+  return AGENTS_BY_KEY[agent]?.label ?? agent;
 }
 
 function authTypeLabel(type: CodingAuth["auth_type"]) {

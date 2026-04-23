@@ -16,6 +16,8 @@ const (
 	ProviderAnthropic     ProviderName = "anthropic"
 	ProviderOpenAI        ProviderName = "openai"
 	ProviderGemini        ProviderName = "gemini"
+	ProviderAmp           ProviderName = "amp"
+	ProviderPi            ProviderName = "pi"
 	ProviderOpenAIChatGPT ProviderName = "openai_chatgpt"
 	ProviderOpenRouter    ProviderName = "openrouter"
 	ProviderGitHubApp     ProviderName = "github_app"
@@ -29,7 +31,7 @@ const (
 
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenAIChatGPT, ProviderOpenRouter,
+	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenAIChatGPT, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
 }
@@ -139,6 +141,14 @@ type OpenAIConfig struct {
 type GeminiConfig struct {
 	APIKey string `json:"api_key"` // #nosec G117 -- JSON config field
 	Model  string `json:"model,omitempty"`
+}
+
+type AmpConfig struct {
+	APIKey string `json:"api_key"` // #nosec G117 -- JSON config field
+}
+
+type PiConfig struct {
+	APIKey string `json:"api_key"` // #nosec G117 -- JSON config field
 }
 
 type OpenRouterConfig struct {
@@ -253,6 +263,8 @@ func (c GitHubAppUserConfig) RefreshTokenExpired() bool {
 func (c AnthropicConfig) Provider() ProviderName     { return ProviderAnthropic }
 func (c OpenAIConfig) Provider() ProviderName        { return ProviderOpenAI }
 func (c GeminiConfig) Provider() ProviderName        { return ProviderGemini }
+func (c AmpConfig) Provider() ProviderName           { return ProviderAmp }
+func (c PiConfig) Provider() ProviderName            { return ProviderPi }
 func (c OpenRouterConfig) Provider() ProviderName    { return ProviderOpenRouter }
 func (c GitHubAppConfig) Provider() ProviderName     { return ProviderGitHubApp }
 func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppUser }
@@ -302,6 +314,20 @@ func (c OpenAIConfig) Validate() error {
 }
 
 func (c GeminiConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
+	}
+	return nil
+}
+
+func (c AmpConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
+	}
+	return nil
+}
+
+func (c PiConfig) Validate() error {
 	if c.APIKey == "" {
 		return errors.New("api_key is required")
 	}
@@ -420,6 +446,22 @@ func (c GeminiConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c AmpConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderAmp,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
+	}
+}
+
+func (c PiConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderPi,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
+	}
+}
+
 func (c OpenRouterConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:   ProviderOpenRouter,
@@ -515,6 +557,18 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg GeminiConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("invalid gemini config: %w", err)
+		}
+		return cfg, nil
+	case ProviderAmp:
+		var cfg AmpConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid amp config: %w", err)
+		}
+		return cfg, nil
+	case ProviderPi:
+		var cfg PiConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid pi config: %w", err)
 		}
 		return cfg, nil
 	case ProviderOpenRouter:
@@ -727,13 +781,31 @@ type CodingAuth struct {
 	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
+type LegacyCodingAuthStatus struct {
+	HasLegacyAmpSecret   bool   `json:"has_legacy_amp_secret"`
+	AmpMaskedKey         string `json:"amp_masked_key,omitempty"`
+	HasAmpCredential     bool   `json:"has_amp_credential"`
+	HasLegacyPiSecret    bool   `json:"has_legacy_pi_secret"`
+	PiMaskedKey          string `json:"pi_masked_key,omitempty"`
+	HasLegacyPiDefaults  bool   `json:"has_legacy_pi_defaults"`
+	HasPiCredential      bool   `json:"has_pi_credential"`
+	PiRequiresManualAuth bool   `json:"pi_requires_manual_auth"`
+}
+
+type LegacyCodingAuthMigrationResult struct {
+	MigratedAmp          bool `json:"migrated_amp"`
+	MigratedPi           bool `json:"migrated_pi"`
+	RemovedLegacySecrets bool `json:"removed_legacy_secrets"`
+}
+
 type CreateCodingAuthInput struct {
-	Agent    AgentType      `json:"agent"`
-	AuthType CodingAuthType `json:"auth_type"`
-	Label    string         `json:"label"`
-	APIKey   string         `json:"api_key,omitempty"`
-	APIType  string         `json:"api_type,omitempty"`
-	BaseURL  string         `json:"base_url,omitempty"`
+	Agent         AgentType         `json:"agent"`
+	AuthType      CodingAuthType    `json:"auth_type"`
+	Label         string            `json:"label"`
+	APIKey        string            `json:"api_key,omitempty"`
+	APIType       string            `json:"api_type,omitempty"`
+	BaseURL       string            `json:"base_url,omitempty"`
+	AgentDefaults map[string]string `json:"agent_defaults,omitempty"`
 }
 
 func (i CreateCodingAuthInput) Validate() error {
@@ -749,6 +821,9 @@ func (i CreateCodingAuthInput) Validate() error {
 	if i.AuthType == CodingAuthTypeSubscription {
 		return errors.New("subscription auth must be created through the provider-specific auth flow")
 	}
+	if len(i.AgentDefaults) > 0 && i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
+		return errors.New("agent_defaults are only supported for amp and pi")
+	}
 	return nil
 }
 
@@ -758,7 +833,7 @@ type UpdateCodingAuthInput struct {
 
 // CodingAgentProviders lists the LLM providers used as coding agent credentials.
 var CodingAgentProviders = []ProviderName{
-	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenRouter,
+	ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.

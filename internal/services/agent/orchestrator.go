@@ -510,24 +510,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
-	// Apply per-run model override before the auth pre-flight: for Pi the
-	// required provider key is derived from the resolved model, so checking
-	// auth against the agent_config default would let an OpenAI override
-	// past the gate on an Anthropic-only org.
+	// Apply per-run model override before the auth pre-flight so the sandbox
+	// sees the effective model/mode selection rather than only the org default.
 	if run.ModelOverride != nil && *run.ModelOverride != "" {
 		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *run.ModelOverride
-		}
-	}
-	// For Pi, drop any inherited provider keys that don't match the effective
-	// model so the sandbox only sees the single credential Pi will actually
-	// use. Runs after ModelOverride so a per-run switch shapes the env too.
-	if run.AgentType == models.AgentTypePi {
-		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
-			log.Warn().
-				Str("provider_prefix", unknownPrefix).
-				Str("model", piResolvedModel(sandboxCfg.Env)).
-				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
 		}
 	}
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
@@ -973,20 +960,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
-	// Apply the per-session model override before the auth pre-flight so
-	// AgentEnv.CheckAuth evaluates the *effective* model — see the matching
-	// block in RunAgent for the Pi-specific reasoning.
+	// Apply the per-session model override before the auth pre-flight so the
+	// sandbox sees the effective model/mode selection.
 	if session.ModelOverride != nil && *session.ModelOverride != "" {
 		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
 			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
-	}
-	if session.AgentType == models.AgentTypePi {
-		if unknownPrefix := narrowPiProviderKeys(sandboxCfg.Env); unknownPrefix != "" {
-			log.Warn().
-				Str("provider_prefix", unknownPrefix).
-				Str("model", piResolvedModel(sandboxCfg.Env)).
-				Msg("pi: unrecognized provider prefix, exporting all inherited provider keys to sandbox")
 		}
 	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {

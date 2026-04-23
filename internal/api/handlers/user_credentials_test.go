@@ -81,12 +81,20 @@ func (m *mockUserCredentialStore) RemoveTeamDefault(ctx context.Context, orgID u
 }
 
 type mockOrgCredentialReader struct {
-	getFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	getFn            func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
+	listByProviderFn func(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
 }
 
 func (m *mockOrgCredentialReader) Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if m.getFn != nil {
 		return m.getFn(ctx, orgID, provider)
+	}
+	return nil, errors.New("not found")
+}
+
+func (m *mockOrgCredentialReader) ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error) {
+	if m.listByProviderFn != nil {
+		return m.listByProviderFn(ctx, orgID, provider)
 	}
 	return nil, errors.New("not found")
 }
@@ -206,6 +214,63 @@ func TestUserCredentialHandler_UpsertPersonal(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, w.Code)
 		require.Equal(t, models.ProviderAnthropic, savedProvider)
+	})
+
+	t.Run("accepts amp and pi as personal coding-agent providers", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name       string
+			provider   string
+			configJSON string
+			expected   models.ProviderName
+		}{
+			{
+				name:       "amp",
+				provider:   "amp",
+				configJSON: `{"api_key":"sgamp_test_token"}`,
+				expected:   models.ProviderAmp,
+			},
+			{
+				name:       "pi",
+				provider:   "pi",
+				configJSON: `{"api_key":"pi-provider-key"}`,
+				expected:   models.ProviderPi,
+			},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				var savedProvider models.ProviderName
+				store := &mockUserCredentialStore{
+					upsertFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, cfg models.ProviderConfig, _ bool) error {
+						savedProvider = cfg.Provider()
+						return nil
+					},
+				}
+				h := newTestUserCredHandler(store)
+
+				body, _ := json.Marshal(map[string]interface{}{
+					"config":          json.RawMessage(tt.configJSON),
+					"is_team_default": false,
+				})
+				r := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
+				r = withUserAndOrg(r, userID, orgID, "member")
+
+				rctx := chi.NewRouteContext()
+				rctx.URLParams.Add("provider", tt.provider)
+				r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
+
+				w := httptest.NewRecorder()
+				h.UpsertPersonal(w, r)
+
+				require.Equal(t, http.StatusOK, w.Code, "UpsertPersonal should accept %s as a coding-agent provider", tt.provider)
+				require.Equal(t, tt.expected, savedProvider, "UpsertPersonal should save the expected provider type")
+			})
+		}
 	})
 
 	t.Run("rejects team default from non-admin", func(t *testing.T) {
@@ -378,6 +443,8 @@ func TestUserCredentialHandler_ListResolved(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("resolves personal > team > org chain", func(t *testing.T) {
+		t.Parallel()
+
 		store := &mockUserCredentialStore{
 			getForUserFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, p models.ProviderName) (*models.DecryptedUserCredential, error) {
 				if p == models.ProviderAnthropic {
@@ -435,5 +502,57 @@ func TestUserCredentialHandler_ListResolved(t *testing.T) {
 		require.Equal(t, "team_default", byProvider[models.ProviderOpenAI].Source)
 		require.Equal(t, "org", byProvider[models.ProviderGemini].Source)
 		require.Equal(t, "none", byProvider[models.ProviderOpenRouter].Source)
+	})
+
+	t.Run("uses org coding-auth rows returned from ListByProvider", func(t *testing.T) {
+		t.Parallel()
+
+		store := &mockUserCredentialStore{}
+		orgCreds := &mockOrgCredentialReader{
+			listByProviderFn: func(_ context.Context, _ uuid.UUID, p models.ProviderName) ([]models.DecryptedCredential, error) {
+				switch p {
+				case models.ProviderAmp:
+					return []models.DecryptedCredential{
+						{
+							Provider: models.ProviderAmp,
+							Label:    "Amp primary",
+							Config:   models.AmpConfig{APIKey: "amp_live_key"},
+						},
+					}, nil
+				case models.ProviderPi:
+					return []models.DecryptedCredential{
+						{
+							Provider: models.ProviderPi,
+							Label:    "Pi primary",
+							Config:   models.PiConfig{APIKey: "pi_live_key"},
+						},
+					}, nil
+				default:
+					return nil, errors.New("not found")
+				}
+			},
+		}
+		h := NewUserCredentialHandler(store, orgCreds, &mockUserLookup{})
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r = withUserAndOrg(r, userID, orgID, "member")
+		w := httptest.NewRecorder()
+
+		h.ListResolved(w, r)
+
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp models.ListResponse[models.ResolvedCredential]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+		byProvider := map[models.ProviderName]models.ResolvedCredential{}
+		for _, rc := range resp.Data {
+			byProvider[rc.Provider] = rc
+		}
+
+		require.Equal(t, "org", byProvider[models.ProviderAmp].Source, "ListResolved should surface labeled org Amp auth rows")
+		require.NotEmpty(t, byProvider[models.ProviderAmp].MaskedKey, "ListResolved should mask Amp org auth rows")
+		require.Equal(t, "org", byProvider[models.ProviderPi].Source, "ListResolved should surface labeled org Pi auth rows")
+		require.NotEmpty(t, byProvider[models.ProviderPi].MaskedKey, "ListResolved should mask Pi org auth rows")
 	})
 }
