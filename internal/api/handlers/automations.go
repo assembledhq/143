@@ -155,6 +155,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ScheduleType   *string `json:"schedule_type"`
 		IntervalValue  *int    `json:"interval_value"`
 		IntervalUnit   *string `json:"interval_unit"`
+		IntervalRunAt  *string `json:"interval_run_at"`
 		CronExpression *string `json:"cron_expression"`
 		Timezone       *string `json:"timezone"`
 		Priority       *int    `json:"priority"`
@@ -198,8 +199,8 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Reject cross-typed schedule fields up front rather than silently dropping
 	// them: a cron payload that also includes interval_value almost certainly
 	// reflects a client bug, and silent normalisation would mask it.
-	if scheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+	if scheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value, interval_unit, and interval_run_at must not be set for cron schedules")
 		return
 	}
 	if scheduleType == models.AutomationScheduleInterval && req.CronExpression != nil {
@@ -212,6 +213,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// (chk_automations_schedule_fields) also enforces this XOR relationship.
 	var intervalValuePtr *int
 	var intervalUnitPtr *string
+	var intervalRunAtPtr *string
 	if scheduleType == models.AutomationScheduleInterval {
 		intervalValue := 1
 		intervalUnit := "days"
@@ -231,6 +233,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		intervalValuePtr = &intervalValue
 		intervalUnitPtr = &intervalUnit
+		if req.IntervalRunAt != nil && strings.TrimSpace(*req.IntervalRunAt) != "" {
+			runAt := strings.TrimSpace(*req.IntervalRunAt)
+			if err := models.ValidateIntervalRunAt(runAt); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_RUN_AT", err.Error())
+				return
+			}
+			intervalRunAtPtr = &runAt
+		}
 	}
 
 	var cronExpressionPtr *string
@@ -312,6 +322,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ScheduleType:   scheduleType,
 		IntervalValue:  intervalValuePtr,
 		IntervalUnit:   intervalUnitPtr,
+		IntervalRunAt:  intervalRunAtPtr,
 		CronExpression: cronExpressionPtr,
 		Timezone:       timezone,
 		Enabled:        true,
@@ -371,6 +382,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ScheduleType   *string `json:"schedule_type"`
 		IntervalValue  *int    `json:"interval_value"`
 		IntervalUnit   *string `json:"interval_unit"`
+		IntervalRunAt  *string `json:"interval_run_at"`
 		CronExpression *string `json:"cron_expression"`
 		Timezone       *string `json:"timezone"`
 		Priority       *int    `json:"priority"`
@@ -477,8 +489,8 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		effectiveScheduleType = *req.ScheduleType
 	}
-	if effectiveScheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil) {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value and interval_unit must not be set for cron schedules")
+	if effectiveScheduleType == models.AutomationScheduleCron && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "interval_value, interval_unit, and interval_run_at must not be set for cron schedules")
 		return
 	}
 	if effectiveScheduleType == models.AutomationScheduleInterval && req.CronExpression != nil && strings.TrimSpace(*req.CronExpression) != "" {
@@ -512,6 +524,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 				// Switching away from interval: clear interval fields.
 				automation.IntervalValue = nil
 				automation.IntervalUnit = nil
+				automation.IntervalRunAt = nil
 			}
 		}
 		automation.ScheduleType = *req.ScheduleType
@@ -531,6 +544,19 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.IntervalUnit = req.IntervalUnit
+		scheduleChanged = true
+	}
+	if req.IntervalRunAt != nil {
+		trimmed := strings.TrimSpace(*req.IntervalRunAt)
+		if trimmed == "" {
+			automation.IntervalRunAt = nil
+		} else {
+			if err := models.ValidateIntervalRunAt(trimmed); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INTERVAL_RUN_AT", err.Error())
+				return
+			}
+			automation.IntervalRunAt = &trimmed
+		}
 		scheduleChanged = true
 	}
 	if req.CronExpression != nil {
