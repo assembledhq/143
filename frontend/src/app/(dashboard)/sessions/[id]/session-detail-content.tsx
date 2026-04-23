@@ -9,7 +9,6 @@ import {
   ArrowUp,
   ClipboardList,
   ExternalLink,
-  Eye,
   FileCode2,
   GitPullRequest,
   Loader2,
@@ -1731,10 +1730,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 {showValidationTab && (
                   <TabsTrigger value="validation">Validation</TabsTrigger>
                 )}
-                <TabsTrigger value="preview">
-                  <Eye className="h-3 w-3 mr-1" />
-                  Preview
-                </TabsTrigger>
+                <TabsTrigger value="preview">Preview</TabsTrigger>
               </TabsList>
               {(() => {
                 if (hasPR && prData?.data?.github_pr_url) {

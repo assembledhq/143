@@ -1504,6 +1504,7 @@ describe('SessionDetailPage', () => {
 
     const previewTab = screen.getByRole('tab', { name: /Preview/ });
     expect(previewTab).toBeInTheDocument();
+    expect(previewTab.querySelector('svg')).toBeNull();
 
     const user = userEvent.setup();
     await user.click(previewTab);
