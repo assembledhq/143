@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -21,6 +22,18 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func expectUserLastOrgLookup(mock pgxmock.PgxPoolIface, userID uuid.UUID, lastOrgID *uuid.UUID) {
+	rows := pgxmock.NewRows([]string{"last_org_id"})
+	if lastOrgID == nil {
+		rows.AddRow(nil)
+	} else {
+		rows.AddRow(lastOrgID.String())
+	}
+	mock.ExpectQuery(`SELECT last_org_id FROM users WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(rows)
+}
 
 func TestAuthHandler_Login_Redirects(t *testing.T) {
 	t.Parallel()
@@ -172,6 +185,345 @@ func TestAuthHandler_Logout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAuthHandler_PersistSessionTx_SeedsLastOrgIDFromUserPreference(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	cfg := &config.Config{}
+	userStore := db.NewUserStore(mock)
+	handler := NewAuthHandler(cfg, mock, userStore, db.NewAuthSessionStore(mock), nil, nil)
+
+	user := &models.User{
+		ID:    uuid.New(),
+		OrgID: uuid.New(),
+	}
+	lastOrgID := uuid.New()
+
+	expectUserLastOrgLookup(mock, user.ID, &lastOrgID)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), &lastOrgID, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(uuid.New(), time.Now()),
+		)
+
+	token, err := handler.persistSessionTx(context.Background(), mock, user)
+	require.NoError(t, err, "persistSessionTx should create a session successfully")
+	require.NotEmpty(t, token, "persistSessionTx should return the minted session token")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAuthHandler_PersistSessionTx_UsesDBTXForLastOrgLookup(t *testing.T) {
+	t.Parallel()
+
+	sessionDB, err := pgxmock.NewPool()
+	require.NoError(t, err, "session database mock should initialize")
+	defer sessionDB.Close()
+
+	handlerStoreDB, err := pgxmock.NewPool()
+	require.NoError(t, err, "handler user store mock should initialize")
+	defer handlerStoreDB.Close()
+
+	lastOrgID := uuid.New()
+	user := &models.User{
+		ID:    uuid.New(),
+		OrgID: uuid.New(),
+	}
+
+	expectUserLastOrgLookup(sessionDB, user.ID, &lastOrgID)
+	sessionDB.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), &lastOrgID, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at"}).
+				AddRow(uuid.New(), time.Now()),
+		)
+
+	handler := NewAuthHandler(
+		&config.Config{},
+		nil,
+		db.NewUserStore(handlerStoreDB),
+		db.NewAuthSessionStore(sessionDB),
+		nil,
+		nil,
+	)
+
+	token, err := handler.persistSessionTx(context.Background(), sessionDB, user)
+	require.NoError(t, err, "persistSessionTx should read and write through the provided dbtx")
+	require.NotEmpty(t, token, "persistSessionTx should return the minted session token")
+	require.NoError(t, sessionDB.ExpectationsWereMet(), "all dbtx expectations should be met")
+	require.NoError(t, handlerStoreDB.ExpectationsWereMet(), "handler-scoped user store should be unused")
+}
+
+func TestAuthHandler_PersistSessionTx_ReturnsLookupErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	user := &models.User{
+		ID:    uuid.New(),
+		OrgID: uuid.New(),
+	}
+
+	mock.ExpectQuery(`SELECT last_org_id FROM users WHERE id = @id`).
+		WithArgs(user.ID).
+		WillReturnError(errors.New("lookup failed"))
+
+	handler := NewAuthHandler(&config.Config{}, nil, nil, db.NewAuthSessionStore(mock), nil, nil)
+	token, err := handler.persistSessionTx(context.Background(), mock, user)
+	require.Error(t, err, "persistSessionTx should return last-org lookup failures")
+	require.Empty(t, token, "persistSessionTx should not return a session token on lookup failure")
+	require.Contains(t, err.Error(), "get user last_org_id", "persistSessionTx should wrap the lookup failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAuthHandler_SetActiveOrg(t *testing.T) {
+	t.Parallel()
+
+	t.Run("requires an authenticated user", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", bytes.NewBufferString(`{"org_id":"`+uuid.New().String()+`"}`))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, "SetActiveOrg should reject unauthenticated requests")
+	})
+
+	t.Run("rejects invalid request bodies", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(nil),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(nil),
+		)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", bytes.NewBufferString(`{"org_id":`))
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: uuid.New()}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, "SetActiveOrg should reject malformed JSON")
+	})
+
+	t.Run("rejects invalid org ids", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(nil),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(nil),
+		)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", bytes.NewBufferString(`{"org_id":"not-a-uuid"}`))
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: uuid.New()}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, "SetActiveOrg should reject invalid organization ids")
+	})
+
+	t.Run("persists a membership the user holds", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		userID := uuid.New()
+		targetOrgID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+			WithArgs(userID, targetOrgID).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
+					AddRow(userID, targetOrgID, "member", now),
+			)
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&targetOrgID, userID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(mock),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(mock),
+		)
+
+		body := bytes.NewBufferString(fmt.Sprintf(`{"org_id":"%s"}`, targetOrgID))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", body)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusNoContent, w.Code, "SetActiveOrg should persist the preference and return 204")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("rejects orgs the user is not a member of", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		userID := uuid.New()
+		targetOrgID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+			WithArgs(userID, targetOrgID).
+			WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}))
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(mock),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(mock),
+		)
+
+		body := bytes.NewBufferString(fmt.Sprintf(`{"org_id":"%s"}`, targetOrgID))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", body)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusForbidden, w.Code, "SetActiveOrg should reject unrelated org ids")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns 500 when membership lookup fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		userID := uuid.New()
+		targetOrgID := uuid.New()
+
+		mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+			WithArgs(userID, targetOrgID).
+			WillReturnError(errors.New("db down"))
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(mock),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(mock),
+		)
+
+		body := bytes.NewBufferString(fmt.Sprintf(`{"org_id":"%s"}`, targetOrgID))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", body)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code, "SetActiveOrg should surface membership lookup failures as 500s")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns 500 when user preference persistence fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		userID := uuid.New()
+		targetOrgID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+			WithArgs(userID, targetOrgID).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
+					AddRow(userID, targetOrgID, "member", now),
+			)
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&targetOrgID, userID).
+			WillReturnError(errors.New("write failed"))
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(mock),
+			nil,
+			nil,
+			db.NewOrganizationMembershipStore(mock),
+		)
+
+		body := bytes.NewBufferString(fmt.Sprintf(`{"org_id":"%s"}`, targetOrgID))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", body)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code, "SetActiveOrg should surface user preference persistence failures as 500s")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns 500 when session hint persistence fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should initialize")
+		defer mock.Close()
+
+		userID := uuid.New()
+		targetOrgID := uuid.New()
+		now := time.Now()
+
+		mock.ExpectQuery("SELECT .+ FROM organization_memberships").
+			WithArgs(userID, targetOrgID).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
+					AddRow(userID, targetOrgID, "member", now),
+			)
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&targetOrgID, userID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec(`UPDATE auth_sessions SET last_org_id = @last_org_id WHERE token = @token`).
+			WithArgs(&targetOrgID, "session-token").
+			WillReturnError(errors.New("session write failed"))
+
+		handler := NewAuthHandler(
+			&config.Config{},
+			nil,
+			db.NewUserStore(mock),
+			db.NewAuthSessionStore(mock),
+			nil,
+			db.NewOrganizationMembershipStore(mock),
+		)
+
+		body := bytes.NewBufferString(fmt.Sprintf(`{"org_id":"%s"}`, targetOrgID))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/active-org", body)
+		req.AddCookie(&http.Cookie{Name: middleware.SessionCookieName, Value: "session-token"})
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		w := httptest.NewRecorder()
+
+		handler.SetActiveOrg(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code, "SetActiveOrg should fail when it cannot update the current session hint")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }
 
 func TestAuthHandler_Callback(t *testing.T) {
@@ -830,6 +1182,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	expectUserLastOrgLookup(mock, expectedUserID, nil)
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
@@ -1075,6 +1428,7 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
 	// Create session inside the signup tx (5 named args: user_id, org_id, last_org_id, token, expires_at).
 	sessionID := uuid.New()
+	expectUserLastOrgLookup(mock, newUserID, nil)
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(sessionID, time.Now()))
@@ -1377,6 +1731,7 @@ func TestAuthHandler_Register_NoInvitation_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	// Session insert happens inside the signup tx before commit.
+	expectUserLastOrgLookup(mock, newUserID, nil)
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
@@ -1461,6 +1816,9 @@ func TestAuthHandler_ClaimInvitationForExistingUser_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+		WithArgs(&orgID, userID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
 	cfg := &config.Config{}
@@ -1600,6 +1958,9 @@ func TestAuthHandler_ClaimInvitation_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+		WithArgs(&invOrgID, userID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
 	cfg := &config.Config{}
@@ -1708,6 +2069,9 @@ func TestAuthHandler_ClaimInvitation_EmitsAcceptedAudit(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+		WithArgs(&invOrgID, userID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 	// Audit emitter runs post-commit; this is the row `emitInvitationAccepted`
 	// writes into audit_logs. AuditLogStore.Create binds 13 named args, which
@@ -1912,6 +2276,7 @@ func TestAuthHandler_CreateSignupOrg_DBErrors(t *testing.T) {
 		mock.ExpectExec("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		expectUserLastOrgLookup(mock, userID, nil)
 		mock.ExpectQuery("INSERT INTO auth_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("session"))
@@ -1939,6 +2304,7 @@ func TestAuthHandler_CreateSignupOrg_DBErrors(t *testing.T) {
 		mock.ExpectExec("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		expectUserLastOrgLookup(mock, userID, nil)
 		mock.ExpectQuery("INSERT INTO auth_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
@@ -2024,7 +2390,32 @@ func TestAuthHandler_ClaimInvitationForExistingUser_DBErrors(t *testing.T) {
 		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&orgID, pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectCommit().WillReturnError(errors.New("commit"))
+
+		_, _, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
+		require.Error(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("last org update fails", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+		setupBeginSelect(mock)
+		mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("INSERT INTO organization_memberships").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&orgID, pgxmock.AnyArg()).
+			WillReturnError(errors.New("update last org"))
+		mock.ExpectRollback()
 
 		_, _, _, err = newHandler(mock).claimInvitationForExistingUser(context.Background(), "valid", "u@example.com", "", uuid.New())
 		require.Error(t, err)
@@ -2133,12 +2524,14 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+		userID := uuid.New()
+		expectUserLastOrgLookup(mock, userID, nil)
 		mock.ExpectQuery("INSERT INTO auth_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
 		mock.ExpectCommit().WillReturnError(errors.New("commit"))
 
-		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: uuid.New(), OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: userID, OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -2183,6 +2576,8 @@ func TestAuthHandler_createSessionAndRespond_SetsCookiesWithMiddlewareConstants(
 	require.NoError(t, err)
 	defer mock.Close()
 
+	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
+	expectUserLastOrgLookup(mock, user.ID, nil)
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2203,7 +2598,6 @@ func TestAuthHandler_createSessionAndRespond_SetsCookiesWithMiddlewareConstants(
 	req.TLS = nil
 	w := httptest.NewRecorder()
 
-	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
 	handler.createSessionAndRespond(w, req, user)
 
 	require.Equal(t, http.StatusOK, w.Code)
@@ -2230,6 +2624,8 @@ func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing
 	require.NoError(t, err)
 	defer mock.Close()
 
+	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
+	expectUserLastOrgLookup(mock, user.ID, nil)
 	mock.ExpectQuery("INSERT INTO auth_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2253,7 +2649,6 @@ func TestAuthHandler_createSessionAndRedirect_SetsCookiesAndRedirects(t *testing
 	req.Header.Set("X-Forwarded-Proto", "https")
 	w := httptest.NewRecorder()
 
-	user := &models.User{ID: uuid.New(), OrgID: uuid.New(), Email: "u@example.com"}
 	handler.createSessionAndRedirect(w, req, user)
 
 	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
@@ -2310,6 +2705,9 @@ func TestAuthHandler_ClaimPendingInvitationForExistingUser(t *testing.T) {
 		mock.ExpectQuery("INSERT INTO organization_memberships").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+		mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+			WithArgs(&orgID, userID).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectCommit()
 
 		cfg := &config.Config{}

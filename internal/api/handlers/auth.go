@@ -137,6 +137,58 @@ func (h *AuthHandler) Memberships(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SetActiveOrg persists the user's explicitly selected org so future sessions
+// can default to it across logins. The target org must be one the user
+// currently belongs to.
+//
+// lint:allow-no-orgid reason="user-scoped preference write validated against memberships"
+func (h *AuthHandler) SetActiveOrg(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		return
+	}
+
+	var body struct {
+		OrgID string `json:"org_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	orgID, err := uuid.Parse(strings.TrimSpace(body.OrgID))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ORG_ID", "invalid organization id")
+		return
+	}
+
+	if _, err := h.memberships.Get(r.Context(), user.ID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "organization not available to user")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ACTIVE_ORG_LOOKUP_FAILED", "failed to validate organization membership", err)
+		return
+	}
+
+	if err := h.userStore.UpdateLastOrgID(r.Context(), user.ID, &orgID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ACTIVE_ORG_UPDATE_FAILED", "failed to persist active organization", err)
+		return
+	}
+
+	if h.sessionStore != nil {
+		if cookie, err := r.Cookie(middleware.SessionCookieName); err == nil && cookie.Value != "" {
+			if updateErr := h.sessionStore.UpdateLastOrgID(r.Context(), cookie.Value, &orgID); updateErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "ACTIVE_ORG_UPDATE_FAILED", "failed to persist active organization", updateErr)
+				return
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Register handles email/password sign-up.
 // If an invitation token is provided, the user joins the inviting org instead of creating a new one.
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -693,6 +745,11 @@ func (h *AuthHandler) persistSessionTx(ctx context.Context, dbtx db.DBTX, user *
 	if err != nil {
 		return "", fmt.Errorf("generate session token: %w", err)
 	}
+	userStore := db.NewUserStore(dbtx)
+	lastOrgID, err := userStore.GetLastOrgID(ctx, user.ID)
+	if err != nil {
+		return "", fmt.Errorf("get user last_org_id: %w", err)
+	}
 	// TODO(2026-04-25): drop OrgID from AuthSession once the legacy column
 	// is removed. Session->org resolution now flows through the middleware
 	// (X-Active-Org-ID header → session.last_org_id → oldest membership);
@@ -712,6 +769,7 @@ func (h *AuthHandler) persistSessionTx(ctx context.Context, dbtx db.DBTX, user *
 	session := &models.AuthSession{
 		UserID:    user.ID,
 		OrgID:     user.OrgID,
+		LastOrgID: lastOrgID,
 		Token:     sessionToken,
 		ExpiresAt: time.Now().Add(middleware.SessionTTL),
 	}

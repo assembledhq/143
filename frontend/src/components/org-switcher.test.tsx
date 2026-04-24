@@ -10,14 +10,27 @@ import {
   setActiveOrgId,
 } from "@/lib/active-org";
 
-const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }));
+const { pushMock, toastInfo, toastError } = vi.hoisted(() => ({
+  pushMock: vi.fn(),
+  toastInfo: vi.fn(),
+  toastError: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock, replace: vi.fn() }),
 }));
 
+vi.mock("sonner", () => ({
+  toast: {
+    info: toastInfo,
+    error: toastError,
+  },
+}));
+
 beforeEach(() => {
   pushMock.mockReset();
+  toastInfo.mockReset();
+  toastError.mockReset();
   window.sessionStorage.clear();
 });
 
@@ -71,12 +84,20 @@ describe("OrgSwitcher", () => {
   });
 
   it("switching orgs writes sessionStorage and pushes /sessions", async () => {
+    let persistedOrgId: string | null = null;
     mockMemberships(
       [
         { org_id: "org-1", org_name: "Acme", role: "admin" },
         { org_id: "org-2", org_name: "Globex", role: "member" },
       ],
       "org-1",
+    );
+    server.use(
+      http.post("/api/v1/auth/active-org", async ({ request }) => {
+        const body = (await request.json()) as { org_id: string };
+        persistedOrgId = body.org_id;
+        return new HttpResponse(null, { status: 204 });
+      }),
     );
 
     const user = userEvent.setup();
@@ -85,8 +106,47 @@ describe("OrgSwitcher", () => {
     await user.click(await screen.findByTestId("org-switcher"));
     await user.click(await screen.findByTestId("org-switcher-item-org-2"));
 
-    expect(getActiveOrgId()).toBe("org-2");
-    expect(pushMock).toHaveBeenCalledWith("/sessions");
+    await waitFor(() => {
+      expect(getActiveOrgId()).toBe("org-2");
+      expect(persistedOrgId).toBe("org-2");
+      expect(pushMock).toHaveBeenCalledWith("/sessions");
+    });
+  });
+
+  it("switch failure leaves the previous org selected and shows an error", async () => {
+    setActiveOrgId("org-1");
+    mockMemberships(
+      [
+        { org_id: "org-1", org_name: "Acme", role: "admin" },
+        { org_id: "org-2", org_name: "Globex", role: "member" },
+      ],
+      "org-1",
+    );
+    server.use(
+      http.post("/api/v1/auth/active-org", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "ACTIVE_ORG_UPDATE_FAILED",
+              message: "failed to persist active organization",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<OrgSwitcher />);
+
+    await user.click(await screen.findByTestId("org-switcher"));
+    await user.click(await screen.findByTestId("org-switcher-item-org-2"));
+
+    await waitFor(() => {
+      expect(toastError).toHaveBeenCalled();
+    });
+    expect(getActiveOrgId()).toBe("org-1");
+    expect(pushMock).not.toHaveBeenCalled();
   });
 
   it("clicking the already-active org is a no-op", async () => {
