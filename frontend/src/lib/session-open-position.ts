@@ -16,6 +16,11 @@ interface ScrollStorageReader {
   get(key: string): string | undefined;
 }
 
+interface StoredSessionScrollPosition {
+  version: 1;
+  scrollTop: number;
+}
+
 interface ResolveInitialSessionAnchorInput {
   entries: TimelineEntry[];
   isActive: boolean;
@@ -45,8 +50,20 @@ export function readStoredSessionScrollPosition(
 
   if (!rawValue) return null;
 
+  if (rawValue.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(rawValue) as Partial<StoredSessionScrollPosition>;
+      if (parsed.version !== 1 || !Number.isFinite(parsed.scrollTop) || parsed.scrollTop! < 0) {
+        return null;
+      }
+      return parsed.scrollTop!;
+    } catch {
+      return null;
+    }
+  }
+
   const parsed = Number(rawValue);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  if (!Number.isFinite(parsed) || parsed <= 0) {
     return null;
   }
 
@@ -64,7 +81,10 @@ export function writeStoredSessionScrollPosition(
   }
 
   const key = getSessionScrollStorageKey(sessionId, viewerScope);
-  const normalizedValue = Math.round(scrollTop).toString();
+  const normalizedValue = JSON.stringify({
+    version: 1,
+    scrollTop: Math.round(scrollTop),
+  } satisfies StoredSessionScrollPosition);
 
   if ("setItem" in storage) {
     storage.setItem(key, normalizedValue);

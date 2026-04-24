@@ -511,6 +511,59 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('ignores a legacy saved top position and still opens a running session at the live edge', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      id: 'session-scroll-legacy-zero',
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 2,
+      sandbox_state: 'running',
+    };
+
+    window.localStorage.setItem(`session-scroll-position:org-1:user-1:${runningSession.id}`, '0');
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        const timeline: SessionTimelineEntry[] = [
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:01:00Z',
+            message: { id: 1, session_id: runningSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 1, role: 'user', content: 'First request', created_at: '2026-02-17T07:01:00Z' },
+          },
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:02:00Z',
+            message: { id: 2, session_id: runningSession.id, org_id: 'org-1', turn_number: 1, role: 'assistant', content: 'First response', created_at: '2026-02-17T07:02:00Z' },
+          },
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:03:00Z',
+            message: { id: 3, session_id: runningSession.id, org_id: 'org-1', user_id: 'user-1', turn_number: 2, role: 'user', content: 'Second request', created_at: '2026-02-17T07:03:00Z' },
+          },
+          {
+            kind: 'message',
+            created_at: '2026-02-17T07:04:00Z',
+            message: { id: 4, session_id: runningSession.id, org_id: 'org-1', turn_number: 2, role: 'assistant', content: 'Latest response', created_at: '2026-02-17T07:04:00Z' },
+          },
+        ];
+        return HttpResponse.json({ data: timeline, meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    await screen.findByText('Latest response');
+
+    await waitFor(() => {
+      expect(getChatScroller(container).scrollTop).toBe(900);
+    });
+  });
+
   it('opens active sessions at the live edge when there is no saved position', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
