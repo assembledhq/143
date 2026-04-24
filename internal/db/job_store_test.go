@@ -581,9 +581,9 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 
 	store := NewJobStore(mock)
 	staleBefore := time.Now().Add(-90 * time.Second)
-	mock.ExpectExec("WITH dead_nodes AS").
+	mock.ExpectQuery("WITH dead_nodes AS").
 		WithArgs(staleBefore, 100).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3)))
 
 	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
 	require.NoError(t, err, "ReclaimLostRunningJobs should not return an error")
@@ -600,13 +600,32 @@ func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {
 
 	store := NewJobStore(mock)
 	staleBefore := time.Now().Add(-90 * time.Second)
-	mock.ExpectExec("WITH dead_nodes AS").
+	mock.ExpectQuery("WITH dead_nodes AS").
 		WithArgs(staleBefore, 100).
 		WillReturnError(errors.New("update failed"))
 
 	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
 	require.Error(t, err, "ReclaimLostRunningJobs should return wrapped update errors")
 	require.Equal(t, int64(0), reclaimed, "ReclaimLostRunningJobs should return zero on error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_OldestPendingSessionJobAge_UsesRunnableTime(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	runnableAt := time.Now().Add(-45 * time.Second)
+	mock.ExpectQuery("SELECT run_at\\s+FROM jobs").
+		WillReturnRows(pgxmock.NewRows([]string{"run_at"}).AddRow(runnableAt))
+
+	age, ok, err := store.OldestPendingSessionJobAge(context.Background())
+	require.NoError(t, err, "OldestPendingSessionJobAge should not return an error")
+	require.True(t, ok, "OldestPendingSessionJobAge should report a runnable job when one exists")
+	require.InDelta(t, 45*time.Second, age, float64(2*time.Second), "OldestPendingSessionJobAge should measure backlog from run_at rather than job creation time")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

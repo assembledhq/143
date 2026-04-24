@@ -29,6 +29,10 @@ var sessionTestColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
+	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
+	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
+	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
@@ -51,6 +55,24 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		nil, 0, lastActivityAt, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+		nil,      // runtime_soft_deadline_at
+		nil,      // runtime_hard_deadline_at
+		nil,      // runtime_last_progress_at
+		"",       // runtime_last_progress_type
+		"",       // runtime_last_progress_strength
+		0,        // runtime_extension_count
+		0,        // runtime_extension_seconds
+		"",       // runtime_stop_reason
+		nil,      // runtime_graceful_stop_at
+		nil,      // checkpointed_at
+		"",       // checkpoint_kind
+		"",       // checkpoint_capability
+		int64(0), // checkpoint_size_bytes
+		nil,      // checkpoint_error
+		"",       // recovery_state
+		nil,      // recovery_queued_at
+		nil,      // recovery_started_at
+		0,        // recovery_attempt_count
 		nil,      // target_branch
 		nil,      // working_branch
 		nil,      // base_commit_sha
@@ -1640,4 +1662,42 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	_, err = store.ListOrphanedContainers(context.Background(), uuid.Nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list orphaned containers")
+}
+
+func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectExec(`recovery_state = CASE\s+WHEN recovery_state = 'recovering' THEN recovery_state ELSE '' END`).
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.BeginRuntime(
+		context.Background(),
+		orgID,
+		sessionID,
+		models.CheckpointCapabilityFullResume,
+		now.Add(10*time.Minute),
+		now.Add(20*time.Minute),
+		now,
+	)
+	require.NoError(t, err, "BeginRuntime should not clear recovering state when resuming from a checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

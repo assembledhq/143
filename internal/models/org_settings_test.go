@@ -442,3 +442,34 @@ func TestParseOrgSettings_MaxSessionDuration_InRange(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 600, s.MaxSessionDurationSeconds, "in-range value should pass through")
 }
+
+func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {
+	t.Parallel()
+
+	s, err := ParseOrgSettings(nil)
+	require.NoError(t, err, "ParseOrgSettings should apply runtime budget defaults")
+	require.Equal(t, DefaultNoProgressTimeoutSeconds, s.RuntimeBudgets.NoProgressTimeoutSeconds, "no-progress timeout should default")
+	require.Equal(t, DefaultGracefulShutdownWindowSeconds, s.RuntimeBudgets.GracefulShutdownWindowSeconds, "graceful shutdown window should default")
+	require.Equal(t, DefaultCheckpointFinalizeWindowSeconds, s.RuntimeBudgets.CheckpointFinalizationWindowSeconds, "checkpoint finalization window should default")
+	require.Equal(t, DefaultAutomaticExtensionSeconds, s.RuntimeBudgets.AutomaticExtensionSeconds, "automatic extension window should default")
+	require.Equal(t, DefaultMaxAutomaticExtensionSeconds, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "max automatic extension should default")
+	require.Equal(t, DefaultAbsoluteRuntimeCeilingSeconds, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should default")
+}
+
+func TestParseOrgSettings_RuntimeBudgets_ClampToSoftBudgetAndCeiling(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"max_session_duration_seconds": 1200,
+		"runtime_budgets": {
+			"max_automatic_extension_seconds": 7200,
+			"absolute_runtime_ceiling_seconds": 1500
+		}
+	}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should clamp runtime budgets against the soft budget and ceiling")
+	require.Equal(t, 1200, s.MaxSessionDurationSeconds, "soft budget should preserve the configured value")
+	require.Equal(t, 1500, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should preserve the configured value")
+	require.Equal(t, 300, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "max automatic extension should clamp to the available headroom")
+}

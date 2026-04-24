@@ -147,6 +147,10 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
+	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
+	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
+	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
@@ -163,6 +167,39 @@ func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
 	return row
 }
 
+const legacySessionColumnsLen = 54
+
+func legacyRuntimeSessionDefaults() []interface{} {
+	return []interface{}{
+		nil,      // runtime_soft_deadline_at
+		nil,      // runtime_hard_deadline_at
+		nil,      // runtime_last_progress_at
+		"",       // runtime_last_progress_type
+		"",       // runtime_last_progress_strength
+		0,        // runtime_extension_count
+		0,        // runtime_extension_seconds
+		"",       // runtime_stop_reason
+		nil,      // runtime_graceful_stop_at
+		nil,      // checkpointed_at
+		"",       // checkpoint_kind
+		"",       // checkpoint_capability
+		int64(0), // checkpoint_size_bytes
+		nil,      // checkpoint_error
+		"",       // recovery_state
+		nil,      // recovery_queued_at
+		nil,      // recovery_started_at
+		0,        // recovery_attempt_count
+	}
+}
+
+func expandLegacySessionRow(values []interface{}) []interface{} {
+	row := make([]interface{}, 0, len(sessionColumns))
+	row = append(row, values[:38]...)
+	row = append(row, legacyRuntimeSessionDefaults()...)
+	row = append(row, values[38:]...)
+	return row
+}
+
 func sessionTestRow(values ...interface{}) []interface{} {
 	switch len(values) {
 	case len(sessionColumns) - 3, len(sessionColumns) - 4, len(sessionColumns) - 6, len(sessionColumns) - 7:
@@ -172,6 +209,36 @@ func sessionTestRow(values ...interface{}) []interface{} {
 	switch len(values) {
 	case len(sessionColumns):
 		return values
+	case legacySessionColumnsLen:
+		return expandLegacySessionRow(values)
+	case legacySessionColumnsLen - 1:
+		row := make([]interface{}, 0, legacySessionColumnsLen)
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:]...)
+		return expandLegacySessionRow(row)
+	case legacySessionColumnsLen - 4:
+		row := make([]interface{}, 0, legacySessionColumnsLen)
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:39]...)
+		row = append(row, nil) // base_commit_sha
+		row = append(row, values[39:48]...)
+		row = append(row, nil) // diff_collected_at
+		row = append(row, nil) // latest_diff_snapshot_id
+		row = append(row, values[48:]...)
+		return expandLegacySessionRow(row)
+	case legacySessionColumnsLen - 3:
+		row := make([]interface{}, 0, legacySessionColumnsLen)
+		row = append(row, values[:12]...)
+		row = append(row, nil) // worker_node_id
+		row = append(row, values[12:40]...)
+		row = append(row, nil) // base_commit_sha
+		row = append(row, values[40:49]...)
+		row = append(row, nil) // diff_collected_at
+		row = append(row, nil) // latest_diff_snapshot_id
+		row = append(row, values[49:]...)
+		return expandLegacySessionRow(row)
 	case len(sessionColumns) - 1:
 		row := make([]interface{}, 0, len(sessionColumns))
 		row = append(row, values[:15]...)
@@ -201,7 +268,18 @@ func sessionTestRow(values ...interface{}) []interface{} {
 		row = append(row, values[52:]...)
 		return row
 	default:
-		panic(fmt.Sprintf("sessionTestRow received %d values, want %d, %d, %d, or %d (plus legacy variants without session policy columns)", len(values), len(sessionColumns), len(sessionColumns)-1, len(sessionColumns)-3, len(sessionColumns)-4))
+		panic(fmt.Sprintf(
+			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
+			len(values),
+			len(sessionColumns),
+			len(sessionColumns)-1,
+			len(sessionColumns)-3,
+			len(sessionColumns)-4,
+			legacySessionColumnsLen,
+			legacySessionColumnsLen-1,
+			legacySessionColumnsLen-3,
+			legacySessionColumnsLen-4,
+		))
 	}
 }
 

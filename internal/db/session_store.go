@@ -112,7 +112,12 @@ const sessionSelectColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
+	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
+	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
+	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
+	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -133,7 +138,12 @@ const sessionListColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
+	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
+	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
+	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
+	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -467,6 +477,197 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		return fmt.Errorf("commit session create transaction: %w", err)
 	}
 	return nil
+}
+
+func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {
+	query := `
+		UPDATE sessions
+		SET runtime_soft_deadline_at = @runtime_soft_deadline_at,
+		    runtime_hard_deadline_at = @runtime_hard_deadline_at,
+		    runtime_last_progress_at = @runtime_last_progress_at,
+		    runtime_last_progress_type = @runtime_last_progress_type,
+		    runtime_last_progress_strength = @runtime_last_progress_strength,
+		    runtime_extension_count = 0,
+		    runtime_extension_seconds = 0,
+		    runtime_stop_reason = '',
+		    runtime_graceful_stop_at = NULL,
+		    checkpoint_capability = @checkpoint_capability,
+		    checkpoint_error = NULL,
+		    recovery_state = CASE
+		        WHEN recovery_state = 'recovering' THEN recovery_state
+		        ELSE ''
+		    END,
+		    recovery_queued_at = NULL,
+		    recovery_started_at = CASE
+		        WHEN recovery_state = 'recovering' THEN recovery_started_at
+		        ELSE NULL
+		    END
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                             sessionID,
+		"org_id":                         orgID,
+		"runtime_soft_deadline_at":       softDeadline.UTC(),
+		"runtime_hard_deadline_at":       hardDeadline.UTC(),
+		"runtime_last_progress_at":       observedAt.UTC(),
+		"runtime_last_progress_type":     string(models.RuntimeProgressTypeAssistantOutput),
+		"runtime_last_progress_strength": string(models.RuntimeProgressStrengthWeak),
+		"checkpoint_capability":          string(capability),
+	})
+	return err
+}
+
+func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
+	query := `
+		UPDATE sessions
+		SET runtime_last_progress_at = @runtime_last_progress_at,
+		    runtime_last_progress_type = @runtime_last_progress_type,
+		    runtime_last_progress_strength = @runtime_last_progress_strength
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":                             sessionID,
+		"org_id":                         orgID,
+		"runtime_last_progress_at":       observedAt.UTC(),
+		"runtime_last_progress_type":     string(progressType),
+		"runtime_last_progress_strength": string(strength),
+	})
+	return err
+}
+
+func (s *SessionStore) GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
+	args := pgx.NamedArgs{
+		"id":                     sessionID,
+		"org_id":                 orgID,
+		"expected_soft_deadline": expectedSoftDeadline.UTC(),
+		"new_soft_deadline":      newSoftDeadline.UTC(),
+		"runtime_hard_deadline":  hardDeadline.UTC(),
+		"extension_seconds":      extensionSeconds,
+	}
+
+	query := `
+		UPDATE sessions s
+		SET runtime_soft_deadline_at = @new_soft_deadline,
+		    runtime_hard_deadline_at = @runtime_hard_deadline,
+		    runtime_extension_count = runtime_extension_count + 1,
+		    runtime_extension_seconds = runtime_extension_seconds + @extension_seconds
+		WHERE s.id = @id
+		  AND s.org_id = @org_id
+		  AND s.deleted_at IS NULL
+		  AND s.status = 'running'
+		  AND s.runtime_soft_deadline_at = @expected_soft_deadline`
+	if lockToken != uuid.Nil {
+		query += `
+		  AND EXISTS (
+			SELECT 1
+			FROM jobs j
+			WHERE j.status = 'running'
+			  AND j.org_id = @org_id
+			  AND j.lock_token = @lock_token
+			  AND NULLIF(j.payload->>'session_id', '')::uuid = s.id
+		  )`
+		args["lock_token"] = lockToken
+	}
+
+	tag, err := s.db.Exec(ctx, query, args)
+	if err != nil {
+		return false, fmt.Errorf("grant runtime extension: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
+	args := pgx.NamedArgs{
+		"id":                    sessionID,
+		"org_id":                orgID,
+		"agent_session_id":      agentSessionID,
+		"snapshot_key":          snapshotKey,
+		"checkpoint_kind":       string(kind),
+		"checkpoint_capability": string(capability),
+		"checkpoint_size_bytes": sizeBytes,
+		"checkpointed_at":       checkpointedAt.UTC(),
+		"checkpoint_error":      checkpointErr,
+		"runtime_stop_reason":   string(stopReason),
+	}
+
+	query := `
+		UPDATE sessions s
+		SET agent_session_id = CASE
+		        WHEN @agent_session_id = '' THEN agent_session_id
+		        ELSE @agent_session_id
+		    END,
+		    snapshot_key = CASE
+		        WHEN @snapshot_key = '' THEN snapshot_key
+		        ELSE @snapshot_key
+		    END,
+		    sandbox_state = CASE
+		        WHEN @snapshot_key = '' THEN sandbox_state
+		        ELSE 'snapshotted'
+		    END,
+		    checkpoint_kind = @checkpoint_kind,
+		    checkpoint_capability = @checkpoint_capability,
+		    checkpoint_size_bytes = @checkpoint_size_bytes,
+		    checkpointed_at = @checkpointed_at,
+		    checkpoint_error = @checkpoint_error,
+		    runtime_stop_reason = @runtime_stop_reason,
+		    runtime_graceful_stop_at = CASE
+		        WHEN @runtime_stop_reason = '' THEN runtime_graceful_stop_at
+		        ELSE @checkpointed_at
+		    END
+		WHERE s.id = @id
+		  AND s.org_id = @org_id
+		  AND s.deleted_at IS NULL`
+	if lockToken != uuid.Nil {
+		query += `
+		  AND EXISTS (
+			SELECT 1
+			FROM jobs j
+			WHERE j.status = 'running'
+			  AND j.org_id = @org_id
+			  AND j.lock_token = @lock_token
+			  AND NULLIF(j.payload->>'session_id', '')::uuid = s.id
+		  )`
+		args["lock_token"] = lockToken
+	}
+
+	tag, err := s.db.Exec(ctx, query, args)
+	if err != nil {
+		return false, fmt.Errorf("publish checkpoint: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error {
+	query := `
+		UPDATE sessions
+		SET recovery_state = @recovery_state,
+		    recovery_queued_at = @recovery_queued_at,
+		    recovery_started_at = @recovery_started_at,
+		    recovery_attempt_count = CASE
+		        WHEN @increment_attempt THEN recovery_attempt_count + 1
+		        ELSE recovery_attempt_count
+		    END
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+
+	args := pgx.NamedArgs{
+		"id":                sessionID,
+		"org_id":            orgID,
+		"recovery_state":    string(state),
+		"increment_attempt": incrementAttempt,
+	}
+	if queuedAt != nil {
+		args["recovery_queued_at"] = queuedAt.UTC()
+	} else {
+		args["recovery_queued_at"] = nil
+	}
+	if startedAt != nil {
+		args["recovery_started_at"] = startedAt.UTC()
+	} else {
+		args["recovery_started_at"] = nil
+	}
+
+	_, err := s.db.Exec(ctx, query, args)
+	return err
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
