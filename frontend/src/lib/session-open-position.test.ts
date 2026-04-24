@@ -63,12 +63,24 @@ describe("session-open-position", () => {
     expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope)).toBe(480);
   });
 
+  it("ignores legacy zero scroll positions so old top-of-page state does not mask new reopen behavior", () => {
+    const storage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", "0"]]);
+
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope)).toBeNull();
+  });
+
+  it("reads structured saved positions including an intentional top-of-thread value", () => {
+    const storage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", JSON.stringify({ version: 1, scrollTop: 0 })]]);
+
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope)).toBe(0);
+  });
+
   it("stores normalized scroll positions for a session", () => {
     const storage = new Map<string, string>();
 
     writeStoredSessionScrollPosition(storage, "sess-123", viewerScope, 319.8);
 
-    expect(storage.get("session-scroll-position:org-1:user-1:sess-123")).toBe("320");
+    expect(storage.get("session-scroll-position:org-1:user-1:sess-123")).toBe(JSON.stringify({ version: 1, scrollTop: 320 }));
   });
 
   it("does not read another viewer's saved session position", () => {
