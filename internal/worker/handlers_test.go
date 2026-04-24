@@ -18,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
+	"github.com/assembledhq/143/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -2014,6 +2015,145 @@ func TestValidateHandler_MissingOrgID(t *testing.T) {
 	require.Contains(t, err.Error(), "parse org ID", "error should mention org ID")
 }
 
+func TestPrimaryIssueIDFromSnapshot(t *testing.T) {
+	t.Parallel()
+
+	primaryID := uuid.New()
+	got := primaryIssueIDFromSnapshot(&models.SessionTurnIssueSnapshot{
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{IssueID: uuid.New(), Role: models.SessionIssueLinkRoleRelated},
+			{IssueID: primaryID, Role: models.SessionIssueLinkRolePrimary},
+		},
+	})
+
+	require.NotNil(t, got, "primaryIssueIDFromSnapshot should return the primary issue when present")
+	require.Equal(t, primaryID, *got, "primaryIssueIDFromSnapshot should return the first primary linked issue")
+	require.Nil(t, primaryIssueIDFromSnapshot(nil), "primaryIssueIDFromSnapshot should return nil when there is no snapshot")
+	require.Nil(t, primaryIssueIDFromSnapshot(&models.SessionTurnIssueSnapshot{
+		LinkedIssues: []models.SessionIssueSnapshotEntry{{IssueID: uuid.New(), Role: models.SessionIssueLinkRoleRelated}},
+	}), "primaryIssueIDFromSnapshot should return nil when there is no primary linked issue")
+}
+
+func TestValidateHandler_IssueSnapshotErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects invalid issue snapshot ids", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-validate-invalid"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+
+		services := &Services{
+			Validation:      &validation.Service{},
+			SandboxProvider: testutil.NewMockSandboxProvider(),
+		}
+
+		handler := newValidateHandler(stores, services, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"not-a-uuid"}`)
+		err := handler(context.Background(), "validate", payload)
+
+		require.Error(t, err, "validate should reject invalid issue snapshot ids")
+		require.Contains(t, err.Error(), "parse issue snapshot id", "validate should report snapshot id parse failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns snapshot lookup errors", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		snapshotID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-validate-missing"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(context.Canceled)
+
+		services := &Services{
+			Validation:      &validation.Service{},
+			SandboxProvider: testutil.NewMockSandboxProvider(),
+		}
+
+		handler := newValidateHandler(stores, services, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"` + snapshotID.String() + `"}`)
+		err := handler(context.Background(), "validate", payload)
+
+		require.Error(t, err, "validate should return snapshot lookup errors")
+		require.Contains(t, err.Error(), "fetch issue snapshot for validation", "validate should wrap snapshot lookup failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("uses turn snapshot and returns issue fetch errors", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		primaryIssueID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-validate-turn"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		runRow := workerSessionTestRow(
+			sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+			nil, nil, nil, nil,
+			nil, nil, false, &now, &now, nil,
+			nil, nil, nil, false,
+			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, nil,
+			nil, nil,
+			nil, 2, now, "snapshotted", &snapshotKey,
+			nil, nil, nil, nil, nil, nil, nil,
+			nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
+		)
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runRow...))
+		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
+					AddRow(uuid.New(), orgID, sessionID, 2, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
+			)
+		mock.ExpectQuery("SELECT .* FROM issues").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("issue missing"))
+
+		services := &Services{
+			Validation:      &validation.Service{},
+			SandboxProvider: testutil.NewMockSandboxProvider(),
+		}
+
+		handler := newValidateHandler(stores, services, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+		err := handler(context.Background(), "validate", payload)
+
+		require.Error(t, err, "validate should return issue fetch errors after resolving the turn snapshot")
+		require.Contains(t, err.Error(), "fetch issue for validation", "validate should wrap issue fetch failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+}
+
 func TestOpenPRHandler_InvalidOrgID(t *testing.T) {
 	t.Parallel()
 
@@ -2038,6 +2178,170 @@ func TestOpenPRHandler_InvalidRunID(t *testing.T) {
 	err := handler(context.Background(), "open_pr", payload)
 	require.Error(t, err, "open_pr handler should return error for invalid run ID")
 	require.Contains(t, err.Error(), "parse agent run ID", "error should mention run ID")
+}
+
+func TestOpenPRHandler_UsesSnapshotPrimaryIssueFromPayload(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	primaryIssueID := uuid.New()
+	snapshotID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snap-open-pr-snapshot"
+
+	stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
+				AddRow(snapshotID, orgID, sessionID, 1, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
+		)
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Equal(t, primaryIssueID, run.IssueID, "open_pr should replace the session's legacy issue id with the snapshot primary issue")
+				require.NotNil(t, run.PrimaryIssueID, "open_pr should backfill PrimaryIssueID from the snapshot")
+				require.Equal(t, primaryIssueID, *run.PrimaryIssueID, "open_pr should preserve the snapshot primary issue id")
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"` + snapshotID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr should succeed when snapshot-backed primary issue resolution succeeds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOpenPRHandler_IssueSnapshotErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects invalid issue snapshot ids", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-open-pr-invalid"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+
+		handler := newOpenPRHandler(stores, &Services{PR: &stubPRService{}}, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"not-a-uuid"}`)
+		err := handler(context.Background(), "open_pr", payload)
+
+		require.Error(t, err, "open_pr should reject invalid issue snapshot ids")
+		require.Contains(t, err.Error(), "parse issue snapshot id", "open_pr should report snapshot id parse failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("returns snapshot lookup errors", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		snapshotID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-open-pr-missing"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(context.Canceled)
+
+		handler := newOpenPRHandler(stores, &Services{PR: &stubPRService{}}, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_snapshot_id":"` + snapshotID.String() + `"}`)
+		err := handler(context.Background(), "open_pr", payload)
+
+		require.Error(t, err, "open_pr should return snapshot lookup errors")
+		require.Contains(t, err.Error(), "fetch issue snapshot for open_pr", "open_pr should wrap snapshot lookup failures")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("uses turn snapshot when payload omits snapshot id", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		primaryIssueID := uuid.New()
+		now := time.Now().UTC()
+		snapshotKey := "snap-open-pr-turn"
+		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
+
+		runRow := workerSessionTestRow(
+			sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+			nil, nil, nil, nil,
+			nil, nil, false, &now, &now, nil,
+			nil, nil, nil, false,
+			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil, nil,
+			nil, nil,
+			nil, 2, now, "snapshotted", &snapshotKey,
+			nil, nil, nil, nil, nil, nil, nil,
+			nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
+		)
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runRow...))
+		mock.ExpectQuery("SELECT .+ FROM session_turn_issue_snapshots").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "session_id", "turn_number", "linked_issues", "created_at"}).
+					AddRow(uuid.New(), orgID, sessionID, 2, []byte(`[{"issue_id":"`+primaryIssueID.String()+`","role":"primary","position":0,"title":"Fix checkout timeout","source":"linear"}]`), now),
+			)
+		mock.ExpectExec("UPDATE sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectExec("UPDATE sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		handler := newOpenPRHandler(stores, &Services{
+			PR: &stubPRService{
+				createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+					require.Equal(t, primaryIssueID, run.IssueID, "open_pr should resolve the primary issue from the current turn snapshot")
+					return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+				},
+			},
+		}, zerolog.Nop())
+		payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+		err := handler(context.Background(), "open_pr", payload)
+
+		require.NoError(t, err, "open_pr should succeed when resolving the primary issue from the current turn snapshot")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }
 
 func TestAnalyzeFailureHandler_InvalidOrgID(t *testing.T) {

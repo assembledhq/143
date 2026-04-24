@@ -593,6 +593,36 @@ func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
 	require.Contains(t, prompt, "Use Go 1.22")
 }
 
+func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue: &models.Issue{Title: "Bug"},
+		LinkedIssues: []models.SessionIssueSnapshotEntry{
+			{
+				Role:        models.SessionIssueLinkRolePrimary,
+				Source:      models.IssueSourceLinear,
+				Title:       "Fix checkout timeout",
+				ExternalID:  "ENG-123",
+				Description: "Customers hit a timeout after payment authorization.",
+			},
+			{
+				Role:        models.SessionIssueLinkRoleRelated,
+				Source:      models.IssueSourceSentry,
+				Title:       "Cart worker panic",
+				ExternalID:  "SENTRY-1",
+				Description: "This description should not be copied for related issues.",
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.Contains(t, prompt, "Linked Issues Context", "buildSystemPrompt should include the linked issue context header")
+	require.Contains(t, prompt, "<external_id>ENG-123</external_id>", "buildSystemPrompt should include external ids for linked issues")
+	require.Contains(t, prompt, "<description>Customers hit a timeout after payment authorization.</description>", "buildSystemPrompt should include descriptions for primary linked issues")
+	require.NotContains(t, prompt, "This description should not be copied for related issues.", "buildSystemPrompt should omit descriptions for related linked issues")
+}
+
 // ---------------------------------------------------------------------------
 // buildUserPrompt
 // ---------------------------------------------------------------------------
