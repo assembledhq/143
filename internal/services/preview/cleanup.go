@@ -75,7 +75,7 @@ func (w *CleanupWorker) cleanup() {
 	now := time.Now()
 
 	// Stop expired previews (hard TTL exceeded).
-	expired, err := w.manager.store.ListExpiredPreviews(ctx, now)
+	expired, err := w.manager.store.ListExpiredPreviewsForWorker(ctx, w.manager.WorkerNodeID(), now)
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list expired previews")
 	} else {
@@ -92,7 +92,7 @@ func (w *CleanupWorker) cleanup() {
 
 	// Stop idle previews (no activity for idleTimeout).
 	idleSince := now.Add(-w.idleTimeout)
-	idle, err := w.manager.store.ListIdlePreviews(ctx, idleSince)
+	idle, err := w.manager.store.ListIdlePreviewsForWorker(ctx, w.manager.WorkerNodeID(), idleSince)
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list idle previews")
 	} else {

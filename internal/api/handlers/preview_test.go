@@ -192,6 +192,83 @@ func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
 	}
 }
 
+func TestPreviewHandler_HelperMethods(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preview http error string handling", func(t *testing.T) {
+		t.Parallel()
+
+		var nilErr *previewHTTPError
+		require.Equal(t, "", nilErr.Error(), "nil previewHTTPError should stringify to an empty string")
+
+		msgErr := newPreviewHTTPError(http.StatusBadRequest, "BAD", "bad request", nil)
+		require.Equal(t, "bad request", msgErr.Error(), "previewHTTPError should return its message when no wrapped error is present")
+
+		wrapped := newPreviewHTTPError(http.StatusBadGateway, "BAD_GATEWAY", "gateway failed", errors.New("boom"))
+		require.Equal(t, "boom", wrapped.Error(), "previewHTTPError should return the wrapped error when present")
+	})
+
+	t.Run("write preview http error variants", func(t *testing.T) {
+		t.Parallel()
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = previewTestContext(req)
+
+		rr := httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, nil)
+		require.Equal(t, http.StatusOK, rr.Code, "writePreviewHTTPError should be a no-op for nil errors")
+
+		rr = httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, newPreviewHTTPError(http.StatusBadRequest, "INVALID", "bad input", nil))
+		require.Equal(t, http.StatusBadRequest, rr.Code, "writePreviewHTTPError should emit plain preview errors")
+
+		rr = httptest.NewRecorder()
+		writePreviewHTTPError(rr, req, newPreviewHTTPError(http.StatusBadGateway, "FAILED", "worker failed", errors.New("boom")))
+		require.Equal(t, http.StatusBadGateway, rr.Code, "writePreviewHTTPError should emit wrapped preview errors")
+		require.Contains(t, rr.Body.String(), "FAILED", "writePreviewHTTPError should preserve the error code")
+	})
+
+	t.Run("worker runtime helpers", func(t *testing.T) {
+		t.Parallel()
+
+		h := newPreviewTestHandler()
+		require.False(t, h.workerRoutingEnabled(), "worker routing should be disabled until both selector and client are configured")
+		require.False(t, h.isLocalWorker(preview.WorkerNode{ID: "worker-a"}), "isLocalWorker should reject non-matching worker IDs")
+		require.Error(t, func() error {
+			_, err := h.resolvePreviewWorker(context.Background(), "worker-a")
+			return err
+		}(), "resolvePreviewWorker should fail when no selector is configured")
+
+		h.workerSelector = &preview.WorkerSelector{}
+		h.workerClient = preview.NewWorkerPreviewClient("secret")
+		h.localNodeID = "worker-a"
+		require.True(t, h.workerRoutingEnabled(), "worker routing should be enabled when selector and client are configured")
+		require.True(t, h.isLocalWorker(preview.WorkerNode{ID: "worker-a"}), "isLocalWorker should accept matching worker IDs")
+	})
+
+	t.Run("manager and worker error helpers", func(t *testing.T) {
+		t.Parallel()
+
+		h := newPreviewTestHandler()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = previewTestContext(req)
+
+		rr := httptest.NewRecorder()
+		require.False(t, h.requireManager(rr, req), "requireManager should reject handlers without a preview manager")
+		require.Equal(t, http.StatusNotImplemented, rr.Code, "requireManager should return 501 when no preview manager is configured")
+
+		rr = httptest.NewRecorder()
+		h.writeWorkerClientError(rr, req, &preview.WorkerRequestError{StatusCode: http.StatusConflict, Code: "NO_SANDBOX", Message: "missing sandbox"})
+		require.Equal(t, http.StatusConflict, rr.Code, "writeWorkerClientError should preserve structured worker status codes")
+		require.Contains(t, rr.Body.String(), "NO_SANDBOX", "writeWorkerClientError should preserve structured worker codes")
+
+		rr = httptest.NewRecorder()
+		h.writeWorkerClientError(rr, req, errors.New("boom"))
+		require.Equal(t, http.StatusBadGateway, rr.Code, "writeWorkerClientError should map generic worker failures to 502")
+		require.Contains(t, rr.Body.String(), "PREVIEW_WORKER_REQUEST_FAILED", "writeWorkerClientError should emit the generic worker failure code")
+	})
+}
+
 func TestPreviewHandler_DetectReadiness_NoConfig(t *testing.T) {
 	t.Parallel()
 	h := newPreviewTestHandler()
@@ -382,6 +459,10 @@ var handlerPreviewLogTestCols = []string{
 var handlerPreviewSnapshotTestCols = []string{
 	"id", "preview_instance_id", "trigger", "url_path", "blob_ref",
 	"viewport_width", "viewport_height", "console_errors", "file_changes", "created_at",
+}
+
+var handlerNodeTestCols = []string{
+	"id", "mode", "host", "status", "metadata", "started_at", "last_heartbeat_at",
 }
 
 // newReservedPreviewRow builds the pgxmock row that CreatePreviewInstance
@@ -636,7 +717,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 var sessionRowColumns = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -653,7 +734,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, false, nil, nil, json.RawMessage(`{}`),
+		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -676,7 +757,7 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		&containerID, false, nil, nil, json.RawMessage(`{}`),
+		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -695,7 +776,7 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 	return []interface{}{
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
-		nil, false, nil, nil, json.RawMessage(`{}`),
+		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
@@ -940,6 +1021,121 @@ func TestPreviewHandler_StartPreview_CapacityReached(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.Equal(t, "PREVIEW_CAPACITY_REACHED", resp.Error.Code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandler_StartPreview_ColdStartRetriesAnotherWorkerOnCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	worker1Calls := 0
+	worker2Calls := 0
+
+	worker1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		worker1Calls++
+		require.Equal(t, http.MethodPost, r.Method, "worker one should receive a start request")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "PREVIEW_CAPACITY_REACHED",
+				Message: "all preview slots are in use",
+			},
+		}), "worker one should encode the capacity error")
+	}))
+	defer worker1.Close()
+
+	returnedPreviewID := uuid.New()
+	worker2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		worker2Calls++
+		require.Equal(t, http.MethodPost, r.Method, "worker two should receive a start request")
+		w.WriteHeader(http.StatusCreated)
+		require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewInstance]{
+			Data: &models.PreviewInstance{
+				ID:           returnedPreviewID,
+				SessionID:    sessionID,
+				OrgID:        orgID,
+				UserID:       userID,
+				Status:       models.PreviewStatusReady,
+				WorkerNodeID: "worker-2",
+			},
+		}), "worker two should encode the preview response")
+	}))
+	defer worker2.Close()
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+
+	h := newPreviewTestHandlerWithManager()
+	h.store = previewStore
+	h.sessionStore = sessionStore
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+
+	worker1Meta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: worker1.URL,
+	})
+	require.NoError(t, err, "should marshal worker one metadata")
+	worker2Meta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: worker2.URL,
+	})
+	require.NoError(t, err, "should marshal worker two metadata")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "none")...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
+				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
+		)
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", worker1Meta, now, now).
+				AddRow("worker-2", "worker", "worker-2.internal", "active", worker2Meta, now, now),
+		)
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "cold-start preview should retry another worker after capacity races")
+	var resp models.SingleResponse[*models.PreviewInstance]
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
+	require.NotNil(t, resp.Data, "response should include a preview instance")
+	require.Equal(t, returnedPreviewID, resp.Data.ID, "response should return the preview started on the retry worker")
+	require.Equal(t, 1, worker1Calls, "first worker should be tried once")
+	require.Equal(t, 1, worker2Calls, "second worker should be tried once after capacity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // TestPreviewHandler_StartPreview_HydrateReachesLaunch verifies that when
