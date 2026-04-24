@@ -12,7 +12,7 @@ import (
 func TestSessionIssueLinksMigration_PrioritizesIssueBackedSessionsOverUserID(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join("..", "..", "migrations", "000090_session_issue_links.up.sql")
+	path := filepath.Join("..", "..", "migrations", "000091_session_issue_links.up.sql")
 	src, err := os.ReadFile(path)
 	require.NoError(t, err, "reading the session issue links migration should succeed")
 
