@@ -730,7 +730,6 @@ export default function TeamSettingsPage() {
                 <AlertDialogCancel type="button">Cancel</AlertDialogCancel>
                 <Button
                   type="submit"
-                  className="h-9"
                   disabled={
                     inviteMutation.isPending ||
                     !inviteDraft ||
