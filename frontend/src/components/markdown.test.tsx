@@ -54,6 +54,13 @@ describe("MarkdownContent", () => {
     expect(list).not.toBeNull();
   });
 
+  it("preserves ordered list start numbers", () => {
+    const md = "2. Second\n3. Third";
+    render(<MarkdownContent content={md} />);
+    const list = screen.getByText("Second").closest("ol");
+    expect(list).toHaveAttribute("start", "2");
+  });
+
   it("renders headings", () => {
     const md = "# Title\n## Subtitle\n### Section";
     render(<MarkdownContent content={md} />);
