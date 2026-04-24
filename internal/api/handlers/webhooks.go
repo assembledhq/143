@@ -64,6 +64,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handlePullRequestReviewComment(w, r, body)
 	case "check_suite":
 		h.handleCheckSuite(w, r, body)
+	case "check_run":
+		h.handleCheckRun(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
@@ -343,6 +345,26 @@ func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request
 
 	if err := h.prService.HandleCheckSuiteEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CHECK_SUITE_FAILED", "failed to process check_suite event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.CheckRunEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_run event")
+		return
+	}
+
+	if err := h.prService.HandleCheckRunEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
 		return
 	}
 

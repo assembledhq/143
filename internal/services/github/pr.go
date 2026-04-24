@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
@@ -54,6 +55,7 @@ type PRService struct {
 	reviewComments  *db.ReviewCommentStore
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
+	sessionMessages *db.SessionMessageStore
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
@@ -62,6 +64,7 @@ type PRService struct {
 	prTemplates     *db.PRTemplateStore
 	previews        *db.PreviewStore
 	previewStopper  PreviewStopper
+	prHealthStreams *cache.PullRequestStreams
 	llmClient       llm.Client
 	audit           *db.AuditEmitter
 	sandboxProvider agent.SandboxProvider // used by the push-based PR flow
@@ -115,6 +118,10 @@ func (s *PRService) IntegrationStore() *db.IntegrationStore {
 // SetUserCredentialStore sets the user credential store for user-authored PRs.
 func (s *PRService) SetUserCredentialStore(store *db.UserCredentialStore) {
 	s.userCredentials = store
+}
+
+func (s *PRService) SetSessionMessageStore(store *db.SessionMessageStore) {
+	s.sessionMessages = store
 }
 
 // SetAppUserAuth wires the refresh-aware GitHub App user auth service used to
@@ -190,6 +197,10 @@ func (s *PRService) SetPreviewTeardown(previews *db.PreviewStore, stopper Previe
 func (s *PRService) SetSandboxPushDeps(provider agent.SandboxProvider, snapshots storage.SnapshotStore) {
 	s.sandboxProvider = provider
 	s.snapshots = snapshots
+}
+
+func (s *PRService) SetPullRequestStreams(streams *cache.PullRequestStreams) {
+	s.prHealthStreams = streams
 }
 
 // SandboxProvider exposes the configured sandbox provider for wiring tests.
@@ -819,7 +830,13 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		return nil
 	}
 
-	if event.Action != "closed" {
+	switch event.Action {
+	case "opened", "reopened", "synchronize":
+		s.enqueuePullRequestStateSync(ctx, pr)
+		return nil
+	case "closed":
+		// handled below
+	default:
 		return nil
 	}
 
@@ -940,6 +957,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}
 	}
 
+	s.enqueuePullRequestStateSync(ctx, pr)
 	return nil
 }
 
@@ -2085,6 +2103,37 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 		if err := s.pullRequests.UpdateCIStatus(ctx, pr.OrgID, pr.ID, ciStatus); err != nil {
 			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to update CI status")
 		}
+		s.enqueuePullRequestStateSync(ctx, pr)
+	}
+
+	return nil
+}
+
+// CheckRunEvent represents a GitHub check_run webhook payload.
+type CheckRunEvent struct {
+	Action   string `json:"action"`
+	CheckRun struct {
+		PullRequests []struct {
+			Number int `json:"number"`
+		} `json:"pull_requests"`
+	} `json:"check_run"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// HandleCheckRunEvent processes check_run webhook events and refreshes repairable PR state.
+func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent) error {
+	if event.Action != "completed" {
+		return nil
+	}
+
+	for _, prRef := range event.CheckRun.PullRequests {
+		pr, err := s.pullRequests.GetByRepoAndNumber(ctx, event.Repository.FullName, prRef.Number)
+		if err != nil {
+			continue // Not a 143-managed PR.
+		}
+		s.enqueuePullRequestStateSync(ctx, pr)
 	}
 
 	return nil

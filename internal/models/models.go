@@ -428,21 +428,29 @@ type Validation struct {
 // NOTE: SessionID is nullable (*uuid.UUID) because PRs can be created manually
 // without an associated session. API consumers should handle null session_id.
 type PullRequest struct {
-	ID             uuid.UUID  `db:"id" json:"id"`
-	SessionID      *uuid.UUID `db:"session_id" json:"session_id,omitempty"`
-	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
-	GitHubPRNumber int        `db:"github_pr_number" json:"github_pr_number"`
-	GitHubPRURL    string     `db:"github_pr_url" json:"github_pr_url"`
-	GitHubRepo     string     `db:"github_repo" json:"github_repo"`
-	Title          string     `db:"title" json:"title"`
-	Body           *string    `db:"body" json:"body,omitempty"`
-	Status         string     `db:"status" json:"status"`
-	ReviewStatus   string     `db:"review_status" json:"review_status"`
-	AuthoredBy     string     `db:"authored_by" json:"authored_by"`
-	CIStatus       string     `db:"ci_status" json:"ci_status"`
-	MergedAt       *time.Time `db:"merged_at" json:"merged_at,omitempty"`
-	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	ID                  uuid.UUID             `db:"id" json:"id"`
+	SessionID           *uuid.UUID            `db:"session_id" json:"session_id,omitempty"`
+	OrgID               uuid.UUID             `db:"org_id" json:"org_id"`
+	GitHubPRNumber      int                   `db:"github_pr_number" json:"github_pr_number"`
+	GitHubPRURL         string                `db:"github_pr_url" json:"github_pr_url"`
+	GitHubRepo          string                `db:"github_repo" json:"github_repo"`
+	Title               string                `db:"title" json:"title"`
+	Body                *string               `db:"body" json:"body,omitempty"`
+	Status              string                `db:"status" json:"status"`
+	ReviewStatus        string                `db:"review_status" json:"review_status"`
+	AuthoredBy          string                `db:"authored_by" json:"authored_by"`
+	CIStatus            string                `db:"ci_status" json:"ci_status"`
+	HeadSHA             *string               `db:"head_sha" json:"head_sha,omitempty"`
+	BaseSHA             *string               `db:"base_sha" json:"base_sha,omitempty"`
+	MergeState          PullRequestMergeState `db:"merge_state" json:"merge_state"`
+	HasConflicts        bool                  `db:"has_conflicts" json:"has_conflicts"`
+	FailingTestCount    int                   `db:"failing_test_count" json:"failing_test_count"`
+	NeedsAgentAction    bool                  `db:"needs_agent_action" json:"needs_agent_action"`
+	GitHubStateSyncedAt *time.Time            `db:"github_state_synced_at" json:"github_state_synced_at,omitempty"`
+	HealthVersion       int64                 `db:"health_version" json:"health_version"`
+	MergedAt            *time.Time            `db:"merged_at" json:"merged_at,omitempty"`
+	CreatedAt           time.Time             `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time             `db:"updated_at" json:"updated_at"`
 }
 
 // PRSummary is a lightweight view of a PR for inclusion in session list responses.
