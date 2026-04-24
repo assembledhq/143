@@ -41,8 +41,8 @@ export function PRHealthBanner({
                 {isHealthy ? <CheckCircle2 className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
               </div>
               <div className="min-w-0">
-                <div className="text-xs font-medium text-foreground">PR health</div>
-                <div className="text-xs text-muted-foreground">
+                <div className="text-sm font-medium text-foreground">PR health</div>
+                <div className="text-sm text-muted-foreground">
                   PR #{health.pull_request_number} · {health.repository}
                 </div>
               </div>
