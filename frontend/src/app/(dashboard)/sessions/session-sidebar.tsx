@@ -80,6 +80,9 @@ function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"
   if (prSummary.status === "merged") {
     dotColor = "bg-violet-500";
     label = "Merged";
+  } else if (prSummary.status === "closed") {
+    dotColor = "bg-muted-foreground";
+    label = "Closed";
   } else if (prSummary.ci_status === "success") {
     dotColor = "bg-emerald-500";
     label = "CI passed";
