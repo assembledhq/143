@@ -69,10 +69,14 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 }
 
 type orchestratorServiceStub struct {
-	runAgentCalls       int
-	recoverSessionCalls int
-	runAgentFn          func(ctx context.Context, run *models.Session) error
-	recoverSessionFn    func(ctx context.Context, session *models.Session) error
+	runAgentCalls        int
+	continueSessionCalls int
+	recoverSessionCalls  int
+	runAgentFn           func(ctx context.Context, run *models.Session) error
+	continueSessionFn    func(ctx context.Context, session *models.Session) error
+	recoverSessionFn     func(ctx context.Context, session *models.Session) error
+	sessionTimeout       time.Duration
+	runtimeCeiling       time.Duration
 }
 
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
@@ -84,6 +88,10 @@ func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Sess
 }
 
 func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session) error {
+	s.continueSessionCalls++
+	if s.continueSessionFn != nil {
+		return s.continueSessionFn(ctx, session)
+	}
 	return nil
 }
 
@@ -96,10 +104,16 @@ func (s *orchestratorServiceStub) RecoverSession(ctx context.Context, session *m
 }
 
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if s.sessionTimeout > 0 {
+		return s.sessionTimeout
+	}
 	return time.Minute
 }
 
 func (s *orchestratorServiceStub) ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if s.runtimeCeiling > 0 {
+		return s.runtimeCeiling
+	}
 	return 90 * time.Minute
 }
 
@@ -2510,6 +2524,48 @@ func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
 	err := handler(context.Background(), "run_agent", payload)
 	require.Error(t, err, "run_agent should propagate orchestrator failures")
 	require.Contains(t, err.Error(), "execute failed", "run_agent should preserve the orchestrator error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	runtimeCeiling := 75 * time.Second
+	sessionTimeout := 20 * time.Minute
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		sessionTimeout: sessionTimeout,
+		runtimeCeiling: runtimeCeiling,
+		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "continue_session should apply a handler deadline")
+			remaining := time.Until(deadline)
+			expected := runtimeCeiling + agent.HandlerCleanupBuffer
+			require.InDelta(t, expected, remaining, float64(2*time.Second), "continue_session should use the runtime ceiling plus cleanup buffer for its deadline")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

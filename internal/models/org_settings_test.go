@@ -473,3 +473,20 @@ func TestParseOrgSettings_RuntimeBudgets_ClampToSoftBudgetAndCeiling(t *testing.
 	require.Equal(t, 1500, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should preserve the configured value")
 	require.Equal(t, 300, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "max automatic extension should clamp to the available headroom")
 }
+
+func TestParseOrgSettings_RuntimeBudgets_NegativeMaxAutomaticExtensionClampsToZero(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"max_session_duration_seconds": 900,
+		"runtime_budgets": {
+			"max_automatic_extension_seconds": -30,
+			"absolute_runtime_ceiling_seconds": 1200
+		}
+	}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should accept negative max automatic extension values and clamp them")
+	require.Equal(t, 1200, s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds, "absolute runtime ceiling should preserve the configured value")
+	require.Equal(t, 0, s.RuntimeBudgets.MaxAutomaticExtensionSeconds, "negative max automatic extension should clamp to zero rather than defaulting positive")
+}
