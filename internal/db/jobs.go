@@ -93,6 +93,30 @@ func (s *JobStore) notify(ctx context.Context, id uuid.UUID) {
 	}
 }
 
+// OldestPendingSessionJobAge returns how long the oldest runnable pending
+// session job has been waiting in the global queue.
+// lint:allow-no-orgid reason="queue pressure read spans jobs across all orgs by design"
+func (s *JobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error) {
+	var runnableAt time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT run_at
+		FROM jobs
+		WHERE status = 'pending'
+		  AND org_id IS NOT NULL
+		  AND run_at <= now()
+		  AND job_type IN ('run_agent', 'continue_session')
+		ORDER BY run_at ASC
+		LIMIT 1`,
+	).Scan(&runnableAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("oldest pending session job age: %w", err)
+	}
+	return time.Since(runnableAt), true, nil
+}
+
 type jobQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
@@ -386,36 +410,80 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			WHERE status = 'dead'
 			   OR last_heartbeat_at < $1
 		),
-		reclaimable AS (
-			SELECT j.id
+		candidates AS (
+			SELECT
+				j.id,
+				j.org_id,
+				j.job_type,
+				j.locked_at,
+				COALESCE(sess.snapshot_key, '') AS snapshot_key,
+				CASE
+					WHEN j.job_type IN ('run_agent', 'continue_session') THEN
+						ROW_NUMBER() OVER (
+							PARTITION BY j.org_id
+							ORDER BY
+								CASE WHEN COALESCE(sess.snapshot_key, '') <> '' THEN 0 ELSE 1 END,
+								j.locked_at ASC
+						)
+					ELSE 1
+				END AS org_recovery_rank
 			FROM jobs j
 			LEFT JOIN dead_nodes d ON d.id = j.locked_by_node_id
+			LEFT JOIN sessions sess
+				ON sess.org_id = j.org_id
+			   AND NULLIF(j.payload->>'session_id', '') IS NOT NULL
+			   AND sess.id = NULLIF(j.payload->>'session_id', '')::uuid
 			WHERE j.status = 'running'
 			  AND (
 				j.lease_expires_at < now()
 				OR d.id IS NOT NULL
 			  )
-			ORDER BY j.locked_at ASC
+		),
+		reclaimable AS (
+			SELECT id, org_id
+			FROM candidates
+			WHERE job_type NOT IN ('run_agent', 'continue_session')
+			   OR org_recovery_rank <= 3
+			ORDER BY
+				CASE WHEN job_type IN ('run_agent', 'continue_session') THEN 0 ELSE 1 END,
+				CASE WHEN snapshot_key <> '' THEN 0 ELSE 1 END,
+				locked_at ASC
 			LIMIT $2
+		),
+		updated_jobs AS (
+			UPDATE jobs j
+			SET status = 'pending',
+				last_error = 'job ownership lost; queued for bounded recovery',
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				run_at = now(),
+				updated_at = now()
+			FROM reclaimable r
+			WHERE j.id = r.id
+			RETURNING j.org_id, NULLIF(j.payload->>'session_id', '') AS session_id
+		),
+		updated_sessions AS (
+			UPDATE sessions s
+			SET recovery_state = 'queued',
+			    recovery_queued_at = now(),
+			    recovery_started_at = NULL,
+			    runtime_stop_reason = 'worker_recovery'
+			FROM updated_jobs uj
+			WHERE uj.session_id IS NOT NULL
+			  AND s.org_id = uj.org_id
+			  AND s.id = uj.session_id::uuid
 		)
-		UPDATE jobs j
-		SET status = 'pending',
-			last_error = 'job ownership lost; re-queued by recovery loop',
-			locked_by_node_id = NULL,
-			run_owner_id = NULL,
-			lock_token = NULL,
-			locked_at = NULL,
-			lease_expires_at = NULL,
-			run_at = now(),
-			updated_at = now()
-		FROM reclaimable r
-		WHERE j.id = r.id`
+		SELECT COUNT(*) FROM updated_jobs`
 
-	tag, err := s.db.Exec(ctx, query, staleBefore, limit)
+	var reclaimed int64
+	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return reclaimed, nil
 }
 
 // CountRunningOwnedByNode returns the number of running jobs currently owned by

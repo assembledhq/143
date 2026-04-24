@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/testutil"
 )
 
@@ -151,10 +152,16 @@ type mockSessionStore struct {
 	statusUpdates    []string
 	resultUpdates    []resultUpdate
 	turnUpdates      []turnUpdate
+	runtimeBegins    []runtimeBegin
+	progressUpdates  []runtimeProgressUpdate
+	extensionGrants  []runtimeExtensionGrant
+	checkpoints      []checkpointUpdate
+	recoveryStates   []recoveryStateUpdate
 	baseCommitSHAs   []string
 	failureUpdates   []failureUpdate
 	workerOwnerships []workerOwnershipUpdate
 	countRunningErr  error
+	beginRuntimeErr  error
 	acquireHoldFn    func(proposedContainerID string) (string, error)
 	acquireHoldErr   error
 	setWorkerNodeErr error
@@ -175,6 +182,40 @@ type failureUpdate struct {
 type workerOwnershipUpdate struct {
 	containerID  string
 	workerNodeID string
+}
+
+type runtimeBegin struct {
+	capability   models.CheckpointCapability
+	softDeadline time.Time
+	hardDeadline time.Time
+	observedAt   time.Time
+}
+
+type runtimeProgressUpdate struct {
+	progressType models.RuntimeProgressType
+	strength     models.RuntimeProgressStrength
+	observedAt   time.Time
+}
+
+type checkpointUpdate struct {
+	agentSessionID string
+	snapshotKey    string
+	kind           models.CheckpointKind
+	capability     models.CheckpointCapability
+	sizeBytes      int64
+	checkpointErr  *string
+	stopReason     models.RuntimeStopReason
+}
+
+type runtimeExtensionGrant struct {
+	expectedSoftDeadline time.Time
+	newSoftDeadline      time.Time
+	extensionSeconds     int
+}
+
+type recoveryStateUpdate struct {
+	state            models.RecoveryState
+	incrementAttempt bool
 }
 
 type resultUpdate struct {
@@ -222,6 +263,65 @@ func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
+	return nil
+}
+
+func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runtimeBegins = append(m.runtimeBegins, runtimeBegin{
+		capability:   capability,
+		softDeadline: softDeadline,
+		hardDeadline: hardDeadline,
+		observedAt:   observedAt,
+	})
+	return m.beginRuntimeErr
+}
+
+func (m *mockSessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.progressUpdates = append(m.progressUpdates, runtimeProgressUpdate{
+		progressType: progressType,
+		strength:     strength,
+		observedAt:   observedAt,
+	})
+	return nil
+}
+
+func (m *mockSessionStore) GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.extensionGrants = append(m.extensionGrants, runtimeExtensionGrant{
+		expectedSoftDeadline: expectedSoftDeadline,
+		newSoftDeadline:      newSoftDeadline,
+		extensionSeconds:     extensionSeconds,
+	})
+	return true, nil
+}
+
+func (m *mockSessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.checkpoints = append(m.checkpoints, checkpointUpdate{
+		agentSessionID: agentSessionID,
+		snapshotKey:    snapshotKey,
+		kind:           kind,
+		capability:     capability,
+		sizeBytes:      sizeBytes,
+		checkpointErr:  checkpointErr,
+		stopReason:     stopReason,
+	})
+	return true, nil
+}
+
+func (m *mockSessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recoveryStates = append(m.recoveryStates, recoveryStateUpdate{
+		state:            state,
+		incrementAttempt: incrementAttempt,
+	})
 	return nil
 }
 
@@ -339,6 +439,14 @@ func (m *mockSessionStore) getFailureUpdates() []failureUpdate {
 	defer m.mu.Unlock()
 	out := make([]failureUpdate, len(m.failureUpdates))
 	copy(out, m.failureUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getCheckpointUpdates() []checkpointUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]checkpointUpdate, len(m.checkpoints))
+	copy(out, m.checkpoints)
 	return out
 }
 
@@ -559,9 +667,11 @@ func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Org
 
 // mockJobStore implements agent.JobStore.
 type mockJobStore struct {
-	mu       sync.Mutex
-	enqueued []string // job types
-	payloads map[string]any
+	mu               sync.Mutex
+	enqueued         []string // job types
+	payloads         map[string]any
+	oldestPendingAge time.Duration
+	hasPendingAge    bool
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -573,6 +683,12 @@ func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 	m.enqueued = append(m.enqueued, jobType)
 	m.payloads[jobType] = payload
 	return uuid.New(), nil
+}
+
+func (m *mockJobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.oldestPendingAge, m.hasPendingAge, nil
 }
 
 func (m *mockJobStore) getEnqueued() []string {
@@ -662,6 +778,7 @@ type testDeps struct {
 	snapshots      *mockSnapshotStore
 	cancels        *agent.CancelRegistry
 	nodeID         string
+	orgs           *mockOrgStore
 }
 
 func defaultDeps() testDeps {
@@ -697,6 +814,14 @@ func defaultDeps() testDeps {
 }
 
 func buildOrchestrator(d testDeps) *agent.Orchestrator {
+	var orgStore agent.OrgStore
+	if d.orgs != nil {
+		orgStore = d.orgs
+	}
+	var snapshotStore storage.SnapshotStore
+	if d.snapshots != nil {
+		snapshotStore = d.snapshots
+	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         d.provider,
 		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
@@ -713,8 +838,9 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		CodexAuth:        d.codexAuth,
 		ClaudeCodeAuth:   d.claudeCodeAuth,
 		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
+		Snapshots:        snapshotStore,
 		Cancels:          d.cancels,
+		Orgs:             orgStore,
 		NodeID:           d.nodeID,
 		Logger:           zerolog.Nop(),
 		MaxConcurrent:    3,
@@ -998,6 +1124,41 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	require.Len(t, results, 1, "restart should still complete the run")
 	require.Equal(t, "completed", results[0].status, "restart should complete successfully under a single-slot concurrency limit")
 	require.Contains(t, d.jobs.getEnqueued(), "validate", "restart should enqueue validation like a fresh run")
+}
+
+func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusRunning)
+	session.CurrentTurn = 1
+	session.AgentSessionID = strPtr("agent-session-1")
+	session.SnapshotKey = strPtr("snapshots/test/recover-init-failure.tar")
+
+	d := defaultDeps()
+	d.sessions.beginRuntimeErr = errors.New("runtime init write failed")
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue from the last checkpoint.",
+		},
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("checkpoint-bytes"),
+	}
+
+	err := buildOrchestrator(d).RecoverSession(context.Background(), session)
+	require.Error(t, err, "RecoverSession should surface runtime initialization errors")
+	require.Contains(t, err.Error(), "begin runtime control", "RecoverSession should wrap the runtime initialization failure")
+
+	statuses := d.sessions.getStatusUpdates()
+	require.Equal(t, []string{"running", "running"}, statuses, "recovery should preserve the running status when runtime initialization fails")
 }
 
 // TestRunAgent_PreviewHoldsContainerSkipsDestroy covers the branch where
@@ -3289,6 +3450,104 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	require.Len(t, failures, 1)
 	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
 	require.True(t, failures[0].retryAdvised)
+}
+
+func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	settings, err := json.Marshal(map[string]any{
+		"max_session_duration_seconds": 30,
+		"runtime_budgets": map[string]any{
+			"no_progress_timeout_seconds":            1,
+			"graceful_shutdown_window_seconds":       1,
+			"checkpoint_finalization_window_seconds": 1,
+			"automatic_extension_seconds":            2,
+			"max_automatic_extension_seconds":        2,
+			"absolute_runtime_ceiling_seconds":       5,
+		},
+	})
+	require.NoError(t, err, "runtime settings JSON should marshal")
+
+	cancelReg := agent.NewCancelRegistry(zerolog.Nop())
+
+	d := defaultDeps()
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}}
+	d.cancels = cancelReg
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("checkpoint-after-no-progress"))), nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		return 1, errors.New("exec not available in test")
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		<-ctx.Done()
+		return &agent.AgentResult{
+			Summary:         "Interrupted cleanly",
+			ConfidenceScore: 0.4,
+			AgentSessionID:  "agent-checkpoint-1",
+			ExitCode:        1,
+		}, ctx.Err()
+	}
+
+	err = buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "policy stop should be handled internally after checkpoint publication")
+
+	checkpoints := d.sessions.getCheckpointUpdates()
+	require.NotEmpty(t, checkpoints, "policy stop should publish checkpoint metadata")
+	require.Equal(t, models.CheckpointKindGracefulStop, checkpoints[len(checkpoints)-1].kind, "policy stop should publish a graceful-stop checkpoint")
+	require.Equal(t, models.RuntimeStopReasonNoProgress, checkpoints[len(checkpoints)-1].stopReason, "policy stop should record the no-progress stop reason")
+	require.NotEmpty(t, checkpoints[len(checkpoints)-1].snapshotKey, "policy stop should persist the checkpoint snapshot key")
+
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1, "policy stop should persist a structured failure explanation")
+	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
+	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
+}
+
+func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.snapshots = nil
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Diff:            "--- a/main.go\n+++ b/main.go",
+			Summary:         "Fixed null pointer",
+			ConfidenceScore: 0.9,
+			AgentSessionID:  "agent-no-snapshot-store",
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed without a snapshot store configured")
+	require.Empty(t, d.sessions.getCheckpointUpdates(), "RunAgent should not publish checkpoint metadata when no snapshot was actually persisted")
+}
+
+func TestRunAgent_RevertsToPendingWhenRuntimeInitFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.beginRuntimeErr = errors.New("runtime init write failed")
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should surface runtime initialization errors")
+	require.Contains(t, err.Error(), "begin runtime control", "RunAgent should wrap the runtime initialization failure")
+
+	statuses := d.sessions.getStatusUpdates()
+	require.Equal(t, []string{"running", "pending"}, statuses, "RunAgent should roll the session back out of running when runtime initialization fails")
 }
 
 // TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering

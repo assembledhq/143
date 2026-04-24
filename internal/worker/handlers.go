@@ -150,6 +150,7 @@ type orchestratorService interface {
 	ContinueSession(ctx context.Context, session *models.Session) error
 	RecoverSession(ctx context.Context, session *models.Session) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
+	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
 }
 
 // llmClient is the interface for LLM completion calls used by eval graders.
@@ -811,13 +812,15 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		// to stop the container, snapshot, and persist the failed status
 		// after the session timeout expires.
 		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
-		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
+		runtimeCeiling := services.Orchestrator.ResolveAbsoluteRuntimeCeiling(ctx, orgID)
+		jobCtx, cancel := context.WithTimeout(ctx, runtimeCeiling+agent.HandlerCleanupBuffer)
 		defer cancel()
 
 		logger.Info().
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Dur("session_timeout", sessionTimeout).
+			Dur("runtime_ceiling", runtimeCeiling).
 			Msg("starting run_agent job")
 
 		var runErr error
@@ -891,7 +894,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
 		// after the timeout fires without racing the handler context.
 		sessionTimeout := services.Orchestrator.ResolveSessionTimeout(ctx, orgID)
-		jobCtx, cancel := context.WithTimeout(ctx, sessionTimeout+agent.HandlerCleanupBuffer)
+		runtimeCeiling := services.Orchestrator.ResolveAbsoluteRuntimeCeiling(ctx, orgID)
+		jobCtx, cancel := context.WithTimeout(ctx, runtimeCeiling+agent.HandlerCleanupBuffer)
 		defer cancel()
 
 		logger.Info().
@@ -899,6 +903,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Str("org_id", orgID.String()).
 			Int("current_turn", session.CurrentTurn).
 			Dur("session_timeout", sessionTimeout).
+			Dur("runtime_ceiling", runtimeCeiling).
 			Msg("starting continue_session job")
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session); err != nil {

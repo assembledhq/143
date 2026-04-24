@@ -41,6 +41,10 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning", "project_task_id",
 	"model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
+	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
+	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
+	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
@@ -154,6 +158,24 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil,                      // reasoning_effort
 					nil,                      // triggered_by_user_id
 					nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+					nil,      // runtime_soft_deadline_at
+					nil,      // runtime_hard_deadline_at
+					nil,      // runtime_last_progress_at
+					"",       // runtime_last_progress_type
+					"",       // runtime_last_progress_strength
+					0,        // runtime_extension_count
+					0,        // runtime_extension_seconds
+					"",       // runtime_stop_reason
+					nil,      // runtime_graceful_stop_at
+					nil,      // checkpointed_at
+					"",       // checkpoint_kind
+					"",       // checkpoint_capability
+					int64(0), // checkpoint_size_bytes
+					nil,      // checkpoint_error
+					"",       // recovery_state
+					nil,      // recovery_queued_at
+					nil,      // recovery_started_at
+					0,        // recovery_attempt_count
 					nil,      // target_branch
 					nil,      // working_branch
 					nil,      // base_commit_sha

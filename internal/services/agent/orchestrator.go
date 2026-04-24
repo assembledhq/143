@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"regexp"
 	"strings"
@@ -80,6 +81,11 @@ type SessionStore interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
+	BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error
+	RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error
+	GrantRuntimeExtension(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, expectedSoftDeadline, newSoftDeadline, hardDeadline time.Time, extensionSeconds int) (bool, error)
+	PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error)
+	UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
@@ -159,6 +165,7 @@ type RepositoryStore interface {
 // JobStore defines the job enqueue operations.
 type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error)
 }
 
 // UsageRecorder tracks container lifecycle events for billing.
@@ -230,6 +237,7 @@ type Orchestrator struct {
 	maxConcurrent     int
 	cancels           *CancelRegistry
 	nodeID            string
+	isDraining        func() bool
 }
 
 // DurableCheckpoint is the latest fully committed resume boundary for a
@@ -274,6 +282,7 @@ type OrchestratorConfig struct {
 	// existing call sites (notably tests) don't have to change.
 	Env           *AgentEnv
 	NodeID        string
+	IsDraining    func() bool
 	Logger        zerolog.Logger
 	MaxConcurrent int
 }
@@ -328,6 +337,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 		nodeID:            cfg.NodeID,
+		isDraining:        cfg.IsDraining,
 	}
 }
 
@@ -339,6 +349,15 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		Str("session_id", session.ID.String()).
 		Str("org_id", session.OrgID.String()).
 		Logger()
+	startedAt := time.Now().UTC()
+	if err := o.sessions.UpdateRecoveryState(ctx, session.OrgID, session.ID, models.RecoveryStateRecovering, nil, &startedAt, true); err != nil {
+		log.Warn().Err(err).Msg("failed to mark session recovery as in progress")
+	}
+	defer func() {
+		if err := o.sessions.UpdateRecoveryState(context.Background(), session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
+			log.Warn().Err(err).Msg("failed to clear session recovery state")
+		}
+	}()
 
 	checkpoint, ok := latestDurableCheckpoint(session)
 	if !ok {
@@ -356,6 +375,17 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	event.Msg("recovering session from latest durable checkpoint")
 
 	return o.ContinueSession(ctx, session)
+}
+
+func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus string, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
+	if err := controller.Begin(ctx, startedAt, capability); err != nil {
+		if rollbackErr := o.sessions.UpdateStatus(ctx, orgID, sessionID, fallbackStatus); rollbackErr != nil {
+			log.Warn().Err(rollbackErr).Str("fallback_status", fallbackStatus).Msg("failed to roll back session status after runtime initialization error")
+		}
+		return fmt.Errorf("begin runtime control: %w", err)
+	}
+	go controller.Run(ctx)
+	return nil
 }
 
 func latestDurableCheckpoint(session *models.Session) (DurableCheckpoint, bool) {
@@ -655,6 +685,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// elapsed on a 25-minute timeout should suspect the deadline fired
 	// during sandbox creation, not the adapter.
 	runStartedAt := time.Now()
+	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
+	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, string(models.SessionStatusPending), checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
+		return err
+	}
 
 	turnNumber := run.CurrentTurn + 1
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, run, turnNumber)
@@ -1010,7 +1046,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh)
+		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1022,7 +1058,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 11. Handle result.
-	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(run.ID)
+	stopReason := StopReasonNone
+	if o.cancels != nil {
+		stopReason = o.cancels.StopReason(run.ID)
+	}
+	wasCancelled := stopReason == StopReasonUserCancel
 
 	if err != nil {
 		// Distinguish three cases:
@@ -1035,10 +1075,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		//      is set without relying on text-matching in classifyFailure.
 		//   3. Any other error — fail with the underlying message and defer
 		//      classification to the async analyze_failure job.
-		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
+		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user")
-			o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
+			o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
+		if stopReason != StopReasonNone {
+			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy")
+			o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
+			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(runStartedAt).Round(time.Second)
@@ -1057,14 +1102,25 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// the workspace and return the session to idle so it can be continued.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel, snapshotting and returning to idle")
-		o.handleCancelledSession(run, sandbox, result, run.CurrentTurn+1, log)
+		o.handleCancelledSession(ctx, run, sandbox, result, run.CurrentTurn+1, log)
+		return nil
+	}
+	if stopReason != StopReasonNone {
+		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop")
+		o.handlePolicyStoppedSession(ctx, run, sandbox, result, run.CurrentTurn+1, stopReason, log)
 		return nil
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
-	snapshotKey, snapshotErr := o.snapshotSession(ctx, run, sandbox, result)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, run, sandbox, result)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session, session will not support follow-up turns")
+	} else if snapshotKey != "" {
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		lockToken, _ := jobctx.LockTokenFromContext(ctx)
+		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
+			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
+		}
 	}
 
 	// Fetch org settings for confidence thresholds.
@@ -1214,6 +1270,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// above. It includes snapshot restore, sandbox create, and agent
 	// execute. See runStartedAt in RunAgent for analogous semantics.
 	turnStartedAt := time.Now()
+	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
+	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	fallbackStatus := session.Status
+	if fallbackStatus == "" {
+		fallbackStatus = string(models.SessionStatusIdle)
+	}
+	if err := o.beginRuntimeControl(ctx, runtimeController, session.OrgID, session.ID, fallbackStatus, checkpointCapabilityForAgent(session.AgentType), turnStartedAt, log); err != nil {
+		return err
+	}
 	if err := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateRunning)); err != nil {
 		log.Warn().Err(err).Msg("failed to update sandbox state to running")
 	}
@@ -1623,7 +1689,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh)
+		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1634,15 +1700,24 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
-	wasCancelled := o.cancels != nil && o.cancels.WasCancelled(session.ID)
+	stopReason := StopReasonNone
+	if o.cancels != nil {
+		stopReason = o.cancels.StopReason(session.ID)
+	}
+	wasCancelled := stopReason == StopReasonUserCancel
 
 	if err != nil {
 		// User cancel is checked first so an explicit cancel that races the
 		// deadline is classified as a cancel, not a timeout.
-		if wasCancelled || errors.Is(ctx.Err(), context.Canceled) {
+		if wasCancelled || (stopReason == StopReasonNone && errors.Is(ctx.Err(), context.Canceled)) {
 			log.Info().Msg("session cancelled by user during continue")
-			o.handleCancelledSession(session, sandbox, result, turnNumber, log)
+			o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
 			return fmt.Errorf("session cancelled: %w", ctx.Err())
+		}
+		if stopReason != StopReasonNone {
+			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
+			o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
+			return nil
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(turnStartedAt).Round(time.Second)
@@ -1656,7 +1731,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 6c. If cancelled but agent exited gracefully, snapshot and return to idle.
 	if wasCancelled {
 		log.Info().Msg("agent exited after cancel during continue, returning to idle")
-		o.handleCancelledSession(session, sandbox, result, turnNumber, log)
+		o.handleCancelledSession(ctx, session, sandbox, result, turnNumber, log)
+		return nil
+	}
+	if stopReason != StopReasonNone {
+		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
+		o.handlePolicyStoppedSession(ctx, session, sandbox, result, turnNumber, stopReason, log)
 		return nil
 	}
 
@@ -1666,9 +1746,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 8. Snapshot again.
-	newSnapshotKey, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
+	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSession(ctx, session, sandbox, result)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
+	} else if newSnapshotKey != "" {
+		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC())
+		lockToken, _ := jobctx.LockTokenFromContext(ctx)
+		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, result.AgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
+			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
+		}
 	}
 
 	// 9. Update turn complete — sets status to idle.
@@ -1938,8 +2024,13 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
 // It also detects question-level log entries and creates SessionQuestion records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, turnNumber int, logCh <-chan LogEntry) {
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
+		if tracker != nil {
+			if progressType, strength, ok := runtimeProgressFromLog(entry); ok {
+				tracker.Record(progressType, strength, entry.Timestamp)
+			}
+		}
 		metadata, err := json.Marshal(entry.Metadata)
 		if err != nil {
 			o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
@@ -2400,11 +2491,12 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 // both RunAgent and ContinueSession to avoid duplication.
 //
 // result may be nil (e.g. when the agent was force-killed and returned an error).
-func (o *Orchestrator) handleCancelledSession(session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, log zerolog.Logger) {
+func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, log zerolog.Logger) {
 	bgCtx := context.Background()
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
 
 	// Attempt to snapshot so the session can be continued later.
-	snapshotKey, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, nil)
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, nil)
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot cancelled session")
 	}
@@ -2421,6 +2513,10 @@ func (o *Orchestrator) handleCancelledSession(session *models.Session, sandbox *
 	// If we got a snapshot, return to idle via UpdateTurnComplete so the user
 	// can continue the conversation. Otherwise, mark as cancelled (terminal).
 	if snapshotKey != "" {
+		checkpointedAt := time.Now().UTC()
+		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
+			log.Warn().Err(err).Msg("failed to publish cancelled-session checkpoint metadata")
+		}
 		if err := o.sessions.UpdateTurnComplete(bgCtx, session.OrgID, session.ID, turnNumber, nil, agentSessionID, snapshotKey); err != nil {
 			log.Warn().Err(err).Msg("failed to return cancelled session to idle")
 			_ = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, string(models.SessionStatusCancelled))
@@ -2436,27 +2532,99 @@ func (o *Orchestrator) handleCancelledSession(session *models.Session, sandbox *
 // If snapshots are not configured, this is a no-op. This only saves the snapshot
 // and updates sandbox state — it does NOT change session status or call UpdateTurnComplete.
 // result is unused but kept in the signature for future extensibility (e.g. metadata).
-func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, error) {
+func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult) (string, int64, error) {
 	if o.snapshots == nil {
-		return "", nil
+		return "", 0, nil
 	}
 
 	snapshotKey := fmt.Sprintf("snapshots/%s/%s/workspace.tar.zst", session.OrgID, session.ID)
 
 	reader, err := o.provider.Snapshot(ctx, sandbox)
 	if err != nil {
-		return "", fmt.Errorf("snapshot sandbox: %w", err)
+		return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
 	}
 	defer reader.Close()
 
-	if err := o.snapshots.Save(ctx, snapshotKey, reader); err != nil {
-		return "", fmt.Errorf("save snapshot to storage: %w", err)
+	countingReader := &countingReadCloser{ReadCloser: reader}
+
+	if err := o.snapshots.Save(ctx, snapshotKey, countingReader); err != nil {
+		return "", 0, fmt.Errorf("save snapshot to storage: %w", err)
 	}
 
 	// Store the snapshot key on the session for subsequent use.
 	session.SnapshotKey = &snapshotKey
 
-	return snapshotKey, nil
+	return snapshotKey, countingReader.n, nil
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	n int64
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.n += int64(n)
+	return n, err
+}
+
+func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, log zerolog.Logger) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	checkpointedAt := time.Now().UTC()
+	agentSessionID := ""
+	if result != nil && result.AgentSessionID != "" {
+		agentSessionID = result.AgentSessionID
+	} else if session.AgentSessionID != nil {
+		agentSessionID = *session.AgentSessionID
+	}
+
+	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, result)
+	var checkpointErrText *string
+	if snapshotErr != nil {
+		errMsg := snapshotErr.Error()
+		checkpointErrText = &errMsg
+	}
+	if snapshotKey != "" || checkpointErrText != nil {
+		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
+			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
+		}
+	}
+
+	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
+	o.failRunWithCategory(bgCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
+}
+
+func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckpoint bool) (string, string, []string) {
+	reasonText := "The session reached its runtime budget."
+	switch reason {
+	case StopReasonNoProgress:
+		reasonText = "The session stopped after going too long without meaningful progress."
+	case StopReasonAbsoluteCeiling:
+		reasonText = "The session hit the absolute runtime ceiling."
+	}
+
+	if checkpointedThisTurn {
+		return reasonText + " The latest state was saved.", reasonText + " We stopped the run cleanly and saved a resumable checkpoint for the latest state.", []string{
+			"Resume the session from the saved checkpoint",
+			"Provide narrower follow-up guidance if the run was heading into a large search space",
+			"Retry later if the repository or toolchain was unusually slow",
+		}
+	}
+	if hadPriorCheckpoint {
+		return reasonText + " The latest turn could not be checkpointed, but the previous checkpoint is still available.", reasonText + " We rolled the session back to the previously committed checkpoint because the current turn could not be saved cleanly.", []string{
+			"Resume from the previous checkpoint",
+			"Split the remaining work into a smaller follow-up turn",
+			"Retry later if the stop happened during a large tool invocation",
+		}
+	}
+	return reasonText + " The latest in-flight work could not be saved.", reasonText + " The run had to stop before any durable checkpoint was available for this turn.", []string{
+		"Retry the session from scratch",
+		"Split the task into smaller pieces so checkpoints publish sooner",
+		"Reduce broad repository scans or long-running commands in the prompt",
+	}
 }
 
 func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {
@@ -2546,6 +2714,10 @@ func (o *Orchestrator) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUI
 		}
 	}
 	return DefaultSandboxTimeout
+}
+
+func (o *Orchestrator) ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration {
+	return o.resolveRuntimeConfig(ctx, orgID).AbsoluteRuntimeCeiling
 }
 
 const maxBranchSlugLen = 60
@@ -2644,7 +2816,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, sessionID, orgID, turnNumber, retryLogCh)
+		o.streamLogs(ctx, sessionID, orgID, turnNumber, retryLogCh, nil)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)

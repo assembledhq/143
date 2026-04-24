@@ -35,17 +35,202 @@ var workerSessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
+	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
+	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
+	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
+const (
+	workerSessionWorkerNodeIndex      = 15
+	workerSessionReasoningIndex       = 35
+	workerSessionBaseCommitSHAIndex   = 62
+	workerSessionDiffCollectedAtIndex = 72
+	workerSessionLatestDiffIndex      = 73
+	workerLegacySessionColumnsLen     = 58
+	workerLegacyRuntimeInsertIndex    = 42
+	workerLegacyReasoningIndex        = 35
+	workerLegacyBaseCommitIndex       = 44
+	workerLegacyDiffCollectedIndex    = 54
+	workerLegacyLatestDiffIndex       = 55
+)
+
+func workerSessionNeedsPolicyDefaults(values []any) bool {
+	if len(values) < 4 {
+		return false
+	}
+	agentType, ok := values[3].(string)
+	if !ok {
+		return false
+	}
+	switch agentType {
+	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func insertWorkerSessionValue(values []any, idx int, value any) []any {
+	row := make([]any, 0, len(values)+1)
+	row = append(row, values[:idx]...)
+	row = append(row, value)
+	row = append(row, values[idx:]...)
+	return row
+}
+
+func workerSessionCurrentOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
+	row := values
+	if includeWorkerNode {
+		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
+	}
+	if includeReasoning {
+		row = insertWorkerSessionValue(row, workerSessionReasoningIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertWorkerSessionValue(row, workerSessionBaseCommitSHAIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionLatestDiffIndex, nil)
+	}
+	return row
+}
+
+func workerSessionLegacyOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
+	row := values
+	if includeWorkerNode {
+		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
+	}
+	if includeReasoning {
+		row = insertWorkerSessionValue(row, workerLegacyReasoningIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertWorkerSessionValue(row, workerLegacyBaseCommitIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyLatestDiffIndex, nil)
+	}
+	return row
+}
+
+func workerSessionWithPolicyDefaults(values []any) []any {
+	origin := string(models.SessionOriginManual)
+	interactionMode := string(models.SessionInteractionModeInteractive)
+	validationPolicy := string(models.SessionValidationPolicyOnTurnComplete)
+	if len(values) > 1 {
+		if issueID, ok := values[1].(uuid.UUID); ok && issueID != uuid.Nil {
+			origin = string(models.SessionOriginIssueTrigger)
+			interactionMode = string(models.SessionInteractionModeSingleRun)
+			validationPolicy = string(models.SessionValidationPolicyOnSessionEnd)
+		}
+	}
+	row := make([]any, 0, len(values)+3)
+	row = append(row, values[:3]...)
+	row = append(row, origin, interactionMode, validationPolicy)
+	row = append(row, values[3:]...)
+	return row
+}
+
+func workerSessionLikelyOmitsWorkerNode(values []any) bool {
+	if len(values) <= workerSessionWorkerNodeIndex {
+		return false
+	}
+	_, ok := values[workerSessionWorkerNodeIndex].(bool)
+	return ok
+}
+
+func expandLegacyWorkerSessionRow(values []any) []any {
+	row := make([]any, 0, len(workerSessionColumns))
+	row = append(row, values[:workerLegacyRuntimeInsertIndex]...)
+	row = append(row,
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
+	)
+	row = append(row, values[workerLegacyRuntimeInsertIndex:]...)
+	return row
+}
+
 func workerSessionTestRow(values ...any) []any {
-	if len(values) == len(workerSessionColumns)-3 {
-		row := make([]any, 0, len(values)+3)
-		row = append(row, values[:3]...)
-		row = append(row, "", "", "")
-		row = append(row, values[3:]...)
-		return row
+	if workerSessionNeedsPolicyDefaults(values) {
+		switch len(values) {
+		case len(workerSessionColumns) - 3:
+			return workerSessionWithPolicyDefaults(values)
+		case len(workerSessionColumns) - 4:
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false)
+			}
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false)
+		case len(workerSessionColumns) - 5:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false)
+		case len(workerSessionColumns) - 6:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true)
+		case len(workerSessionColumns) - 7:
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true)
+			}
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true)
+		case len(workerSessionColumns) - 8:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true)
+		case workerLegacySessionColumnsLen - 3:
+			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
+		case workerLegacySessionColumnsLen - 4:
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false))
+			}
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false))
+		case workerLegacySessionColumnsLen - 5:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false))
+		case workerLegacySessionColumnsLen - 6:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true))
+		case workerLegacySessionColumnsLen - 7:
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true))
+			}
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true))
+		case workerLegacySessionColumnsLen - 8:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true))
+		}
+	}
+
+	switch len(values) {
+	case len(workerSessionColumns):
+		return values
+	case workerLegacySessionColumnsLen:
+		return expandLegacyWorkerSessionRow(values)
+	case workerLegacySessionColumnsLen - 1:
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true, false))
+		}
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, false))
+	case workerLegacySessionColumnsLen - 2:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, false))
+	case workerLegacySessionColumnsLen - 4:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, false, true))
+	case workerLegacySessionColumnsLen - 3:
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true, true))
+		}
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, true))
+	case workerLegacySessionColumnsLen - 5:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, true))
+	case len(workerSessionColumns) - 1:
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return workerSessionCurrentOptionalDefaults(values, false, true, false)
+		}
+		return workerSessionCurrentOptionalDefaults(values, true, false, false)
+	case len(workerSessionColumns) - 2:
+		return workerSessionCurrentOptionalDefaults(values, true, true, false)
+	case len(workerSessionColumns) - 3:
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return workerSessionCurrentOptionalDefaults(values, false, true, true)
+		}
+		return workerSessionCurrentOptionalDefaults(values, true, false, true)
+	case len(workerSessionColumns) - 4:
+		return workerSessionCurrentOptionalDefaults(values, false, false, true)
+	case len(workerSessionColumns) - 5:
+		return workerSessionCurrentOptionalDefaults(values, true, true, true)
 	}
 	return values
 }
@@ -65,10 +250,14 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 }
 
 type orchestratorServiceStub struct {
-	runAgentCalls       int
-	recoverSessionCalls int
-	runAgentFn          func(ctx context.Context, run *models.Session) error
-	recoverSessionFn    func(ctx context.Context, session *models.Session) error
+	runAgentCalls        int
+	continueSessionCalls int
+	recoverSessionCalls  int
+	runAgentFn           func(ctx context.Context, run *models.Session) error
+	continueSessionFn    func(ctx context.Context, session *models.Session) error
+	recoverSessionFn     func(ctx context.Context, session *models.Session) error
+	sessionTimeout       time.Duration
+	runtimeCeiling       time.Duration
 }
 
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
@@ -80,6 +269,10 @@ func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Sess
 }
 
 func (s *orchestratorServiceStub) ContinueSession(ctx context.Context, session *models.Session) error {
+	s.continueSessionCalls++
+	if s.continueSessionFn != nil {
+		return s.continueSessionFn(ctx, session)
+	}
 	return nil
 }
 
@@ -92,7 +285,17 @@ func (s *orchestratorServiceStub) RecoverSession(ctx context.Context, session *m
 }
 
 func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if s.sessionTimeout > 0 {
+		return s.sessionTimeout
+	}
 	return time.Minute
+}
+
+func (s *orchestratorServiceStub) ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration {
+	if s.runtimeCeiling > 0 {
+		return s.runtimeCeiling
+	}
+	return 90 * time.Minute
 }
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
@@ -106,6 +309,10 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
 	)
@@ -552,6 +759,10 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, nil, nil, nil, nil,
 		nil, nil,
 		nil, 0, now, "snapshotted", snapshotKey,
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
 	)
@@ -2494,6 +2705,48 @@ func TestRunAgentHandler_PropagatesRunErrors(t *testing.T) {
 	err := handler(context.Background(), "run_agent", payload)
 	require.Error(t, err, "run_agent should propagate orchestrator failures")
 	require.Contains(t, err.Error(), "execute failed", "run_agent should preserve the orchestrator error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	runtimeCeiling := 75 * time.Second
+	sessionTimeout := 20 * time.Minute
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		sessionTimeout: sessionTimeout,
+		runtimeCeiling: runtimeCeiling,
+		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "continue_session should apply a handler deadline")
+			remaining := time.Until(deadline)
+			expected := runtimeCeiling + agent.HandlerCleanupBuffer
+			require.InDelta(t, expected, remaining, float64(2*time.Second), "continue_session should use the runtime ceiling plus cleanup buffer for its deadline")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
