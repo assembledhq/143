@@ -26,7 +26,7 @@ import (
 )
 
 var workerSessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -36,6 +36,17 @@ var workerSessionColumns = []string{
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+}
+
+func workerSessionTestRow(values ...any) []any {
+	if len(values) == len(workerSessionColumns)-3 {
+		row := make([]any, 0, len(values)+3)
+		row = append(row, values[:3]...)
+		row = append(row, "", "", "")
+		row = append(row, values[3:]...)
+		return row
+	}
+	return values
 }
 
 func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
@@ -85,7 +96,7 @@ func (s *orchestratorServiceStub) ResolveSessionTimeout(ctx context.Context, org
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
 	now := time.Now()
-	return []any{
+	return workerSessionTestRow(
 		sessionID, issueID, orgID, "claude_code", status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, nil, nil, nil,
@@ -96,7 +107,7 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
-	}
+	)
 }
 
 func TestIngestWebhookHandler(t *testing.T) {
@@ -531,7 +542,7 @@ func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger mo
 }
 
 func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey *string) []any {
-	return []any{
+	return workerSessionTestRow(
 		sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &now, &now, nil,
@@ -542,7 +553,7 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, 0, now, "snapshotted", snapshotKey,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "queued", (*string)(nil), nil, nil, nil, now,
-	}
+	)
 }
 
 func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
@@ -1011,13 +1022,15 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
 	// on sessions.automation_run_id would silently miss every row).
+	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectCommit()
 
 	// 5. Enqueue run_agent (with dedupe key on the session ID).
 	mock.ExpectQuery(`INSERT INTO jobs`).

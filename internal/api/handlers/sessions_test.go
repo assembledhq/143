@@ -139,7 +139,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.
 var sessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -150,45 +150,90 @@ var sessionColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
+func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
+	row := make([]interface{}, 0, len(values)+3)
+	row = append(row, values[:3]...)
+	row = append(
+		row,
+		"",
+		"",
+		"",
+	)
+	row = append(row, values[3:]...)
+	return row
+}
+
 func sessionTestRow(values ...interface{}) []interface{} {
+	switch len(values) {
+	case len(sessionColumns) - 3, len(sessionColumns) - 4, len(sessionColumns) - 6, len(sessionColumns) - 7:
+		values = sessionTestRowWithPolicyDefaults(values)
+	}
+
 	switch len(values) {
 	case len(sessionColumns):
 		return values
 	case len(sessionColumns) - 1:
 		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:12]...)
+		row = append(row, values[:15]...)
 		row = append(row, nil) // worker_node_id
-		row = append(row, values[12:]...)
+		row = append(row, values[15:]...)
 		return row
 	case len(sessionColumns) - 4:
 		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:12]...)
+		row = append(row, values[:15]...)
 		row = append(row, nil) // worker_node_id
-		row = append(row, values[12:39]...)
+		row = append(row, values[15:42]...)
 		row = append(row, nil) // base_commit_sha
-		row = append(row, values[39:48]...)
+		row = append(row, values[42:51]...)
 		row = append(row, nil) // diff_collected_at
 		row = append(row, nil) // latest_diff_snapshot_id
-		row = append(row, values[48:]...)
+		row = append(row, values[51:]...)
 		return row
 	case len(sessionColumns) - 3:
 		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:12]...)
+		row = append(row, values[:15]...)
 		row = append(row, nil) // worker_node_id
-		row = append(row, values[12:40]...)
+		row = append(row, values[15:43]...)
 		row = append(row, nil) // base_commit_sha
-		row = append(row, values[40:49]...)
+		row = append(row, values[43:52]...)
 		row = append(row, nil) // diff_collected_at
 		row = append(row, nil) // latest_diff_snapshot_id
-		row = append(row, values[49:]...)
+		row = append(row, values[52:]...)
 		return row
 	default:
-		panic(fmt.Sprintf("sessionTestRow received %d values, want %d, %d, %d, or %d", len(values), len(sessionColumns), len(sessionColumns)-1, len(sessionColumns)-3, len(sessionColumns)-4))
+		panic(fmt.Sprintf("sessionTestRow received %d values, want %d, %d, %d, or %d (plus legacy variants without session policy columns)", len(values), len(sessionColumns), len(sessionColumns)-1, len(sessionColumns)-3, len(sessionColumns)-4))
 	}
 }
 
 func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 	return rows.AddRow(sessionTestRow(values...)...)
+}
+
+func sessionAnyArgs(count int) []interface{} {
+	args := make([]interface{}, count)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
+}
+
+func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(sessionAnyArgs(22)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectCommit()
+}
+
+func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(sessionAnyArgs(22)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	mock.ExpectExec("INSERT INTO session_issue_links").
+		WithArgs(sessionAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 }
 
 func TestSessionHandler_List(t *testing.T) {
@@ -814,19 +859,8 @@ func triggerFixIssueMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 			),
 		)
 
-	// Mock agent run create (17 named args)
 	runID := uuid.New()
-	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
-
-	mock.ExpectExec("INSERT INTO session_issue_links").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectIssueSessionCreate(mock, runID, now)
 
 	// Mock job enqueue (6 named args)
 	jobID := uuid.New()
@@ -867,19 +901,8 @@ func triggerFixIssueAndOrgDefaultMock(mock pgxmock.PgxPoolIface, orgID uuid.UUID
 				AddRow(orgID, "Acme", []byte(settings), now, now),
 		)
 
-	// Mock agent run create (17 named args)
 	runID := uuid.New()
-	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
-
-	mock.ExpectExec("INSERT INTO session_issue_links").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectIssueSessionCreate(mock, runID, now)
 
 	// Mock job enqueue (6 named args)
 	jobID := uuid.New()
@@ -2675,14 +2698,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 						AddRow(orgID, "test-org", nil, now, now))
 
-				// Mock session create (17 named args)
-				mock.ExpectQuery("INSERT INTO sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+				expectManualSessionCreate(mock, runID, now)
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -2727,14 +2743,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
 					)
 
-				// Mock session create
-				mock.ExpectQuery("INSERT INTO sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+				expectManualSessionCreate(mock, runID, now)
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -4351,14 +4360,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "test-org", nil, now, now))
 
-	// Mock session create
-	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	expectManualSessionCreate(mock, runID, now)
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
@@ -4434,14 +4436,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "test-org", nil, now, now))
 
-	// Mock session create
-	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
+	expectManualSessionCreate(mock, runID, now)
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
