@@ -344,6 +344,8 @@ describe('UsagePage', () => {
     expect(screen.getByText('Last 7d')).toBeInTheDocument();
     expect(screen.getByText('Last 30d')).toBeInTheDocument();
     expect(screen.getByText('This month')).toBeInTheDocument();
+    expect(screen.getByText('Breakdown')).toBeInTheDocument();
+    expect(screen.queryByText('Capacity Breakdown')).not.toBeInTheDocument();
   });
 
   it('renders the footer disclaimer text', () => {
@@ -460,58 +462,6 @@ describe('UsageSummaryCards', () => {
     });
     expect(screen.getByText('10')).toBeInTheDocument();
     expect(screen.getByText('3')).toBeInTheDocument();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// UsageCapacityBars
-// ---------------------------------------------------------------------------
-
-import { UsageCapacityBars } from './usage-capacity-bars';
-
-describe('UsageCapacityBars', () => {
-  it('renders empty state when no data', async () => {
-    server.use(
-      http.get('*/api/v1/usage/breakdown', () => {
-        return HttpResponse.json({ data: [], meta: {} });
-      })
-    );
-    renderWithProviders(
-      <UsageCapacityBars start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
-    );
-    await waitFor(() => {
-      expect(screen.getByText('No capacity data available')).toBeInTheDocument();
-    });
-  });
-
-  it('renders capacity bars with formatted labels', async () => {
-    server.use(
-      http.get('*/api/v1/usage/breakdown', () => {
-        return HttpResponse.json({
-          data: [
-            {
-              key: '2cpu_4096mb',
-              label: '2cpu_4096mb',
-              total_container_minutes: 100,
-              total_sessions: 5,
-              total_container_starts: 5,
-              peak_concurrent: 2,
-              total_input_tokens: 1000,
-              total_output_tokens: 500,
-              total_llm_cost_usd: 1.5,
-              percentage: 75.0,
-            },
-          ],
-          meta: {},
-        });
-      })
-    );
-    renderWithProviders(
-      <UsageCapacityBars start="2026-04-01T00:00:00Z" end="2026-04-30T00:00:00Z" />
-    );
-    await waitFor(() => {
-      expect(screen.getByText('75.0%')).toBeInTheDocument();
-    });
   });
 });
 
