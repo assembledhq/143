@@ -27,6 +27,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - The selected agent card always presents one clear next action: sign in (Codex) or configure credentials (Claude/Gemini), with a persistent settings entrypoint.
 - Codex remains visually recommended to guide most users toward the quickest "time to first fix" path while preserving flexibility for teams with existing Anthropic/Google setups.
 - Contextual PM steering lives on `Autopilot` as compact summaries edited in side sheets, while low-frequency PM admin controls like model selection and cadence live in `Autopilot settings`.
+- Live sandbox reuse is worker-owned. When a session still has a running container, follow-up execution should route back to the owning worker instead of the generic queue path; preview routing already follows this rule, and the planned resume-queue affinity work is captured in [future/62-worker-affine-session-resume.md](future/62-worker-affine-session-resume.md).
 
 - Step 0: Connect repositories and build codebase context
     - Users sign in with GitHub OAuth and install the 143.dev GitHub App on their organization/repos. The GitHub App (same auth model used by Codex web, Claude Code web, and other modern AI coding platforms) provides fine-grained, short-lived installation tokens for repo access, and can also mint user-to-server tokens when a human authorizes PR creation on their behalf. No personal access tokens are required.
