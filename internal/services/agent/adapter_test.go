@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestSlugForRepo(t *testing.T) {
 	t.Parallel()
@@ -33,4 +37,32 @@ func TestSlugForRepo(t *testing.T) {
 			}
 		})
 	}
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestDefaultSandboxConfig_UsesEnvironmentOverrides(t *testing.T) {
+	t.Setenv("SANDBOX_IMAGE", "ghcr.io/example/custom:latest")
+	t.Setenv("SANDBOX_CPU_LIMIT", "3.5")
+	t.Setenv("SANDBOX_MEMORY_LIMIT_MB", "6144")
+	t.Setenv("SANDBOX_DISK_LIMIT_GB", "24")
+
+	cfg := DefaultSandboxConfig()
+
+	require.Equal(t, "ghcr.io/example/custom:latest", cfg.Image, "DefaultSandboxConfig should use SANDBOX_IMAGE when provided")
+	require.Equal(t, 3.5, cfg.CPULimit, "DefaultSandboxConfig should use SANDBOX_CPU_LIMIT when provided")
+	require.Equal(t, 6144, cfg.MemoryLimitMB, "DefaultSandboxConfig should use SANDBOX_MEMORY_LIMIT_MB when provided")
+	require.Equal(t, 24, cfg.DiskLimitGB, "DefaultSandboxConfig should use SANDBOX_DISK_LIMIT_GB when provided")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestDefaultSandboxConfig_InvalidEnvironmentOverridesFallbackToDefaults(t *testing.T) {
+	t.Setenv("SANDBOX_CPU_LIMIT", "not-a-number")
+	t.Setenv("SANDBOX_MEMORY_LIMIT_MB", "-1")
+	t.Setenv("SANDBOX_DISK_LIMIT_GB", "0")
+
+	cfg := DefaultSandboxConfig()
+
+	require.Equal(t, 2.0, cfg.CPULimit, "DefaultSandboxConfig should fall back to default CPU limit for invalid SANDBOX_CPU_LIMIT")
+	require.Equal(t, 4096, cfg.MemoryLimitMB, "DefaultSandboxConfig should fall back to default memory limit for invalid SANDBOX_MEMORY_LIMIT_MB")
+	require.Equal(t, 10, cfg.DiskLimitGB, "DefaultSandboxConfig should fall back to default disk limit for invalid SANDBOX_DISK_LIMIT_GB")
 }

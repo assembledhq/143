@@ -31,6 +31,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
 DISABLED_CRITICAL_WEBHOOK_URL="http://localhost:65535/disabled-critical"
 
+# Shared worker bucket defaults and mapping logic.
+# shellcheck source=deploy/scripts/worker_buckets.sh
+source "$SCRIPT_DIR/worker_buckets.sh"
+
 # Validate role
 case "$ROLE" in
   app)     COMPOSE_FILE="docker-compose.app.yml" ;;
@@ -79,6 +83,8 @@ else
   echo "WARNING: .env.production.enc not found at $ENC_FILE"
   echo "Falling back to environment variables."
 fi
+
+apply_worker_bucket_overrides "$ROLE" "$HOST"
 
 # Validate required secrets are available (from env or .env.production.enc)
 if [ "$ROLE" != "logging" ] && [ "$ROLE" != "redis" ]; then
@@ -212,7 +218,9 @@ elif [ "$ROLE" = "worker" ]; then
   # Workers only get the secrets they need — no age key or encrypted bundle.
   # A worker compromise cannot decrypt the full production secret set, but it
   # still needs GitHub App user-auth client creds to refresh user PR tokens.
-  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\n' "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
+  printf 'DB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+    "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
+    "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
