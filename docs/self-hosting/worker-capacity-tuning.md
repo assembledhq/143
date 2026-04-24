@@ -55,8 +55,8 @@ For fleet-managed deploys, either set `WORKER_PROCESS_COUNT` directly or map spe
 Example:
 
 ```dotenv
-# map host/IP to bucket in one variable
-WORKER_BUCKET_MAP=10.0.0.4=hcloud-cpx21,10.0.0.5=hcloud-cpx31,10.0.0.6=hcloud-ccx23
+# map bucket to host/IP in one variable
+WORKER_BUCKET_MAP=hcloud-cpx21:10.0.0.4,hcloud-cpx31:10.0.0.5,hcloud-ccx23:10.0.0.6
 ```
 
 Built-in bucket presets used by deploy/provision scripts:

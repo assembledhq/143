@@ -14,15 +14,15 @@ apply_worker_bucket_overrides() {
     return
   fi
 
-  # WORKER_BUCKET_MAP is a single env var mapping host/IP to a provider SKU:
-  #   WORKER_BUCKET_MAP="10.0.0.4=hcloud-cpx31,10.0.0.5=hcloud-ccx23"
+  # WORKER_BUCKET_MAP is a single env var mapping provider SKU to host/IP:
+  #   WORKER_BUCKET_MAP="hcloud-cpx31:10.0.0.4,hcloud-ccx23:10.0.0.5"
   local bucket
   bucket="${WORKER_DEFAULT_BUCKET:-hcloud-cpx31}"
   if [ -n "${WORKER_BUCKET_MAP:-}" ]; then
     IFS=',' read -ra mappings <<< "$WORKER_BUCKET_MAP"
     for mapping in "${mappings[@]}"; do
-      map_host="${mapping%%=*}"
-      map_bucket="${mapping#*=}"
+      map_bucket="${mapping%%:*}"
+      map_host="${mapping#*:}"
       if [ "$map_host" = "$host" ]; then
         bucket="$map_bucket"
         break
