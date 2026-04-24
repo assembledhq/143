@@ -48,15 +48,18 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalProjectHandler.Propose": "internal API, uses claims.OrgID",
 
 		// Authenticated but legitimately no org-scoped data access.
-		"AuthHandler.Me":                   "returns user from context only",
-		"AuthHandler.Logout":               "deletes session by cookie token only",
-		"AuthHandler.SetActiveOrg":         "user-scoped preference write; validates membership directly instead of using request org context",
-		"AuthHandler.ClaimInvitation":      "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
-		"OrganizationsHandler.Create":      "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
-		"SettingsHandler.GetLLMDefaults":   "returns static server config",
-		"SettingsHandler.GetLLMModels":     "returns static server config",
-		"ProjectGenerateHandler.Generate":  "calls LLM only, no org-scoped data",
-		"GitHubStatusHandler.StartConnect": "OAuth redirect only, no store calls",
+		"AuthHandler.Me":                     "returns user from context only",
+		"AuthHandler.Logout":                 "deletes session by cookie token only",
+		"AuthHandler.SetActiveOrg":           "user-scoped preference write; validates membership directly instead of using request org context",
+		"AuthHandler.ClaimInvitation":        "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
+		"AuthHandler.ListPendingInvitations": "user-scoped query spanning all orgs the user is invited to",
+		"AuthHandler.AcceptInvitationByID":   "invitee-scoped accept; org context comes from the invitation row itself, not the request",
+		"AuthHandler.DeclineInvitationByID":  "invitee-scoped decline; org context comes from the invitation row itself, not the request",
+		"OrganizationsHandler.Create":        "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
+		"SettingsHandler.GetLLMDefaults":     "returns static server config",
+		"SettingsHandler.GetLLMModels":       "returns static server config",
+		"ProjectGenerateHandler.Generate":    "calls LLM only, no org-scoped data",
+		"GitHubStatusHandler.StartConnect":   "OAuth redirect only, no store calls",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
 		"IntegrationHandler.StartLinearOAuth": "OAuth redirect only",
