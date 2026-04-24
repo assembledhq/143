@@ -808,6 +808,163 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestAuthHandler_Me_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns user lookup failure when settings load fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgxmock pool without error")
+		defer mock.Close()
+
+		userID := uuid.New()
+		handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
+		mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+			WithArgs(userID).
+			WillReturnError(errors.New("db unavailable"))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{
+			ID:    userID,
+			OrgID: uuid.New(),
+			Role:  "admin",
+		}))
+		w := httptest.NewRecorder()
+
+		handler.Me(w, req)
+		require.Equal(t, http.StatusInternalServerError, w.Code, "Me should surface settings lookup failures")
+		require.Contains(t, w.Body.String(), "USER_LOOKUP_FAILED", "Me should report settings lookup failures explicitly")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+}
+
+func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		handler      *AuthHandler
+		body         string
+		setupCtx     func(r *http.Request) *http.Request
+		expectedCode int
+		expectedBody string
+	}{
+		{
+			name:         "returns unauthorized when not authenticated",
+			handler:      NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil),
+			body:         `{}`,
+			setupCtx:     func(r *http.Request) *http.Request { return r },
+			expectedCode: http.StatusUnauthorized,
+			expectedBody: "UNAUTHORIZED",
+		},
+		{
+			name:         "returns unconfigured error when user store is missing",
+			handler:      NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil),
+			body:         `{}`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "USER_STORE_UNCONFIGURED",
+		},
+		{
+			name:         "returns invalid body for malformed json",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `{"coding_agent_reasoning_defaults":`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BODY",
+		},
+		{
+			name:         "returns invalid settings for unsupported effort",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `{"coding_agent_reasoning_defaults":{"codex":"max"}}`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_USER_SETTINGS",
+		},
+		{
+			name: "returns update failure when persistence fails",
+			handler: func() *AuthHandler {
+				mock, err := pgxmock.NewPool()
+				require.NoError(t, err, "should create pgxmock pool without error")
+				t.Cleanup(func() { mock.Close() })
+				userID := authCoverageUserID
+				mock.ExpectExec("UPDATE users SET settings = @settings").
+					WithArgs(pgxmock.AnyArg(), userID).
+					WillReturnError(errors.New("write failed"))
+				return NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
+			}(),
+			body:         `{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`,
+			setupCtx:     withAuthCoverageUser,
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "USER_SETTINGS_UPDATE_FAILED",
+		},
+		{
+			name: "returns lookup failure when refresh load fails",
+			handler: func() *AuthHandler {
+				mock, err := pgxmock.NewPool()
+				require.NoError(t, err, "should create pgxmock pool without error")
+				t.Cleanup(func() { mock.Close() })
+				userID := authCoverageUserID
+				mock.ExpectExec("UPDATE users SET settings = @settings").
+					WithArgs(pgxmock.AnyArg(), userID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+					WithArgs(userID).
+					WillReturnError(errors.New("reload failed"))
+				return NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
+			}(),
+			body:         `{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`,
+			setupCtx:     withAuthCoverageUser,
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "USER_LOOKUP_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/auth/me/settings", bytes.NewBufferString(tt.body))
+			req = tt.setupCtx(req)
+			w := httptest.NewRecorder()
+
+			tt.handler.UpdateSettings(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "UpdateSettings should return the expected status code")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "UpdateSettings should return the expected error code")
+		})
+	}
+}
+
+var authCoverageUserID = uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+func withAuthUser(r *http.Request) *http.Request {
+	return withAuthCoverageUser(r)
+}
+
+func withAuthCoverageUser(r *http.Request) *http.Request {
+	return r.WithContext(middleware.WithUser(r.Context(), &models.User{
+		ID:    authCoverageUserID,
+		OrgID: uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+		Email: "me@example.com",
+		Name:  "Me",
+		Role:  "admin",
+	}))
+}
+
+func newAuthHandlerWithUserStore(t *testing.T, configure func(mock pgxmock.PgxPoolIface)) *AuthHandler {
+	t.Helper()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	t.Cleanup(func() { mock.Close() })
+	if configure != nil {
+		configure(mock)
+	}
+	return NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
+}
+
 func TestAuthHandler_Memberships(t *testing.T) {
 	t.Parallel()
 

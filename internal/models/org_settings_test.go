@@ -213,6 +213,14 @@ func TestReasoningEffort_Validate(t *testing.T) {
 	}
 }
 
+func TestAgentType_SupportsReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, AgentTypeCodex.SupportsReasoningEffort(), "Codex should support explicit reasoning overrides")
+	require.True(t, AgentTypeClaudeCode.SupportsReasoningEffort(), "Claude Code should support explicit reasoning overrides")
+	require.False(t, AgentTypeGeminiCLI.SupportsReasoningEffort(), "Gemini CLI should not report reasoning override support")
+}
+
 func TestConfidenceThresholdsForAutonomy(t *testing.T) {
 	t.Parallel()
 

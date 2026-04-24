@@ -17,6 +17,11 @@ func TestParseUserSettings(t *testing.T) {
 		wantErr bool
 	}{
 		{
+			name: "empty settings returns zero value",
+			raw:  nil,
+			want: UserSettings{},
+		},
+		{
 			name: "parses supported agent defaults",
 			raw:  json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"xhigh","claude_code":"max"}}`),
 			want: UserSettings{
@@ -25,6 +30,16 @@ func TestParseUserSettings(t *testing.T) {
 					AgentTypeClaudeCode: ReasoningEffortMax,
 				},
 			},
+		},
+		{
+			name:    "rejects malformed json",
+			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":`),
+			wantErr: true,
+		},
+		{
+			name:    "rejects unknown top-level fields",
+			raw:     json.RawMessage(`{"unknown":true}`),
+			wantErr: true,
 		},
 		{
 			name:    "rejects unsupported effort for agent",
@@ -49,6 +64,92 @@ func TestParseUserSettings(t *testing.T) {
 			}
 			require.NoError(t, err, "ParseUserSettings should accept valid settings")
 			require.Equal(t, tt.want, got, "ParseUserSettings should return the expected settings")
+		})
+	}
+}
+
+func TestUserSettings_MarshalJSONB(t *testing.T) {
+	t.Parallel()
+
+	t.Run("marshals valid settings", func(t *testing.T) {
+		t.Parallel()
+
+		raw, err := (UserSettings{
+			CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+				AgentTypeClaudeCode: ReasoningEffortMax,
+			},
+		}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept valid settings")
+		require.JSONEq(t, `{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`, string(raw), "MarshalJSONB should encode the settings document")
+	})
+
+	t.Run("rejects invalid settings", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := (UserSettings{
+			CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+				AgentTypeCodex: "",
+			},
+		}).MarshalJSONB()
+		require.Error(t, err, "MarshalJSONB should reject invalid settings")
+		require.Contains(t, err.Error(), "reasoning effort cannot be empty", "MarshalJSONB should return validation failures")
+	})
+}
+
+func TestUserSettings_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings UserSettings
+		wantErr  string
+	}{
+		{
+			name: "rejects invalid agent type",
+			settings: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentType("bogus"): ReasoningEffortHigh,
+				},
+			},
+			wantErr: "invalid agent type",
+		},
+		{
+			name: "rejects invalid effort enum",
+			settings: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeCodex: "turbo",
+				},
+			},
+			wantErr: "invalid reasoning effort",
+		},
+		{
+			name: "rejects empty effort",
+			settings: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeClaudeCode: "",
+				},
+			},
+			wantErr: "reasoning effort cannot be empty",
+		},
+		{
+			name: "rejects unsupported effort for agent",
+			settings: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeCodex: ReasoningEffortMax,
+				},
+			},
+			wantErr: "is not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.settings.Validate()
+			require.Error(t, err, "Validate should reject invalid user settings")
+			require.Contains(t, err.Error(), tt.wantErr, "Validate should explain the invalid setting")
 		})
 	}
 }

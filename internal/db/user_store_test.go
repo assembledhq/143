@@ -320,6 +320,47 @@ func TestUserStore_GetByIDGlobalWithSettings_InvalidSettings(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestUserStore_GetByIDGlobalWithSettings_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnError(errors.New("query failed"))
+
+	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
+	require.Error(t, err, "GetByIDGlobalWithSettings should return query failures")
+	require.Contains(t, err.Error(), "query user with settings", "GetByIDGlobalWithSettings should wrap query failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserStore_GetByIDGlobalWithSettings_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	orgID := uuid.New()
+
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, "not-a-time", []byte(`{}`)))
+
+	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
+	require.Error(t, err, "GetByIDGlobalWithSettings should surface scan failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestUserStore_GetLastOrgID(t *testing.T) {
 	t.Parallel()
 
@@ -598,6 +639,77 @@ func TestUserStore_UpdateSettings(t *testing.T) {
 	err = store.UpdateSettings(context.Background(), userID, settings)
 	require.NoError(t, err, "UpdateSettings should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserStore_UpdateSettings_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		settings  models.UserSettings
+		setupMock func(mock pgxmock.PgxPoolIface, userID uuid.UUID)
+		wantErr   string
+	}{
+		{
+			name: "returns marshal error for invalid settings",
+			settings: models.UserSettings{
+				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+					models.AgentTypeCodex: models.ReasoningEffortMax,
+				},
+			},
+			wantErr: "marshal user settings",
+		},
+		{
+			name: "returns exec error",
+			settings: models.UserSettings{
+				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+				},
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectExec("UPDATE users SET settings = @settings").
+					WithArgs(pgxmock.AnyArg(), userID).
+					WillReturnError(errors.New("write failed"))
+			},
+			wantErr: "update user settings",
+		},
+		{
+			name: "returns no rows when user is missing",
+			settings: models.UserSettings{
+				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+				},
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectExec("UPDATE users SET settings = @settings").
+					WithArgs(pgxmock.AnyArg(), userID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			},
+			wantErr: pgx.ErrNoRows.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			if tt.setupMock != nil {
+				tt.setupMock(mock, userID)
+			}
+
+			err = store.UpdateSettings(context.Background(), userID, tt.settings)
+			require.Error(t, err, "UpdateSettings should return the expected error")
+			require.Contains(t, err.Error(), tt.wantErr, "UpdateSettings should describe the failure")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestUserStore_GetByGitHubID(t *testing.T) {
