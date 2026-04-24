@@ -84,7 +84,7 @@ describe("AuthenticatedLayout", () => {
     expect(sidebar).toHaveClass("w-[236px]");
   });
 
-  it("uses a full-width content area with generous padding", () => {
+  it("uses a full-width content area with responsive padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -93,8 +93,12 @@ describe("AuthenticatedLayout", () => {
 
     const contentWrapper = container.querySelector("main > div:last-child");
     expect(contentWrapper).toHaveClass("max-w-none");
-    expect(contentWrapper).toHaveClass("px-8");
-    expect(contentWrapper).toHaveClass("py-6");
+    // Mobile-first: tight padding by default, wider on larger breakpoints.
+    expect(contentWrapper).toHaveClass("px-4");
+    expect(contentWrapper).toHaveClass("sm:px-6");
+    expect(contentWrapper).toHaveClass("lg:px-10");
+    expect(contentWrapper).toHaveClass("py-5");
+    expect(contentWrapper).toHaveClass("sm:py-6");
   });
 
   it("content wrapper supports full-height children via flex-1 and min-h-0", () => {
@@ -255,7 +259,8 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+    // Rendered in both the desktop sidebar and the mobile top bar.
+    expect(screen.getAllByRole("button", { name: "Search" }).length).toBeGreaterThan(0);
   });
 
   it("has a new session button", () => {
@@ -265,7 +270,7 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New session" }).length).toBeGreaterThan(0);
   });
 
   it("opens create session dialog when new session button is clicked", async () => {
@@ -277,7 +282,9 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: "New session" }));
+    // Click the first "New session" trigger (desktop sidebar); both triggers
+    // wire up to the same handler.
+    await user.click(screen.getAllByRole("button", { name: "New session" })[0]);
 
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();

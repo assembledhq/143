@@ -79,9 +79,11 @@ function isItemActive(pathname: string, href: string): boolean {
 export function SidebarSettingsSection({
   pathname,
   userRole,
+  onNavigate,
 }: {
   pathname: string;
   userRole: string | undefined;
+  onNavigate?: () => void;
 }) {
   const onSettingsPage = isSettingsPath(pathname);
 
@@ -163,6 +165,7 @@ export function SidebarSettingsSection({
                       <Link
                         key={item.href}
                         href={item.href}
+                        onClick={onNavigate}
                         className={cn(
                           "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
                           active
