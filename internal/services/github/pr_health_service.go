@@ -118,9 +118,8 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 		NeedsAgentAction:    pr.NeedsAgentAction,
 		GitHubStateSyncedAt: pr.GitHubStateSyncedAt,
 		HealthVersion:       pr.HealthVersion,
-		CanResolveConflicts: pr.HasConflicts || pr.MergeState == models.PullRequestMergeStateConflicted,
-		CanFixTests:         pr.FailingTestCount > 0,
 	}
+	derivePullRequestRepairActions(resp)
 	if pr.HeadSHA != nil {
 		resp.HeadSHA = *pr.HeadSHA
 	}
@@ -143,6 +142,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 			resp.EnrichmentStatus = current.EnrichmentStatus
 			resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
 			resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
+			derivePullRequestRepairActions(resp)
 		}
 
 		if resp.EnrichmentReady {
@@ -158,6 +158,11 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 
 	resp.Summary = buildPRHealthSummaryText(*resp)
 	return resp, nil
+}
+
+func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
+	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
+	resp.CanFixTests = resp.FailingTestCount > 0
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -385,7 +390,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 		return nil, err
 	}
 
-	revisionContext, err := s.buildRepairRevisionContext(pr, current, snapshot, action)
+	revisionContext, err := s.buildRepairRevisionContext(pr, current, summary, snapshot, action)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +410,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	return s.createRepairRevisionSession(ctx, pr, revisionContext, shortPrompt, userID, action, current.Version, current.HeadSHA, current.BaseSHA)
 }
 
-func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
+func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, summary models.PullRequestHealthSummary, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
 	ctxPayload := &agent.RevisionContext{
 		RepairAction: action,
 		RepairContext: &agent.PullRequestRepairContext{
@@ -413,8 +418,8 @@ func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current mo
 			Repository:        pr.GitHubRepo,
 			HeadSHA:           current.HeadSHA,
 			BaseSHA:           current.BaseSHA,
-			MergeState:        pr.MergeState,
-			HasConflicts:      pr.HasConflicts,
+			MergeState:        summary.MergeState,
+			HasConflicts:      summary.HasConflicts,
 		},
 	}
 
