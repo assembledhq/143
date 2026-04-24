@@ -8,19 +8,19 @@
 
 ## Summary
 
-Add a compact **PR health** section to the settings detail overview surface for the current repo/work item. When the linked pull request has actionable GitHub state, show one or both repair actions:
+Add a compact **PR health** banner to the **session detail Overview** surface for the current session. When the PR linked to that session has actionable GitHub state, show one or both repair actions:
 
 - `Resolve conflicts`
 - `Fix tests`
 
-The action row should live **at the very top of the Overview tab content**, before the existing overview cards. It should be the first thing the user sees when they open Overview on a repo/work item with an open PR that needs attention.
+The banner should live **at the very top of the Overview tab content**, in the same slot where the session currently renders PR/session error notices like `PR session expired`. It should be the first thing the user sees when they open Overview on a session whose linked PR needs attention.
 
 The buttons should stay simple from the operator's point of view, but they should not send only a bare natural-language prompt. Each click should resume the linked coding session, or create a revision session when resume is not possible, with a structured GitHub-derived payload attached behind a short visible prompt:
 
 - `Please resolve the conflicts.`
 - `Please fix these tests.`
 
-The key requirement is that these actions appear quickly after GitHub state changes. That means 143 needs a first-class PR-state sync path, not just today's coarse `status` / `review_status` / `ci_status` fields.
+The key requirement is that these actions appear quickly after GitHub state changes and remain tied to the current session's PR context. That means 143 needs a first-class PR-state sync path, not just today's coarse `status` / `review_status` / `ci_status` fields.
 
 ## Problem
 
@@ -87,7 +87,7 @@ Sources:
 
 Take the **Conductor-style actionability** and pair it with a **server-synced GitHub state model**.
 
-Do **not** copy Conductor's exact implementation detail of reading local workspace state with `gh`, because our target surface is a product settings/detail page that may not have a live local checkout. For 143, GitHub should remain the remote source of truth and the backend should materialize a normalized PR-health record for the UI.
+Do **not** copy Conductor's exact implementation detail of reading local workspace state with `gh`, because our target surface is a product session-detail page that may not have a live local checkout. For 143, GitHub should remain the remote source of truth and the backend should materialize a normalized PR-health record for the UI.
 
 Recommended product behavior:
 
@@ -104,7 +104,7 @@ As of 2026-04-23, the relevant code paths are:
 - PR model: [internal/models/models.go](../../../internal/models/models.go)
 - GitHub webhook handling: [internal/services/github/pr.go](../../../internal/services/github/pr.go)
 - PR authorship/user GitHub status flow: [internal/api/handlers/github_status.go](../../../internal/api/handlers/github_status.go)
-- Current settings detail sheet UX: [frontend/src/app/(dashboard)/settings/agent/page.tsx](../../../frontend/src/app/(dashboard)/settings/agent/page.tsx)
+- Current session detail UX: [frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx](../../../frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx)
 
 The important gap is that the current webhook processing stores only summary flags. It does not materialize repair-ready GitHub payloads.
 
@@ -114,7 +114,7 @@ The important gap is that the current webhook processing stores only summary fla
 
 PR health should be treated as a **product-level domain primitive**, not as a settings-page-only feature.
 
-This settings-detail Overview row is the first consumer, not the entire abstraction boundary.
+The session-detail Overview banner is the first consumer, not the entire abstraction boundary.
 
 The same normalized PR health model should be reusable from:
 
@@ -143,27 +143,31 @@ This avoids a one-EventSource-per-item anti-pattern once PR health appears in re
 
 ### Target surface
 
-This doc assumes the buttons live in the existing **settings detail overview** surface for the active repo/work item.
+This doc assumes the buttons live in the existing **session detail Overview** surface for the active session.
 
-That overview should gain a new action row plus status summary:
+That Overview surface should gain a session-scoped PR-health banner:
 
 - `PR health`
 
-The action row should only render when there is an open PR in scope.
-It should appear **above the top of the Overview page content**, not buried lower in the sheet.
+The banner should only render when the session has PR context in scope, such as:
+
+- a linked open PR
+- a PR-creation failure state that can be repaired from this session
+- a session-specific PR workflow that is waiting on GitHub state
+
+It should appear **above the top of the Overview page content**, in the same area where the current session-level PR error notice is rendered.
 
 ### Placement
 
-Inside the detail sheet:
+Inside the session detail panel:
 
-1. sheet header
-2. tab strip
-3. `PR health` action row
-4. existing Overview content
+1. tab strip
+2. session-level `PR health` banner in the current error/status slot
+3. existing Overview content such as result cards
 
 This makes the PR repair actions feel like first-class next steps rather than passive metadata.
 
-### Action row contents
+### Banner contents
 
 When the PR is healthy:
 
@@ -176,7 +180,9 @@ When the PR needs attention:
 - show a short summary of the blocker
 - show the relevant repair button(s)
 - show the most recent GitHub sync timestamp
-- keep the row visually compact so it reads as a top-of-page action banner, not a large content block
+- keep the banner visually compact so it reads like the existing session status/error notice, not a large content block
+
+If the session is already showing a PR-related error notice, reuse that same banner shell and upgrade it with repair actions rather than rendering a second independent card.
 
 ### Button rules
 
@@ -201,20 +207,14 @@ Reasoning: a conflicted branch often invalidates existing test results, so confl
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Codex team seat A                                         DEFAULT   │
-│ Subscription auth                                                   │
-├──────────────────────────────────────────────────────────────────────┤
-│ Tabs: [Overview] [History] [Usage]                                  │
+│ Tabs: [Overview] [Changes] [Preview]                                │
 ├──────────────────────────────────────────────────────────────────────┤
 │ PR health                                                    Synced │
 │ PR #184 is blocked by conflicts and 2 failing test jobs.     22s ago│
 │ [Resolve conflicts] [Fix tests]                                     │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Status            Healthy                                            │
-│ Priority          1                                                  │
-│ Scope             Organization                                       │
-│ Usage note        user@company.com                                   │
-│ ... existing Overview content ...                                   │
+│ Result                                                               │
+│ ... existing session result / timeline content ...                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -234,8 +234,9 @@ On click:
 1. Optimistically disable the clicked button.
 2. Start the repair session.
 3. Replace the button with a spinner plus `Opening repair session…`.
-4. On success, route the user into the linked session detail.
-5. On failure, restore the button and show a scoped error notice.
+4. If we resumed the current session, stay on the same session detail view and stream the resumed work in place.
+5. If we created a new revision session, route the user into that new linked session detail.
+6. On failure, restore the button and show a scoped error notice in the same banner area.
 
 These are operational actions, not settings edits, so they should use explicit buttons rather than autosave.
 
@@ -248,7 +249,7 @@ Recommended behavior:
 - if a fresh summary sync is in progress, show a lightweight syncing state and suppress repair buttons until eligibility is known
 - if mergeability remains `unknown` after retry, do not show `Resolve conflicts` yet; show the latest known sync time and a neutral waiting state
 - if failed checks cannot yet be confidently classified as `test`, do not show `Fix tests`; show the blocker summary without an agent-action CTA
-- if the health snapshot is older than a defined freshness threshold, show the row as stale and trigger a refresh rather than reusing old button eligibility
+- if the health snapshot is older than a defined freshness threshold, show the banner as stale and trigger a refresh rather than reusing old button eligibility
 
 The system should prefer temporarily hiding a button over showing an incorrect repair action against stale state.
 
@@ -438,7 +439,7 @@ Recommended default:
 
 Concretely, enrichment should happen when:
 
-- the PR health surface is viewed and the current `health_version` lacks enrichment
+- the session detail PR-health banner is viewed and the current `health_version` lacks enrichment
 - a repair action is requested
 - an explicit high-signal workflow says this PR is actively being worked
 
@@ -784,7 +785,7 @@ The backend should emit these events from an outbox-backed publisher so retries,
 
 Recommended frontend behavior:
 
-- subscribe to `pull_request.updated` while the detail sheet is open and the PR is open
+- subscribe to `pull_request.updated` while the session detail view is open and the PR is open
 - ignore stale events using `version`
 - refetch the canonical health query on reconnect
 - refetch the canonical health query after a repair action starts
@@ -863,7 +864,7 @@ Without this instrumentation, the architecture may look correct on paper while q
 
 ### Phase 3: UI card
 
-- add the `PR health` action row above the top of the Overview page
+- add the session-detail `PR health` banner in the existing top-of-Overview error/status slot
 - render conflict/test summaries
 - render the two repair buttons when eligible
 
