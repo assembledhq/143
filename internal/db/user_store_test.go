@@ -17,6 +17,10 @@ var userColumns = []string{
 	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at",
 }
 
+var userColumnsWithSettings = []string{
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+}
+
 func TestUserStore_UpsertFromGitHub(t *testing.T) {
 	t.Parallel()
 
@@ -260,6 +264,58 @@ func TestUserStore_GetByIDGlobal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestUserStore_GetByIDGlobalWithSettings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+	settings := []byte(`{"coding_agent_reasoning_defaults":{"codex":"xhigh"}}`)
+
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, settings))
+
+	u, err := store.GetByIDGlobalWithSettings(context.Background(), userID)
+	require.NoError(t, err, "GetByIDGlobalWithSettings should not return an error")
+	require.Equal(t, userID, u.ID, "GetByIDGlobalWithSettings should return the requested user id")
+	require.Equal(t, models.UserSettings{
+		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+			models.AgentTypeCodex: models.ReasoningEffortXHigh,
+		},
+	}, u.Settings, "GetByIDGlobalWithSettings should decode typed user settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserStore_GetByIDGlobalWithSettings_InvalidSettings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`)))
+
+	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
+	require.Error(t, err, "GetByIDGlobalWithSettings should reject invalid stored settings")
+	require.Contains(t, err.Error(), "parse user settings", "GetByIDGlobalWithSettings should wrap settings parse failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // GetByIDGlobal wraps Query errors with a "query user" prefix so callers
 // can distinguish "database unreachable" from "no such row".
 func TestUserStore_GetByIDGlobal_QueryError(t *testing.T) {
@@ -404,6 +460,30 @@ func TestUserStore_LinkGoogleAccount(t *testing.T) {
 
 	err = store.LinkGoogleAccount(context.Background(), userID, orgID, "google-sub-linked", "https://avatar.com/google.png")
 	require.NoError(t, err, "LinkGoogleAccount should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserStore_UpdateSettings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewUserStore(mock)
+	userID := uuid.New()
+	settings := models.UserSettings{
+		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+		},
+	}
+
+	mock.ExpectExec("UPDATE users SET settings = @settings").
+		WithArgs(pgxmock.AnyArg(), userID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateSettings(context.Background(), userID, settings)
+	require.NoError(t, err, "UpdateSettings should not return an error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

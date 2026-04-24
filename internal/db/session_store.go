@@ -102,7 +102,7 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
@@ -114,7 +114,7 @@ const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-0000
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
@@ -314,12 +314,12 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id, target_branch, repository_id, automation_run_id
+			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id
+			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id
 		)
 		RETURNING id, created_at, last_activity_at`
 
@@ -344,6 +344,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"pm_reasoning":         run.PMReasoning,
 		"project_task_id":      run.ProjectTaskID,
 		"model_override":       run.ModelOverride,
+		"reasoning_effort":     run.ReasoningEffort,
 		"triggered_by_user_id": run.TriggeredByUserID,
 		"target_branch":        run.TargetBranch,
 		"repository_id":        run.RepositoryID,

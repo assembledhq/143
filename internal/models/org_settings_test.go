@@ -193,8 +193,10 @@ func TestReasoningEffort_Validate(t *testing.T) {
 		{name: "low is valid", effort: ReasoningEffortLow},
 		{name: "medium is valid", effort: ReasoningEffortMedium},
 		{name: "high is valid", effort: ReasoningEffortHigh},
+		{name: "xhigh is valid", effort: ReasoningEffortXHigh},
+		{name: "max is valid", effort: ReasoningEffortMax},
 		{name: "rejects invalid value", effort: "invalid", wantErr: true},
-		{name: "rejects unknown value", effort: "max", wantErr: true},
+		{name: "rejects unknown value", effort: "turbo", wantErr: true},
 	}
 
 	for _, tt := range tests {

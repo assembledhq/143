@@ -316,13 +316,19 @@ func TestAuthHandler_Providers_OmitsDemoCredentialsWhenOff(t *testing.T) {
 func TestAuthHandler_Me(t *testing.T) {
 	t.Parallel()
 
+	settingsUserID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	settingsOrgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
 	tests := []struct {
 		name         string
+		handler      *AuthHandler
 		setupCtx     func(r *http.Request) *http.Request
 		expectedCode int
+		assertBody   func(t *testing.T, body []byte)
 	}{
 		{
-			name: "returns user when authenticated",
+			name:    "returns user when authenticated",
+			handler: NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil),
 			setupCtx: func(r *http.Request) *http.Request {
 				user := &models.User{
 					ID:    uuid.New(),
@@ -337,7 +343,49 @@ func TestAuthHandler_Me(t *testing.T) {
 			expectedCode: http.StatusOK,
 		},
 		{
-			name: "returns 401 when not authenticated",
+			name: "returns stored user settings when user store is configured",
+			handler: func() *AuthHandler {
+				mock, err := pgxmock.NewPool()
+				require.NoError(t, err, "should create pgxmock pool without error")
+				t.Cleanup(func() { mock.Close() })
+				userStore := db.NewUserStore(mock)
+				settings := []byte(`{"coding_agent_reasoning_defaults":{"codex":"xhigh"}}`)
+				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+					WithArgs(settingsUserID).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+					}).AddRow(settingsUserID, uuid.New(), "me@example.com", "Me", "member", nil, nil, nil, nil, time.Now(), settings))
+				handler := NewAuthHandler(&config.Config{}, nil, userStore, nil, nil, nil)
+				return handler
+			}(),
+			setupCtx: func(r *http.Request) *http.Request {
+				user := &models.User{
+					ID:    settingsUserID,
+					OrgID: settingsOrgID,
+					Email: "me@example.com",
+					Name:  "Me",
+					Role:  "admin",
+				}
+				ctx := middleware.WithUser(r.Context(), user)
+				return r.WithContext(ctx)
+			},
+			expectedCode: http.StatusOK,
+			assertBody: func(t *testing.T, body []byte) {
+				t.Helper()
+				var resp models.SingleResponse[models.UserWithSettings]
+				require.NoError(t, json.Unmarshal(body, &resp), "response body should be valid JSON")
+				require.Equal(t, settingsOrgID, resp.Data.OrgID, "/auth/me should preserve the active membership org id")
+				require.Equal(t, "admin", resp.Data.Role, "/auth/me should preserve the active membership role")
+				require.Equal(t, models.UserSettings{
+					CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+						models.AgentTypeCodex: models.ReasoningEffortXHigh,
+					},
+				}, resp.Data.Settings, "/auth/me should return typed persisted user settings")
+			},
+		},
+		{
+			name:    "returns 401 when not authenticated",
+			handler: NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil),
 			setupCtx: func(r *http.Request) *http.Request {
 				return r
 			},
@@ -349,15 +397,63 @@ func TestAuthHandler_Me(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 			req = tt.setupCtx(req)
 			w := httptest.NewRecorder()
 
-			handler.Me(w, req)
+			tt.handler.Me(w, req)
 			require.Equal(t, tt.expectedCode, w.Code)
+			if tt.assertBody != nil {
+				tt.assertBody(t, w.Body.Bytes())
+			}
 		})
 	}
+}
+
+func TestAuthHandler_UpdateSettings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	userStore := db.NewUserStore(mock)
+	handler := NewAuthHandler(&config.Config{}, nil, userStore, nil, nil, nil)
+	userID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+	settings := []byte(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`)
+
+	mock.ExpectExec("UPDATE users SET settings = @settings").
+		WithArgs(pgxmock.AnyArg(), userID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+		}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, now, settings))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/auth/me/settings", bytes.NewBufferString(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`))
+	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{
+		ID:    userID,
+		OrgID: orgID,
+		Email: "me@example.com",
+		Name:  "Me",
+		Role:  "admin",
+	}))
+	w := httptest.NewRecorder()
+
+	handler.UpdateSettings(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "UpdateSettings should return success")
+	var resp models.SingleResponse[models.UserWithSettings]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response body should be valid JSON")
+	require.Equal(t, models.UserSettings{
+		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+		},
+	}, resp.Data.Settings, "updated user response should include typed persisted settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAuthHandler_Memberships(t *testing.T) {

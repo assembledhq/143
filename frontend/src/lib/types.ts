@@ -35,8 +35,15 @@ export interface User {
   github_login?: string;
   avatar_url?: string;
   google_id?: string;
+  settings?: UserSettings;
   created_at: string;
 }
+
+export interface UserSettings {
+  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
+}
+
+export type UserSettingsUpdateRequest = UserSettings;
 
 export interface AuthProviders {
   github: boolean;
@@ -128,6 +135,7 @@ export interface Session {
   pm_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
+  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   triggered_by_user_id?: string;
   agent_session_id?: string;
   current_turn: number;
@@ -362,7 +370,7 @@ export interface OrgSettings {
   product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
-  llm_reasoning_effort?: 'low' | 'medium' | 'high' | '';
+  llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
   agent_config?: Record<string, Record<string, string>>;
   default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli' | 'amp' | 'pi';
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';

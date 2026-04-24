@@ -32,9 +32,10 @@ func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return &agent.AgentPrompt{
-		SystemPrompt: "test system prompt",
-		UserPrompt:   "test user prompt",
-		MaxTokens:    50000,
+		SystemPrompt:    "test system prompt",
+		UserPrompt:      "test user prompt",
+		MaxTokens:       50000,
+		ReasoningEffort: input.ReasoningEffort,
 	}, nil
 }
 
@@ -2202,6 +2203,10 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.ReasoningEffort = func() *models.ReasoningEffort {
+		effort := models.ReasoningEffortHigh
+		return &effort
+	}()
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -2225,6 +2230,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "continue_session should execute the adapter in continuation mode")
 		require.Equal(t, "Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message")
+		require.Equal(t, models.ReasoningEffortHigh, prompt.ReasoningEffort, "continue_session should preserve the stored reasoning effort on snapshot-backed turns")
 		return &agent.AgentResult{
 			Diff:                "--- a/main_test.go\n+++ b/main_test.go",
 			Summary:             "Added the regression test",
@@ -2267,6 +2273,10 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
+	session.ReasoningEffort = func() *models.ReasoningEffort {
+		effort := models.ReasoningEffortMedium
+		return &effort
+	}()
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -2287,6 +2297,7 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.False(t, prompt.Continuation, "fresh resume should rebuild context instead of using continuation mode")
 		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
+		require.Equal(t, models.ReasoningEffortMedium, prompt.ReasoningEffort, "fresh resume should preserve the stored reasoning effort when rebuilding the prompt")
 		return &agent.AgentResult{
 			Summary:         "continued from fallback auth",
 			ConfidenceScore: 0.8,

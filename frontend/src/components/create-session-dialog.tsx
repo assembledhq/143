@@ -35,6 +35,15 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { queryKeys } from "@/lib/query-keys";
 import { AGENTS, agentTypeForModel } from "@/lib/agents";
+import { useAuth } from "@/hooks/use-auth";
+import {
+  type CodingAgentReasoningEffort,
+  getDefaultCodingAgentReasoningForAgent,
+  getCodingAgentReasoningOptions,
+  isCodingAgentReasoningEffortSupported,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse } from "@/lib/types";
 
@@ -46,6 +55,7 @@ interface CreateSessionDialogProps {
 }
 
 export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogProps) {
+  const { user } = useAuth();
   const router = useRouter();
   const queryClient = useQueryClient();
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -60,6 +70,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [reasoningOverride, setReasoningOverride] = useState<CodingAgentReasoningEffort>("");
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(null);
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -116,6 +127,13 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       return AGENTS.indexOf(a) - AGENTS.indexOf(b);
     });
   }, [defaultAgentType]);
+  const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
+  const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType);
+  const effectiveReasoningOverride = isCodingAgentReasoningEffortSupported(effectiveAgentType, reasoningOverride) ? reasoningOverride : "";
+  const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const submittedReasoningEffort = showReasoningSelector ? effectiveReasoningEffort : "";
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
   // Reset state when dialog closes
   useEffect(() => {
@@ -126,6 +144,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       setShowImageInput(false);
       setImageURL("");
       setSelectedModel("");
+      setReasoningOverride("");
       setUserSelectedRepoId(null);
       setBranchByRepoId({});
       setCreationError(null);
@@ -145,6 +164,7 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
+        ...(submittedReasoningEffort ? { reasoning_effort: submittedReasoningEffort } : {}),
         ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
@@ -365,6 +385,22 @@ export function CreateSessionDialog({ open, onOpenChange }: CreateSessionDialogP
               ))}
             </SelectContent>
           </Select>
+
+          {showReasoningSelector ? (
+            <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
+              <SelectTrigger className="h-7 w-auto gap-1 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
+                <SelectValue placeholder="Reasoning" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default__">
+                  {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
+                </SelectItem>
+                {reasoningOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
 
           <div className="ml-auto">
             <Button

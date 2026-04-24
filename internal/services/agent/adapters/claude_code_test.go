@@ -344,6 +344,42 @@ func TestClaudeCodeAdapter_Execute_ContinuationUsesContinueMode(t *testing.T) {
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
+func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "claude") {
+			_, _ = stdout.Write([]byte(`{"type":"assistant","content":"done"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewClaudeCodeAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	prompt := &agent.AgentPrompt{
+		SystemPrompt:    "test",
+		UserPrompt:      "test",
+		MaxTokens:       50_000,
+		ReasoningEffort: models.ReasoningEffortHigh,
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "execute should succeed with a reasoning effort override")
+	require.NotNil(t, result, "execute should return a result")
+	require.Contains(t, provider.ExecCalls[0], "--effort high", "claude command should include the requested effort level")
+}
+
 // ---------------------------------------------------------------------------
 // parseStreamOutput (Claude Code streaming JSON)
 // ---------------------------------------------------------------------------

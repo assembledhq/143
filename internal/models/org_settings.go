@@ -61,23 +61,67 @@ func (a AgentType) Validate() error {
 type AgentEnvConfig map[string]map[string]string
 
 // ReasoningEffort controls how much reasoning a model should use.
-// Valid values: "low", "medium", "high", or "" (default/none).
+// Valid values: "low", "medium", "high", "xhigh", "max", or "" (default/none).
 type ReasoningEffort string
 
 const (
 	ReasoningEffortLow    ReasoningEffort = "low"
 	ReasoningEffortMedium ReasoningEffort = "medium"
 	ReasoningEffortHigh   ReasoningEffort = "high"
+	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
+	ReasoningEffortMax    ReasoningEffort = "max"
 )
 
 // Validate returns an error if the reasoning effort is not a recognized value.
 func (r ReasoningEffort) Validate() error {
 	switch r {
-	case "", ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh:
+	case "", ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax:
 		return nil
 	default:
 		return fmt.Errorf("invalid reasoning effort: %q", r)
 	}
+}
+
+// SupportedReasoningEfforts returns the reasoning levels the agent runtime can
+// honor today. The empty value is intentionally omitted; callers should treat
+// it as "no explicit override".
+func (a AgentType) SupportedReasoningEfforts() []ReasoningEffort {
+	switch a {
+	case AgentTypeCodex:
+		return []ReasoningEffort{
+			ReasoningEffortLow,
+			ReasoningEffortMedium,
+			ReasoningEffortHigh,
+			ReasoningEffortXHigh,
+		}
+	case AgentTypeClaudeCode:
+		return []ReasoningEffort{
+			ReasoningEffortLow,
+			ReasoningEffortMedium,
+			ReasoningEffortHigh,
+			ReasoningEffortXHigh,
+			ReasoningEffortMax,
+		}
+	default:
+		return nil
+	}
+}
+
+// SupportsReasoningEffort reports whether the agent runtime can honor any
+// explicit reasoning effort override.
+func (a AgentType) SupportsReasoningEffort() bool {
+	return len(a.SupportedReasoningEfforts()) > 0
+}
+
+// SupportsReasoningEffortLevel reports whether the given explicit effort is
+// supported by the selected coding agent.
+func (a AgentType) SupportsReasoningEffortLevel(level ReasoningEffort) bool {
+	for _, supported := range a.SupportedReasoningEfforts() {
+		if supported == level {
+			return true
+		}
+	}
+	return false
 }
 
 // OrgSize classifies an organization by volume of issues and activity.

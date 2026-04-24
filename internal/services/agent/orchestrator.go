@@ -460,10 +460,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 6. Prepare the prompt.
 	input := &AgentInput{
-		Issue:         issue,
-		RepoURL:       repoURL,
-		RepoBranch:    branch,
-		References:    manualSessionReferences(issue),
+		Issue:      issue,
+		RepoURL:    repoURL,
+		RepoBranch: branch,
+		References: manualSessionReferences(issue),
+		ReasoningEffort: func() models.ReasoningEffort {
+			if run.ReasoningEffort == nil {
+				return ""
+			}
+			return *run.ReasoningEffort
+		}(),
 		TokenMode:     run.TokenMode,
 		ContextLimits: contextLimits,
 	}
@@ -1239,6 +1245,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			ResumeSessionID: resumeSessionID,
 			UserMessage:     userMessage,
 			MaxTokens:       tokenLimitForMode(session.TokenMode),
+			ReasoningEffort: func() models.ReasoningEffort {
+				if session.ReasoningEffort == nil {
+					return ""
+				}
+				return *session.ReasoningEffort
+			}(),
 		}
 
 		if reusedExisting {
@@ -1261,7 +1273,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
 		input := &AgentInput{
-			Issue:     &issue,
+			Issue: &issue,
+			ReasoningEffort: func() models.ReasoningEffort {
+				if session.ReasoningEffort == nil {
+					return ""
+				}
+				return *session.ReasoningEffort
+			}(),
 			TokenMode: session.TokenMode,
 		}
 		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
