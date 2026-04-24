@@ -184,12 +184,48 @@ const (
 	legacySessionDiffCollectedIndex = 53
 	legacySessionLatestDiffIndex    = 54
 )
+
 const (
 	sessionWorkerNodeIndex      = 15
 	sessionBaseCommitSHAIndex   = 61
 	sessionDiffCollectedAtIndex = 71
 	sessionLatestDiffIndex      = 72
 )
+
+var sessionPullRequestColumns = []string{
+	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+	"health_version", "merged_at", "created_at", "updated_at",
+}
+
+func sessionPullRequestRow(prID uuid.UUID, sessionID *uuid.UUID, orgID uuid.UUID, repo string, now time.Time) []any {
+	return []any{
+		prID,
+		sessionID,
+		orgID,
+		42,
+		"https://github.com/" + repo + "/pull/42",
+		repo,
+		"Fix bug",
+		(*string)(nil),
+		"open",
+		"pending",
+		"app",
+		"",
+		(*string)(nil),
+		(*string)(nil),
+		models.PullRequestMergeStateUnknown,
+		false,
+		0,
+		false,
+		(*time.Time)(nil),
+		int64(0),
+		(*time.Time)(nil),
+		now,
+		now,
+	}
+}
 
 func sessionRowNeedsPolicyDefaults(values []interface{}) bool {
 	if len(values) < 4 {
@@ -1408,14 +1444,8 @@ func TestSessionHandler_GetPullRequest_Success(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "session_id", "org_id", "github_pr_number", "github_pr_url",
-				"github_repo", "title", "body", "status", "review_status",
-				"authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-			}).AddRow(
-				prID, &runID, orgID, 42, "https://github.com/org/repo/pull/42",
-				"org/repo", "Fix bug", nil, "open", "pending",
-				"app", "", nil, now, now,
+			pgxmock.NewRows(sessionPullRequestColumns).AddRow(
+				sessionPullRequestRow(prID, &runID, orgID, "org/repo", now)...,
 			),
 		)
 
@@ -1451,11 +1481,7 @@ func TestSessionHandler_GetPullRequest_NoPR_Returns200Null(t *testing.T) {
 
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url",
-			"github_repo", "title", "body", "status", "review_status",
-			"authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/pull-request", nil)
 	rctx := chi.NewRouteContext()
@@ -4665,10 +4691,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	// Mock PR lookup — no existing PR (returns empty result).
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	// Mock job enqueue.
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -4737,10 +4760,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	// ON CONFLICT DO NOTHING fires because the dedupe_key already matches a
 	// pending job — pgx surfaces this as ErrNoRows.
@@ -4812,10 +4832,7 @@ func TestSessionHandler_CreatePR_ReturnsAuthInterceptWhenUserCredentialMissing(t
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -4884,10 +4901,7 @@ func TestSessionHandler_CreatePR_InvalidAuthorMode(t *testing.T) {
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"author_mode":"bogus"}`))
 	rctx := chi.NewRouteContext()
@@ -4949,10 +4963,7 @@ func TestSessionHandler_CreatePR_PRAuthCheckerError(t *testing.T) {
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5012,10 +5023,7 @@ func TestSessionHandler_CreatePR_ResumeTokenRequiresSigningKey(t *testing.T) {
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5078,10 +5086,7 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -5162,10 +5167,7 @@ func TestSessionHandler_CreatePR_InvalidStoredCredentialTriggersAuthIntercept(t 
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5231,10 +5233,7 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5302,10 +5301,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutGitHubAppUserAuthFailsFast(t
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5378,10 +5374,7 @@ func TestSessionHandler_CreatePR_UserRequiredWithoutCheckerIgnoresStoredGitHubAp
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("SELECT .+ FROM organizations").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
@@ -5564,10 +5557,7 @@ func TestSessionHandler_CreatePR_UpdateStateErrorStillAccepted(t *testing.T) {
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
@@ -5636,12 +5626,8 @@ func TestSessionHandler_CreatePR_AlreadyExists(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-				"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-			}).AddRow(
-				prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-				"Fix bug", (*string)(nil), "open", "pending", "app", "", (*time.Time)(nil), now, now,
+			pgxmock.NewRows(sessionPullRequestColumns).AddRow(
+				sessionPullRequestRow(prID, &sessionID, orgID, "org/repo", now)...,
 			),
 		)
 
@@ -5701,10 +5687,7 @@ func TestSessionHandler_CreatePR_SucceededWithoutStoredPRRejectsRetry(t *testing
 		)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-			"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
-		}))
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
 	rctx := chi.NewRouteContext()

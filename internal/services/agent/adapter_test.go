@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/stretchr/testify/require"
 )
 
@@ -65,4 +67,60 @@ func TestDefaultSandboxConfig_InvalidEnvironmentOverridesFallbackToDefaults(t *t
 	require.Equal(t, 2.0, cfg.CPULimit, "DefaultSandboxConfig should fall back to default CPU limit for invalid SANDBOX_CPU_LIMIT")
 	require.Equal(t, 4096, cfg.MemoryLimitMB, "DefaultSandboxConfig should fall back to default memory limit for invalid SANDBOX_MEMORY_LIMIT_MB")
 	require.Equal(t, 10, cfg.DiskLimitGB, "DefaultSandboxConfig should fall back to default disk limit for invalid SANDBOX_DISK_LIMIT_GB")
+}
+
+func TestParseAndFormatRevisionContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, err := ParseRevisionContext(nil)
+	require.NoError(t, err, "ParseRevisionContext should accept empty input")
+	require.Nil(t, ctx, "ParseRevisionContext should return nil for empty input")
+
+	_, err = ParseRevisionContext(json.RawMessage(`{"repair_action":`))
+	require.Error(t, err, "ParseRevisionContext should reject invalid JSON")
+	require.Contains(t, err.Error(), "unmarshal revision context", "ParseRevisionContext should wrap JSON errors")
+
+	raw := json.RawMessage(`{
+		"formatted_feedback":"Please address the review feedback.",
+		"comment_summary":"Two issues remain.",
+		"previous_diff":"--- a/foo.go\n+++ b/foo.go",
+		"repair_action":"fix_tests",
+		"repair_context":{
+			"pull_request_number":42,
+			"repository":"assembledhq/143",
+			"head_sha":"head",
+			"base_sha":"base",
+			"merge_state":"conflicted",
+			"has_conflicts":true,
+			"failing_checks":[
+				{
+					"name":"unit tests",
+					"category":"test",
+					"summary":"2 tests failed",
+					"details_url":"https://example.com/check",
+					"log_excerpt":"panic: boom",
+					"annotations":["foo_test.go:12 expected true"]
+				}
+			]
+		}
+	}`)
+
+	parsed, err := ParseRevisionContext(raw)
+	require.NoError(t, err, "ParseRevisionContext should decode a valid revision payload")
+	formatted := FormatRevisionContextForContinuation(parsed)
+	require.Contains(t, formatted, "## Revision context", "FormatRevisionContextForContinuation should include the revision section when feedback exists")
+	require.Contains(t, formatted, "Please address the review feedback.", "FormatRevisionContextForContinuation should include formatted feedback")
+	require.Contains(t, formatted, "Summary: Two issues remain.", "FormatRevisionContextForContinuation should include the comment summary")
+	require.Contains(t, formatted, "Previous diff:", "FormatRevisionContextForContinuation should include the previous diff block")
+	require.Contains(t, formatted, "## Pull request repair context", "FormatRevisionContextForContinuation should include the repair section when repair context exists")
+	require.Contains(t, formatted, "Repair action: `fix_tests`", "FormatRevisionContextForContinuation should include the repair action")
+	require.Contains(t, formatted, "PR #42 in `assembledhq/143`.", "FormatRevisionContextForContinuation should identify the PR being repaired")
+	require.Contains(t, formatted, "Merge state: `conflicted`", "FormatRevisionContextForContinuation should include the merge state")
+	require.Contains(t, formatted, "annotation: foo_test.go:12 expected true", "FormatRevisionContextForContinuation should include failing-check annotations")
+	require.Contains(t, formatted, "log excerpt: panic: boom", "FormatRevisionContextForContinuation should include failing-check log excerpts")
+	require.Contains(t, formatted, "details: https://example.com/check", "FormatRevisionContextForContinuation should include failing-check details links")
+
+	require.Equal(t, "", FormatRevisionContextForContinuation(nil), "FormatRevisionContextForContinuation should return an empty string for nil input")
+	require.Equal(t, "", FormatRevisionContextForContinuation(&RevisionContext{}), "FormatRevisionContextForContinuation should return an empty string for empty revision context")
+	require.Equal(t, models.PullRequestRepairActionTypeFixTests, parsed.RepairAction, "ParseRevisionContext should decode the repair action type")
 }

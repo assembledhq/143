@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -117,6 +117,31 @@ export const mockPR: PullRequest = {
   closed_at: null,
   created_at: '2026-02-17T07:06:00Z',
   updated_at: '2026-02-17T07:06:00Z',
+};
+
+export const mockPRHealth: PullRequestHealthResponse = {
+  pull_request_id: 'pr-1',
+  pull_request_number: 42,
+  repository: 'example/repo',
+  url: 'https://github.com/example/repo/pull/42',
+  status: 'open',
+  head_sha: 'head-sha',
+  base_sha: 'base-sha',
+  health_version: 1,
+  merge_state: 'clean',
+  has_conflicts: false,
+  failing_test_count: 0,
+  needs_agent_action: false,
+  github_state_synced_at: '2026-02-17T07:07:00Z',
+  summary: 'PR #42 is mergeable and all required test checks are passing.',
+  checks: [],
+  can_resolve_conflicts: false,
+  can_fix_tests: false,
+  enrichment_status: 'ready',
+  enrichment_requested: false,
+  enrichment_ready: true,
+  conflict_detail_available: true,
+  failing_test_detail_available: false,
 };
 
 export const mockProjectDetail: ProjectDetail = {
@@ -301,8 +326,41 @@ export const handlers = [
     return HttpResponse.json({ data: mockValidation } satisfies SingleResponse<Validation>);
   }),
 
-  http.get('/api/v1/sessions/:id/pr', () => {
-    return HttpResponse.json({ data: mockPR } satisfies SingleResponse<PullRequest>);
+  http.get('/api/v1/sessions/:id/pr', ({ params }) => {
+    const data = params.id === mockPR.session_id ? mockPR : null;
+    return HttpResponse.json({ data } satisfies SingleResponse<PullRequest | null>);
+  }),
+
+  http.get('/api/v1/pull-requests/:id/health', () => {
+    return HttpResponse.json({ data: mockPRHealth } satisfies SingleResponse<PullRequestHealthResponse>);
+  }),
+
+  http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+    return HttpResponse.json({
+      data: {
+        session_id: mockSessions[0].id,
+        mode: 'resumed',
+        reused_in_flight: false,
+        head_sha: 'head-sha',
+        base_sha: 'base-sha',
+        health_version: 1,
+        repair_action_type: 'fix_tests',
+      },
+    } satisfies SingleResponse<PullRequestRepairResponse>);
+  }),
+
+  http.post('/api/v1/pull-requests/:id/repair/resolve-conflicts', () => {
+    return HttpResponse.json({
+      data: {
+        session_id: mockSessions[0].id,
+        mode: 'resumed',
+        reused_in_flight: false,
+        head_sha: 'head-sha',
+        base_sha: 'base-sha',
+        health_version: 1,
+        repair_action_type: 'resolve_conflicts',
+      },
+    } satisfies SingleResponse<PullRequestRepairResponse>);
   }),
 
   http.get('/api/v1/sessions/:id/messages', () => {

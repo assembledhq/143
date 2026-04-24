@@ -308,6 +308,45 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 			b.WriteString(input.RevisionContext.PreviousDiff)
 			b.WriteString("\n```\n\n")
 		}
+		if input.RevisionContext.RepairContext != nil {
+			b.WriteString("### Repair Context\n\n")
+			if input.RevisionContext.RepairAction != "" {
+				b.WriteString("Repair action: `")
+				b.WriteString(string(input.RevisionContext.RepairAction))
+				b.WriteString("`\n\n")
+			}
+			b.WriteString(fmt.Sprintf("PR #%d in `%s`.\n\n", input.RevisionContext.RepairContext.PullRequestNumber, input.RevisionContext.RepairContext.Repository))
+			b.WriteString(fmt.Sprintf("- head SHA: `%s`\n", input.RevisionContext.RepairContext.HeadSHA))
+			b.WriteString(fmt.Sprintf("- base SHA: `%s`\n", input.RevisionContext.RepairContext.BaseSHA))
+			b.WriteString(fmt.Sprintf("- merge state: `%s`\n", input.RevisionContext.RepairContext.MergeState))
+			if len(input.RevisionContext.RepairContext.FailingChecks) > 0 {
+				b.WriteString("\nFailed checks:\n")
+				for _, check := range input.RevisionContext.RepairContext.FailingChecks {
+					b.WriteString(fmt.Sprintf("- `%s` (%s)", check.Name, check.Category))
+					if check.Summary != "" {
+						b.WriteString(": ")
+						b.WriteString(check.Summary)
+					}
+					b.WriteString("\n")
+					for _, annotation := range check.Annotations {
+						b.WriteString("  - annotation: ")
+						b.WriteString(annotation)
+						b.WriteString("\n")
+					}
+					if check.LogExcerpt != "" {
+						b.WriteString("  - log excerpt: ")
+						b.WriteString(check.LogExcerpt)
+						b.WriteString("\n")
+					}
+					if check.DetailsURL != "" {
+						b.WriteString("  - details: ")
+						b.WriteString(check.DetailsURL)
+						b.WriteString("\n")
+					}
+				}
+				b.WriteString("\n")
+			}
+		}
 	}
 
 	// Integration tools: inject CLI skills doc so the agent knows what's available.

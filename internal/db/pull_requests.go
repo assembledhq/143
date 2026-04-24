@@ -52,7 +52,9 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 }
 
 const prSelectColumns = `id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
-		       title, body, status, review_status, authored_by, ci_status, merged_at, created_at, updated_at`
+		       title, body, status, review_status, authored_by, ci_status, head_sha, base_sha,
+		       merge_state, has_conflicts, failing_test_count, needs_agent_action, github_state_synced_at,
+		       health_version, merged_at, created_at, updated_at`
 
 func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.PullRequest, error) {
 	query := `

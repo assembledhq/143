@@ -549,6 +549,41 @@ func TestBuildSystemPrompt_IncludesRevisionContext(t *testing.T) {
 	require.Contains(t, prompt, "--- a/main.go")
 }
 
+func TestBuildSystemPrompt_IncludesRepairContext(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue: &models.Issue{Title: "Bug"},
+		RevisionContext: &agent.RevisionContext{
+			RepairAction: models.PullRequestRepairActionTypeFixTests,
+			RepairContext: &agent.PullRequestRepairContext{
+				PullRequestNumber: 184,
+				Repository:        "org/repo",
+				HeadSHA:           "abc123",
+				BaseSHA:           "def456",
+				MergeState:        models.PullRequestMergeStateClean,
+				FailingChecks: []agent.PullRequestFailingCheck{
+					{
+						Name:        "unit tests / api",
+						Category:    models.PullRequestCheckCategoryTest,
+						Summary:     "2 failing tests in auth package",
+						DetailsURL:  "https://github.com/org/repo/actions/runs/1/job/2",
+						LogExcerpt:  "FAIL auth handler should reject expired token",
+						Annotations: []string{"auth/handler_test.go:42 token expiry assertion failed"},
+					},
+				},
+			},
+		},
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.Contains(t, prompt, "Repair Context", "system prompt should include the repair context section")
+	require.Contains(t, prompt, "fix_tests", "system prompt should include the repair action type")
+	require.Contains(t, prompt, "PR #184", "system prompt should include the PR number")
+	require.Contains(t, prompt, "unit tests / api", "system prompt should include failing check names")
+	require.Contains(t, prompt, "token expiry assertion failed", "system prompt should include check annotations")
+}
+
 func TestBuildSystemPrompt_IncludesContextDocs(t *testing.T) {
 	t.Parallel()
 
