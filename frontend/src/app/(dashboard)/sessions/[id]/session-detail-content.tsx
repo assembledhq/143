@@ -1368,6 +1368,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!pullRequestId && prData?.data?.status === "open",
   });
   const prHealth = prHealthData?.data;
+  const prStatus = prData?.data?.status;
+  const closedPRNumber = prData?.data?.github_pr_number;
+  const closedPRSummary = closedPRNumber
+    ? `PR #${closedPRNumber} was closed without merging.`
+    : "This pull request was closed without merging.";
 
   // React to pr_creation_state transitions with toast feedback. Tracks the
   // previous value via ref so we fire once per transition rather than on
@@ -2061,12 +2066,19 @@ export function SessionDetailContent({ id }: { id: string }) {
                   <TabsTrigger value="preview">Preview</TabsTrigger>
                 </TabsList>
                 {hasPR && prData?.data?.github_pr_url ? (
-                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                    <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                      <ExternalLink className="h-3 w-3" />
-                      View PR
-                    </Button>
-                  </a>
+                  <>
+                    {prStatus === "closed" && (
+                      <Badge variant="secondary" className="h-7 px-2 text-xs">
+                        PR closed
+                      </Badge>
+                    )}
+                    <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                        <ExternalLink className="h-3 w-3" />
+                        View PR
+                      </Button>
+                    </a>
+                  </>
                 ) : showPRAction && !prErrorNotice ? (
                   <Button
                     variant="outline"
@@ -2117,7 +2129,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsContent>
             <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
               <div className="space-y-4">
-                {pullRequestId && prData?.data?.status === "open" && (
+                {pullRequestId && prStatus === "open" && (
                   prHealth ? (
                     <PRHealthBanner
                       health={prHealth}
@@ -2134,6 +2146,24 @@ export function SessionDetailContent({ id }: { id: string }) {
                       </CardContent>
                     </Card>
                   ) : null
+                )}
+                {pullRequestId && prStatus === "closed" && (
+                  <Card className="border-border/60">
+                    <CardContent className="p-4">
+                      <div className="flex items-start gap-3">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                          <XCircle className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0 space-y-1">
+                          <div className="text-sm font-medium text-foreground">PR closed</div>
+                          <p className="text-sm text-foreground">{closedPRSummary}</p>
+                          <p className="text-sm text-muted-foreground">
+                            This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+                          </p>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
                 )}
                 <OverviewTab session={session} members={members} />
               </div>

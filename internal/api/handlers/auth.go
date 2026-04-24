@@ -95,7 +95,77 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+	if h.userStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"data": user})
+		return
+	}
+	loadedUser, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load user settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
+		ID:          user.ID,
+		OrgID:       user.OrgID,
+		Email:       loadedUser.Email,
+		Name:        loadedUser.Name,
+		Role:        user.Role,
+		GitHubID:    loadedUser.GitHubID,
+		GitHubLogin: loadedUser.GitHubLogin,
+		AvatarURL:   loadedUser.AvatarURL,
+		GoogleID:    loadedUser.GoogleID,
+		Settings:    loadedUser.Settings,
+		CreatedAt:   loadedUser.CreatedAt,
+	}})
+}
+
+// UpdateSettings updates the authenticated user's personal settings document.
+func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		return
+	}
+	_ = middleware.OrgIDFromContext(r.Context())
+	if h.userStore == nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_STORE_UNCONFIGURED", "user settings store not configured")
+		return
+	}
+
+	var body models.UserSettings
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if err := body.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_USER_SETTINGS", err.Error())
+		return
+	}
+	if err := h.userStore.UpdateSettings(r.Context(), user.ID, body); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_SETTINGS_UPDATE_FAILED", "failed to update user settings", err)
+		return
+	}
+
+	updatedUser, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load updated user settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
+		ID:          user.ID,
+		OrgID:       user.OrgID,
+		Email:       updatedUser.Email,
+		Name:        updatedUser.Name,
+		Role:        user.Role,
+		GitHubID:    updatedUser.GitHubID,
+		GitHubLogin: updatedUser.GitHubLogin,
+		AvatarURL:   updatedUser.AvatarURL,
+		GoogleID:    updatedUser.GoogleID,
+		Settings:    updatedUser.Settings,
+		CreatedAt:   updatedUser.CreatedAt,
+	}})
 }
 
 // Memberships returns the authenticated user's full membership set together
@@ -1183,21 +1253,43 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 		return inv, uuid.Nil, "", &invitationError{http.StatusInternalServerError, "INVITE_LOOKUP_FAILED", "failed to look up invitation"}
 	}
 
+	if invErr := validateInvitationForRecipient(inv, email, githubLogin); invErr != nil {
+		return inv, uuid.Nil, "", invErr
+	}
+	return inv, inv.OrgID, inv.Role, nil
+}
+
+// validateInvitationForRecipient checks the three invariants that gate every
+// invitation claim regardless of how the row was looked up: the invitation
+// is still pending, has not expired, and its recipient identifier matches
+// the authenticated user. Shared by the token-based claim path and the
+// id-based in-app accept/decline paths so the matching rules can never
+// drift between the dropdown's "is this invite mine?" filter and the
+// server's "is this user allowed to accept?" check.
+//
+// Match rules (mirror the ListPendingForUser store query):
+//   - email-only invite: the user's email (case-insensitive) must equal it
+//   - github-only invite: the user's github_login (case-insensitive) must equal it
+//   - both set: either match suffices
+//   - empty user-side identifiers can never satisfy either branch
+//
+// All three failures return invitationError values with status codes that
+// suit the token-claim path. Id-based callers may remap the mismatch code
+// to 403 since the id is part of the URL (the request is naming a specific
+// invitation the user has no claim to, not submitting bad input).
+func validateInvitationForRecipient(inv models.Invitation, email, githubLogin string) *invitationError {
 	if inv.Status != "pending" {
-		return inv, uuid.Nil, "", &invitationError{http.StatusGone, "INVITE_INVALID", "this invitation is no longer valid"}
+		return &invitationError{http.StatusGone, "INVITE_INVALID", "this invitation is no longer valid"}
 	}
-
 	if time.Now().After(inv.ExpiresAt) {
-		return inv, uuid.Nil, "", &invitationError{http.StatusGone, "INVITE_EXPIRED", "this invitation has expired"}
+		return &invitationError{http.StatusGone, "INVITE_EXPIRED", "this invitation has expired"}
 	}
-
 	emailMatches := inv.Email != nil && email != "" && strings.EqualFold(*inv.Email, email)
 	githubMatches := inv.GitHubUsername != nil && githubLogin != "" && strings.EqualFold(*inv.GitHubUsername, githubLogin)
 	if !emailMatches && !githubMatches {
-		return inv, uuid.Nil, "", &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
+		return &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
 	}
-
-	return inv, inv.OrgID, inv.Role, nil
+	return nil
 }
 
 // emitAuthEvent emits an audit log entry for an authentication event. It

@@ -1681,15 +1681,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	var body struct {
-		Message       string                         `json:"message"`
-		Images        []string                       `json:"images"`
-		References    []models.SessionInputReference `json:"references"`
-		AgentType     string                         `json:"agent_type"`
-		Model         string                         `json:"model"`
-		AutonomyLevel string                         `json:"autonomy_level"`
-		TokenMode     string                         `json:"token_mode"`
-		RepositoryID  string                         `json:"repository_id"`
-		Branch        string                         `json:"branch"`
+		Message         string                         `json:"message"`
+		Images          []string                       `json:"images"`
+		References      []models.SessionInputReference `json:"references"`
+		AgentType       string                         `json:"agent_type"`
+		Model           string                         `json:"model"`
+		ReasoningEffort string                         `json:"reasoning_effort"`
+		AutonomyLevel   string                         `json:"autonomy_level"`
+		TokenMode       string                         `json:"token_mode"`
+		RepositoryID    string                         `json:"repository_id"`
+		Branch          string                         `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1772,6 +1773,20 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		modelOverride = &body.Model
 	}
 
+	reasoningEffort := models.ReasoningEffort(body.ReasoningEffort)
+	if err := reasoningEffort.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
+		return
+	}
+	if reasoningEffort != "" && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", fmt.Sprintf("reasoning_effort is not supported for agent_type %q", agentType))
+		return
+	}
+	var reasoningOverride *models.ReasoningEffort
+	if reasoningEffort != "" {
+		reasoningOverride = &reasoningEffort
+	}
+
 	autonomyLevel := body.AutonomyLevel
 	if autonomyLevel == "" {
 		autonomyLevel = "semi"
@@ -1810,6 +1825,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		AutonomyLevel:     autonomyLevel,
 		TokenMode:         tokenMode,
 		ModelOverride:     modelOverride,
+		ReasoningEffort:   reasoningOverride,
 		TriggeredByUserID: manualTriggeredByUserID,
 		Title:             &title,
 		PMApproach:        &title,

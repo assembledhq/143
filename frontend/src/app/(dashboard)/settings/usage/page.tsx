@@ -9,7 +9,6 @@ import { UsageSummaryCards } from "./usage-summary-cards";
 import { UsageDatePicker, type DatePreset } from "./usage-date-picker";
 import { UsageTimeseriesChart } from "./usage-timeseries-chart";
 import { UsageBreakdownTable } from "./usage-breakdown-table";
-import { UsageCapacityBars } from "./usage-capacity-bars";
 import { UsageExportButton } from "./usage-export-button";
 import { getDateRangePreset, formatDateForApi, nextDayIso, type MetricKey } from "./usage-helpers";
 
@@ -111,21 +110,14 @@ export default function UsagePage() {
           onDayClick={handleDayClick}
         />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <UsageBreakdownTable
-              start={breakdownStart}
-              end={breakdownEnd}
-              dimension={dimension}
-              onDimensionChange={setDimension}
-              onRowClick={handleRowClick}
-              selectedKey={dimension === "user" ? selectedUserId : undefined}
-            />
-          </div>
-          <div>
-            <UsageCapacityBars start={start} end={end} />
-          </div>
-        </div>
+        <UsageBreakdownTable
+          start={breakdownStart}
+          end={breakdownEnd}
+          dimension={dimension}
+          onDimensionChange={setDimension}
+          onRowClick={handleRowClick}
+          selectedKey={dimension === "user" ? selectedUserId : undefined}
+        />
 
         <p className="text-xs text-muted-foreground text-center pb-4">
           Data updates each reaper tick (typically every few minutes). The current hour is rolled up with partial data and finalized at the hour boundary.

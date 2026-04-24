@@ -33,9 +33,10 @@ func (m *mockAgentAdapter) Name() models.AgentType { return m.name }
 
 func (m *mockAgentAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
 	return &agent.AgentPrompt{
-		SystemPrompt: "test system prompt",
-		UserPrompt:   "test user prompt",
-		MaxTokens:    50000,
+		SystemPrompt:    "test system prompt",
+		UserPrompt:      "test user prompt",
+		MaxTokens:       50000,
+		ReasoningEffort: input.ReasoningEffort,
 	}, nil
 }
 
@@ -2363,6 +2364,10 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.ReasoningEffort = func() *models.ReasoningEffort {
+		effort := models.ReasoningEffortHigh
+		return &effort
+	}()
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -2386,6 +2391,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "continue_session should execute the adapter in continuation mode")
 		require.Equal(t, "Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message")
+		require.Equal(t, models.ReasoningEffortHigh, prompt.ReasoningEffort, "continue_session should preserve the stored reasoning effort on snapshot-backed turns")
 		return &agent.AgentResult{
 			Diff:                "--- a/main_test.go\n+++ b/main_test.go",
 			Summary:             "Added the regression test",
@@ -2428,6 +2434,10 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
+	session.ReasoningEffort = func() *models.ReasoningEffort {
+		effort := models.ReasoningEffortMedium
+		return &effort
+	}()
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -2448,6 +2458,7 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.False(t, prompt.Continuation, "fresh resume should rebuild context instead of using continuation mode")
 		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
+		require.Equal(t, models.ReasoningEffortMedium, prompt.ReasoningEffort, "fresh resume should preserve the stored reasoning effort when rebuilding the prompt")
 		return &agent.AgentResult{
 			Summary:         "continued from fallback auth",
 			ConfidenceScore: 0.8,
@@ -2461,6 +2472,75 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	require.Len(t, d.sessions.getFailureUpdates(), 0, "API-key fallback should not mark the resumed session as failed")
 	_, wroteCredsFile := d.provider.Files["/home/sandbox/.claude/.credentials.json"]
 	require.False(t, wroteCredsFile, "fresh resume should not write Claude subscription credentials when token refresh fails")
+}
+
+func TestRunAgent_OmitsReasoningEffortWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.ReasoningEffort = nil
+
+	d := defaultDeps()
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, models.ReasoningEffort(""), prompt.ReasoningEffort, "RunAgent should leave reasoning effort empty when no override is configured")
+		return &agent.AgentResult{
+			Summary:         "ok",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed without a reasoning override")
+}
+
+func TestContinueSession_OmitsReasoningEffortWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session-nil-effort.tar")
+	session.ReasoningEffort = nil
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, models.ReasoningEffort(""), prompt.ReasoningEffort, "ContinueSession should leave reasoning effort empty when the stored session has no override")
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.81,
+			ExitCode:        0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	require.NoError(t, err, "ContinueSession should succeed without a reasoning override")
 }
 
 func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFallback(t *testing.T) {

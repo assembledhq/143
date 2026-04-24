@@ -88,6 +88,7 @@ const (
 	AuditActionTeamMemberRemoved         AuditAction = "team.member_removed"
 	AuditActionTeamInvitationRevoked     AuditAction = "team.invitation_revoked"
 	AuditActionTeamInvitationAccepted    AuditAction = "team.invitation_accepted"
+	AuditActionTeamInvitationDeclined    AuditAction = "team.invitation_declined"
 	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
 	// Organization actions
@@ -134,7 +135,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPMDocumentUpdated, AuditActionPMDocumentRestored, AuditActionPMDocumentSetPinned,
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
-		AuditActionTeamInvitationClaimFailed,
+		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,

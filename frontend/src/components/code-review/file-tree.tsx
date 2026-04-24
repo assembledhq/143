@@ -67,18 +67,6 @@ function flattenSingleChildDirs(node: TreeNode): TreeNode {
   return { ...node, children: newChildren };
 }
 
-/**
- * Sort files by impact: largest changes first, then alphabetical.
- */
-function sortFilesByImpact(files: DiffFile[]): DiffFile[] {
-  return [...files].sort((a, b) => {
-    const aImpact = a.stats.added + a.stats.removed;
-    const bImpact = b.stats.added + b.stats.removed;
-    if (bImpact !== aImpact) return bImpact - aImpact;
-    return a.newPath.localeCompare(b.newPath);
-  });
-}
-
 const TreeDirectory = memo(function TreeDirectory({
   node,
   activeFileIndex,
@@ -159,14 +147,11 @@ export function FileTree({
 }: FileTreeProps) {
   const [filter, setFilter] = useState("");
 
-  // Sort files by impact (largest changes first) then filter
-  const sortedFiles = useMemo(() => sortFilesByImpact(files), [files]);
-
   const filteredFiles = useMemo(() => {
-    if (!filter.trim()) return sortedFiles;
+    if (!filter.trim()) return files;
     const q = filter.toLowerCase();
-    return sortedFiles.filter((f) => f.newPath.toLowerCase().includes(q));
-  }, [sortedFiles, filter]);
+    return files.filter((f) => f.newPath.toLowerCase().includes(q));
+  }, [files, filter]);
 
   // Build a reference-identity map from DiffFile -> original index for O(1) lookups
   const fileToOrigIndex = useMemo(() => {
@@ -175,27 +160,27 @@ export function FileTree({
     return map;
   }, [files]);
 
-  // Map original indices to sorted indices for active file tracking
-  const sortedIndexMap = useMemo(() => {
+  // Map original indices to filtered indices for active file tracking.
+  const filteredIndexMap = useMemo(() => {
     const map = new Map<number, number>();
-    sortedFiles.forEach((file, sortedIdx) => {
+    filteredFiles.forEach((file, filteredIdx) => {
       const origIdx = fileToOrigIndex.get(file) ?? -1;
-      if (origIdx >= 0) map.set(origIdx, sortedIdx);
+      if (origIdx >= 0) map.set(origIdx, filteredIdx);
     });
     return map;
-  }, [fileToOrigIndex, sortedFiles]);
+  }, [fileToOrigIndex, filteredFiles]);
 
   const tree = useMemo(
     () => flattenSingleChildDirs(buildTree(filteredFiles)),
     [filteredFiles]
   );
 
-  // Convert activeFileIndex from original files array to the sorted position
-  const sortedActiveIndex = sortedIndexMap.get(activeFileIndex) ?? activeFileIndex;
+  // Convert activeFileIndex from original files array to the filtered position.
+  const filteredActiveIndex = filteredIndexMap.get(activeFileIndex) ?? activeFileIndex;
 
-  // When a file is selected in the sorted tree, convert back to original index
-  const handleFileSelect = (sortedIdx: number) => {
-    const file = filteredFiles[sortedIdx];
+  // When a file is selected in the filtered tree, convert back to original index.
+  const handleFileSelect = (filteredIdx: number) => {
+    const file = filteredFiles[filteredIdx];
     if (!file) return;
     const origIdx = fileToOrigIndex.get(file) ?? -1;
     if (origIdx >= 0) onFileSelect(origIdx);
@@ -221,7 +206,7 @@ export function FileTree({
       <div className="flex-1 overflow-y-auto scrollbar-hide px-3 pb-2">
         <TreeDirectory
           node={tree}
-          activeFileIndex={sortedActiveIndex}
+          activeFileIndex={filteredActiveIndex}
           onFileSelect={handleFileSelect}
         />
       </div>
