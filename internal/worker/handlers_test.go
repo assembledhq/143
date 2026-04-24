@@ -43,13 +43,138 @@ var workerSessionColumns = []string{
 	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
+const (
+	workerSessionWorkerNodeIndex      = 15
+	workerSessionBaseCommitSHAIndex   = 61
+	workerSessionDiffCollectedAtIndex = 71
+	workerSessionLatestDiffIndex      = 72
+	workerLegacySessionColumnsLen     = 57
+	workerLegacyRuntimeInsertIndex    = 41
+	workerLegacyBaseCommitIndex       = 43
+	workerLegacyDiffCollectedIndex    = 53
+	workerLegacyLatestDiffIndex       = 54
+)
+
+func workerSessionNeedsPolicyDefaults(values []any) bool {
+	if len(values) < 4 {
+		return false
+	}
+	agentType, ok := values[3].(string)
+	if !ok {
+		return false
+	}
+	switch agentType {
+	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func insertWorkerSessionValue(values []any, idx int, value any) []any {
+	row := make([]any, 0, len(values)+1)
+	row = append(row, values[:idx]...)
+	row = append(row, value)
+	row = append(row, values[idx:]...)
+	return row
+}
+
+func workerSessionCurrentOptionalDefaults(values []any, includeWorkerNode bool, includeDiffMetadata bool) []any {
+	row := values
+	if includeWorkerNode {
+		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionBaseCommitSHAIndex, nil)
+	}
+	return row
+}
+
+func workerSessionLegacyOptionalDefaults(values []any, includeWorkerNode bool, includeDiffMetadata bool) []any {
+	row := values
+	if includeWorkerNode {
+		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyBaseCommitIndex, nil)
+	}
+	return row
+}
+
+func workerSessionWithPolicyDefaults(values []any) []any {
+	origin := string(models.SessionOriginManual)
+	interactionMode := string(models.SessionInteractionModeInteractive)
+	validationPolicy := string(models.SessionValidationPolicyOnTurnComplete)
+	if len(values) > 1 {
+		if issueID, ok := values[1].(uuid.UUID); ok && issueID != uuid.Nil {
+			origin = string(models.SessionOriginIssueTrigger)
+			interactionMode = string(models.SessionInteractionModeSingleRun)
+			validationPolicy = string(models.SessionValidationPolicyOnSessionEnd)
+		}
+	}
+	row := make([]any, 0, len(values)+3)
+	row = append(row, values[:3]...)
+	row = append(row, origin, interactionMode, validationPolicy)
+	row = append(row, values[3:]...)
+	return row
+}
+
+func expandLegacyWorkerSessionRow(values []any) []any {
+	row := make([]any, 0, len(workerSessionColumns))
+	row = append(row, values[:workerLegacyRuntimeInsertIndex]...)
+	row = append(row,
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
+	)
+	row = append(row, values[workerLegacyRuntimeInsertIndex:]...)
+	return row
+}
+
 func workerSessionTestRow(values ...any) []any {
-	if len(values) == len(workerSessionColumns)-3 {
-		row := make([]any, 0, len(values)+3)
-		row = append(row, values[:3]...)
-		row = append(row, "", "", "")
-		row = append(row, values[3:]...)
-		return row
+	if workerSessionNeedsPolicyDefaults(values) {
+		switch len(values) {
+		case len(workerSessionColumns) - 3:
+			return workerSessionWithPolicyDefaults(values)
+		case len(workerSessionColumns) - 4:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false)
+		case len(workerSessionColumns) - 6:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true)
+		case len(workerSessionColumns) - 7:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true)
+		case workerLegacySessionColumnsLen - 3:
+			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
+		case workerLegacySessionColumnsLen - 4:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false))
+		case workerLegacySessionColumnsLen - 6:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true))
+		case workerLegacySessionColumnsLen - 7:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true))
+		}
+	}
+
+	switch len(values) {
+	case len(workerSessionColumns):
+		return values
+	case workerLegacySessionColumnsLen:
+		return expandLegacyWorkerSessionRow(values)
+	case workerLegacySessionColumnsLen - 1:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false))
+	case workerLegacySessionColumnsLen - 4:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true))
+	case workerLegacySessionColumnsLen - 3:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true))
+	case len(workerSessionColumns) - 1:
+		return workerSessionCurrentOptionalDefaults(values, true, false)
+	case len(workerSessionColumns) - 3:
+		return workerSessionCurrentOptionalDefaults(values, false, true)
+	case len(workerSessionColumns) - 4:
+		return workerSessionCurrentOptionalDefaults(values, true, true)
 	}
 	return values
 }
