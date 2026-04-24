@@ -33,7 +33,7 @@ var workerSessionColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
-	"project_task_id", "model_override", "triggered_by_user_id",
+	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
@@ -45,14 +45,16 @@ var workerSessionColumns = []string{
 
 const (
 	workerSessionWorkerNodeIndex      = 15
-	workerSessionBaseCommitSHAIndex   = 61
-	workerSessionDiffCollectedAtIndex = 71
-	workerSessionLatestDiffIndex      = 72
-	workerLegacySessionColumnsLen     = 57
-	workerLegacyRuntimeInsertIndex    = 41
-	workerLegacyBaseCommitIndex       = 43
-	workerLegacyDiffCollectedIndex    = 53
-	workerLegacyLatestDiffIndex       = 54
+	workerSessionReasoningIndex       = 35
+	workerSessionBaseCommitSHAIndex   = 62
+	workerSessionDiffCollectedAtIndex = 72
+	workerSessionLatestDiffIndex      = 73
+	workerLegacySessionColumnsLen     = 58
+	workerLegacyRuntimeInsertIndex    = 42
+	workerLegacyReasoningIndex        = 35
+	workerLegacyBaseCommitIndex       = 44
+	workerLegacyDiffCollectedIndex    = 54
+	workerLegacyLatestDiffIndex       = 55
 )
 
 func workerSessionNeedsPolicyDefaults(values []any) bool {
@@ -79,28 +81,34 @@ func insertWorkerSessionValue(values []any, idx int, value any) []any {
 	return row
 }
 
-func workerSessionCurrentOptionalDefaults(values []any, includeWorkerNode bool, includeDiffMetadata bool) []any {
+func workerSessionCurrentOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
 	row := values
 	if includeWorkerNode {
 		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
 	}
+	if includeReasoning {
+		row = insertWorkerSessionValue(row, workerSessionReasoningIndex, nil)
+	}
 	if includeDiffMetadata {
-		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
-		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
 		row = insertWorkerSessionValue(row, workerSessionBaseCommitSHAIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionDiffCollectedAtIndex, nil)
+		row = insertWorkerSessionValue(row, workerSessionLatestDiffIndex, nil)
 	}
 	return row
 }
 
-func workerSessionLegacyOptionalDefaults(values []any, includeWorkerNode bool, includeDiffMetadata bool) []any {
+func workerSessionLegacyOptionalDefaults(values []any, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []any {
 	row := values
 	if includeWorkerNode {
 		row = insertWorkerSessionValue(row, workerSessionWorkerNodeIndex, nil)
 	}
+	if includeReasoning {
+		row = insertWorkerSessionValue(row, workerLegacyReasoningIndex, nil)
+	}
 	if includeDiffMetadata {
-		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
-		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
 		row = insertWorkerSessionValue(row, workerLegacyBaseCommitIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyDiffCollectedIndex, nil)
+		row = insertWorkerSessionValue(row, workerLegacyLatestDiffIndex, nil)
 	}
 	return row
 }
@@ -123,6 +131,14 @@ func workerSessionWithPolicyDefaults(values []any) []any {
 	return row
 }
 
+func workerSessionLikelyOmitsWorkerNode(values []any) bool {
+	if len(values) <= workerSessionWorkerNodeIndex {
+		return false
+	}
+	_, ok := values[workerSessionWorkerNodeIndex].(bool)
+	return ok
+}
+
 func expandLegacyWorkerSessionRow(values []any) []any {
 	row := make([]any, 0, len(workerSessionColumns))
 	row = append(row, values[:workerLegacyRuntimeInsertIndex]...)
@@ -142,19 +158,39 @@ func workerSessionTestRow(values ...any) []any {
 		case len(workerSessionColumns) - 3:
 			return workerSessionWithPolicyDefaults(values)
 		case len(workerSessionColumns) - 4:
-			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false)
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false)
+			}
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false)
+		case len(workerSessionColumns) - 5:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false)
 		case len(workerSessionColumns) - 6:
-			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true)
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true)
 		case len(workerSessionColumns) - 7:
-			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true)
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true)
+			}
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true)
+		case len(workerSessionColumns) - 8:
+			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true)
 		case workerLegacySessionColumnsLen - 3:
 			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
 		case workerLegacySessionColumnsLen - 4:
-			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false))
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false))
+			}
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false))
+		case workerLegacySessionColumnsLen - 5:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false))
 		case workerLegacySessionColumnsLen - 6:
-			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true))
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true))
 		case workerLegacySessionColumnsLen - 7:
-			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true))
+			if workerSessionLikelyOmitsWorkerNode(values) {
+				return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true))
+			}
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true))
+		case workerLegacySessionColumnsLen - 8:
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true))
 		}
 	}
 
@@ -164,17 +200,37 @@ func workerSessionTestRow(values ...any) []any {
 	case workerLegacySessionColumnsLen:
 		return expandLegacyWorkerSessionRow(values)
 	case workerLegacySessionColumnsLen - 1:
-		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false))
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true, false))
+		}
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, false))
+	case workerLegacySessionColumnsLen - 2:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, false))
 	case workerLegacySessionColumnsLen - 4:
-		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true))
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, false, true))
 	case workerLegacySessionColumnsLen - 3:
-		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true))
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, false, true, true))
+		}
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, true))
+	case workerLegacySessionColumnsLen - 5:
+		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, true))
 	case len(workerSessionColumns) - 1:
-		return workerSessionCurrentOptionalDefaults(values, true, false)
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return workerSessionCurrentOptionalDefaults(values, false, true, false)
+		}
+		return workerSessionCurrentOptionalDefaults(values, true, false, false)
+	case len(workerSessionColumns) - 2:
+		return workerSessionCurrentOptionalDefaults(values, true, true, false)
 	case len(workerSessionColumns) - 3:
-		return workerSessionCurrentOptionalDefaults(values, false, true)
+		if workerSessionLikelyOmitsWorkerNode(values) {
+			return workerSessionCurrentOptionalDefaults(values, false, true, true)
+		}
+		return workerSessionCurrentOptionalDefaults(values, true, false, true)
 	case len(workerSessionColumns) - 4:
-		return workerSessionCurrentOptionalDefaults(values, true, true)
+		return workerSessionCurrentOptionalDefaults(values, false, false, true)
+	case len(workerSessionColumns) - 5:
+		return workerSessionCurrentOptionalDefaults(values, true, true, true)
 	}
 	return values
 }
@@ -249,7 +305,7 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil,
 		nil, nil, false, nil, nil, nil,
 		nil, nil, nil, false,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil,
 		agentSessionID, currentTurn, now, "snapshotted", snapshotKey,
@@ -723,7 +779,7 @@ func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey 
 		nil, nil, nil, nil,
 		nil, nil, false, &now, &now, nil,
 		nil, nil, nil, false,
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil,
 		nil, 0, now, "snapshotted", snapshotKey,
@@ -1364,7 +1420,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// 4. Create the session. The 19th arg is automation_run_id — asserting
+	// 4. Create the session. The 20th arg is automation_run_id — asserting
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
 	// on sessions.automation_run_id would silently miss every row).
@@ -1374,7 +1430,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
 	mock.ExpectCommit()
 

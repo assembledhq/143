@@ -139,6 +139,29 @@ describe('useAuth', () => {
       configurable: true,
     });
   });
+
+  it('returns backend-backed user settings from auth/me', async () => {
+    meMock.mockResolvedValue({
+      data: {
+        id: 'user-1',
+        email: 'test@test.com',
+        name: 'Test',
+        settings: {
+          coding_agent_reasoning_defaults: {
+            codex: 'xhigh',
+          },
+        },
+      },
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.user?.settings?.coding_agent_reasoning_defaults?.codex).toBe('xhigh');
+  });
 });
 
 describe('useAuthProviders', () => {

@@ -149,7 +149,7 @@ var sessionTestCols = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
-	"project_task_id", "model_override", "triggered_by_user_id",
+	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
@@ -198,7 +198,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil,
+		nil, nil, nil, nil,
 		nil, 0, now, "running", nil,
 		nil,      // runtime_soft_deadline_at
 		nil,      // runtime_hard_deadline_at

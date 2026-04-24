@@ -74,10 +74,11 @@ func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.Agen
 	files := extractFileHints(input)
 
 	return &agent.AgentPrompt{
-		SystemPrompt: systemPrompt,
-		UserPrompt:   userPrompt,
-		MaxTokens:    maxTokens,
-		Files:        files,
+		SystemPrompt:    systemPrompt,
+		UserPrompt:      userPrompt,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: input.ReasoningEffort,
+		Files:           files,
 	}, nil
 }
 
@@ -89,12 +90,17 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 	}
 
 	var cmd string
+	effortArg := ""
+	if prompt.ReasoningEffort != "" {
+		effortArg = fmt.Sprintf(" --effort %s", prompt.ReasoningEffort)
+	}
 	if prompt.Continuation {
 		// Subsequent turn: resume the latest session with --continue.
 		// The prompt is a positional argument to --print.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --verbose --continue \"%s\"",
+			"claude --print --output-format stream-json --verbose%s --continue \"%s\"",
+			effortArg,
 			msg,
 		)
 	} else {
@@ -107,7 +113,8 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"claude --print --output-format stream-json --verbose < %s",
+			"claude --print --output-format stream-json --verbose%s < %s",
+			effortArg,
 			promptPath,
 		)
 	}

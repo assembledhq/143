@@ -260,7 +260,7 @@ export default function LLMPage() {
             onReasoningChange={(effort) =>
               autosave.save({
                 settings: {
-                  llm_reasoning_effort: effort as "" | "low" | "medium" | "high",
+                  llm_reasoning_effort: effort as "" | "low" | "medium" | "high" | "xhigh" | "max",
                 },
               })
             }
