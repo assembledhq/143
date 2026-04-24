@@ -91,7 +91,7 @@ func NextRunTime(from time.Time, interval int, unit string) time.Time {
 // "daily at 9 AM" schedule fires at 9 AM local even as DST shifts the UTC
 // offset — doing the arithmetic in the target location is what makes that
 // invariant hold. An empty timezone is treated as UTC for backwards
-// compatibility with pre-migration-92 interval rows.
+// compatibility with pre-migration-93 interval rows.
 func NextRunTimeAt(from time.Time, interval int, unit string, runAt string, timezone string) (time.Time, error) {
 	if timezone == "" {
 		timezone = "UTC"

@@ -297,9 +297,9 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 }
 
 // TestAutomationHandler_Create_IntervalNonUTCTimezone locks in the post-
-// migration-92 contract: an interval schedule may specify any IANA zone for
+// migration-93 contract: an interval schedule may specify any IANA zone for
 // interval_run_at, and ComputeNextRunAt resolves next_run_at in that zone
-// before storing UTC. Prior to migration 92 this combination returned 400
+// before storing UTC. Prior to migration 93 this combination returned 400
 // INVALID_TIMEZONE.
 func TestAutomationHandler_Create_IntervalNonUTCTimezone(t *testing.T) {
 	t.Parallel()
@@ -515,7 +515,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		"interval_unit":  "days",
 		"priority":       75,
 		"base_branch":    "develop",
-		// Migration 92 dropped chk_automations_timezone_interval, so any IANA
+		// Migration 93 dropped chk_automations_timezone_interval, so any IANA
 		// zone is accepted for interval schedules. UTC kept here as the default.
 		"timezone": "UTC",
 	}

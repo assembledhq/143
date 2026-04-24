@@ -33,7 +33,7 @@ type Automation struct {
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
 	// duration arithmetic (NextRunTime) and the stored timezone is inert.
-	// Migration 92 dropped the chk_automations_timezone_interval DB CHECK so
+	// Migration 93 dropped the chk_automations_timezone_interval DB CHECK so
 	// interval rows can now carry non-UTC zones; writers must still set
 	// timezone='UTC' only when meaningful.
 	Timezone  string     `db:"timezone"        json:"timezone"`
