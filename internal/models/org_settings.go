@@ -207,10 +207,11 @@ type OrgSettings struct {
 	AutoArchiveOnPRClose       bool                 `json:"auto_archive_on_pr_close,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
-	// to run_agent and continue_session jobs. A session that exceeds this
-	// limit is cancelled and marked failed with a timeout error. Zero falls
-	// back to DefaultMaxSessionDurationSeconds.
+	// as the soft runtime budget for run_agent and continue_session jobs.
+	// Zero falls back to DefaultMaxSessionDurationSeconds.
 	MaxSessionDurationSeconds int `json:"max_session_duration_seconds,omitempty"`
+
+	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 }
 
 // Agent autonomy mode constants.
@@ -290,6 +291,13 @@ const (
 	// stay strictly above it so the reaper doesn't kill legitimate
 	// long-running sessions before the orchestrator's own timeout fires.
 	MaxMaxSessionDurationSeconds = 2 * 60 * 60
+
+	DefaultNoProgressTimeoutSeconds        = 5 * 60
+	DefaultGracefulShutdownWindowSeconds   = 30
+	DefaultCheckpointFinalizeWindowSeconds = 30
+	DefaultAutomaticExtensionSeconds       = 10 * 60
+	DefaultMaxAutomaticExtensionSeconds    = 30 * 60
+	DefaultAbsoluteRuntimeCeilingSeconds   = 90 * 60
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -469,6 +477,39 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.MaxSessionDurationSeconds = MinMaxSessionDurationSeconds
 	} else if s.MaxSessionDurationSeconds > MaxMaxSessionDurationSeconds {
 		s.MaxSessionDurationSeconds = MaxMaxSessionDurationSeconds
+	}
+
+	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {
+		s.RuntimeBudgets.NoProgressTimeoutSeconds = DefaultNoProgressTimeoutSeconds
+	}
+	if s.RuntimeBudgets.GracefulShutdownWindowSeconds <= 0 {
+		s.RuntimeBudgets.GracefulShutdownWindowSeconds = DefaultGracefulShutdownWindowSeconds
+	}
+	if s.RuntimeBudgets.CheckpointFinalizationWindowSeconds <= 0 {
+		s.RuntimeBudgets.CheckpointFinalizationWindowSeconds = DefaultCheckpointFinalizeWindowSeconds
+	}
+	if s.RuntimeBudgets.AutomaticExtensionSeconds <= 0 {
+		s.RuntimeBudgets.AutomaticExtensionSeconds = DefaultAutomaticExtensionSeconds
+	}
+	if s.RuntimeBudgets.MaxAutomaticExtensionSeconds < 0 {
+		s.RuntimeBudgets.MaxAutomaticExtensionSeconds = 0
+	} else if s.RuntimeBudgets.MaxAutomaticExtensionSeconds == 0 {
+		s.RuntimeBudgets.MaxAutomaticExtensionSeconds = DefaultMaxAutomaticExtensionSeconds
+	}
+	if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds <= 0 {
+		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = DefaultAbsoluteRuntimeCeilingSeconds
+	}
+	if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds < s.MaxSessionDurationSeconds {
+		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = s.MaxSessionDurationSeconds
+	}
+	if s.RuntimeBudgets.MaxAutomaticExtensionSeconds > 0 {
+		maxExtensionByCeiling := s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds - s.MaxSessionDurationSeconds
+		if maxExtensionByCeiling < 0 {
+			maxExtensionByCeiling = 0
+		}
+		if s.RuntimeBudgets.MaxAutomaticExtensionSeconds > maxExtensionByCeiling {
+			s.RuntimeBudgets.MaxAutomaticExtensionSeconds = maxExtensionByCeiling
+		}
 	}
 
 	return s, nil

@@ -6,11 +6,16 @@ package jobctx
 import (
 	"context"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 type ctxKey int
 
-const hooksKey ctxKey = iota
+const (
+	hooksKey ctxKey = iota
+	lockTokenKey
+)
 
 // DeadLetterHook runs synchronously on the worker's poll goroutine when
 // a job is dead-lettered, receiving the final error recorded on the job.
@@ -26,6 +31,15 @@ type hookRegistry struct {
 // registry — installed once per attempt so hooks don't leak across retries.
 func WithDeadLetterHooks(ctx context.Context) context.Context {
 	return context.WithValue(ctx, hooksKey, &hookRegistry{})
+}
+
+func WithLockToken(ctx context.Context, token uuid.UUID) context.Context {
+	return context.WithValue(ctx, lockTokenKey, token)
+}
+
+func LockTokenFromContext(ctx context.Context) (uuid.UUID, bool) {
+	token, ok := ctx.Value(lockTokenKey).(uuid.UUID)
+	return token, ok
 }
 
 // RegisterDeadLetterHook queues a hook on the context's registry. When the
