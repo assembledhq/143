@@ -271,8 +271,6 @@ func main() {
 		if workerCount <= 0 {
 			workerCount = 2
 		}
-		w := worker.New(pool, logger, cfg.NodeID)
-		processWorker = w
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
