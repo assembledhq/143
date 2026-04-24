@@ -21,6 +21,29 @@ const files: DiffFile[] = [
 ];
 
 describe("FileTree", () => {
+  it("preserves incoming file order so the sidebar matches the diff detail view", () => {
+    const orderedFiles: DiffFile[] = [
+      makeDiffFile("src/first.ts", 1, 0),
+      makeDiffFile("src/second.ts", 10, 0),
+      makeDiffFile("src/third.ts", 5, 0),
+    ];
+
+    render(
+      <FileTree files={orderedFiles} activeFileIndex={0} onFileSelect={vi.fn()} />
+    );
+
+    const firstFile = screen.getByText("first.ts");
+    const secondFile = screen.getByText("second.ts");
+    const thirdFile = screen.getByText("third.ts");
+
+    expect(
+      firstFile.compareDocumentPosition(secondFile) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      secondFile.compareDocumentPosition(thirdFile) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+  });
+
   it("renders file names", () => {
     render(
       <FileTree files={files} activeFileIndex={0} onFileSelect={vi.fn()} />
