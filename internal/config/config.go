@@ -49,6 +49,10 @@ type Config struct {
 	// only if you also regenerate the bcrypt hash in the seed.
 	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"dogfood@143.dev"`
 	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview-dogfood"`
+	// WorkerProcessCount controls how many worker loops run inside a single
+	// server process when MODE is "worker" or "all". Increase this on larger
+	// hosts to process more jobs/sandboxes in parallel.
+	WorkerProcessCount int `env:"WORKER_PROCESS_COUNT" envDefault:"2"`
 
 	// GitHub OAuth
 	GitHubOAuthClientID     string `env:"GITHUB_OAUTH_CLIENT_ID"`
@@ -220,6 +224,9 @@ func Load() *Config {
 	// Default GitHub OAuth redirect URI to BASE_URL + callback path.
 	if cfg.GitHubOAuthRedirectURI == "" {
 		cfg.GitHubOAuthRedirectURI = cfg.BaseURL + "/api/v1/auth/github/callback"
+	}
+	if cfg.WorkerProcessCount <= 0 {
+		cfg.WorkerProcessCount = 2
 	}
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.

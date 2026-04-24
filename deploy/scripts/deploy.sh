@@ -16,6 +16,10 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
 DISABLED_CRITICAL_WEBHOOK_URL="http://localhost:65535/disabled-critical"
 
+# Shared worker bucket defaults and mapping logic.
+# shellcheck source=deploy/scripts/worker_buckets.sh
+source "$SCRIPT_DIR/worker_buckets.sh"
+
 case "$ROLE" in
   app)
     COMPOSE_FILE="docker-compose.app.yml"
@@ -70,6 +74,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     fi
   done <<< "$DECRYPTED"
 
+  apply_worker_bucket_overrides "$ROLE" "$HOST"
+
   if [ "$ROLE" = "logging" ]; then
     : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for logging role (set it or add to .env.production.enc)}"
@@ -91,7 +97,9 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for worker role (set it or add to .env.production.enc)}"
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
+      "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
+      "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
