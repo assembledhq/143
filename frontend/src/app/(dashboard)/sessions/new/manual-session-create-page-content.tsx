@@ -31,6 +31,7 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { findActiveMention, insertMentionAtCaret, removeMentionReference, syncReferencesWithMessage } from "@/lib/session-composer-mentions";
 import { queryKeys } from "@/lib/query-keys";
+import { cn } from "@/lib/utils";
 import {
   AGENTS,
   AGENTS_BY_KEY,
@@ -104,7 +105,10 @@ export function ManualSessionCreatePageContent() {
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [mentionPickerPosition, setMentionPickerPosition] = useState<MentionPickerPosition | null>(null);
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [dragMessage, setDragMessage] = useState<string | null>(null);
   const previousRepoIdRef = useRef<string>("");
+  const dragDepthRef = useRef(0);
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
 
@@ -376,17 +380,15 @@ export function ManualSessionCreatePageContent() {
     setCaretPosition(nextMessage.length);
   }
 
-  async function onUploadChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const fileList = event.target.files;
-    if (!fileList || fileList.length === 0) {
+  async function uploadFiles(fileList: FileList | File[]) {
+    const files = Array.from(fileList);
+    if (files.length === 0) {
       return;
     }
 
-    const files = Array.from(fileList);
     const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
       setCreationError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
-      event.target.value = "";
       return;
     }
 
@@ -401,8 +403,96 @@ export function ManualSessionCreatePageContent() {
       setCreationError(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsUploading(false);
-      event.target.value = "";
     }
+  }
+
+  async function onUploadChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) {
+      return;
+    }
+
+    await uploadFiles(fileList);
+    event.target.value = "";
+  }
+
+  function isFileDrag(event: React.DragEvent<HTMLElement>) {
+    const types = Array.from(event.dataTransfer.types ?? []);
+    return types.includes("Files");
+  }
+
+  function summarizeDraggedFiles(files: File[]) {
+    if (files.length === 0) {
+      return "Drop images to attach";
+    }
+    const imageCount = files.filter((file) => file.type.startsWith("image/")).length;
+    if (imageCount === files.length) {
+      return files.length === 1 ? "Drop image to attach" : "Drop images to attach";
+    }
+    return "Drop files to attach";
+  }
+
+  function resetDragState() {
+    dragDepthRef.current = 0;
+    setIsDragActive(false);
+    setDragMessage(null);
+  }
+
+  function handleDragEnter(event: React.DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragActive(true);
+    const files = Array.from(event.dataTransfer.files ?? []);
+    setDragMessage(summarizeDraggedFiles(files));
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    const files = Array.from(event.dataTransfer.files ?? []);
+    setDragMessage(summarizeDraggedFiles(files));
+    setIsDragActive(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    const nextTarget = event.relatedTarget ?? (event.nativeEvent as DragEvent).relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragActive(false);
+      setDragMessage(null);
+    }
+  }
+
+  async function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files ?? []);
+    resetDragState();
+    if (files.length === 0) {
+      return;
+    }
+    await uploadFiles(files);
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+    });
   }
 
   function addImageURL() {
@@ -467,35 +557,85 @@ export function ManualSessionCreatePageContent() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Centered hero + composer */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
-        <div className="text-center mb-8">
-          <p className="text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">Let&apos;s build</p>
-          <p className="mt-2 text-xs text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
-        </div>
-      </div>
-
-      {/* No repos warning */}
-      {repositories.length === 0 && (
-        <div className="shrink-0 px-4">
-          <div className="w-full max-w-3xl mx-auto">
-            <NoReposWarning />
+      <div
+        className="flex flex-1 flex-col px-4 pb-4"
+        data-testid="manual-session-dropzone"
+        data-drag-active={isDragActive ? "true" : "false"}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div
+          className={cn(
+            "relative mx-auto flex w-full max-w-3xl flex-1 flex-col rounded-[2rem] border border-transparent transition-all duration-200 ease-out",
+            "before:pointer-events-none before:absolute before:inset-0 before:rounded-[inherit] before:border before:border-dashed before:opacity-0 before:transition-opacity before:duration-200",
+            "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.08),transparent_58%)] after:opacity-0 after:transition-opacity after:duration-200",
+            isDragActive && "border-primary/20 bg-primary/5 shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
+          )}
+        >
+          <div className="pointer-events-none absolute inset-x-6 top-6 flex justify-center">
+            <div
+              aria-live="polite"
+              className={cn(
+                "inline-flex min-h-8 items-center rounded-full border px-3 py-1 text-xs font-medium tracking-[0.02em] text-muted-foreground transition-all duration-200",
+                isDragActive
+                  ? "translate-y-0 border-primary/30 bg-background/90 text-foreground opacity-100 shadow-sm"
+                  : "translate-y-1 border-transparent bg-transparent opacity-0",
+              )}
+            >
+              {dragMessage ?? "Drop images to attach"}
+            </div>
           </div>
-        </div>
-      )}
 
-      {/* Agent credentials warning */}
-      {!hasAgentCredentials && (
-        <div className="shrink-0 px-4">
-          <div className="w-full max-w-3xl mx-auto">
-            <AgentKeyRequiredBanner agentType={effectiveAgentType} />
+          {/* Centered hero + composer */}
+          <div className="flex-1 flex flex-col items-center justify-center px-2 pt-16 pb-4">
+            <div
+              className={cn(
+                "text-center mb-8 transition-all duration-200 ease-out",
+                isDragActive ? "-translate-y-1 scale-[1.01]" : "translate-y-0 scale-100",
+              )}
+            >
+              <p className={cn(
+                "text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent transition-opacity duration-200",
+                isDragActive ? "opacity-100" : "opacity-95",
+              )}
+              >
+                Let&apos;s build
+              </p>
+              <p className="mt-2 text-xs text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
+              <p
+                className={cn(
+                  "mt-3 text-xs text-muted-foreground transition-all duration-200",
+                  isDragActive ? "translate-y-0 opacity-100" : "translate-y-1 opacity-70",
+                )}
+              >
+                {isDragActive ? (dragMessage ?? "Drop images to attach") : "Drop a screenshot anywhere here, or use +"}
+              </p>
+            </div>
           </div>
-        </div>
-      )}
 
-      {/* Composer pinned to bottom */}
-      <div className="shrink-0 px-4 pb-4">
-        <div className="relative mx-auto w-full max-w-3xl">
+          {/* No repos warning */}
+          {repositories.length === 0 && (
+            <div className="shrink-0 px-0">
+              <div className="w-full max-w-3xl mx-auto">
+                <NoReposWarning />
+              </div>
+            </div>
+          )}
+
+          {/* Agent credentials warning */}
+          {!hasAgentCredentials && (
+            <div className="shrink-0 px-0">
+              <div className="w-full max-w-3xl mx-auto">
+                <AgentKeyRequiredBanner agentType={effectiveAgentType} />
+              </div>
+            </div>
+          )}
+
+          {/* Composer pinned to bottom */}
+          <div className="shrink-0 px-0">
+            <div className="relative mx-auto w-full max-w-3xl">
           {showMentionPicker && mentionPickerPosition && typeof document !== "undefined" && createPortal(
             <Card
               className="fixed z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
@@ -544,7 +684,10 @@ export function ManualSessionCreatePageContent() {
 
           <Card
             ref={composerCardRef}
-            className="w-full border-border/60 bg-card shadow-lg rounded-2xl dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]"
+            className={cn(
+              "w-full rounded-2xl border-border/60 bg-card shadow-lg transition-all duration-200 ease-out dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]",
+              isDragActive && "-translate-y-0.5 border-primary/25 shadow-[0_24px_70px_-45px_rgba(59,130,246,0.55)]",
+            )}
             data-testid="manual-session-composer"
           >
             <CardContent className="space-y-0 p-4">
@@ -759,6 +902,8 @@ export function ManualSessionCreatePageContent() {
             )}
             </CardContent>
           </Card>
+            </div>
+          </div>
         </div>
       </div>
     </div>
