@@ -981,6 +981,30 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('does not show a PR snapshot error when the PR already exists', async () => {
+    const sessionWithStalePRError: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: undefined,
+      pr_creation_state: 'failed',
+      pr_creation_error: 'session state expired — re-run to create a PR',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithStalePRError } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByRole('button', { name: /View PR/ })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('does not show Create PR button when session has no diff', async () => {
     // Default mockSessions[0] has no diff_stats
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);

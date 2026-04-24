@@ -1815,10 +1815,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
-  const prActionError =
-    (localSnapshotUnavailable ? snapshotExpiredMessage : localPRActionError?.message) ||
-    (snapshotUnavailable ? snapshotExpiredMessage : null) ||
-    (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
+  const prActionError = hasPR
+    ? null
+    : (localSnapshotUnavailable ? snapshotExpiredMessage : localPRActionError?.message) ||
+      (snapshotUnavailable ? snapshotExpiredMessage : null) ||
+      (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canCreatePR ||
     showExpiredPRAction ||
