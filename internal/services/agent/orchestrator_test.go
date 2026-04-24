@@ -449,14 +449,6 @@ func (m *mockSessionStore) getCheckpointUpdates() []checkpointUpdate {
 	return out
 }
 
-func (m *mockSessionStore) getExtensionGrants() []runtimeExtensionGrant {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]runtimeExtensionGrant, len(m.extensionGrants))
-	copy(out, m.extensionGrants)
-	return out
-}
-
 func (m *mockSessionStore) getBaseCommitSHAs() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()

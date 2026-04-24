@@ -93,6 +93,8 @@ func (s *JobStore) notify(ctx context.Context, id uuid.UUID) {
 	}
 }
 
+// OldestPendingSessionJobAge returns how long the oldest runnable pending
+// session job has been waiting in the global queue.
 // lint:allow-no-orgid reason="queue pressure read spans jobs across all orgs by design"
 func (s *JobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error) {
 	var runnableAt time.Time
