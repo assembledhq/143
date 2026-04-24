@@ -137,6 +137,7 @@ export function ManualSessionCreatePageContent() {
 
       setAttachments(draft.attachments);
       setSelectedModel(draft.selectedModel);
+      setReasoningOverride(draft.reasoningOverride);
       setShowImageInput(draft.showImageInput);
       setImageURL(draft.imageURL);
       setBranchByRepoId(draft.branchByRepoId);
@@ -183,6 +184,7 @@ export function ManualSessionCreatePageContent() {
       attachments,
       references,
       selectedModel,
+      reasoningOverride,
       userSelectedRepoId,
       branchByRepoId,
       showImageInput,
@@ -194,6 +196,7 @@ export function ManualSessionCreatePageContent() {
     attachments,
     references,
     selectedModel,
+    reasoningOverride,
     userSelectedRepoId,
     branchByRepoId,
     showImageInput,

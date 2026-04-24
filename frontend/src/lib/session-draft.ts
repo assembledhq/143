@@ -8,6 +8,7 @@
 // site. The serialization format here is forward-compatible: a schema-version
 // mismatch silently discards the old draft rather than hydrating junk.
 
+import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import type { SessionInputReference } from "@/lib/types";
 
 const STORAGE_KEY = "143:new-session-draft";
@@ -18,6 +19,7 @@ export type SessionDraft = {
   attachments: string[];
   references: SessionInputReference[];
   selectedModel: string;
+  reasoningOverride: CodingAgentReasoningEffort;
   userSelectedRepoId: string | null;
   branchByRepoId: Record<string, string>;
   showImageInput: boolean;
@@ -63,6 +65,10 @@ export function loadDraft(): SessionDraft | null {
       ? parsed.references.filter(isValidReference)
       : [],
     selectedModel: typeof parsed.selectedModel === "string" ? parsed.selectedModel : "",
+    // Sanitize via the canonical coercer: unknown/invalid values collapse to "".
+    reasoningOverride: toCodingAgentReasoningEffort(
+      typeof parsed.reasoningOverride === "string" ? parsed.reasoningOverride : "",
+    ),
     userSelectedRepoId: typeof parsed.userSelectedRepoId === "string" ? parsed.userSelectedRepoId : null,
     branchByRepoId: isStringRecord(parsed.branchByRepoId) ? parsed.branchByRepoId : {},
     showImageInput: parsed.showImageInput === true,
@@ -101,6 +107,7 @@ function isEmptyDraft(draft: SessionDraft): boolean {
     && draft.attachments.length === 0
     && draft.references.length === 0
     && draft.selectedModel === ""
+    && draft.reasoningOverride === ""
     && draft.userSelectedRepoId === null
     && Object.keys(draft.branchByRepoId).length === 0
     && !draft.showImageInput

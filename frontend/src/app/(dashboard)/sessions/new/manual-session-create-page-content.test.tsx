@@ -335,6 +335,45 @@ describe("ManualSessionCreatePageContent", () => {
       expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
     });
 
+    it("restores a hydrated reasoning override and uses it at submit time", async () => {
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 1,
+          message: "tune this",
+          attachments: [],
+          references: [],
+          selectedModel: "",
+          reasoningOverride: "high",
+          userSelectedRepoId: null,
+          branchByRepoId: {},
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      const user = userEvent.setup();
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        "Tell the agent what to do...",
+      );
+      await waitFor(() => {
+        expect(textarea.value).toBe("tune this");
+      });
+
+      await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+      await waitFor(() => {
+        expect(mocks.createSessionMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: "tune this",
+            reasoning_effort: "high",
+          }),
+        );
+      });
+    });
+
     it("clears a hydrated repo id that no longer exists once repos load", async () => {
       window.sessionStorage.setItem(
         DRAFT_STORAGE_KEY,

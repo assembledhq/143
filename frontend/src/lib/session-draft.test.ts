@@ -8,6 +8,7 @@ const emptyDraft: SessionDraft = {
   attachments: [],
   references: [],
   selectedModel: "",
+  reasoningOverride: "",
   userSelectedRepoId: null,
   branchByRepoId: {},
   showImageInput: false,
@@ -31,6 +32,7 @@ describe("session-draft storage", () => {
         { kind: "file", display: "auth.go", path: "internal/auth/auth.go", token: "@auth.go" },
       ],
       selectedModel: "claude-sonnet-4-6",
+      reasoningOverride: "xhigh",
       userSelectedRepoId: "repo-abc",
       branchByRepoId: { "repo-abc": "feature/auth" },
       showImageInput: true,
@@ -38,6 +40,20 @@ describe("session-draft storage", () => {
     };
     saveDraft(draft);
     expect(loadDraft()).toEqual(draft);
+  });
+
+  it("drops a reasoning override that isn't a known value", () => {
+    window.sessionStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ __v: 1, reasoningOverride: "bogus" }),
+    );
+    expect(loadDraft()?.reasoningOverride).toBe("");
+  });
+
+  it("preserves a populated reasoningOverride as non-empty", () => {
+    saveDraft({ ...emptyDraft, reasoningOverride: "max" });
+    expect(window.sessionStorage.getItem(STORAGE_KEY)).not.toBeNull();
+    expect(loadDraft()?.reasoningOverride).toBe("max");
   });
 
   it("does not persist an empty draft and clears existing storage", () => {
@@ -91,6 +107,7 @@ describe("session-draft storage", () => {
       attachments: ["ok"],
       references: [{ kind: "file", display: "ok.go" }],
       selectedModel: "",
+      reasoningOverride: "",
       userSelectedRepoId: null,
       branchByRepoId: {},
       showImageInput: false,
