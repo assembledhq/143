@@ -87,14 +87,12 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   // collapses into a confirmation. Cleared when the dropdown closes; the
   // next open shows the fresh state from the refetched pending list.
   const [justJoined, setJustJoined] = useState<Record<string, JoinedOrg>>({});
-  // Snapshot of Date.now() at dropdown open, used by the "expires soon"
-  // annotation. Read-during-render of Date.now() is an impure-function rule
-  // violation; capturing the wall clock once per open is plenty of precision
-  // for an hours-grained warning, and reading from state keeps the render pure.
-  // The snapshot intentionally does not tick while the dropdown is open —
-  // a user leaving the menu open across the 24h threshold is pathological
-  // enough that a stale "expires soon" badge is fine.
-  const [openNowMs, setOpenNowMs] = useState<number>(0);
+  // Wall-clock snapshot for the per-row "expires soon" annotation. Captured
+  // once on mount and re-captured whenever a fresh pending-invites result
+  // arrives (see the effect below) so a dropdown left open across the
+  // 5-minute poll still sees an accurate badge. Reading from state rather
+  // than calling Date.now() mid-render keeps the render pure.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   const memberships = useMemo(
     () => membershipsResponse?.data?.memberships ?? [],
@@ -160,40 +158,39 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     return memberships.filter((m) => m.org_name.toLowerCase().includes(q));
   }, [memberships, search]);
 
-  const handleSwitch = async (membership: MembershipSummary) => {
-    if (membership.org_id === effectiveActiveOrgId) return;
-    try {
-      await api.auth.setActiveOrg(membership.org_id);
-    } catch (err: unknown) {
-      toast.error(messageForActiveOrgSwitchError(err, membership.org_name));
-      return;
-    }
-    setActiveOrgId(membership.org_id);
-    // clear() over invalidateQueries(): invalidating here would refetch every
-    // cached query against the *current* page right before it unmounts on
-    // navigation — doubling request volume. Clearing drops the cache so the
-    // destination page fetches fresh under the new active-org header.
-    queryClient.clear();
-    router.push("/sessions");
-  };
-
-  // Switch to the org the user just joined via an in-app invite accept.
-  // Same path as handleSwitch but synthesizes a MembershipSummary from the
-  // freshly-claimed invite (the memberships query may not have refetched
-  // yet, so we can't go through the regular membership lookup).
-  const handleSwitchToJoined = useCallback(
-    async (joined: JoinedOrg) => {
+  // Shared between the regular membership switch and the post-accept
+  // "Switch to it" affordance. Takes the minimal {org_id, org_name} shape
+  // so the caller can pass either a MembershipSummary or a freshly-claimed
+  // JoinedOrg without going through the memberships cache (which may not
+  // have refetched yet in the just-accepted case).
+  //
+  // clear() over invalidateQueries(): invalidating here would refetch every
+  // cached query against the *current* page right before it unmounts on
+  // navigation — doubling request volume. Clearing drops the cache so the
+  // destination page fetches fresh under the new active-org header.
+  const activateOrgAndNavigate = useCallback(
+    async (org: { org_id: string; org_name: string }) => {
       try {
-        await api.auth.setActiveOrg(joined.org_id);
+        await api.auth.setActiveOrg(org.org_id);
       } catch (err: unknown) {
-        toast.error(messageForActiveOrgSwitchError(err, joined.org_name));
+        toast.error(messageForActiveOrgSwitchError(err, org.org_name));
         return;
       }
-      setActiveOrgId(joined.org_id);
+      setActiveOrgId(org.org_id);
       queryClient.clear();
       router.push("/sessions");
     },
     [queryClient, router],
+  );
+
+  const handleSwitch = async (membership: MembershipSummary) => {
+    if (membership.org_id === effectiveActiveOrgId) return;
+    await activateOrgAndNavigate(membership);
+  };
+
+  const handleSwitchToJoined = useCallback(
+    (joined: JoinedOrg) => activateOrgAndNavigate(joined),
+    [activateOrgAndNavigate],
   );
 
   const handleAcceptInvite = useCallback(
@@ -226,7 +223,21 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     async (invite: PendingInvitationForUser) => {
       try {
         await pendingInvites.decline(invite.id);
-      } catch {
+      } catch (err: unknown) {
+        // 410 (INVITE_INVALID / INVITE_EXPIRED) means an admin revoked or a
+        // concurrent decline landed first. From the user's perspective the
+        // row they wanted gone *is* gone, so refetch quietly and let them
+        // know the list was already out of sync — same pattern as accept,
+        // but with toast.info instead of .error since the end state matches
+        // what they asked for.
+        if (
+          err instanceof ApiError &&
+          (err.code === "INVITE_INVALID" || err.code === "INVITE_EXPIRED")
+        ) {
+          pendingInvites.refetch();
+          toast.info(`The invitation to ${invite.org_name} was already resolved.`);
+          return;
+        }
         toast.error(`Couldn't decline the invitation to ${invite.org_name}. Please try again.`);
       }
     },
@@ -237,6 +248,18 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   // Index by code points, not UTF-16 code units: "🏢 Acme"[0] is a lone high
   // surrogate that renders as a replacement char. Array.from splits correctly.
   const initial = Array.from(orgLabel)[0]?.toUpperCase() ?? "?";
+
+  // Sync nowMs with real time whenever new pending-invites data arrives.
+  // This is the "update React state from an external source" shape the
+  // set-state-in-effect rule has a narrow carve-out for — Date.now() is
+  // the external source, pendingInvites.invites identity is the signal
+  // that the data we're rendering against just changed. Stable dep:
+  // pendingInvites.invites is memoized in the hook, so this fires only
+  // on fresh query results, not on every render.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setNowMs(Date.now());
+  }, [pendingInvites.invites]);
 
   // The pending-invites count drives both the trigger dot and the in-dropdown
   // section. Treating the *visible* count (pending minus already-joined-in-
@@ -260,11 +283,10 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
         onOpenChange={(open) => {
           if (open) {
             // Refetch on open so the "you have a pending invite" surface is
-            // never staler than the moment the user looked at it. Snapshot
-            // the wall clock so the per-row "expires soon" check stays a
-            // pure read-from-state during the render of the open dropdown.
+            // never staler than the moment the user looked at it. The wall-
+            // clock snapshot used by the per-row "expires soon" check rides
+            // on top of the refetched invites identity via nowMs's useMemo.
             pendingInvites.refetch();
-            setOpenNowMs(Date.now());
           } else {
             setSearch("");
             // Drop the just-joined confirmation rows once the dropdown
@@ -346,9 +368,8 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
                 {visiblePendingInvites.map((invite) => {
                   const expiresAtMs = new Date(invite.expires_at).getTime();
                   const expiresSoon =
-                    openNowMs > 0 &&
                     Number.isFinite(expiresAtMs) &&
-                    expiresAtMs - openNowMs < EXPIRES_SOON_MS;
+                    expiresAtMs - nowMs < EXPIRES_SOON_MS;
                   return (
                     <div
                       key={invite.id}

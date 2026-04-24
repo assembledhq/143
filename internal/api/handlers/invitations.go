@@ -137,12 +137,19 @@ func (h *AuthHandler) AcceptInvitationByID(w http.ResponseWriter, r *http.Reques
 // distinguished in the audit stream (AuditActionTeamInvitationDeclined),
 // which is where downstream analytics belong anyway.
 //
-// Audit is emitted only on successful decline. A non-recipient probe or a
-// malformed id returns early without writing an audit row — these are
-// authorization failures whose breadcrumbs live in the zerolog warn
-// emitted from loadInvitationForRecipient plus the ClaimRateLimit's
-// per-IP ceiling, which is the same pattern the token-based claim path
-// uses for its lookup/mismatch cases.
+// Audit policy — deliberately asymmetric from the token-claim path:
+//
+//   - Success → AuditActionTeamInvitationDeclined row against inv.OrgID.
+//   - Malformed id / 404 / 403 non-recipient probe → no audit row.
+//     Unlike the token-claim path, which emits AuditActionTeamInvitationClaimFailed
+//     for wrong-account attempts, we do NOT persist a claim-failed row for
+//     decline probes: the user is trying to make an invitation go away, not
+//     acquire membership, so there is no privilege-escalation signal in the
+//     attempt that admins of the target org need to see. The zerolog warn
+//     emitted from loadInvitationForRecipient and the ClaimRateLimit's
+//     per-IP ceiling still cover the ops/security-monitoring angle.
+//   - Concurrent revoke race (410) → no audit row: the real action was
+//     whichever write landed first, and it already logged its own row.
 //
 // lint:allow-no-orgid reason="invitee-scoped decline; org context is the invitation's own org_id"
 func (h *AuthHandler) DeclineInvitationByID(w http.ResponseWriter, r *http.Request) {

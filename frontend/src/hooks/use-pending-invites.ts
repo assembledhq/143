@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type { PendingInvitationForUser } from "@/lib/types";
 
@@ -57,11 +57,7 @@ export function usePendingInvites(opts: { enabled?: boolean } = {}): UsePendingI
     refetchOnWindowFocus: true,
     // Don't retry on 401 — an unauthenticated user has nothing to recover.
     retry: (failureCount, err) => {
-      if (
-        typeof err === "object" &&
-        err !== null &&
-        (err as { code?: unknown }).code === "UNAUTHORIZED"
-      ) {
+      if (err instanceof ApiError && err.code === "UNAUTHORIZED") {
         return false;
       }
       return failureCount < 2;
@@ -104,7 +100,10 @@ export function usePendingInvites(opts: { enabled?: boolean } = {}): UsePendingI
     void refetch();
   }, [refetch]);
 
-  const invites = data?.data ?? [];
+  // Memoize so the array identity is stable between renders until React
+  // Query hands us a new result. Consumers can depend on `invites` in an
+  // effect dep array without the effect firing on every render.
+  const invites = useMemo(() => data?.data ?? [], [data]);
   return {
     invites,
     count: invites.length,

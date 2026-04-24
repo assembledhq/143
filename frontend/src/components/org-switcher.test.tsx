@@ -341,6 +341,69 @@ describe("OrgSwitcher", () => {
     expect(pushMock).not.toHaveBeenCalled();
   });
 
+  it("the pending-invite dot and section disappear after the last invite is accepted and the dropdown reopens", async () => {
+    // Transition coverage for the pending → joined → closed-and-reopened = gone
+    // state machine. The dot is driven by visiblePendingCount (refetched list
+    // minus still-in-justJoined rows), and the section's existence is driven
+    // by hasPendingInvites = count > 0 || joinedEntries.length > 0 — so only a
+    // close+reopen cycle *plus* the server dropping the row (server filters
+    // accepted rows via NOT EXISTS membership) gets us back to neither.
+    mockMemberships([{ org_id: "org-1", org_name: "Acme", role: "admin" }], "org-1");
+    setActiveOrgId("org-1");
+    mockPendingInvites([
+      {
+        id: "inv-last",
+        org_id: "org-9",
+        org_name: "Soylent",
+        role: "member",
+        invited_by: { id: "u-9", name: "Zed" },
+      },
+    ]);
+    server.use(
+      http.post("/api/v1/invitations/inv-last/accept", () => {
+        // Simulate the server's real behavior: once the membership exists,
+        // ListPendingForUser's NOT EXISTS filter drops the row from /pending.
+        server.use(
+          http.get("/api/v1/invitations/pending", () =>
+            HttpResponse.json({ data: [], meta: {} }),
+          ),
+        );
+        return HttpResponse.json({ data: { org_id: "org-9", role: "member" } });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<OrgSwitcher userEmail="u@example.com" />);
+
+    // Dot visible before acceptance.
+    await waitFor(() => {
+      expect(screen.getByTestId("org-switcher-pending-invite-dot")).toBeInTheDocument();
+    });
+
+    // Open, accept, see the inline joined confirmation.
+    await user.click(screen.getByTestId("org-switcher"));
+    await user.click(await screen.findByTestId("pending-invitation-accept-inv-last"));
+    await screen.findByTestId("pending-invitation-joined-inv-last");
+
+    // Close the dropdown — Escape rather than clicking the trigger because
+    // Radix locks pointer-events on the rest of the document while the menu
+    // is open, which makes a second trigger click unreachable in jsdom.
+    // Closing clears justJoined so the section can hide on the next open.
+    await user.keyboard("{Escape}");
+
+    // Dot is already gone (visiblePendingCount derives from the refetched
+    // list, which the server now returns empty). Wait for the refetch to
+    // settle before asserting absence so we don't race the invalidation.
+    await waitFor(() => {
+      expect(screen.queryByTestId("org-switcher-pending-invite-dot")).not.toBeInTheDocument();
+    });
+
+    // Reopen — section must not render.
+    await user.click(screen.getByTestId("org-switcher"));
+    await screen.findByTestId("org-switcher-item-org-1");
+    expect(screen.queryByTestId("pending-invitations-section")).not.toBeInTheDocument();
+  });
+
   it("the post-accept Switch to it link sets the active org and navigates", async () => {
     mockMemberships([{ org_id: "org-1", org_name: "Acme", role: "admin" }], "org-1");
     setActiveOrgId("org-1");
