@@ -5734,7 +5734,7 @@ func TestSessionHandler_CancelSession_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestSessionHandler_UpdateTitle(t *testing.T) {
+func TestSessionHandler_Update(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
