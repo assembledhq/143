@@ -530,6 +530,14 @@ export const handlers = [
     });
   }),
 
+  // Default to no pending invites — the org-switcher polls this on mount, so
+  // every test rendering the switcher would otherwise hit an unhandled-request
+  // warning. Tests that want to exercise the pending-invites surface override
+  // this with server.use(...).
+  http.get('/api/v1/invitations/pending', () => {
+    return HttpResponse.json({ data: [], meta: {} });
+  }),
+
   http.patch('/api/v1/settings', () => {
     return HttpResponse.json({
       data: {

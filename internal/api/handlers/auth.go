@@ -1183,21 +1183,43 @@ func (h *AuthHandler) validateInvitationWithStore(ctx context.Context, invitatio
 		return inv, uuid.Nil, "", &invitationError{http.StatusInternalServerError, "INVITE_LOOKUP_FAILED", "failed to look up invitation"}
 	}
 
+	if invErr := validateInvitationForRecipient(inv, email, githubLogin); invErr != nil {
+		return inv, uuid.Nil, "", invErr
+	}
+	return inv, inv.OrgID, inv.Role, nil
+}
+
+// validateInvitationForRecipient checks the three invariants that gate every
+// invitation claim regardless of how the row was looked up: the invitation
+// is still pending, has not expired, and its recipient identifier matches
+// the authenticated user. Shared by the token-based claim path and the
+// id-based in-app accept/decline paths so the matching rules can never
+// drift between the dropdown's "is this invite mine?" filter and the
+// server's "is this user allowed to accept?" check.
+//
+// Match rules (mirror the ListPendingForUser store query):
+//   - email-only invite: the user's email (case-insensitive) must equal it
+//   - github-only invite: the user's github_login (case-insensitive) must equal it
+//   - both set: either match suffices
+//   - empty user-side identifiers can never satisfy either branch
+//
+// All three failures return invitationError values with status codes that
+// suit the token-claim path. Id-based callers may remap the mismatch code
+// to 403 since the id is part of the URL (the request is naming a specific
+// invitation the user has no claim to, not submitting bad input).
+func validateInvitationForRecipient(inv models.Invitation, email, githubLogin string) *invitationError {
 	if inv.Status != "pending" {
-		return inv, uuid.Nil, "", &invitationError{http.StatusGone, "INVITE_INVALID", "this invitation is no longer valid"}
+		return &invitationError{http.StatusGone, "INVITE_INVALID", "this invitation is no longer valid"}
 	}
-
 	if time.Now().After(inv.ExpiresAt) {
-		return inv, uuid.Nil, "", &invitationError{http.StatusGone, "INVITE_EXPIRED", "this invitation has expired"}
+		return &invitationError{http.StatusGone, "INVITE_EXPIRED", "this invitation has expired"}
 	}
-
 	emailMatches := inv.Email != nil && email != "" && strings.EqualFold(*inv.Email, email)
 	githubMatches := inv.GitHubUsername != nil && githubLogin != "" && strings.EqualFold(*inv.GitHubUsername, githubLogin)
 	if !emailMatches && !githubMatches {
-		return inv, uuid.Nil, "", &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
+		return &invitationError{http.StatusBadRequest, "INVITE_MISMATCH", "this account does not match the invitation"}
 	}
-
-	return inv, inv.OrgID, inv.Role, nil
+	return nil
 }
 
 // emitAuthEvent emits an audit log entry for an authentication event. It

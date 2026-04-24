@@ -60,6 +60,9 @@ export const queryKeys = {
   auth: {
     memberships: ["auth", "memberships"] as const,
   },
+  invitations: {
+    pending: ["invitations", "pending"] as const,
+  },
   usage: {
     summary: (params: { start: string; end: string }) =>
       ["usage", "summary", params] as const,
