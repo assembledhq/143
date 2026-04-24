@@ -259,7 +259,7 @@ func main() {
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
 		workerCount := cfg.WorkerProcessCount
 		if workerCount <= 0 {
-			workerCount = 1
+			workerCount = 2
 		}
 
 		issueStore := db.NewIssueStore(pool)
