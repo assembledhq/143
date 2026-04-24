@@ -184,14 +184,32 @@ type Session struct {
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
-	LastActivityAt time.Time       `db:"last_activity_at" json:"last_activity_at"`
-	SandboxState   string          `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey    *string         `db:"snapshot_key" json:"snapshot_key,omitempty"`
-	TargetBranch   *string         `db:"target_branch" json:"target_branch,omitempty"`
-	WorkingBranch  *string         `db:"working_branch" json:"working_branch,omitempty"`
-	BaseCommitSHA  *string         `db:"base_commit_sha" json:"base_commit_sha,omitempty"`
-	RepositoryID   *uuid.UUID      `db:"repository_id" json:"repository_id,omitempty"`
-	DiffStats      json.RawMessage `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
+	LastActivityAt              time.Time               `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState                string                  `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey                 *string                 `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	RuntimeSoftDeadlineAt       *time.Time              `db:"runtime_soft_deadline_at" json:"runtime_soft_deadline_at,omitempty"`
+	RuntimeHardDeadlineAt       *time.Time              `db:"runtime_hard_deadline_at" json:"runtime_hard_deadline_at,omitempty"`
+	RuntimeLastProgressAt       *time.Time              `db:"runtime_last_progress_at" json:"runtime_last_progress_at,omitempty"`
+	RuntimeLastProgressType     RuntimeProgressType     `db:"runtime_last_progress_type" json:"runtime_last_progress_type,omitempty"`
+	RuntimeLastProgressStrength RuntimeProgressStrength `db:"runtime_last_progress_strength" json:"runtime_last_progress_strength,omitempty"`
+	RuntimeExtensionCount       int                     `db:"runtime_extension_count" json:"runtime_extension_count"`
+	RuntimeExtensionSeconds     int                     `db:"runtime_extension_seconds" json:"runtime_extension_seconds"`
+	RuntimeStopReason           RuntimeStopReason       `db:"runtime_stop_reason" json:"runtime_stop_reason,omitempty"`
+	RuntimeGracefulStopAt       *time.Time              `db:"runtime_graceful_stop_at" json:"runtime_graceful_stop_at,omitempty"`
+	CheckpointedAt              *time.Time              `db:"checkpointed_at" json:"checkpointed_at,omitempty"`
+	CheckpointKind              CheckpointKind          `db:"checkpoint_kind" json:"checkpoint_kind,omitempty"`
+	CheckpointCapability        CheckpointCapability    `db:"checkpoint_capability" json:"checkpoint_capability,omitempty"`
+	CheckpointSizeBytes         int64                   `db:"checkpoint_size_bytes" json:"checkpoint_size_bytes"`
+	CheckpointError             *string                 `db:"checkpoint_error" json:"checkpoint_error,omitempty"`
+	RecoveryState               RecoveryState           `db:"recovery_state" json:"recovery_state,omitempty"`
+	RecoveryQueuedAt            *time.Time              `db:"recovery_queued_at" json:"recovery_queued_at,omitempty"`
+	RecoveryStartedAt           *time.Time              `db:"recovery_started_at" json:"recovery_started_at,omitempty"`
+	RecoveryAttemptCount        int                     `db:"recovery_attempt_count" json:"recovery_attempt_count"`
+	TargetBranch                *string                 `db:"target_branch" json:"target_branch,omitempty"`
+	WorkingBranch               *string                 `db:"working_branch" json:"working_branch,omitempty"`
+	BaseCommitSHA               *string                 `db:"base_commit_sha" json:"base_commit_sha,omitempty"`
+	RepositoryID                *uuid.UUID              `db:"repository_id" json:"repository_id,omitempty"`
+	DiffStats                   json.RawMessage         `db:"diff_stats" json:"diff_stats,omitempty"` // nil for list queries (excluded to reduce payload size)
 	// DiffHistory is only populated on single-session fetches (GetByID, ClaimIdle, etc.).
 	// List queries return NULL to avoid multi-megabyte payloads — do not rely on this
 	// field being non-nil unless the session was fetched individually.

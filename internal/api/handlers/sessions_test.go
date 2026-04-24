@@ -147,61 +147,209 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
+	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
+	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
+	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
 func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
+	origin := string(models.SessionOriginManual)
+	interactionMode := string(models.SessionInteractionModeInteractive)
+	validationPolicy := string(models.SessionValidationPolicyOnTurnComplete)
+	if len(values) > 1 {
+		if issueID, ok := values[1].(uuid.UUID); ok && issueID != uuid.Nil {
+			origin = string(models.SessionOriginIssueTrigger)
+			interactionMode = string(models.SessionInteractionModeSingleRun)
+			validationPolicy = string(models.SessionValidationPolicyOnSessionEnd)
+		}
+	}
 	row := make([]interface{}, 0, len(values)+3)
 	row = append(row, values[:3]...)
 	row = append(
 		row,
-		"",
-		"",
-		"",
+		origin,
+		interactionMode,
+		validationPolicy,
 	)
 	row = append(row, values[3:]...)
 	return row
 }
 
-func sessionTestRow(values ...interface{}) []interface{} {
-	switch len(values) {
-	case len(sessionColumns) - 3, len(sessionColumns) - 4, len(sessionColumns) - 6, len(sessionColumns) - 7:
-		values = sessionTestRowWithPolicyDefaults(values)
+const (
+	legacySessionColumnsLen         = 57
+	legacyRuntimeInsertIndex        = 41
+	legacySessionBaseCommitSHAIndex = 43
+	legacySessionDiffCollectedIndex = 53
+	legacySessionLatestDiffIndex    = 54
+)
+const (
+	sessionWorkerNodeIndex      = 15
+	sessionBaseCommitSHAIndex   = 61
+	sessionDiffCollectedAtIndex = 71
+	sessionLatestDiffIndex      = 72
+)
+
+func sessionRowNeedsPolicyDefaults(values []interface{}) bool {
+	if len(values) < 4 {
+		return false
 	}
+	agentType, ok := values[3].(string)
+	if !ok {
+		return false
+	}
+	switch agentType {
+	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeSessionAgentType(value interface{}) interface{} {
+	agentType, ok := value.(string)
+	if !ok {
+		return value
+	}
+	switch agentType {
+	case "claude-code":
+		return string(models.AgentTypeClaudeCode)
+	case "gemini-cli":
+		return string(models.AgentTypeGeminiCLI)
+	default:
+		return value
+	}
+}
+
+func normalizeSessionRowAgentType(values []interface{}, agentTypeIndex int) []interface{} {
+	if len(values) <= agentTypeIndex {
+		return values
+	}
+	row := append([]interface{}(nil), values...)
+	row[agentTypeIndex] = normalizeSessionAgentType(row[agentTypeIndex])
+	return row
+}
+
+func insertSessionValue(values []interface{}, idx int, value interface{}) []interface{} {
+	row := make([]interface{}, 0, len(values)+1)
+	row = append(row, values[:idx]...)
+	row = append(row, value)
+	row = append(row, values[idx:]...)
+	return row
+}
+
+func sessionRowWithCurrentOptionalDefaults(values []interface{}, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
+	row := values
+	if includeWorkerNode {
+		row = insertSessionValue(row, sessionWorkerNodeIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertSessionValue(row, sessionDiffCollectedAtIndex, nil)
+		row = insertSessionValue(row, sessionDiffCollectedAtIndex, nil)
+		row = insertSessionValue(row, sessionBaseCommitSHAIndex, nil)
+	}
+	return row
+}
+
+func sessionRowWithLegacyOptionalDefaults(values []interface{}, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
+	row := values
+	if includeWorkerNode {
+		row = insertSessionValue(row, sessionWorkerNodeIndex, nil)
+	}
+	if includeDiffMetadata {
+		row = insertSessionValue(row, legacySessionDiffCollectedIndex, nil)
+		row = insertSessionValue(row, legacySessionDiffCollectedIndex, nil)
+		row = insertSessionValue(row, legacySessionBaseCommitSHAIndex, nil)
+	}
+	return row
+}
+
+func legacyRuntimeSessionDefaults() []interface{} {
+	return []interface{}{
+		nil,      // runtime_soft_deadline_at
+		nil,      // runtime_hard_deadline_at
+		nil,      // runtime_last_progress_at
+		"",       // runtime_last_progress_type
+		"",       // runtime_last_progress_strength
+		0,        // runtime_extension_count
+		0,        // runtime_extension_seconds
+		"",       // runtime_stop_reason
+		nil,      // runtime_graceful_stop_at
+		nil,      // checkpointed_at
+		"",       // checkpoint_kind
+		"",       // checkpoint_capability
+		int64(0), // checkpoint_size_bytes
+		nil,      // checkpoint_error
+		"",       // recovery_state
+		nil,      // recovery_queued_at
+		nil,      // recovery_started_at
+		0,        // recovery_attempt_count
+	}
+}
+
+func expandLegacySessionRow(values []interface{}) []interface{} {
+	row := make([]interface{}, 0, len(sessionColumns))
+	row = append(row, values[:legacyRuntimeInsertIndex]...)
+	row = append(row, legacyRuntimeSessionDefaults()...)
+	row = append(row, values[legacyRuntimeInsertIndex:]...)
+	return row
+}
+
+func sessionTestRow(values ...interface{}) []interface{} {
+	if sessionRowNeedsPolicyDefaults(values) {
+		values = normalizeSessionRowAgentType(values, 3)
+		switch len(values) {
+		case len(sessionColumns) - 3:
+			return sessionTestRowWithPolicyDefaults(values)
+		case len(sessionColumns) - 4:
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false)
+		case len(sessionColumns) - 6:
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true)
+		case len(sessionColumns) - 7:
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true)
+		case legacySessionColumnsLen - 3:
+			return expandLegacySessionRow(sessionTestRowWithPolicyDefaults(values))
+		case legacySessionColumnsLen - 4:
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false))
+		case legacySessionColumnsLen - 6:
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true))
+		case legacySessionColumnsLen - 7:
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true))
+		}
+	}
+	values = normalizeSessionRowAgentType(values, 6)
 
 	switch len(values) {
 	case len(sessionColumns):
 		return values
+	case legacySessionColumnsLen:
+		return expandLegacySessionRow(values)
+	case legacySessionColumnsLen - 1:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false))
+	case legacySessionColumnsLen - 4:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true))
+	case legacySessionColumnsLen - 3:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true))
 	case len(sessionColumns) - 1:
-		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:15]...)
-		row = append(row, nil) // worker_node_id
-		row = append(row, values[15:]...)
-		return row
+		return sessionRowWithCurrentOptionalDefaults(values, true, false)
 	case len(sessionColumns) - 4:
-		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:15]...)
-		row = append(row, nil) // worker_node_id
-		row = append(row, values[15:42]...)
-		row = append(row, nil) // base_commit_sha
-		row = append(row, values[42:51]...)
-		row = append(row, nil) // diff_collected_at
-		row = append(row, nil) // latest_diff_snapshot_id
-		row = append(row, values[51:]...)
-		return row
+		return sessionRowWithCurrentOptionalDefaults(values, true, true)
 	case len(sessionColumns) - 3:
-		row := make([]interface{}, 0, len(sessionColumns))
-		row = append(row, values[:15]...)
-		row = append(row, nil) // worker_node_id
-		row = append(row, values[15:43]...)
-		row = append(row, nil) // base_commit_sha
-		row = append(row, values[43:52]...)
-		row = append(row, nil) // diff_collected_at
-		row = append(row, nil) // latest_diff_snapshot_id
-		row = append(row, values[52:]...)
-		return row
+		return sessionRowWithCurrentOptionalDefaults(values, false, true)
 	default:
-		panic(fmt.Sprintf("sessionTestRow received %d values, want %d, %d, %d, or %d (plus legacy variants without session policy columns)", len(values), len(sessionColumns), len(sessionColumns)-1, len(sessionColumns)-3, len(sessionColumns)-4))
+		panic(fmt.Sprintf(
+			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
+			len(values),
+			len(sessionColumns),
+			len(sessionColumns)-1,
+			len(sessionColumns)-3,
+			len(sessionColumns)-4,
+			legacySessionColumnsLen,
+			legacySessionColumnsLen-1,
+			legacySessionColumnsLen-3,
+			legacySessionColumnsLen-4,
+		))
 	}
 }
 
