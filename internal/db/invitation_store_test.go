@@ -253,3 +253,199 @@ func TestInvitationStore_Revoke_NotFound(t *testing.T) {
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestInvitationStore_GetByID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+	now := time.Now()
+	id := uuid.New()
+	orgID := uuid.New()
+	invitedBy := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(invitationColumns).
+				AddRow(id, orgID, strPtr("invitee@example.com"), nil, "member", invitedBy, "tok_abc", "pending", now.Add(72*time.Hour), now, nil),
+		)
+
+	inv, err := store.GetByID(context.Background(), id)
+	require.NoError(t, err)
+	require.Equal(t, id, inv.ID)
+	require.NotNil(t, inv.Email)
+	require.Equal(t, "invitee@example.com", *inv.Email)
+	require.Equal(t, "pending", inv.Status)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInvitationStore_GetByID_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(invitationColumns))
+
+	_, err = store.GetByID(context.Background(), uuid.New())
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// pendingForUserColumns mirrors the column projection of ListPendingForUser.
+// The query joins invitations with organizations and users and projects a
+// flatter row than the bare invitation columns above; tests need a matching
+// shape so pgxmock can drive RowToStructByName decoding.
+var pendingForUserColumns = []string{
+	"id", "org_id", "org_name", "role", "invited_by", "inviter_name", "expires_at", "created_at",
+}
+
+func TestInvitationStore_ListPendingForUser(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+	now := time.Now()
+	userID := uuid.New()
+	orgA := uuid.New()
+	orgB := uuid.New()
+	inviterA := uuid.New()
+	inviterB := uuid.New()
+
+	// Two distinct orgs come back from the dedupe layer; the row order is
+	// the wrapper SELECT's ORDER BY created_at DESC, so the most-recent
+	// invite is first.
+	mock.ExpectQuery("FROM invitations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(pendingForUserColumns).
+				AddRow(uuid.New(), orgA, "Acme", "member", inviterA, "Alice", now.Add(72*time.Hour), now).
+				AddRow(uuid.New(), orgB, "Globex", "admin", inviterB, "Bob", now.Add(72*time.Hour), now.Add(-time.Hour)),
+		)
+
+	rows, err := store.ListPendingForUser(context.Background(), userID, "invitee@example.com", "invitee-gh")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, "Acme", rows[0].OrgName)
+	require.Equal(t, "Alice", rows[0].InviterName)
+	require.Equal(t, "member", rows[0].Role)
+	require.Equal(t, "Globex", rows[1].OrgName)
+	require.Equal(t, "Bob", rows[1].InviterName)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInvitationStore_ListPendingForUser_Empty(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	mock.ExpectQuery("FROM invitations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pendingForUserColumns))
+
+	rows, err := store.ListPendingForUser(context.Background(), uuid.New(), "nobody@example.com", "")
+	require.NoError(t, err)
+	require.Empty(t, rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInvitationStore_ListPendingForUser_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	mock.ExpectQuery("FROM invitations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("connection lost"))
+
+	_, err = store.ListPendingForUser(context.Background(), uuid.New(), "x@example.com", "")
+	require.Error(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The query must use DISTINCT ON (i.org_id) so a user with both an email-
+// invite and a github-invite for the same org sees a single dropdown row,
+// and must filter out invites for orgs the user is already a member of so
+// the dropdown can't surface an invite that would 409 on accept. pgxmock
+// can't evaluate the SQL semantically; this test pins the query *shape*
+// so a refactor that drops either guard breaks loudly instead of silently
+// regressing the user-facing dedupe and already-member behaviors.
+func TestInvitationStore_ListPendingForUser_QueryShape(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	// Both regex anchors must match the SAME query string. ExpectQuery's
+	// argument is a regex, so escape the parens for the DISTINCT ON clause.
+	mock.ExpectQuery(`DISTINCT ON \(i\.org_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pendingForUserColumns))
+
+	_, err = store.ListPendingForUser(context.Background(), uuid.New(), "u@example.com", "")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestInvitationStore_ListPendingForUser_FiltersExistingMemberships(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	mock.ExpectQuery(`NOT EXISTS.*organization_memberships`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pendingForUserColumns))
+
+	_, err = store.ListPendingForUser(context.Background(), uuid.New(), "u@example.com", "")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Expired invites are pending in the DB until they're swept (and there is no
+// sweeper today), so the query must filter them with expires_at > now() to
+// avoid surfacing rows that would 410 on accept. Same anti-drift rationale as
+// the DISTINCT ON / NOT EXISTS pin above.
+func TestInvitationStore_ListPendingForUser_FiltersExpired(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewInvitationStore(mock)
+
+	mock.ExpectQuery(`expires_at > now\(\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(pendingForUserColumns))
+
+	_, err = store.ListPendingForUser(context.Background(), uuid.New(), "u@example.com", "")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

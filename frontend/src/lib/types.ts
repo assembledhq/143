@@ -588,6 +588,23 @@ export interface InvitationResponse {
   created_at: string;
 }
 
+// PendingInvitationForUser is the invitee-facing shape: the recipient of an
+// invitation only needs to know which org they're being invited into, by whom,
+// at what role, and when it expires. The token is intentionally omitted —
+// accept/decline are id-routed and re-validated server-side.
+export interface PendingInvitationForUser {
+  id: string;
+  org_id: string;
+  org_name: string;
+  role: string;
+  invited_by: {
+    id: string;
+    name: string;
+  };
+  expires_at: string;
+  created_at: string;
+}
+
 export interface GitHubInviteStatus {
   connected: boolean;
 }

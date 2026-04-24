@@ -544,6 +544,21 @@ export const api = {
     create: (memory: { repo: string; rule: string; category?: string; scope?: string; file_patterns?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').Memory>>('/api/v1/memories', memory),
   },
+  // Invitations addressed to the current user, across orgs. Distinct from
+  // `team.listInvitations` (which lists invitations the *current org's admins*
+  // have sent out): these are the invites *I* can claim, surfaced in the org
+  // switcher's "Pending invitations" section.
+  invitations: {
+    listPending: () =>
+      get<import('./types').ListResponse<import('./types').PendingInvitationForUser>>(
+        '/api/v1/invitations/pending',
+      ),
+    accept: (id: string) =>
+      post<import('./types').SingleResponse<{ org_id: string; role: string }>>(
+        `/api/v1/invitations/${id}/accept`,
+      ),
+    decline: (id: string) => post<void>(`/api/v1/invitations/${id}/decline`),
+  },
   team: {
     listMembers: () => get<import('./types').ListResponse<import('./types').User>>('/api/v1/team/members'),
     changeRole: (id: string, role: string) =>
