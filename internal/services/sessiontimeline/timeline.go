@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
 )
 
 const (
@@ -18,8 +19,15 @@ type logMetadata struct {
 	DuplicateOfTranscript bool   `json:"duplicate_of_transcript"`
 }
 
+type transcriptIdentity struct {
+	threadID   string
+	turnNumber int
+	content    string
+}
+
 // Compose merges session messages and logs into a server-owned timeline.
 func Compose(messages []models.SessionMessage, logs []models.SessionLog) []models.SessionTimelineEntry {
+	messages = dedupeAssistantTranscriptMessages(messages)
 	duplicateLogIDs := duplicateTranscriptLogIDs(messages, logs)
 
 	planModeTurns := make(map[int]struct{})
@@ -127,28 +135,47 @@ func Compose(messages []models.SessionMessage, logs []models.SessionLog) []model
 	return entries
 }
 
-func duplicateTranscriptLogIDs(messages []models.SessionMessage, logs []models.SessionLog) map[int64]struct{} {
-	visibleByTurnAndContent := make(map[int]map[string][]models.SessionLog)
-	for _, log := range logs {
-		if !isVisibleAssistantOutput(log) {
+func dedupeAssistantTranscriptMessages(messages []models.SessionMessage) []models.SessionMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	deduped := make([]models.SessionMessage, 0, len(messages))
+	seen := make(map[transcriptIdentity]struct{}, len(messages))
+
+	for _, msg := range messages {
+		key, ok := assistantTranscriptIdentity(msg)
+		if !ok {
+			deduped = append(deduped, msg)
 			continue
 		}
-		if _, ok := visibleByTurnAndContent[log.TurnNumber]; !ok {
-			visibleByTurnAndContent[log.TurnNumber] = make(map[string][]models.SessionLog)
+		if _, ok := seen[key]; ok {
+			continue
 		}
-		visibleByTurnAndContent[log.TurnNumber][log.Message] = append(visibleByTurnAndContent[log.TurnNumber][log.Message], log)
+		seen[key] = struct{}{}
+		deduped = append(deduped, msg)
+	}
+
+	return deduped
+}
+
+func duplicateTranscriptLogIDs(messages []models.SessionMessage, logs []models.SessionLog) map[int64]struct{} {
+	visibleByTranscript := make(map[transcriptIdentity][]models.SessionLog)
+	for _, log := range logs {
+		key, ok := visibleAssistantTranscriptIdentity(log)
+		if !ok {
+			continue
+		}
+		visibleByTranscript[key] = append(visibleByTranscript[key], log)
 	}
 
 	duplicateLogIDs := make(map[int64]struct{})
 	for _, msg := range messages {
-		if msg.Role != models.MessageRoleAssistant {
+		key, ok := assistantTranscriptIdentity(msg)
+		if !ok {
 			continue
 		}
-		turnGroups := visibleByTurnAndContent[msg.TurnNumber]
-		if len(turnGroups) == 0 {
-			continue
-		}
-		candidates := turnGroups[msg.Content]
+		candidates := visibleByTranscript[key]
 		if len(candidates) == 0 {
 			continue
 		}
@@ -192,4 +219,33 @@ func parseMetadata(raw json.RawMessage) logMetadata {
 		return logMetadata{}
 	}
 	return meta
+}
+
+func assistantTranscriptIdentity(msg models.SessionMessage) (transcriptIdentity, bool) {
+	if msg.Role != models.MessageRoleAssistant {
+		return transcriptIdentity{}, false
+	}
+	return transcriptIdentity{
+		threadID:   optionalThreadID(msg.ThreadID),
+		turnNumber: msg.TurnNumber,
+		content:    msg.Content,
+	}, true
+}
+
+func visibleAssistantTranscriptIdentity(log models.SessionLog) (transcriptIdentity, bool) {
+	if !isVisibleAssistantOutput(log) {
+		return transcriptIdentity{}, false
+	}
+	return transcriptIdentity{
+		threadID:   optionalThreadID(log.ThreadID),
+		turnNumber: log.TurnNumber,
+		content:    log.Message,
+	}, true
+}
+
+func optionalThreadID(threadID *uuid.UUID) string {
+	if threadID == nil {
+		return ""
+	}
+	return threadID.String()
 }
