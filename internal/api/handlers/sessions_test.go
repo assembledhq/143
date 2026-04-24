@@ -6212,6 +6212,94 @@ func TestSessionHandler_UnarchiveSession(t *testing.T) {
 	})
 }
 
+func TestSessionHandler_UpdateTitle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("updates the title and returns the refreshed session", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		now := time.Now()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		title := "Renamed session"
+
+		mock.ExpectExec("UPDATE sessions SET title").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("SELECT .+ FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionColumns).AddRow(sessionTestRow(
+					sessionID, issueID, orgID, "claude_code", "idle", "full", "standard",
+					nil, nil, nil, nil,
+					nil, false, &now, &now, nil,
+					nil, nil, nil, false,
+					nil, nil, nil, nil, nil,
+					nil, &title, nil, nil,
+					nil, nil, nil,
+					nil, 1, now, "snapshotted", nil,
+					nil, nil, nil, nil, nil,
+					nil, nil, nil,
+					nil,
+					"idle", (*string)(nil),
+					nil,
+					now,
+				)...),
+			)
+
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{"title":"  Renamed session  "}`))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: uuid.New(), OrgID: orgID, Role: "member"})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		handler.UpdateTitle(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "UpdateTitle should return 200")
+
+		var resp models.SingleResponse[models.Session]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "UpdateTitle should return valid JSON")
+		require.NotNil(t, resp.Data.Title, "UpdateTitle should return the updated title")
+		require.Equal(t, title, *resp.Data.Title, "UpdateTitle should return the normalized title")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("rejects malformed request bodies", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		orgID := uuid.New()
+		sessionID := uuid.New()
+
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{`))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: uuid.New(), OrgID: orgID, Role: "member"})
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		handler.UpdateTitle(w, req)
+
+		require.Equal(t, http.StatusBadRequest, w.Code, "UpdateTitle should reject malformed JSON")
+		require.NoError(t, mock.ExpectationsWereMet(), "malformed requests should not hit the database")
+	})
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

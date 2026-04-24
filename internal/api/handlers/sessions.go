@@ -1201,6 +1201,43 @@ func (h *SessionHandler) AnswerQuestion(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionQuestion]{Data: question})
 }
 
+// UpdateTitle handles PATCH /sessions/{id} — updates the session title.
+func (h *SessionHandler) UpdateTitle(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+
+	title, err := services.NormalizeEditableTitle(body.Title)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TITLE", "invalid session title", err)
+		return
+	}
+
+	if err := h.runStore.UpdateTitle(r.Context(), orgID, sessionID, title); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update session title", err)
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+}
+
 // SendMessage handles POST /sessions/{id}/messages — sends a follow-up message
 // to an idle multi-turn session and enqueues a continue_session job.
 func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {

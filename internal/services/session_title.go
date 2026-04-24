@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -106,6 +107,17 @@ func CleanTitle(s string) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// NormalizeEditableTitle trims a user-provided title, preserving an empty
+// result to mean "clear the custom title", and rejects values above the
+// shared session-title length limit.
+func NormalizeEditableTitle(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) > maxTitleLen {
+		return "", errors.New("title exceeds maximum length")
+	}
+	return s, nil
 }
 
 // buildTitleUserPrompt constructs a compressed conversation summary for title generation.

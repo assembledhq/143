@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -12,6 +12,7 @@ import {
   Eye,
   FileCode2,
   GitPullRequest,
+  PenLine,
   Loader2,
   RefreshCw,
   CheckCircle2,
@@ -29,6 +30,7 @@ import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { ErrorNotice } from "@/components/ui/error-notice";
+import { Input } from "@/components/ui/input";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -152,6 +154,7 @@ type PRAuthInterceptDetails = {
 };
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const TITLE_CLICK_DRAG_THRESHOLD_PX = 4;
 
 function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
   if (!value || typeof value !== "object") return false;
@@ -159,6 +162,176 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
   return typeof details.connect_url === "string" &&
     typeof details.resume_token === "string" &&
     typeof details.can_fallback_to_app === "boolean";
+}
+
+function hasActiveTitleSelection(): boolean {
+  if (typeof window === "undefined") return false;
+  const selection = window.getSelection();
+  if (!selection) return false;
+  return selection.type === "Range" || selection.toString().trim().length > 0;
+}
+
+function SessionHeaderTitle({ session }: { session: Session }) {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const displayedTitle = sessionTitle(session);
+  const [draftTitle, setDraftTitle] = useState(displayedTitle);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const draggedRef = useRef(false);
+  const canEditTitle = user?.role === "admin" || user?.role === "member";
+
+  if (!editing && draftTitle !== displayedTitle) {
+    setDraftTitle(displayedTitle);
+  }
+
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+
+  const updateTitleMutation = useMutation({
+    mutationFn: (title: string) => api.sessions.update(session.id, { title }),
+    onMutate: async (title) => {
+      await queryClient.cancelQueries({ queryKey: ["session", session.id] });
+      const previousSession = queryClient.getQueryData<SingleResponse<Session>>(["session", session.id]);
+      if (previousSession?.data) {
+        queryClient.setQueryData<SingleResponse<Session>>(["session", session.id], {
+          ...previousSession,
+          data: {
+            ...previousSession.data,
+            title,
+          },
+        });
+      }
+      return { previousSession };
+    },
+    onError: (err, _title, context) => {
+      if (context?.previousSession) {
+        queryClient.setQueryData(["session", session.id], context.previousSession);
+      }
+      toast.error(err instanceof Error ? err.message : "Couldn't update the session title");
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["session", session.id], updated);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+
+  const openEditor = useCallback(() => {
+    if (!canEditTitle) return;
+    setDraftTitle(displayedTitle);
+    setEditing(true);
+  }, [canEditTitle, displayedTitle]);
+
+  const commitTitle = useCallback(() => {
+    const normalizedTitle = draftTitle.trim();
+    setEditing(false);
+
+    if (!session.title && normalizedTitle === "") {
+      return;
+    }
+
+    if (session.title != null) {
+      if (normalizedTitle === session.title) return;
+    } else if (normalizedTitle === displayedTitle) {
+      return;
+    }
+
+    updateTitleMutation.mutate(normalizedTitle);
+  }, [displayedTitle, draftTitle, session.title, updateTitleMutation]);
+
+  const cancelEdit = useCallback(() => {
+    setDraftTitle(displayedTitle);
+    setEditing(false);
+  }, [displayedTitle]);
+
+  const handlePointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    pointerDownRef.current = { x: event.clientX, y: event.clientY };
+    draggedRef.current = false;
+  }, []);
+
+  const handlePointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (!pointerDownRef.current || draggedRef.current) return;
+    const deltaX = Math.abs(event.clientX - pointerDownRef.current.x);
+    const deltaY = Math.abs(event.clientY - pointerDownRef.current.y);
+    if (deltaX > TITLE_CLICK_DRAG_THRESHOLD_PX || deltaY > TITLE_CLICK_DRAG_THRESHOLD_PX) {
+      draggedRef.current = true;
+    }
+  }, []);
+
+  const handleTitleClick = useCallback(() => {
+    if (!canEditTitle || draggedRef.current || hasActiveTitleSelection()) {
+      pointerDownRef.current = null;
+      draggedRef.current = false;
+      return;
+    }
+    pointerDownRef.current = null;
+    draggedRef.current = false;
+    openEditor();
+  }, [canEditTitle, openEditor]);
+
+  if (editing) {
+    return (
+      <div className="min-w-0 flex-1">
+        <Input
+          ref={inputRef}
+          aria-label="Session title"
+          value={draftTitle}
+          className="h-8 min-w-0 text-sm font-medium"
+          onChange={(event) => setDraftTitle(event.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitTitle();
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              cancelEdit();
+            }
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "group/title flex min-w-0 items-center gap-1 rounded-md transition-colors",
+        canEditTitle && "hover:bg-muted/40 focus-within:bg-muted/40",
+      )}
+    >
+      <h1
+        className={cn(
+          "min-w-0 flex-1 truncate px-2 py-1 text-sm font-medium text-foreground",
+          canEditTitle && "cursor-text select-text",
+        )}
+        onPointerDown={canEditTitle ? handlePointerDown : undefined}
+        onPointerMove={canEditTitle ? handlePointerMove : undefined}
+        onClick={canEditTitle ? handleTitleClick : undefined}
+      >
+        {displayedTitle}
+      </h1>
+      {canEditTitle && (
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Edit session title"
+          className="h-7 w-7 shrink-0 opacity-0 transition-opacity group-hover/title:opacity-100 group-focus-within/title:opacity-100"
+          onClick={openEditor}
+        >
+          <PenLine className="h-3.5 w-3.5" />
+        </Button>
+      )}
+    </div>
+  );
 }
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
@@ -1702,9 +1875,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
-            <h1 className="text-sm font-medium text-foreground truncate">
-              {sessionTitle(session)}
-            </h1>
+            <SessionHeaderTitle session={session} />
             <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
               {status.label}
             </span>

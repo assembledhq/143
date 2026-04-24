@@ -181,6 +181,48 @@ func TestCleanTitle(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestNormalizeEditableTitle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     string
+		want      string
+		expectErr bool
+	}{
+		{
+			name:  "trims surrounding whitespace",
+			input: "  Fix auth bug  ",
+			want:  "Fix auth bug",
+		},
+		{
+			name:  "allows clearing the custom title",
+			input: "   ",
+			want:  "",
+		},
+		{
+			name:      "rejects titles longer than the limit",
+			input:     string(make([]byte, 121)),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := NormalizeEditableTitle(tt.input)
+			if tt.expectErr {
+				require.Error(t, err, "NormalizeEditableTitle should reject invalid input")
+				return
+			}
+
+			require.NoError(t, err, "NormalizeEditableTitle should accept valid input")
+			require.Equal(t, tt.want, got, "NormalizeEditableTitle should return the normalized title")
+		})
+	}
+}
+
 func TestBuildTitleUserPrompt(t *testing.T) {
 	t.Parallel()
 	msgs := []models.SessionMessage{

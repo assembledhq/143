@@ -180,6 +180,36 @@ describe('api client', () => {
       await api.sessions.answerQuestion('session-1', 'q-1', 'Try option B');
       expect(capturedBody).toEqual({ answer: 'Try option B' });
     });
+
+    it('updates a session title', async () => {
+      let capturedBody: unknown;
+      let capturedMethod: string | undefined;
+
+      server.use(
+        http.patch('/api/v1/sessions/:id', async ({ request }) => {
+          capturedMethod = request.method;
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'session-abc',
+              issue_id: 'issue-1',
+              org_id: 'org-1',
+              agent_type: 'claude_code',
+              status: 'running',
+              autonomy_level: 'supervised',
+              token_mode: 'standard',
+              title: 'Renamed session',
+              created_at: '2026-02-17T07:00:00Z',
+            },
+          });
+        }),
+      );
+
+      const result = await api.sessions.update('session-abc', { title: 'Renamed session' });
+      expect(capturedMethod).toBe('PATCH');
+      expect(capturedBody).toEqual({ title: 'Renamed session' });
+      expect(result.data.title).toBe('Renamed session');
+    });
   });
 
   describe('repositories', () => {

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
+import { fireEvent } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
@@ -103,6 +104,79 @@ describe('SessionDetailPage', () => {
 
     expect(headerTitle.className).toContain('text-sm');
     expect(headerTitle.className).not.toContain('text-xs');
+  });
+
+  it('opens inline title editing when the pencil affordance is clicked', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', {
+      level: 1,
+      name: 'Fixed TypeError by adding null check',
+    });
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit session title' }));
+
+    expect(screen.getByRole('textbox', { name: 'Session title' })).toHaveValue('Fixed TypeError by adding null check');
+  });
+
+  it('opens inline title editing when the title text is clicked', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const headerTitle = await screen.findByRole('heading', {
+      level: 1,
+      name: 'Fixed TypeError by adding null check',
+    });
+
+    await userEvent.click(headerTitle);
+
+    expect(screen.getByRole('textbox', { name: 'Session title' })).toHaveValue('Fixed TypeError by adding null check');
+  });
+
+  it('does not open inline title editing when the title click is part of text selection', async () => {
+    const selectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      type: 'Range',
+      toString: () => 'Fixed TypeError',
+    } as Selection);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const headerTitle = await screen.findByRole('heading', {
+      level: 1,
+      name: 'Fixed TypeError by adding null check',
+    });
+
+    fireEvent.pointerDown(headerTitle, { clientX: 12, clientY: 12, pointerId: 1 });
+    fireEvent.pointerUp(headerTitle, { clientX: 12, clientY: 12, pointerId: 1 });
+    await userEvent.click(headerTitle);
+
+    expect(screen.queryByRole('textbox', { name: 'Session title' })).not.toBeInTheDocument();
+    selectionSpy.mockRestore();
+  });
+
+  it('hides the title edit affordance for read-only viewers', async () => {
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'viewer',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const headerTitle = await screen.findByRole('heading', {
+      level: 1,
+      name: 'Fixed TypeError by adding null check',
+    });
+
+    expect(screen.queryByRole('button', { name: 'Edit session title' })).not.toBeInTheDocument();
+
+    await userEvent.click(headerTitle);
+
+    expect(screen.queryByRole('textbox', { name: 'Session title' })).not.toBeInTheDocument();
   });
 
   it('shows overview tab with status in detail panel', async () => {

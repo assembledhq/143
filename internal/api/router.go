@@ -682,6 +682,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// File upload (higher body-size limit for multipart uploads).
 				r.With(middleware.MaxBodySize(11<<20)).Post("/api/v1/uploads", uploadHandler.Upload)
 
+				r.Patch("/api/v1/sessions/{id}", sessionHandler.UpdateTitle)
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
