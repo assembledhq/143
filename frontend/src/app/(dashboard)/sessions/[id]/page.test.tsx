@@ -806,6 +806,42 @@ describe('SessionDetailPage', () => {
     expect(screen.getByRole('button', { name: 'Fix tests' })).toBeInTheDocument();
   });
 
+  it('shows a closed terminal state in the detail header and overview when a linked PR is closed', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            id: 'pr-1',
+            session_id: 'session-abcdef12-3456-7890',
+            org_id: 'org-1',
+            github_pr_number: 42,
+            github_pr_url: 'https://github.com/example/repo/pull/42',
+            github_repo: 'example/repo',
+            title: 'Fix TypeError by adding null check',
+            body: 'Adds a null check before accessing properties.',
+            status: 'closed',
+            branch_name: 'fix/type-error-null-check',
+            review_status: null,
+            ci_status: 'success',
+            merged_at: null,
+            closed_at: '2026-02-17T07:10:00Z',
+            created_at: '2026-02-17T07:06:00Z',
+            updated_at: '2026-02-17T07:10:00Z',
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect((await screen.findAllByText('PR closed')).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('PR #42 was closed without merging.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Resolve conflicts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
+  });
+
   it('routes to a new revision session after starting a PR repair action', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
