@@ -1,9 +1,13 @@
 "use client";
 
 import { Suspense, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { api } from "@/lib/api";
+import { setActiveOrgId } from "@/lib/active-org";
 import { captureError } from "@/lib/errors";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -18,23 +22,31 @@ export default function AcceptInvitationPage() {
 
 function AcceptInvitationContent() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const isMissingToken = !token;
 
   const [status, setStatus] = useState<
-    "loading" | "error" | "register" | "login"
+    "loading" | "error" | "register" | "login" | "claiming"
   >(isMissingToken ? "error" : "loading");
   const [errorMessage, setErrorMessage] = useState(
     isMissingToken ? "No invitation token provided." : ""
   );
   const [orgName, setOrgName] = useState("");
   const [invitedEmail, setInvitedEmail] = useState("");
+  const [invitedGitHubUsername, setInvitedGitHubUsername] = useState("");
+
+  const isUnauthorized = (err: unknown) =>
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "UNAUTHORIZED";
 
   useEffect(() => {
     if (!token) {
       return;
     }
+    const inviteToken = token;
 
     async function acceptInvitation() {
       try {
@@ -62,12 +74,38 @@ function AcceptInvitationContent() {
         if (data?.email) {
           setInvitedEmail(data.email);
         }
+        if (data?.github_username) {
+          setInvitedGitHubUsername(data.github_username);
+        }
+
+        try {
+          await api.auth.me();
+          setStatus("claiming");
+          const claim = await api.auth.claimInvitation(inviteToken);
+          setActiveOrgId(claim.data.org_id);
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["auth", "me"] }),
+            queryClient.invalidateQueries({ queryKey: ["auth", "memberships"] }),
+          ]);
+          router.replace("/onboarding");
+          return;
+        } catch (err) {
+          if (!isUnauthorized(err)) {
+            captureError(err, { feature: "invite-claim" });
+            setStatus("error");
+            setErrorMessage(
+              err instanceof Error ? err.message : "Something went wrong. Please try again."
+            );
+            return;
+          }
+        }
+
         if (data?.action === "login" || data?.action === "register") {
           setStatus(data.action);
-        } else {
-          // Fallback: redirect to onboarding (which redirects to sessions if setup is complete)
-          router.replace("/onboarding");
+          return;
         }
+
+        router.replace("/onboarding");
       } catch (err) {
         captureError(err, { feature: "invite-accept" });
         setStatus("error");
@@ -76,18 +114,51 @@ function AcceptInvitationContent() {
     }
 
     acceptInvitation();
-  }, [token, router]);
+  }, [token, router, queryClient]);
+
+  const invitationSummary = orgName || invitedEmail || invitedGitHubUsername;
+  const joinLabel = orgName ? `Join ${orgName}` : "Accept invitation";
+  const accountTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
+  const invitationParams = `${invitedEmail ? `&email=${encodeURIComponent(invitedEmail)}` : ""}${
+    invitedGitHubUsername
+      ? `&github_username=${encodeURIComponent(invitedGitHubUsername)}`
+      : ""
+  }${orgName ? `&org=${encodeURIComponent(orgName)}` : ""}`;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <Card className="w-full max-w-sm">
-        <CardHeader className="text-center">
-          <CardTitle className="text-lg font-semibold">143.dev</CardTitle>
+        <CardHeader className="space-y-3 text-center">
+          {invitationSummary ? (
+            <div className="flex justify-center">
+              <Badge variant="secondary">Invitation pending</Badge>
+            </div>
+          ) : null}
+          <div className="space-y-1">
+            <CardTitle className="text-lg font-semibold">
+              {invitationSummary ? joinLabel : "143.dev"}
+            </CardTitle>
+            {invitationSummary ? (
+              <CardDescription>
+                Someone invited you to collaborate
+                {orgName ? (
+                  <>
+                    {" "}in <span className="font-medium text-foreground">{orgName}</span>
+                  </>
+                ) : null}
+                {accountTarget ? (
+                  <>
+                    {" "}as <span className="font-medium text-foreground">{accountTarget}</span>
+                  </>
+                ) : null}.
+              </CardDescription>
+            ) : null}
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {status === "loading" && (
+          {(status === "loading" || status === "claiming") && (
             <p className="text-center text-sm text-muted-foreground">
-              Verifying invitation...
+              {status === "claiming" ? "Joining organization..." : "Verifying invitation..."}
             </p>
           )}
 
@@ -99,9 +170,17 @@ function AcceptInvitationContent() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() => router.push("/login")}
+                onClick={() =>
+                  router.push(
+                    token
+                      ? `/login?invitation=${encodeURIComponent(token)}${
+                          invitationParams
+                        }`
+                      : "/login"
+                  )
+                }
               >
-                Go to Login
+                Sign in with a different account
               </Button>
             </div>
           )}
@@ -109,33 +188,31 @@ function AcceptInvitationContent() {
           {status === "register" && (
             <div className="space-y-4">
               <p className="text-center text-sm text-muted-foreground">
-                You&apos;ve been invited to join{" "}
-                <span className="font-medium text-foreground">
-                  {orgName}
-                </span>
-                {invitedEmail ? (
+                Create an account to accept this invitation
+                {orgName ? (
                   <>
-                    {" "}as <span className="font-medium text-foreground">{invitedEmail}</span>. Create an account to get started.
+                    {" "}for <span className="font-medium text-foreground">{orgName}</span>
                   </>
                 ) : (
-                  ". Create an account to get started."
+                  "."
                 )}
+                {accountTarget ? (
+                  <>
+                    {" "}We&apos;ll join you as <span className="font-medium text-foreground">{accountTarget}</span>.
+                  </>
+                ) : null}
               </p>
               <Button
                 className="w-full"
                 onClick={() =>
                   router.push(
                     `/login?tab=signup&invitation=${encodeURIComponent(token!)}${
-                      invitedEmail
-                        ? `&email=${encodeURIComponent(invitedEmail)}`
-                        : ""
-                    }${
-                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                      invitationParams
                     }`
                   )
                 }
               >
-                Create account
+                {orgName ? `Create account to join ${orgName}` : "Create account"}
               </Button>
               <Button
                 variant="outline"
@@ -143,16 +220,12 @@ function AcceptInvitationContent() {
                 onClick={() =>
                   router.push(
                     `/login?invitation=${encodeURIComponent(token!)}${
-                      invitedEmail
-                        ? `&email=${encodeURIComponent(invitedEmail)}`
-                        : ""
-                    }${
-                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                      invitationParams
                     }`
                   )
                 }
               >
-                Sign in to existing account
+                I already have an account
               </Button>
             </div>
           )}
@@ -160,33 +233,31 @@ function AcceptInvitationContent() {
           {status === "login" && (
             <div className="space-y-4">
               <p className="text-center text-sm text-muted-foreground">
-                You&apos;ve been invited to join{" "}
-                <span className="font-medium text-foreground">
-                  {orgName}
-                </span>
-                {invitedEmail ? (
+                Sign in to accept this invitation
+                {orgName ? (
                   <>
-                    {" "}as <span className="font-medium text-foreground">{invitedEmail}</span>. Sign in to accept the invitation.
+                    {" "}for <span className="font-medium text-foreground">{orgName}</span>
                   </>
                 ) : (
-                  ". Sign in to accept the invitation."
+                  "."
                 )}
+                {accountTarget ? (
+                  <>
+                    {" "}Use the invited account <span className="font-medium text-foreground">{accountTarget}</span>.
+                  </>
+                ) : null}
               </p>
               <Button
                 className="w-full"
                 onClick={() =>
                   router.push(
                     `/login?invitation=${encodeURIComponent(token!)}${
-                      invitedEmail
-                        ? `&email=${encodeURIComponent(invitedEmail)}`
-                        : ""
-                    }${
-                      orgName ? `&org=${encodeURIComponent(orgName)}` : ""
+                      invitationParams
                     }`
                   )
                 }
               >
-                Sign in
+                {orgName ? `Sign in to join ${orgName}` : "Sign in"}
               </Button>
             </div>
           )}

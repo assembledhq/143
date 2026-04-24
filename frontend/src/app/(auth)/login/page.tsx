@@ -3,7 +3,8 @@
 import Image from "next/image";
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +30,9 @@ function LoginPageContent() {
 
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
+  const invitedGitHubUsername = searchParams.get("github_username") ?? "";
   const invitedOrg = searchParams.get("org") ?? "";
+  const inviteTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -121,14 +124,28 @@ function LoginPageContent() {
           <CardTitle className="text-lg font-semibold">143.dev</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {invitation && invitedEmail && (
-            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-              You were invited{invitedOrg ? (
-                <>
-                  {" "}to join <span className="font-medium text-foreground">{invitedOrg}</span>
-                </>
-              ) : null}{" "}
-              as <span className="font-medium text-foreground">{invitedEmail}</span>.
+          {invitation && (invitedEmail || invitedGitHubUsername || invitedOrg) && (
+            <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-left">
+              <div className="mb-2 flex items-center gap-2">
+                <Badge variant="secondary">Invitation pending</Badge>
+              </div>
+              <div className="text-sm font-medium text-foreground">
+                Join {invitedOrg || "this organization"}
+              </div>
+              <CardDescription className="mt-1 text-sm">
+                Someone asked you to join
+                {invitedOrg ? (
+                  <>
+                    {" "} <span className="font-medium text-foreground">{invitedOrg}</span>
+                  </>
+                ) : null}
+                {inviteTarget ? (
+                  <>
+                    {" "}as <span className="font-medium text-foreground">{inviteTarget}</span>
+                  </>
+                ) : null}
+                . Sign in if you already have an account, or create one to accept the invitation.
+              </CardDescription>
             </div>
           )}
 

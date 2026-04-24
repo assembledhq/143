@@ -1,10 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
+import { getActiveOrgId, setActiveOrgId } from '@/lib/active-org';
 import AcceptInvitationPage from './page';
 
 const pushMock = vi.hoisted(() => vi.fn());
 const replaceMock = vi.hoisted(() => vi.fn());
 const searchParamsMock = vi.hoisted(() => new URLSearchParams());
+const meMock = vi.hoisted(() => vi.fn());
+const claimInvitationMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    auth: {
+      me: meMock,
+      claimInvitation: claimInvitationMock,
+    },
+  },
+}));
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, replace: replaceMock }),
@@ -15,20 +27,24 @@ describe('AcceptInvitationPage', () => {
   beforeEach(() => {
     pushMock.mockReset();
     replaceMock.mockReset();
+    meMock.mockReset();
+    claimInvitationMock.mockReset();
     searchParamsMock.forEach((_, key) => {
       searchParamsMock.delete(key);
     });
+    setActiveOrgId(null);
     vi.restoreAllMocks();
   });
 
   it('shows error when no token is provided', () => {
     renderWithProviders(<AcceptInvitationPage />);
     expect(screen.getByText('No invitation token provided.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Go to Login' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in with a different account' })).toBeInTheDocument();
   });
 
   it('shows loading state when token is present', () => {
     searchParamsMock.set('token', 'abc123');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockReturnValue(new Promise(() => {})); // never resolves
 
     renderWithProviders(<AcceptInvitationPage />);
@@ -37,6 +53,7 @@ describe('AcceptInvitationPage', () => {
 
   it('shows login state with sign in button', async () => {
     searchParamsMock.set('token', 'invite-login');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -47,11 +64,11 @@ describe('AcceptInvitationPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AcceptInvitationPage />);
 
-    await screen.findByRole('button', { name: 'Sign in' });
-    expect(screen.getByText(/user@co.com/)).toBeInTheDocument();
-    expect(screen.getByText('TestCo')).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Sign in to join TestCo' });
+    expect(screen.getByText('Join TestCo')).toBeInTheDocument();
+    expect(screen.getAllByText(/user@co.com/)).toHaveLength(2);
 
-    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await user.click(screen.getByRole('button', { name: 'Sign in to join TestCo' }));
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith(
@@ -62,6 +79,7 @@ describe('AcceptInvitationPage', () => {
 
   it('shows error when API returns error', async () => {
     searchParamsMock.set('token', 'expired-token');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: false,
       json: async () => ({ error: { message: 'Invitation expired' } }),
@@ -76,6 +94,7 @@ describe('AcceptInvitationPage', () => {
 
   it('redirects to /onboarding when no action is returned', async () => {
     searchParamsMock.set('token', 'auto-token');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({ data: { org_name: 'Acme' } }),
@@ -90,6 +109,7 @@ describe('AcceptInvitationPage', () => {
 
   it('shows register state with login alternative', async () => {
     searchParamsMock.set('token', 'reg-no-email');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -100,10 +120,10 @@ describe('AcceptInvitationPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AcceptInvitationPage />);
 
-    await screen.findByRole('button', { name: 'Create account' });
-    expect(screen.getByRole('button', { name: 'Sign in to existing account' })).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Create account to join Acme' });
+    expect(screen.getByRole('button', { name: 'I already have an account' })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Sign in to existing account' }));
+    await user.click(screen.getByRole('button', { name: 'I already have an account' }));
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/login?invitation=reg-no-email&org=Acme');
@@ -112,6 +132,7 @@ describe('AcceptInvitationPage', () => {
 
   it('passes invited email and org to sign-up flow', async () => {
     searchParamsMock.set('token', 'invite-token-123');
+    meMock.mockRejectedValue({ code: 'UNAUTHORIZED' });
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -126,13 +147,47 @@ describe('AcceptInvitationPage', () => {
     const user = userEvent.setup();
     renderWithProviders(<AcceptInvitationPage />);
 
-    await screen.findByRole('button', { name: 'Create account' });
-    expect(screen.getByText(/invitee@example.com/i)).toBeInTheDocument();
+    await screen.findByRole('button', { name: 'Create account to join Acme' });
+    expect(screen.getByText('Join Acme')).toBeInTheDocument();
+    expect(screen.getAllByText(/invitee@example.com/i)).toHaveLength(2);
 
-    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await user.click(screen.getByRole('button', { name: 'Create account to join Acme' }));
 
     await waitFor(() => {
       expect(pushMock).toHaveBeenCalledWith('/login?tab=signup&invitation=invite-token-123&email=invitee%40example.com&org=Acme');
+    });
+  });
+
+  it('claims the invitation immediately when the user is already authenticated', async () => {
+    searchParamsMock.set('token', 'invite-authenticated');
+    meMock.mockResolvedValue({
+      data: {
+        id: 'user-1',
+        org_id: 'org-old',
+        email: 'user@co.com',
+        name: 'User',
+        role: 'member',
+        created_at: '2026-04-23T00:00:00Z',
+      },
+    });
+    claimInvitationMock.mockResolvedValue({
+      data: { org_id: 'org-new', role: 'member' },
+    });
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: { action: 'login', email: 'user@co.com', org_name: 'TestCo' },
+      }),
+    } as Response);
+
+    renderWithProviders(<AcceptInvitationPage />);
+
+    await waitFor(() => {
+      expect(claimInvitationMock).toHaveBeenCalledWith('invite-authenticated');
+    });
+    await waitFor(() => {
+      expect(getActiveOrgId()).toBe('org-new');
+      expect(replaceMock).toHaveBeenCalledWith('/onboarding');
     });
   });
 });

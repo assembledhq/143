@@ -246,7 +246,7 @@ describe('LoginPage', () => {
     renderWithProviders(<LoginPage />);
 
     expect(screen.getByText(/invitee@example.com/i)).toBeInTheDocument();
-    expect(screen.getByText(/Acme/i)).toBeInTheDocument();
+    expect(screen.getByText('Join Acme')).toBeInTheDocument();
 
     const signupEmail = screen.getByLabelText('Email');
     expect(signupEmail).toHaveValue('invitee@example.com');
@@ -257,5 +257,29 @@ describe('LoginPage', () => {
     await user.click(screen.getByRole('button', { name: 'Create account' }));
 
     expect(registerMock).toHaveBeenCalledWith('invitee@example.com', 'invitepass123', 'Invited User', 'invite-123');
+  });
+
+  it('shows an explicit invitation banner when arriving from an invite', () => {
+    searchParamsMock.set('invitation', 'invite-123');
+    searchParamsMock.set('email', 'invitee@example.com');
+    searchParamsMock.set('org', 'Acme');
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByText('Invitation pending')).toBeInTheDocument();
+    expect(screen.getByText('Join Acme')).toBeInTheDocument();
+    expect(screen.getByText(/invitee@example.com/)).toBeInTheDocument();
+  });
+
+  it('shows invitation context for GitHub-only invites too', () => {
+    searchParamsMock.set('invitation', 'invite-gh');
+    searchParamsMock.set('github_username', 'megan-assembled');
+    searchParamsMock.set('org', 'Acme');
+
+    renderWithProviders(<LoginPage />);
+
+    expect(screen.getByText('Invitation pending')).toBeInTheDocument();
+    expect(screen.getByText('Join Acme')).toBeInTheDocument();
+    expect(screen.getByText(/@megan-assembled/)).toBeInTheDocument();
   });
 });
