@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -61,9 +62,112 @@ type PMTaskContext struct {
 
 // RevisionContext holds feedback that triggered a revision run.
 type RevisionContext struct {
-	FormattedFeedback string `json:"formatted_feedback"`
-	PreviousDiff      string `json:"previous_diff"`
-	CommentSummary    string `json:"comment_summary"`
+	FormattedFeedback string                             `json:"formatted_feedback"`
+	PreviousDiff      string                             `json:"previous_diff"`
+	CommentSummary    string                             `json:"comment_summary"`
+	RepairAction      models.PullRequestRepairActionType `json:"repair_action,omitempty"`
+	RepairContext     *PullRequestRepairContext          `json:"repair_context,omitempty"`
+}
+
+type PullRequestRepairContext struct {
+	PullRequestNumber int                          `json:"pull_request_number"`
+	Repository        string                       `json:"repository"`
+	HeadSHA           string                       `json:"head_sha"`
+	BaseSHA           string                       `json:"base_sha"`
+	MergeState        models.PullRequestMergeState `json:"merge_state"`
+	HasConflicts      bool                         `json:"has_conflicts"`
+	FailingChecks     []PullRequestFailingCheck    `json:"failing_checks,omitempty"`
+}
+
+type PullRequestFailingCheck struct {
+	Name        string                          `json:"name"`
+	Category    models.PullRequestCheckCategory `json:"category"`
+	Summary     string                          `json:"summary,omitempty"`
+	DetailsURL  string                          `json:"details_url,omitempty"`
+	LogExcerpt  string                          `json:"log_excerpt,omitempty"`
+	Annotations []string                        `json:"annotations,omitempty"`
+}
+
+func ParseRevisionContext(raw json.RawMessage) (*RevisionContext, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var parsed RevisionContext
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("unmarshal revision context: %w", err)
+	}
+	return &parsed, nil
+}
+
+func FormatRevisionContextForContinuation(ctx *RevisionContext) string {
+	if ctx == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	if ctx.FormattedFeedback != "" || ctx.CommentSummary != "" || ctx.PreviousDiff != "" {
+		b.WriteString("## Revision context\n\n")
+		if ctx.FormattedFeedback != "" {
+			b.WriteString(ctx.FormattedFeedback)
+			b.WriteString("\n\n")
+		}
+		if ctx.CommentSummary != "" {
+			b.WriteString("Summary: ")
+			b.WriteString(ctx.CommentSummary)
+			b.WriteString("\n\n")
+		}
+		if ctx.PreviousDiff != "" {
+			b.WriteString("Previous diff:\n```diff\n")
+			b.WriteString(ctx.PreviousDiff)
+			b.WriteString("\n```\n\n")
+		}
+	}
+
+	if ctx.RepairContext != nil {
+		b.WriteString("## Pull request repair context\n\n")
+		if ctx.RepairAction != "" {
+			b.WriteString("Repair action: `")
+			b.WriteString(string(ctx.RepairAction))
+			b.WriteString("`\n\n")
+		}
+		b.WriteString(fmt.Sprintf("PR #%d in `%s`.\n", ctx.RepairContext.PullRequestNumber, ctx.RepairContext.Repository))
+		b.WriteString(fmt.Sprintf("Head SHA: `%s`\n", ctx.RepairContext.HeadSHA))
+		b.WriteString(fmt.Sprintf("Base SHA: `%s`\n", ctx.RepairContext.BaseSHA))
+		b.WriteString(fmt.Sprintf("Merge state: `%s`\n\n", ctx.RepairContext.MergeState))
+		if len(ctx.RepairContext.FailingChecks) > 0 {
+			b.WriteString("Failing checks:\n")
+			for _, check := range ctx.RepairContext.FailingChecks {
+				b.WriteString("- `")
+				b.WriteString(check.Name)
+				b.WriteString("` (")
+				b.WriteString(string(check.Category))
+				b.WriteString(")")
+				if check.Summary != "" {
+					b.WriteString(": ")
+					b.WriteString(check.Summary)
+				}
+				b.WriteString("\n")
+				for _, annotation := range check.Annotations {
+					b.WriteString("  - annotation: ")
+					b.WriteString(annotation)
+					b.WriteString("\n")
+				}
+				if check.LogExcerpt != "" {
+					b.WriteString("  - log excerpt: ")
+					b.WriteString(check.LogExcerpt)
+					b.WriteString("\n")
+				}
+				if check.DetailsURL != "" {
+					b.WriteString("  - details: ")
+					b.WriteString(check.DetailsURL)
+					b.WriteString("\n")
+				}
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 // ComplexityEstimate holds the triage system's assessment of issue complexity.

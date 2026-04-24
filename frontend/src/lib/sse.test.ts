@@ -83,5 +83,6 @@ describe("SSE_EVENT constants", () => {
     expect(SSE_EVENT.LOG).toBe("message");
     expect(SSE_EVENT.STATUS).toBe("status");
     expect(SSE_EVENT.DONE).toBe("done");
+    expect(SSE_EVENT.PULL_REQUEST_UPDATED).toBe("pull_request.updated");
   });
 });

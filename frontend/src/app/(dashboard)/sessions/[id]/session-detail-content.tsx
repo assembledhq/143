@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -56,6 +57,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
+import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import { SSE_EVENT, addSSEListener } from "@/lib/sse";
 import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
@@ -66,7 +68,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { Session, SessionDetail, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
+import type { Session, SessionDetail, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -76,6 +78,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
 import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
+import { PRHealthBanner } from "@/components/pr-health-banner";
 import { useAuth } from "@/hooks/use-auth";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 
@@ -702,6 +705,15 @@ const BASE_SSE_RECONNECT_DELAY_MS = 1000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
+
+function buildPullRequestStreamURL(apiBase: string, activeOrgId: string | null): string {
+  const searchParams = new URLSearchParams();
+  if (activeOrgId) {
+    searchParams.set("org_id", activeOrgId);
+  }
+  const qs = searchParams.toString();
+  return `${apiBase}/api/v1/pull-requests/stream${qs ? `?${qs}` : ""}`;
+}
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
@@ -1356,6 +1368,7 @@ const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
 
 export function SessionDetailContent({ id }: { id: string }) {
+  const router = useRouter();
   const terminalStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
   const [previewParam, setPreviewParam] = useQueryState("preview");
@@ -1399,8 +1412,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
+  const [pendingRepairAction, setPendingRepairAction] = useState<"fix_tests" | "resolve_conflicts" | null>(null);
+  const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthInterceptDetails | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["session", id],
@@ -1477,6 +1493,13 @@ export function SessionDetailContent({ id }: { id: string }) {
       return waitingForPR && !q.state.data?.data ? 2000 : false;
     },
   });
+  const pullRequestId = prData?.data?.id;
+  const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
+    queryKey: ["pull-request", pullRequestId, "health"],
+    queryFn: () => api.pullRequests.getHealth(pullRequestId!),
+    enabled: !!pullRequestId && prData?.data?.status === "open",
+  });
+  const prHealth = prHealthData?.data;
 
   // React to pr_creation_state transitions with toast feedback. Tracks the
   // previous value via ref so we fire once per transition rather than on
@@ -1517,6 +1540,89 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRUrlRef.current = prUrl;
   }, [localPRState, prUrl, session?.pr_creation_state]);
+  const startRepairMutation = useMutation({
+    mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
+      if (!pullRequestId) {
+        throw new Error("Pull request not found");
+      }
+      return action === "fix_tests"
+        ? api.pullRequests.fixTests(pullRequestId)
+        : api.pullRequests.resolveConflicts(pullRequestId);
+    },
+    onMutate: (action) => {
+      setRepairActionError(null);
+      setPendingRepairAction(action);
+    },
+    onSuccess: (response) => {
+      setPendingRepairAction(null);
+      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+
+      if (response.data.session_id !== id) {
+        router.push(`/sessions/${response.data.session_id}`);
+      }
+    },
+    onError: (err) => {
+      setPendingRepairAction(null);
+      setRepairActionError(err instanceof ApiError ? err.message : "Failed to open repair session");
+    },
+  });
+  useEffect(() => {
+    if (!pullRequestId || prData?.data?.status !== "open") {
+      return;
+    }
+
+    let eventSource: EventSource | null = null;
+    let cancelled = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function connect() {
+      if (cancelled) {
+        return;
+      }
+
+      eventSource = new EventSource(buildPullRequestStreamURL(apiBase, getActiveOrgId()), { withCredentials: true });
+      eventSource.onopen = () => {
+        reconnectAttempts = 0;
+      };
+      addSSEListener(eventSource, SSE_EVENT.PULL_REQUEST_UPDATED, (event) => {
+        if (event.pull_request_id !== pullRequestId) {
+          return;
+        }
+
+        const cached = queryClient.getQueryData<SingleResponse<PullRequestHealthResponse>>(["pull-request", pullRequestId, "health"]);
+        const cachedVersion = cached?.data?.health_version ?? 0;
+        if (event.version < cachedVersion) {
+          return;
+        }
+
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      });
+      eventSource.onerror = () => {
+        eventSource?.close();
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+
+        if (!cancelled && reconnectAttempts < MAX_SSE_RECONNECT_ATTEMPTS) {
+          const delay = BASE_SSE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts);
+          reconnectAttempts += 1;
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+    }
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+    };
+  }, [apiBase, prData?.data?.status, pullRequestId, queryClient]);
   const previousSessionStatusRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const currentStatus = session?.status;
@@ -1987,7 +2093,27 @@ export function SessionDetailContent({ id }: { id: string }) {
               />
             </TabsContent>
             <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-              <OverviewTab session={session} members={members} />
+              <div className="space-y-4">
+                {pullRequestId && prData?.data?.status === "open" && (
+                  prHealth ? (
+                    <PRHealthBanner
+                      health={prHealth}
+                      pendingAction={pendingRepairAction}
+                      repairError={repairActionError}
+                      onFixTests={() => startRepairMutation.mutate("fix_tests")}
+                      onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
+                    />
+                  ) : isPRHealthLoading ? (
+                    <Card className="border-border/60">
+                      <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Loading PR health…</span>
+                      </CardContent>
+                    </Card>
+                  ) : null
+                )}
+                <OverviewTab session={session} members={members} />
+              </div>
             </TabsContent>
             {showValidationTab && (
               <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">

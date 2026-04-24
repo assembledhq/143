@@ -1,10 +1,10 @@
 # 61 - PR State Sync and Repair Actions
 
-> **Status:** Future
+> **Status:** Implemented
 >
 > **Last reviewed:** 2026-04-23
 >
-> **Depends on:** [../overall.md](../overall.md), [../implemented/57-coding-agent-settings-rethink.md](../implemented/57-coding-agent-settings-rethink.md)
+> **Depends on:** [../overall.md](../overall.md), [57-coding-agent-settings-rethink.md](57-coding-agent-settings-rethink.md)
 
 ## Summary
 

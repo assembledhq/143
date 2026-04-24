@@ -996,6 +996,24 @@ func TestSessionStore_UpdateFailure(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_UpdateRevisionContext(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	mock.ExpectExec("UPDATE sessions.+SET revision_context").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateRevisionContext(context.Background(), uuid.New(), uuid.New(), []byte(`{"repair_action":"fix_tests"}`))
+	require.NoError(t, err, "UpdateRevisionContext should persist the revision context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateSnapshotInfo(t *testing.T) {
 	t.Parallel()
 
