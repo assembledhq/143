@@ -1845,7 +1845,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
               {prErrorNotice && (
                 <ErrorNotice
-                  className="mt-2"
+                  className="mx-2 mt-2"
                   title={prErrorNotice.title}
                   description={prErrorNotice.description}
                   action={prErrorNotice.action}

@@ -855,6 +855,33 @@ describe('SessionDetailPage', () => {
     expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
   });
 
+  it('matches the snapshot expiry notice horizontal margins to overview cards', async () => {
+    const sessionWithMissingSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithMissingSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.className).toContain('mx-2');
+  });
+
   it('does not show Create PR button when session is running', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
