@@ -15,7 +15,8 @@ import (
 )
 
 var sessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
+	"agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -32,7 +33,8 @@ var sessionColumns = []string{
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
-		id, issueID, orgID, "claude_code", "pending", "supervised", "low",
+		id, issueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
+		"claude_code", "pending", "supervised", "low",
 		nil, nil, nil, []string{},
 		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
@@ -264,22 +266,30 @@ func TestSessionStore_Create(t *testing.T) {
 		TokenMode:     "low",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	mock.ExpectExec("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
 
 	err = store.Create(context.Background(), run)
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
 	require.Equal(t, now, run.LastActivityAt, "should set the last_activity_at timestamp on the agent run")
+	require.NotNil(t, run.PrimaryIssueID, "Create should normalize the primary issue ID for issue-backed sessions")
+	require.Equal(t, run.IssueID, *run.PrimaryIssueID, "Create should preserve the primary issue ID on issue-backed sessions")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -303,21 +313,104 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 		TokenMode:     "low",
 	}
 
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
 		WithArgs(nil, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
 		)
+	mock.ExpectCommit()
 
 	err = store.Create(context.Background(), run)
 	require.NoError(t, err, "Create should not return an error for nil issue ID")
 	require.Equal(t, generatedID, run.ID, "should set the generated ID on the agent run")
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
+	require.Nil(t, run.PrimaryIssueID, "Create should keep the primary issue unset for issue-less sessions")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	issueID := uuid.New()
+
+	run := &models.Session{
+		IssueID:       issueID,
+		OrgID:         uuid.New(),
+		AgentType:     "claude_code",
+		Status:        "pending",
+		AutonomyLevel: "supervised",
+		TokenMode:     "low",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
+				AddRow(generatedID, now, now),
+		)
+	mock.ExpectExec("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(context.DeadlineExceeded)
+	mock.ExpectRollback()
+
+	err = store.Create(context.Background(), run)
+	require.Error(t, err, "Create should fail when inserting the primary issue link fails")
+	require.Contains(t, err.Error(), "insert session issue link", "Create should wrap primary issue link failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_GetByID_PreservesPersistedPolicy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	row := newSessionRow(runID, issueID, orgID, now)
+	row[3] = models.SessionOriginIssueTrigger
+	row[4] = models.SessionInteractionModeSingleRun
+	row[5] = models.SessionValidationPolicyOnTurnComplete
+	row[35] = &userID
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionColumns).
+				AddRow(row...),
+		)
+
+	run, err := store.GetByID(context.Background(), orgID, runID)
+	require.NoError(t, err, "GetByID should not return an error")
+	require.Equal(t, models.SessionOriginIssueTrigger, run.Origin, "GetByID should preserve the persisted origin")
+	require.Equal(t, models.SessionInteractionModeSingleRun, run.InteractionMode, "GetByID should preserve the persisted interaction mode")
+	require.Equal(t, models.SessionValidationPolicyOnTurnComplete, run.ValidationPolicy, "GetByID should preserve the persisted validation policy")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -382,7 +475,7 @@ func TestSessionStore_ListByIssue(t *testing.T) {
 	runID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND issue_id").
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).
