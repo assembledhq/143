@@ -46,10 +46,11 @@ func (a *CodexAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInpu
 	files := extractFileHints(input)
 
 	return &agent.AgentPrompt{
-		SystemPrompt: systemPrompt,
-		UserPrompt:   userPrompt,
-		MaxTokens:    maxTokens,
-		Files:        files,
+		SystemPrompt:    systemPrompt,
+		UserPrompt:      userPrompt,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: input.ReasoningEffort,
+		Files:           files,
 	}, nil
 }
 
@@ -65,18 +66,24 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// by Docker + gVisor, and bwrap fails because gVisor doesn't support the
 	// unprivileged user namespaces that bwrap requires.
 	var cmd string
+	reasoningArg := ""
+	if prompt.ReasoningEffort != "" {
+		reasoningArg = fmt.Sprintf(" -c '%s'", shellEscapeSingle(fmt.Sprintf(`model_reasoning_effort="%s"`, prompt.ReasoningEffort)))
+	}
 	if prompt.Continuation {
 		// Subsequent turn: resume the latest restored session state.
 		msg := shellEscapeDouble(prompt.UserMessage)
 		if prompt.ResumeSessionID != "" {
 			cmd = fmt.Sprintf(
-				"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json %s \"%s\"",
+				"codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s %s \"%s\"",
+				reasoningArg,
 				shellEscapeCodex(prompt.ResumeSessionID),
 				msg,
 			)
 		} else {
 			cmd = fmt.Sprintf(
-				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json \"%s\"",
+				"codex exec resume --last --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s \"%s\"",
+				reasoningArg,
 				msg,
 			)
 		}
@@ -89,7 +96,8 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 			return nil, fmt.Errorf("write prompt file: %w", err)
 		}
 		cmd = fmt.Sprintf(
-			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json \"$(cat '%s')\"",
+			"codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json%s \"$(cat '%s')\"",
+			reasoningArg,
 			shellEscapeCodex(promptPath),
 		)
 	}

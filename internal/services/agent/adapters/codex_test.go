@@ -780,6 +780,83 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	require.False(t, exists, "continuation should not write a fresh prompt file")
 }
 
+func TestCodexAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"done"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	prompt := &agent.AgentPrompt{
+		SystemPrompt:    "test",
+		UserPrompt:      "test",
+		MaxTokens:       50_000,
+		ReasoningEffort: models.ReasoningEffortHigh,
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "execute should succeed with a reasoning effort override")
+	require.NotNil(t, result, "execute should return a result")
+	require.Contains(t, provider.ExecCalls[0], "model_reasoning_effort", "codex command should include a reasoning override config")
+	require.Contains(t, provider.ExecCalls[0], "high", "codex command should include the requested reasoning effort")
+}
+
+func TestCodexAdapter_Execute_ContinuationWithResumeSessionIDIncludesReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"done"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	prompt := &agent.AgentPrompt{
+		UserMessage:     "Please continue.",
+		MaxTokens:       50_000,
+		Continuation:    true,
+		ResumeSessionID: "session-123",
+		ReasoningEffort: models.ReasoningEffortXHigh,
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "continuation with explicit session ID should succeed")
+	require.NotNil(t, result, "continuation should return a result")
+	require.Contains(t, provider.ExecCalls[0], `codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json`, "continuation should use explicit resume mode")
+	require.Contains(t, provider.ExecCalls[0], "session-123", "continuation should target the provided Codex session ID")
+	require.Contains(t, provider.ExecCalls[0], "model_reasoning_effort", "continuation should include the reasoning override config")
+	require.Contains(t, provider.ExecCalls[0], "xhigh", "continuation should include the requested reasoning effort")
+}
+
 func TestIsDuplicateOutput(t *testing.T) {
 	t.Parallel()
 

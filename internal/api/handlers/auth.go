@@ -95,7 +95,77 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+	if h.userStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"data": user})
+		return
+	}
+	loadedUser, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load user settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
+		ID:          user.ID,
+		OrgID:       user.OrgID,
+		Email:       loadedUser.Email,
+		Name:        loadedUser.Name,
+		Role:        user.Role,
+		GitHubID:    loadedUser.GitHubID,
+		GitHubLogin: loadedUser.GitHubLogin,
+		AvatarURL:   loadedUser.AvatarURL,
+		GoogleID:    loadedUser.GoogleID,
+		Settings:    loadedUser.Settings,
+		CreatedAt:   loadedUser.CreatedAt,
+	}})
+}
+
+// UpdateSettings updates the authenticated user's personal settings document.
+func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		return
+	}
+	_ = middleware.OrgIDFromContext(r.Context())
+	if h.userStore == nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_STORE_UNCONFIGURED", "user settings store not configured")
+		return
+	}
+
+	var body models.UserSettings
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if err := body.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_USER_SETTINGS", err.Error())
+		return
+	}
+	if err := h.userStore.UpdateSettings(r.Context(), user.ID, body); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_SETTINGS_UPDATE_FAILED", "failed to update user settings", err)
+		return
+	}
+
+	updatedUser, err := h.userStore.GetByIDGlobalWithSettings(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "USER_LOOKUP_FAILED", "failed to load updated user settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.UserWithSettings{
+		ID:          user.ID,
+		OrgID:       user.OrgID,
+		Email:       updatedUser.Email,
+		Name:        updatedUser.Name,
+		Role:        user.Role,
+		GitHubID:    updatedUser.GitHubID,
+		GitHubLogin: updatedUser.GitHubLogin,
+		AvatarURL:   updatedUser.AvatarURL,
+		GoogleID:    updatedUser.GoogleID,
+		Settings:    updatedUser.Settings,
+		CreatedAt:   updatedUser.CreatedAt,
+	}})
 }
 
 // Memberships returns the authenticated user's full membership set together

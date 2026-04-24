@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -16,9 +16,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
-import type { ListResponse, UserCredentialSummary } from "@/lib/types";
+import { useAuth } from "@/hooks/use-auth";
+import {
+  CODING_AGENT_REASONING_OPTIONS_BY_AGENT,
+  getCodingAgentReasoningDefaultsFromSettings,
+  toCodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
+import type { ListResponse, UserCredentialSummary, UserSettingsUpdateRequest } from "@/lib/types";
 
 function providerLabel(provider: string) {
   switch (provider) {
@@ -53,10 +60,14 @@ function statusLabel(status?: string) {
 }
 
 export default function AccountPage() {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [provider, setProvider] = useState<PersonalProvider>("openai");
   const [apiKey, setApiKey] = useState("");
+  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const reasoningSaveInFlightRef = useRef(false);
+  const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
 
   const { data: personalResp } = useQuery<ListResponse<UserCredentialSummary>>({
     queryKey: ["user-credentials", "personal"],
@@ -64,6 +75,8 @@ export default function AccountPage() {
   });
   const personalCreds = personalResp?.data ?? [];
   const personalRows = personalCreds.filter((row) => row.configured);
+  const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
+  const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
 
   const createMutation = useMutation({
     mutationFn: () => api.userCredentials.upsertPersonal(provider, { api_key: apiKey }),
@@ -92,6 +105,48 @@ export default function AccountPage() {
       toast.error("Could not remove personal auth");
     },
   });
+
+  const updateReasoningDefaultsMutation = useMutation({
+    mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
+      api.auth.updateSettings({ coding_agent_reasoning_defaults: defaults }),
+    onMutate: (defaults) => {
+      reasoningSaveInFlightRef.current = true;
+      setPendingReasoningDefaults(defaults);
+    },
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+      const queuedDefaults = queuedReasoningDefaultsRef.current;
+      if (queuedDefaults) {
+        queuedReasoningDefaultsRef.current = null;
+        updateReasoningDefaultsMutation.mutate(queuedDefaults);
+        return;
+      }
+      reasoningSaveInFlightRef.current = false;
+      setPendingReasoningDefaults(null);
+      toast.success("Coding agent defaults saved");
+    },
+    onError: (error) => {
+      const queuedDefaults = queuedReasoningDefaultsRef.current;
+      if (queuedDefaults) {
+        queuedReasoningDefaultsRef.current = null;
+        updateReasoningDefaultsMutation.mutate(queuedDefaults);
+        return;
+      }
+      reasoningSaveInFlightRef.current = false;
+      captureError(error, { feature: "personal-coding-agent-defaults-save" });
+      setPendingReasoningDefaults(null);
+      toast.error("Could not save coding agent defaults");
+    },
+  });
+
+  function saveReasoningDefaults(defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) {
+    setPendingReasoningDefaults(defaults);
+    if (reasoningSaveInFlightRef.current) {
+      queuedReasoningDefaultsRef.current = defaults;
+      return;
+    }
+    updateReasoningDefaultsMutation.mutate(defaults);
+  }
 
   return (
     <PageContainer>
@@ -147,6 +202,53 @@ export default function AccountPage() {
                 )}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Coding agent defaults</CardTitle>
+          </CardHeader>
+          <CardContent className="pb-6">
+            <div className="space-y-4">
+              {Object.entries(CODING_AGENT_REASONING_OPTIONS_BY_AGENT).map(([agentType, config]) => {
+                const defaultReasoning = effectiveReasoningDefaults[agentType as "codex" | "claude_code"] ?? "";
+
+                return (
+                  <div key={agentType} className="space-y-2">
+                    <Label htmlFor={`default-coding-agent-reasoning-${agentType}`}>{config.label} default reasoning level</Label>
+                    <Select
+                      value={defaultReasoning || "__default__"}
+                      onValueChange={(value) => {
+                        const nextValue = value === "__default__" ? "" : toCodingAgentReasoningEffort(value);
+                        const nextDefaults = { ...effectiveReasoningDefaults };
+                        if (nextValue) {
+                          nextDefaults[agentType as "codex" | "claude_code"] = nextValue;
+                        } else {
+                          delete nextDefaults[agentType as "codex" | "claude_code"];
+                        }
+                        saveReasoningDefaults(nextDefaults);
+                      }}
+                    >
+                      <SelectTrigger id={`default-coding-agent-reasoning-${agentType}`} aria-label={`${config.label} default coding-agent reasoning`} className="w-[220px]">
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Product default</SelectItem>
+                        {config.options.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                );
+              })}
+              <p className="text-sm text-muted-foreground">
+                Used as the default for supported coding agents in the session composer. You can still override it per prompt.
+              </p>
+            </div>
           </CardContent>
         </Card>
 
