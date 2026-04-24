@@ -8,12 +8,12 @@
 
 ## Summary
 
-Add a compact **PR health** banner to the **session detail Overview** surface for the current session. When the PR linked to that session has actionable GitHub state, show one or both repair actions:
+Add a compact **PR health** row to the **session detail Overview** surface for the current session. When the PR linked to that session has actionable GitHub state, show one or both repair actions:
 
 - `Resolve conflicts`
 - `Fix tests`
 
-The banner should live **at the very top of the Overview tab content**, in the same slot where the session currently renders PR/session error notices like `PR session expired`. It should be the first thing the user sees when they open Overview on a session whose linked PR needs attention.
+The row should live **at the very top of the Overview tab content**, in the same vicinity as the session's existing PR/session error notice like `PR session expired`. If that notice is present, the PR health row should render directly below it. It should be one of the first things the user sees when they open Overview on a session whose linked PR needs attention.
 
 The buttons should stay simple from the operator's point of view, but they should not send only a bare natural-language prompt. Each click should resume the linked coding session, or create a revision session when resume is not possible, with a structured GitHub-derived payload attached behind a short visible prompt:
 
@@ -145,7 +145,7 @@ This avoids a one-EventSource-per-item anti-pattern once PR health appears in re
 
 This doc assumes the buttons live in the existing **session detail Overview** surface for the active session.
 
-That Overview surface should gain a session-scoped PR-health banner:
+That Overview surface should gain a session-scoped PR-health row:
 
 - `PR health`
 
@@ -155,19 +155,20 @@ The banner should only render when the session has PR context in scope, such as:
 - a PR-creation failure state that can be repaired from this session
 - a session-specific PR workflow that is waiting on GitHub state
 
-It should appear **above the top of the Overview page content**, in the same area where the current session-level PR error notice is rendered.
+It should appear **above the top of the Overview page content**, adjacent to the current session-level PR error notice area.
 
 ### Placement
 
 Inside the session detail panel:
 
 1. tab strip
-2. session-level `PR health` banner in the current error/status slot
-3. existing Overview content such as result cards
+2. existing session-level PR/error notice, if any
+3. separate session-level `PR health` row immediately below that notice, or at the top if no notice is present
+4. existing Overview content such as result cards
 
 This makes the PR repair actions feel like first-class next steps rather than passive metadata.
 
-### Banner contents
+### Row contents
 
 When the PR is healthy:
 
@@ -180,9 +181,9 @@ When the PR needs attention:
 - show a short summary of the blocker
 - show the relevant repair button(s)
 - show the most recent GitHub sync timestamp
-- keep the banner visually compact so it reads like the existing session status/error notice, not a large content block
+- keep the row visually compact so it reads like a lightweight action strip, not a large content block
 
-If the session is already showing a PR-related error notice, reuse that same banner shell and upgrade it with repair actions rather than rendering a second independent card.
+If the session is already showing a PR-related error notice, keep that notice as-is and render the PR health row directly below it as a separate element.
 
 ### Button rules
 
@@ -208,6 +209,9 @@ Reasoning: a conflicted branch often invalidates existing test results, so confl
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Tabs: [Overview] [Changes] [Preview]                                │
+├──────────────────────────────────────────────────────────────────────┤
+│ PR session expired                                                  │
+│ Session state expired — re-run to create a PR.                      │
 ├──────────────────────────────────────────────────────────────────────┤
 │ PR health                                                    Synced │
 │ PR #184 is blocked by conflicts and 2 failing test jobs.     22s ago│
@@ -236,7 +240,7 @@ On click:
 3. Replace the button with a spinner plus `Opening repair session…`.
 4. If we resumed the current session, stay on the same session detail view and stream the resumed work in place.
 5. If we created a new revision session, route the user into that new linked session detail.
-6. On failure, restore the button and show a scoped error notice in the same banner area.
+6. On failure, restore the button and show a scoped error notice inline with the PR health row.
 
 These are operational actions, not settings edits, so they should use explicit buttons rather than autosave.
 
@@ -249,7 +253,7 @@ Recommended behavior:
 - if a fresh summary sync is in progress, show a lightweight syncing state and suppress repair buttons until eligibility is known
 - if mergeability remains `unknown` after retry, do not show `Resolve conflicts` yet; show the latest known sync time and a neutral waiting state
 - if failed checks cannot yet be confidently classified as `test`, do not show `Fix tests`; show the blocker summary without an agent-action CTA
-- if the health snapshot is older than a defined freshness threshold, show the banner as stale and trigger a refresh rather than reusing old button eligibility
+- if the health snapshot is older than a defined freshness threshold, show the row as stale and trigger a refresh rather than reusing old button eligibility
 
 The system should prefer temporarily hiding a button over showing an incorrect repair action against stale state.
 
@@ -864,7 +868,7 @@ Without this instrumentation, the architecture may look correct on paper while q
 
 ### Phase 3: UI card
 
-- add the session-detail `PR health` banner in the existing top-of-Overview error/status slot
+- add the session-detail `PR health` row near the existing top-of-Overview PR/error notice area
 - render conflict/test summaries
 - render the two repair buttons when eligible
 
