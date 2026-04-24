@@ -15,6 +15,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - The current product is single-organization per user, but the intended long-term identity model is **one user identity, many organization memberships**. A user represents the human account (email, GitHub ID, Google ID); membership represents access to an organization and carries the user's role for that org.
 - All product data remains scoped to exactly one `org_id`. Multi-organization support should change how the active org is resolved for a request, not introduce cross-org views by default.
 - The detailed future design lives in [future/50-multi-organization-membership.md](future/50-multi-organization-membership.md). The key product guardrail is that single-org users should see no new UI or onboarding complexity.
+- Explicit organization switches should persist across logins. The user-visible selection is still tab-local while browsing, but the system should remember the user's last explicitly selected org as the default seed for the next fresh login so multi-org users land back where they left off.
 - Audit log entries are expected to be self-describing. Every emitted audit event should include structured `details` with operator-useful context such as resource names, source/provenance, runtime choices, job IDs, related IDs, counts, and before/after changes. Audit details must not copy secrets, full document contents, large diffs, or access tokens; use booleans, lengths, hashes, masked summaries, and IDs instead.
 
 ## Autopilot workspace UX

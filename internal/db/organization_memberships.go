@@ -252,6 +252,13 @@ func (s *OrganizationMembershipStore) Remove(ctx context.Context, userID, orgID 
 			WHERE user_id = @user_id
 			  AND last_org_id = @org_id
 			  AND EXISTS (SELECT 1 FROM deleted_membership)
+		),
+		cleared_user_hint AS (
+			UPDATE users
+			SET last_org_id = NULL
+			WHERE id = @user_id
+			  AND last_org_id = @org_id
+			  AND EXISTS (SELECT 1 FROM deleted_membership)
 		)
 		SELECT EXISTS (SELECT 1 FROM deleted_membership)`
 

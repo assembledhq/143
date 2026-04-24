@@ -33,6 +33,16 @@ export interface OrgSwitcherProps {
   userEmail?: string;
 }
 
+function messageForActiveOrgSwitchError(err: unknown, orgName: string): string {
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  switch (code) {
+    case "UNAUTHORIZED":
+      return "Your session expired. Please sign in again before switching workspaces.";
+    default:
+      return `Couldn't switch to ${orgName}. Please try again.`;
+  }
+}
+
 export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -110,8 +120,14 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     return memberships.filter((m) => m.org_name.toLowerCase().includes(q));
   }, [memberships, search]);
 
-  const handleSwitch = (membership: MembershipSummary) => {
+  const handleSwitch = async (membership: MembershipSummary) => {
     if (membership.org_id === effectiveActiveOrgId) return;
+    try {
+      await api.auth.setActiveOrg(membership.org_id);
+    } catch (err: unknown) {
+      toast.error(messageForActiveOrgSwitchError(err, membership.org_name));
+      return;
+    }
     setActiveOrgId(membership.org_id);
     // clear() over invalidateQueries(): invalidating here would refetch every
     // cached query against the *current* page right before it unmounts on

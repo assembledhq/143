@@ -348,10 +348,10 @@ func TestOrganizationMembershipStore_Remove_AllSideEffectsInOneStatement(t *test
 
 	store := NewOrganizationMembershipStore(mock)
 
-	// Require all four CTEs (deleted_membership + three side-effects) to appear
+	// Require all five CTEs (deleted_membership + four side-effects) to appear
 	// in order in a single WITH statement. Any future refactor that splits one
 	// out into a separate Exec call trips this regex.
-	mock.ExpectQuery(`(?s)WITH deleted_membership AS \(.+cleared_answers AS \(.+revoked_invitations AS \(.+cleared_session_hints AS \(`).
+	mock.ExpectQuery(`(?s)WITH deleted_membership AS \(.+cleared_answers AS \(.+revoked_invitations AS \(.+cleared_session_hints AS \(.+cleared_user_hint AS \(`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
@@ -378,6 +378,24 @@ func TestOrganizationMembershipStore_Remove_ClearsSessionHint(t *testing.T) {
 	store := NewOrganizationMembershipStore(mock)
 
 	mock.ExpectQuery(`(?s)UPDATE auth_sessions\s+SET last_org_id = NULL.+user_id = @user_id\s+AND last_org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Remove(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOrganizationMembershipStore_Remove_ClearsUserHint(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewOrganizationMembershipStore(mock)
+
+	mock.ExpectQuery(`(?s)UPDATE users\s+SET last_org_id = NULL.+id = @user_id\s+AND last_org_id = @org_id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 

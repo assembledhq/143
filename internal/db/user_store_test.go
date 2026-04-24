@@ -17,6 +17,10 @@ var userColumns = []string{
 	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at",
 }
 
+func ptrUUID(id uuid.UUID) *uuid.UUID {
+	return &id
+}
+
 func TestUserStore_UpsertFromGitHub(t *testing.T) {
 	t.Parallel()
 
@@ -258,6 +262,115 @@ func TestUserStore_GetByIDGlobal(t *testing.T) {
 	require.Equal(t, userID, u.ID)
 	require.Equal(t, orgID, u.OrgID)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserStore_GetLastOrgID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		lastOrgID *uuid.UUID
+		expectNil bool
+		expectErr bool
+	}{
+		{
+			name:      "returns stored last org id",
+			lastOrgID: ptrUUID(uuid.New()),
+		},
+		{
+			name:      "returns nil when preference is unset",
+			expectNil: true,
+		},
+		{
+			name:      "returns error when user is missing",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+
+			query := mock.ExpectQuery(`SELECT last_org_id FROM users WHERE id = @id`).
+				WithArgs(userID)
+			switch {
+			case tt.expectErr:
+				query.WillReturnRows(pgxmock.NewRows([]string{"last_org_id"}))
+			case tt.expectNil:
+				query.WillReturnRows(
+					pgxmock.NewRows([]string{"last_org_id"}).
+						AddRow(nil),
+				)
+			default:
+				query.WillReturnRows(
+					pgxmock.NewRows([]string{"last_org_id"}).
+						AddRow(tt.lastOrgID.String()),
+				)
+			}
+
+			lastOrgID, err := store.GetLastOrgID(context.Background(), userID)
+			if tt.expectErr {
+				require.Error(t, err, "GetLastOrgID should return an error when the user row is missing")
+				require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+				return
+			}
+
+			require.NoError(t, err, "GetLastOrgID should not return an error")
+			if tt.expectNil {
+				require.Nil(t, lastOrgID, "GetLastOrgID should return nil when the preference is unset")
+			} else {
+				require.NotNil(t, lastOrgID, "GetLastOrgID should return the stored org id")
+				require.Equal(t, *tt.lastOrgID, *lastOrgID, "GetLastOrgID should return the stored org id")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestUserStore_UpdateLastOrgID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		lastOrgID *uuid.UUID
+	}{
+		{
+			name:      "stores a concrete org id",
+			lastOrgID: ptrUUID(uuid.New()),
+		},
+		{
+			name:      "clears the stored preference",
+			lastOrgID: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+
+			mock.ExpectExec(`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`).
+				WithArgs(tt.lastOrgID, userID).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			err = store.UpdateLastOrgID(context.Background(), userID, tt.lastOrgID)
+			require.NoError(t, err, "UpdateLastOrgID should not return an error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 // GetByIDGlobal wraps Query errors with a "query user" prefix so callers
