@@ -21,10 +21,6 @@ type runtimeTestSessionStore struct {
 	countRunningErr            error
 	beginErr                   error
 	beginCalls                 int
-	beginCapability            models.CheckpointCapability
-	beginSoftDeadline          time.Time
-	beginHardDeadline          time.Time
-	beginObservedAt            time.Time
 	recordRuntimeProgressCalls int
 	recordRuntimeProgressErr   error
 	lastProgressType           models.RuntimeProgressType
