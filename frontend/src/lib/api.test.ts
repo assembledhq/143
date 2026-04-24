@@ -577,6 +577,22 @@ describe('api client', () => {
       expect(capturedBody).toEqual({ email: 'a@b.com', password: 'pass', name: 'Test', invitation: 'inv-1' });
     });
 
+    it('claimInvitation posts the invitation token', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/invitations/claim', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { org_id: 'org-2', role: 'member' } });
+        }),
+      );
+
+      const result = await api.auth.claimInvitation('invite-123');
+
+      expect(capturedBody).toEqual({ token: 'invite-123' });
+      expect(result.data).toEqual({ org_id: 'org-2', role: 'member' });
+    });
+
     it('auth providers fetches provider info', async () => {
       server.use(
         http.get('/api/v1/auth/providers', () => {
