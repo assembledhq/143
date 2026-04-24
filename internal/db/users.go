@@ -114,10 +114,7 @@ func (s *UserStore) GetLastOrgID(ctx context.Context, userID uuid.UUID) (*uuid.U
 		return nil, nil
 	}
 	id, err := uuid.FromBytes(lastOrgID.Bytes[:])
-	if err != nil {
-		return nil, err
-	}
-	return &id, nil
+	return &id, err
 }
 
 // UpdateLastOrgID stores the user's cross-login active-org preference. Passing
