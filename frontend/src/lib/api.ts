@@ -187,7 +187,7 @@ export const api = {
     register: (email: string, password: string, name: string, invitation?: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
     claimInvitation: (token: string) =>
-      post<import('./types').SingleResponse<import('./types').ClaimInvitationResponse>>('/api/v1/auth/claim-invitation', { token }),
+      post<import('./types').SingleResponse<import('./types').ClaimInvitationResponse>>('/api/v1/invitations/claim', { token }),
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),

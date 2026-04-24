@@ -33,6 +33,7 @@ function AcceptInvitationContent() {
   const [errorMessage, setErrorMessage] = useState(
     isMissingToken ? "No invitation token provided." : ""
   );
+  const [errorAction, setErrorAction] = useState<"login" | "switch-account">("login");
   const [orgName, setOrgName] = useState("");
   const [invitedEmail, setInvitedEmail] = useState("");
   const [invitedGitHubUsername, setInvitedGitHubUsername] = useState("");
@@ -61,6 +62,7 @@ function AcceptInvitationContent() {
 
         if (!res.ok) {
           setStatus("error");
+          setErrorAction("login");
           setErrorMessage(
             body?.error?.message || "This invitation is no longer valid."
           );
@@ -83,16 +85,20 @@ function AcceptInvitationContent() {
           setStatus("claiming");
           const claim = await api.auth.claimInvitation(inviteToken);
           setActiveOrgId(claim.data.org_id);
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["auth", "me"] }),
-            queryClient.invalidateQueries({ queryKey: ["auth", "memberships"] }),
-          ]);
+          queryClient.clear();
           router.replace("/onboarding");
           return;
         } catch (err) {
           if (!isUnauthorized(err)) {
             captureError(err, { feature: "invite-claim" });
             setStatus("error");
+            setErrorAction(
+              typeof err === "object" &&
+                err !== null &&
+                (err as { code?: unknown }).code === "INVITE_MISMATCH"
+                ? "switch-account"
+                : "login"
+            );
             setErrorMessage(
               err instanceof Error ? err.message : "Something went wrong. Please try again."
             );
@@ -124,6 +130,29 @@ function AcceptInvitationContent() {
       ? `&github_username=${encodeURIComponent(invitedGitHubUsername)}`
       : ""
   }${orgName ? `&org=${encodeURIComponent(orgName)}` : ""}`;
+  const loginHref = token
+    ? `/login?invitation=${encodeURIComponent(token)}${invitationParams}`
+    : "/login";
+  const switchAccountHref = `${loginHref}${token ? "&" : "?"}switch_account=1`;
+
+  const handleDifferentAccountSignIn = async () => {
+    setActiveOrgId(null);
+    queryClient.clear();
+    try {
+      await api.auth.logout();
+    } catch (err) {
+      captureError(err, { feature: "invite-claim-switch-account" });
+    }
+    router.push(switchAccountHref);
+  };
+
+  const handleErrorCta = async () => {
+    if (errorAction === "switch-account") {
+      await handleDifferentAccountSignIn();
+      return;
+    }
+    router.push(loginHref);
+  };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -170,17 +199,9 @@ function AcceptInvitationContent() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() =>
-                  router.push(
-                    token
-                      ? `/login?invitation=${encodeURIComponent(token)}${
-                          invitationParams
-                        }`
-                      : "/login"
-                  )
-                }
+                onClick={() => void handleErrorCta()}
               >
-                Sign in with a different account
+                {errorAction === "switch-account" ? "Sign in with a different account" : "Go to sign in"}
               </Button>
             </div>
           )}
@@ -206,9 +227,7 @@ function AcceptInvitationContent() {
                 className="w-full"
                 onClick={() =>
                   router.push(
-                    `/login?tab=signup&invitation=${encodeURIComponent(token!)}${
-                      invitationParams
-                    }`
+                    `/login?tab=signup&invitation=${encodeURIComponent(token!)}${invitationParams}`
                   )
                 }
               >
@@ -217,13 +236,7 @@ function AcceptInvitationContent() {
               <Button
                 variant="outline"
                 className="w-full"
-                onClick={() =>
-                  router.push(
-                    `/login?invitation=${encodeURIComponent(token!)}${
-                      invitationParams
-                    }`
-                  )
-                }
+                onClick={() => router.push(loginHref)}
               >
                 I already have an account
               </Button>
@@ -249,13 +262,7 @@ function AcceptInvitationContent() {
               </p>
               <Button
                 className="w-full"
-                onClick={() =>
-                  router.push(
-                    `/login?invitation=${encodeURIComponent(token!)}${
-                      invitationParams
-                    }`
-                  )
-                }
+                onClick={() => router.push(loginHref)}
               >
                 {orgName ? `Sign in to join ${orgName}` : "Sign in"}
               </Button>

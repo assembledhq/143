@@ -2,18 +2,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-utils';
 import { getActiveOrgId, setActiveOrgId } from '@/lib/active-org';
 import AcceptInvitationPage from './page';
+import { QueryClient } from '@tanstack/react-query';
 
 const pushMock = vi.hoisted(() => vi.fn());
 const replaceMock = vi.hoisted(() => vi.fn());
 const searchParamsMock = vi.hoisted(() => new URLSearchParams());
 const meMock = vi.hoisted(() => vi.fn());
 const claimInvitationMock = vi.hoisted(() => vi.fn());
+const logoutMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/api', () => ({
   api: {
     auth: {
       me: meMock,
       claimInvitation: claimInvitationMock,
+      logout: logoutMock,
     },
   },
 }));
@@ -29,6 +32,7 @@ describe('AcceptInvitationPage', () => {
     replaceMock.mockReset();
     meMock.mockReset();
     claimInvitationMock.mockReset();
+    logoutMock.mockReset();
     searchParamsMock.forEach((_, key) => {
       searchParamsMock.delete(key);
     });
@@ -39,7 +43,7 @@ describe('AcceptInvitationPage', () => {
   it('shows error when no token is provided', () => {
     renderWithProviders(<AcceptInvitationPage />);
     expect(screen.getByText('No invitation token provided.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Sign in with a different account' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go to sign in' })).toBeInTheDocument();
   });
 
   it('shows loading state when token is present', () => {
@@ -89,6 +93,86 @@ describe('AcceptInvitationPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Invitation expired')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'Go to sign in' })).toBeInTheDocument();
+  });
+
+  it('logs out and uses switch-account login recovery after an invite mismatch', async () => {
+    searchParamsMock.set('token', 'invite-mismatch');
+    meMock.mockResolvedValue({
+      data: {
+        id: 'user-1',
+        org_id: 'org-old',
+        email: 'wrong-user@co.com',
+        name: 'Wrong User',
+        role: 'member',
+        created_at: '2026-04-23T00:00:00Z',
+      },
+    });
+    claimInvitationMock.mockRejectedValue(
+      Object.assign(new Error('This invitation belongs to a different account.'), {
+        code: 'INVITE_MISMATCH',
+      })
+    );
+    logoutMock.mockResolvedValue({});
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: { action: 'login', email: 'invitee@example.com', org_name: 'Acme' },
+      }),
+    } as Response);
+
+    const user = userEvent.setup();
+    renderWithProviders(<AcceptInvitationPage />);
+
+    await screen.findByText('This invitation belongs to a different account.');
+    await user.click(screen.getByRole('button', { name: 'Sign in with a different account' }));
+
+    await waitFor(() => {
+      expect(logoutMock).toHaveBeenCalledTimes(1);
+      expect(pushMock).toHaveBeenCalledWith(
+        '/login?invitation=invite-mismatch&email=invitee%40example.com&org=Acme&switch_account=1'
+      );
+    });
+  });
+
+  it('keeps the current session intact for non-mismatch invite claim failures', async () => {
+    searchParamsMock.set('token', 'invite-invalid');
+    setActiveOrgId('org-old');
+    meMock.mockResolvedValue({
+      data: {
+        id: 'user-1',
+        org_id: 'org-old',
+        email: 'user@co.com',
+        name: 'User',
+        role: 'member',
+        created_at: '2026-04-23T00:00:00Z',
+      },
+    });
+    claimInvitationMock.mockRejectedValue(
+      Object.assign(new Error('This invitation is no longer valid.'), {
+        code: 'INVITE_INVALID',
+      })
+    );
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: { action: 'login', email: 'invitee@example.com', org_name: 'Acme' },
+      }),
+    } as Response);
+
+    const user = userEvent.setup();
+    renderWithProviders(<AcceptInvitationPage />);
+
+    await screen.findByText('This invitation is no longer valid.');
+    await user.click(screen.getByRole('button', { name: 'Go to sign in' }));
+
+    await waitFor(() => {
+      expect(logoutMock).not.toHaveBeenCalled();
+      expect(getActiveOrgId()).toBe('org-old');
+      expect(pushMock).toHaveBeenCalledWith(
+        '/login?invitation=invite-invalid&email=invitee%40example.com&org=Acme'
+      );
     });
   });
 
@@ -173,6 +257,7 @@ describe('AcceptInvitationPage', () => {
     claimInvitationMock.mockResolvedValue({
       data: { org_id: 'org-new', role: 'member' },
     });
+    const clearMock = vi.spyOn(QueryClient.prototype, 'clear');
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -187,6 +272,7 @@ describe('AcceptInvitationPage', () => {
     });
     await waitFor(() => {
       expect(getActiveOrgId()).toBe('org-new');
+      expect(clearMock).toHaveBeenCalled();
       expect(replaceMock).toHaveBeenCalledWith('/onboarding');
     });
   });

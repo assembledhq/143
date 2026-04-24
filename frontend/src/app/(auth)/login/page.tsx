@@ -32,6 +32,10 @@ function LoginPageContent() {
   const invitedEmail = searchParams.get("email") ?? "";
   const invitedGitHubUsername = searchParams.get("github_username") ?? "";
   const invitedOrg = searchParams.get("org") ?? "";
+  const isSwitchAccount = searchParams.get("switch_account") === "1";
+  const postEmailSignInHref = invitation
+    ? `/invite/accept?token=${encodeURIComponent(invitation)}`
+    : "/sessions";
   const inviteTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
@@ -47,10 +51,10 @@ function LoginPageContent() {
   const [signUpPassword, setSignUpPassword] = useState("");
 
   useEffect(() => {
-    if (!authLoading && isAuthenticated) {
+    if (!isSwitchAccount && !authLoading && isAuthenticated) {
       router.replace("/onboarding");
     }
-  }, [authLoading, isAuthenticated, router]);
+  }, [authLoading, isAuthenticated, isSwitchAccount, router]);
 
   useEffect(() => {
     if (invitedEmail) {
@@ -65,7 +69,7 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
-      window.location.href = "/sessions";
+      window.location.href = postEmailSignInHref;
     } catch (err: unknown) {
       captureError(err, { feature: "auth-signin" });
       const message = err instanceof Error ? err.message : "Sign in failed";
@@ -91,7 +95,7 @@ function LoginPageContent() {
     }
   };
 
-  if (authLoading || isAuthenticated) {
+  if (authLoading || (!isSwitchAccount && isAuthenticated)) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 space-y-4">

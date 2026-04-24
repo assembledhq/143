@@ -581,7 +581,7 @@ describe('api client', () => {
       let capturedBody: unknown;
 
       server.use(
-        http.post('/api/v1/auth/claim-invitation', async ({ request }) => {
+        http.post('/api/v1/invitations/claim', async ({ request }) => {
           capturedBody = await request.json();
           return HttpResponse.json({ data: { org_id: 'org-2', role: 'member' } });
         }),
