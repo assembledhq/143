@@ -68,7 +68,7 @@ describe('LoginPage', () => {
     registerMock.mockReset();
     pushMock.mockReset();
     replaceMock.mockReset();
-    searchParamsMock.forEach((_, key) => {
+    Array.from(searchParamsMock.keys()).forEach((key) => {
       searchParamsMock.delete(key);
     });
 
