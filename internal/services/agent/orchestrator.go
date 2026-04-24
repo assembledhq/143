@@ -2441,10 +2441,6 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 	return snapshotKey, nil
 }
 
-func (o *Orchestrator) isInteractiveSession(issue *models.Issue) bool {
-	return issue != nil && issue.Source == models.IssueSourceManual && o.sessionMessages != nil && o.snapshots != nil
-}
-
 func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {
 	if o.sessionMessages == nil {
 		return nil
