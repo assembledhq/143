@@ -234,6 +234,26 @@ func TestComposeTimeline_IgnoresAssistantMessagesWithoutMatchingTurnLogs(t *test
 	require.Equal(t, models.SessionTimelineKindMessage, result[1].Kind, "assistant message should remain visible")
 }
 
+func TestComposeTimeline_SuppressesDuplicateAssistantMessagesForSameTurn(t *testing.T) {
+	t.Parallel()
+
+	messages := []models.SessionMessage{
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.ID = 1
+		}, "2026-01-01T00:00:02Z"),
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.ID = 2
+			msg.CreatedAt = mustTime(t, "2026-01-01T00:00:03Z")
+		}, "2026-01-01T00:00:03Z"),
+	}
+
+	result := Compose(messages, nil)
+	require.Len(t, result, 1, "duplicate assistant transcript rows for the same turn should collapse to a single message")
+	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "deduped assistant transcript should still render as a message")
+	require.NotNil(t, result[0].Message, "message entry should include the assistant transcript payload")
+	require.Equal(t, int64(1), result[0].Message.ID, "the earliest duplicate assistant transcript should be preserved")
+}
+
 func TestComposeTimeline_TreatsInvalidMetadataAsVisibleOutput(t *testing.T) {
 	t.Parallel()
 
