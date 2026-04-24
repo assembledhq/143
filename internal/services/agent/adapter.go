@@ -33,6 +33,9 @@ type AgentAdapter interface {
 // AgentInput contains everything the agent needs to understand and fix an issue.
 type AgentInput struct {
 	Issue              *models.Issue
+	LinkedIssues       []models.SessionIssueSnapshotEntry
+	Manual             bool
+	UserMessage        string
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference

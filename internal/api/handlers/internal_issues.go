@@ -201,15 +201,19 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 	title := issue.Title
 
 	session := &models.Session{
-		IssueID:       issue.ID,
-		OrgID:         orgID,
-		AgentType:     agentType,
-		Status:        "pending",
-		AutonomyLevel: autonomyLevel,
-		TokenMode:     "low",
-		Title:         &title,
-		PMApproach:    issue.Description,
-		RepositoryID:  issue.RepositoryID,
+		IssueID:          issue.ID,
+		PrimaryIssueID:   &issue.ID,
+		OrgID:            orgID,
+		Origin:           models.SessionOriginIssueTrigger,
+		InteractionMode:  models.SessionInteractionModeSingleRun,
+		ValidationPolicy: models.SessionValidationPolicyOnTurnComplete,
+		AgentType:        agentType,
+		Status:           "pending",
+		AutonomyLevel:    autonomyLevel,
+		TokenMode:        "low",
+		Title:            &title,
+		PMApproach:       issue.Description,
+		RepositoryID:     issue.RepositoryID,
 	}
 	if err := h.sessionStore.Create(r.Context(), session); err != nil {
 		return nil, err
