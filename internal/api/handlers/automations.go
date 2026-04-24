@@ -292,12 +292,6 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		timezone = *req.Timezone
 	}
-	// Interval schedules ignore timezone, so rejecting non-UTC here matches
-	// the DB CHECK and keeps the API honest about what the value does.
-	if scheduleType == models.AutomationScheduleInterval && timezone != "UTC" {
-		writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", "timezone must be UTC for interval schedules")
-		return
-	}
 
 	priority := 50
 	if req.Priority != nil {
@@ -583,11 +577,13 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		scheduleChanged = true
 	}
 
-	// Interval schedules ignore timezone. Enforce after all partial updates so
-	// a change to either field alone is still caught (matches the DB CHECK).
-	if automation.ScheduleType == models.AutomationScheduleInterval && automation.Timezone != "UTC" {
-		writeError(w, r, http.StatusBadRequest, "INVALID_TIMEZONE", "timezone must be UTC for interval schedules")
-		return
+	// A timezone change alone should recompute next_run_at for schedules
+	// that evaluate wall-clock targets — cron expressions, and interval
+	// rows with interval_run_at. For an interval row without interval_run_at
+	// the recompute is a no-op (NextRunTime ignores timezone) but triggering
+	// it is cheap and keeps the control flow uniform.
+	if req.Timezone != nil {
+		scheduleChanged = true
 	}
 
 	if scheduleChanged && automation.Enabled {

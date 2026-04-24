@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   RefreshCw,
@@ -32,6 +32,14 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { Automation, AutomationRun, AutomationRunStatus } from "@/lib/types";
 import { AutomationStatsCard } from "./automation-stats-card";
+import {
+  browserTimezone,
+  formatRunAtWithTimezone,
+  hourOptions,
+  minuteOptions,
+  splitRunAt,
+} from "../schedule-time";
+import { TimezonePicker } from "../timezone-picker";
 
 // Single source of truth for interval unit values. Kept as a tuple so we can
 // derive the union type for state AND runtime-validate incoming Select values
@@ -177,7 +185,18 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
-  const [intervalRunAt, setIntervalRunAt] = useState(automation.interval_run_at ?? "09:00");
+  // Form state is seeded from the automation prop on first mount only. The
+  // parent polls every 10s and will refetch into a new `automation` object —
+  // SettingsTab is keyed on `automation.updated_at` (see AutomationDetailPage
+  // below) so a remote change remounts this subtree and reseeds the form.
+  const initialRunAt = splitRunAt(automation.interval_run_at ?? "09:00");
+  const [intervalRunHour, setIntervalRunHour] = useState(initialRunAt.hour);
+  const [intervalRunMinute, setIntervalRunMinute] = useState(initialRunAt.minute);
+  const [timezone, setTimezone] = useState<string>(automation.timezone || "UTC");
+  // Memoised per mount: Intl.DateTimeFormat() is cheap but there's no reason
+  // to re-evaluate it on every render, and stability prevents the
+  // TimezonePicker's `detected` prop from changing identity.
+  const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
 
   const updateMutation = useMutation({
@@ -188,7 +207,8 @@ function SettingsTab({ automation }: { automation: Automation }) {
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
-        interval_run_at: intervalRunAt,
+        interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+        timezone,
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -251,17 +271,41 @@ function SettingsTab({ automation }: { automation: Automation }) {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">At</span>
-            <Input
-              type="time"
-              step={300}
-              value={intervalRunAt}
-              onChange={(e) => setIntervalRunAt(e.target.value)}
-              className="w-32"
-              aria-label="Run at time"
+            <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
+              <SelectTrigger className="w-20" aria-label="Run at hour">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {hourOptions.map((h) => (
+                  <SelectItem key={h} value={h}>
+                    {h}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-sm text-muted-foreground">:</span>
+            <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
+              <SelectTrigger className="w-20" aria-label="Run at minute">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {minuteOptions.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <TimezonePicker
+              value={timezone}
+              onChange={setTimezone}
+              detected={detectedTimezone}
             />
           </div>
         </div>
-        <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>
+        <p className="text-xs text-muted-foreground">
+          Run time is in {timezone}, selectable in 5-minute increments.
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label>Base branch</Label>
@@ -365,9 +409,10 @@ export default function AutomationDetailPage() {
     );
   }
 
+  const scheduleTimezone = automation.timezone || "UTC";
   const schedule = automation.schedule_type === "cron" && automation.cron_expression
-    ? `cron: ${automation.cron_expression}`
-    : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}${automation.interval_run_at ? ` at ${automation.interval_run_at} UTC` : ""}`;
+    ? `cron: ${automation.cron_expression} (${scheduleTimezone})`
+    : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}${automation.interval_run_at ? ` at ${formatRunAtWithTimezone(automation.interval_run_at, scheduleTimezone)}` : ""}`;
 
   const headerDescription = automation.enabled
     ? automation.next_run_at
@@ -456,7 +501,11 @@ export default function AutomationDetailPage() {
             <RunsTab automationId={automationId} />
           </TabsContent>
           <TabsContent value="settings" className="mt-4">
-            <SettingsTab automation={automation} />
+            {/* Key on updated_at so a polling refetch that captures a remote
+                edit remounts SettingsTab, reseeding its useState-from-props
+                form fields. Without this, the visible values would drift
+                from the server until the user manually reopens the tab. */}
+            <SettingsTab key={automation.updated_at} automation={automation} />
           </TabsContent>
         </Tabs>
       </div>
