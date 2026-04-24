@@ -1,6 +1,6 @@
 # 59 - Session/Issue Decoupling and Multi-Issue Linking
 
-> **Status:** Future
+> **Status:** Phase 1 implemented; Phase 2 future cleanup
 >
 > **Last reviewed:** 2026-04-23
 >
@@ -649,6 +649,26 @@ Do one decisive migration that:
 - updates prompt templates/renderers to inject linked issues as bounded XML context when present
 - adds `session_turn_issue_snapshots` as the canonical durable execution snapshot source for linked-issue context
 
+Phase 1 implementation status as of 2026-04-23:
+
+- Implemented: `sessions.origin`, `interaction_mode`, and `validation_policy`
+- Implemented: `session_issue_links` with backfill from legacy `sessions.issue_id`
+- Implemented: `session_turn_issue_snapshots` as the durable per-turn linked-issue context source
+- Implemented: manual session creation no longer creates synthetic `source = manual` issues
+- Implemented: session behavior now keys off explicit session policy fields, with compatibility fallback only for historical/manual rows
+- Implemented: repository resolution is session-first, with issue fallback limited to legacy compatibility paths
+- Implemented: validation and PR flows derive the primary issue from the join/snapshot model instead of treating `sessions.issue_id` as canonical
+- Implemented: API/frontend session responses now use nullable primary-issue semantics instead of the zero UUID sentinel
+- Implemented: prompt rendering injects bounded XML linked-issue context when present
+- Implemented: manual session references are canonical on session messages rather than provider-owned issue payloads
+
+Phase 1 intentionally leaves these follow-ups for later work:
+
+- remove `sessions.issue_id` and the remaining compatibility reads
+- remove compatibility handling for historical `source = manual` issue-backed sessions
+- add dedicated session issue-link mutation APIs/UI for add/remove/reorder/promote flows
+- de-emphasize or hide legacy synthetic manual issues in issue-centric surfaces
+
 Implementation expectations for this phase:
 
 - `sessions.issue_id` may remain present in the database only as a temporary compatibility column for old rows or emergency rollback, but application reads and writes should stop depending on it in normal operation
@@ -683,6 +703,8 @@ Success conditions:
 - zero-issue sessions remain a simple first-class path
 - linked issues appear in prompts in structured bounded context blocks
 - the primary issue cannot change after first execution begins
+
+Status: complete. The shipped cutover satisfies the phase-1 product/runtime contract above. Remaining work belongs to phase 2 cleanup and later multi-issue editing UX, not to the foundational decoupling itself.
 
 ### Phase 2: Deprecate and Remove Legacy Compatibility
 

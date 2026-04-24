@@ -3,6 +3,7 @@ package validation
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -265,6 +266,56 @@ func TestCheckDiffSize_Warning(t *testing.T) {
 	require.Contains(t, details, "large diff", "details should indicate a large diff warning")
 }
 
+type statusTrackingIssueStore struct {
+	updateErr   error
+	lastIssueID uuid.UUID
+	lastStatus  string
+}
+
+func (s *statusTrackingIssueStore) UpdateStatus(ctx context.Context, orgID, issueID uuid.UUID, status string) error {
+	s.lastIssueID = issueID
+	s.lastStatus = status
+	return s.updateErr
+}
+
+func TestServiceValidate_FailedValidationRetriagesIssue(t *testing.T) {
+	t.Parallel()
+
+	validations := &mockValidationStore{checkResults: make(map[string]string)}
+	issues := &statusTrackingIssueStore{}
+	provider := newMockProvider()
+	provider.ReadFileFn = func(context.Context, *agent.Sandbox, string) ([]byte, error) {
+		return nil, errors.New("not found")
+	}
+
+	service := NewService(
+		validations,
+		issues,
+		nil,
+		&mockJobStore{},
+		&mockLLMClient{response: `{"result":"fail","reasoning":"missing regression test"}`},
+		provider,
+		zerolog.Nop(),
+	)
+
+	issueID := uuid.New()
+	diff := "diff --git a/main.go b/main.go\n"
+	err := service.Validate(context.Background(), &models.Session{
+		ID:      uuid.New(),
+		OrgID:   uuid.New(),
+		Diff:    &diff,
+		IssueID: issueID,
+	}, &models.Issue{
+		ID:    issueID,
+		Title: "Fix checkout timeout",
+	}, &agent.Sandbox{ID: "sb", WorkDir: "/workspace"})
+
+	require.NoError(t, err, "Validate should complete when checks fail without infrastructure errors")
+	require.Equal(t, "failed", validations.lastStatus, "Validate should mark the validation record failed when any check fails")
+	require.Equal(t, issueID, issues.lastIssueID, "Validate should re-triage the issue that failed validation")
+	require.Equal(t, "triaged", issues.lastStatus, "Validate should move the issue back to triaged after validation failure")
+}
+
 func TestCheckDiffSize_Fail(t *testing.T) {
 	t.Parallel()
 	s := &Service{logger: zerolog.Nop()}
@@ -475,7 +526,7 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	require.Equal(t, "open_pr", stores.jobs.lastJobType, "a passing validation should enqueue an open_pr job")
 	require.Equal(t, map[string]string{
 		"session_id": agentRun.ID.String(),
-		"org_id":       agentRun.OrgID.String(),
+		"org_id":     agentRun.OrgID.String(),
 	}, stores.jobs.lastPayload, "validation should enqueue open_pr with session_id and org_id")
 	require.Empty(t, stores.issues.lastStatus, "issue status should not be updated when validation passes")
 }
@@ -584,7 +635,6 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 
 	stores := newMockStores()
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
-
 
 	agentRun := &models.Session{
 		ID:      uuid.New(),

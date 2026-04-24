@@ -45,6 +45,87 @@ var (
 	DoneStatuses = []SessionStatus{SessionStatusCompleted, SessionStatusPRCreated, SessionStatusFailed, SessionStatusCancelled, SessionStatusSkipped}
 )
 
+// SessionOrigin captures how a session was created. This is provenance only;
+// runtime behavior is controlled by explicit policy fields.
+type SessionOrigin string
+
+const (
+	SessionOriginIssueTrigger SessionOrigin = "issue_trigger"
+	SessionOriginManual       SessionOrigin = "manual"
+	SessionOriginProject      SessionOrigin = "project"
+	SessionOriginAutomation   SessionOrigin = "automation"
+	SessionOriginRevision     SessionOrigin = "revision"
+)
+
+func (o SessionOrigin) Validate() error {
+	switch o {
+	case SessionOriginIssueTrigger,
+		SessionOriginManual,
+		SessionOriginProject,
+		SessionOriginAutomation,
+		SessionOriginRevision:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionOrigin: %q", o)
+	}
+}
+
+// SessionInteractionMode captures whether the session is interactive across
+// turns or expected to finish in one execution pass.
+type SessionInteractionMode string
+
+const (
+	SessionInteractionModeInteractive SessionInteractionMode = "interactive"
+	SessionInteractionModeSingleRun   SessionInteractionMode = "single_run"
+)
+
+func (m SessionInteractionMode) Validate() error {
+	switch m {
+	case SessionInteractionModeInteractive, SessionInteractionModeSingleRun:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionInteractionMode: %q", m)
+	}
+}
+
+// SessionValidationPolicy captures when validation should run for a session.
+type SessionValidationPolicy string
+
+const (
+	SessionValidationPolicyOnTurnComplete SessionValidationPolicy = "on_turn_complete"
+	SessionValidationPolicyOnSessionEnd   SessionValidationPolicy = "on_session_end"
+	SessionValidationPolicySkip           SessionValidationPolicy = "skip"
+)
+
+func (p SessionValidationPolicy) Validate() error {
+	switch p {
+	case SessionValidationPolicyOnTurnComplete,
+		SessionValidationPolicyOnSessionEnd,
+		SessionValidationPolicySkip:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionValidationPolicy: %q", p)
+	}
+}
+
+// SessionIssueLinkRole captures whether a linked issue owns lifecycle
+// transitions for the session or is contextual-only related context.
+type SessionIssueLinkRole string
+
+const (
+	SessionIssueLinkRolePrimary SessionIssueLinkRole = "primary"
+	SessionIssueLinkRoleRelated SessionIssueLinkRole = "related"
+)
+
+func (r SessionIssueLinkRole) Validate() error {
+	switch r {
+	case SessionIssueLinkRolePrimary, SessionIssueLinkRoleRelated:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionIssueLinkRole: %q", r)
+	}
+}
+
 // PRCreationState captures whether the user has initiated PR creation for a
 // session and, if so, where that async push is in its lifecycle. It is
 // orthogonal to SessionStatus: the agent run can be `completed` while PR

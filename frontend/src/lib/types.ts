@@ -109,8 +109,12 @@ export interface Issue {
 
 export interface Session {
   id: string;
-  issue_id: string;
+  issue_id?: string | null;
+  primary_issue_id?: string | null;
   org_id: string;
+  origin?: string;
+  interaction_mode?: string;
+  validation_policy?: string;
   agent_type: string;
   status: string;
   autonomy_level: string;
@@ -143,6 +147,16 @@ export interface Session {
   pr_creation_error?: string;
   target_branch?: string;
   repository_id?: string;
+  linked_issues?: Array<{
+    id: string;
+    session_id: string;
+    issue_id: string;
+    role: string;
+    position: number;
+    issue_title?: string;
+    issue_source?: string;
+    external_id?: string;
+  }>;
   error?: string;
   result_summary?: string;
   diff?: string;

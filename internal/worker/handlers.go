@@ -113,8 +113,9 @@ type Stores struct {
 	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
 	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	Automations         *db.AutomationStore     // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore  // nil-safe: automations feature disabled if nil
+	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
+	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 }
 
 // MemoryReinforcer retrieves and reinforces memories for a repo.
@@ -914,12 +915,26 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 	}
 }
 
+func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid.UUID {
+	if snapshot == nil {
+		return nil
+	}
+	for _, linked := range snapshot.LinkedIssues {
+		if linked.Role == models.SessionIssueLinkRolePrimary {
+			id := linked.IssueID
+			return &id
+		}
+	}
+	return nil
+}
+
 // validate handler runs validation checks on a completed agent run.
 func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID string `json:"session_id"`
-			OrgID     string `json:"org_id"`
+			SessionID       string `json:"session_id"`
+			OrgID           string `json:"org_id"`
+			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal validate payload: %w", err)
@@ -955,12 +970,40 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 			}
 		}()
 
-		issue, err := stores.Issues.GetByID(ctx, orgID, run.IssueID)
-		if err != nil {
-			return fmt.Errorf("fetch issue for validation: %w", err)
+		var snapshot *models.SessionTurnIssueSnapshot
+		if stores.IssueSnapshots != nil {
+			if input.IssueSnapshotID != "" {
+				snapshotID, err := uuid.Parse(input.IssueSnapshotID)
+				if err != nil {
+					return fmt.Errorf("parse issue snapshot id: %w", err)
+				}
+				resolved, err := stores.IssueSnapshots.GetByID(ctx, orgID, snapshotID)
+				if err != nil {
+					return fmt.Errorf("fetch issue snapshot for validation: %w", err)
+				}
+				snapshot = &resolved
+			} else if run.CurrentTurn > 0 {
+				if resolved, err := stores.IssueSnapshots.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn); err == nil {
+					snapshot = &resolved
+				}
+			}
 		}
 
-		return services.Validation.Validate(ctx, &run, &issue, sandbox)
+		if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
+			run.IssueID = *issueID
+			run.PrimaryIssueID = issueID
+		}
+
+		var issue *models.Issue
+		if run.IssueID != uuid.Nil {
+			resolvedIssue, err := stores.Issues.GetByID(ctx, orgID, run.IssueID)
+			if err != nil {
+				return fmt.Errorf("fetch issue for validation: %w", err)
+			}
+			issue = &resolvedIssue
+		}
+
+		return services.Validation.Validate(ctx, &run, issue, sandbox)
 	}
 }
 
@@ -971,10 +1014,11 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID  string `json:"session_id"`
-			OrgID      string `json:"org_id"`
-			Draft      *bool  `json:"draft,omitempty"`
-			AuthorMode string `json:"author_mode,omitempty"`
+			SessionID       string `json:"session_id"`
+			OrgID           string `json:"org_id"`
+			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
+			Draft           *bool  `json:"draft,omitempty"`
+			AuthorMode      string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -998,6 +1042,29 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).
 			Msg("starting open_pr job")
+
+		if stores.IssueSnapshots != nil {
+			var snapshot *models.SessionTurnIssueSnapshot
+			if input.IssueSnapshotID != "" {
+				snapshotID, err := uuid.Parse(input.IssueSnapshotID)
+				if err != nil {
+					return fmt.Errorf("parse issue snapshot id: %w", err)
+				}
+				resolved, err := stores.IssueSnapshots.GetByID(ctx, orgID, snapshotID)
+				if err != nil {
+					return fmt.Errorf("fetch issue snapshot for open_pr: %w", err)
+				}
+				snapshot = &resolved
+			} else if run.CurrentTurn > 0 {
+				if resolved, err := stores.IssueSnapshots.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn); err == nil {
+					snapshot = &resolved
+				}
+			}
+			if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
+				run.IssueID = *issueID
+				run.PrimaryIssueID = issueID
+			}
+		}
 
 		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStatePushing, ""); err != nil {
 			logger.Error().Err(err).Msg("failed to mark PR creation as pushing")

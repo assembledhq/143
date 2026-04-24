@@ -180,8 +180,10 @@ func (s *Service) Validate(ctx context.Context, agentRun *models.Session, issue 
 		if err := s.validations.UpdateStatus(ctx, v.OrgID, v.ID, "failed"); err != nil {
 			return fmt.Errorf("update validation status to failed: %w", err)
 		}
-		if err := s.issues.UpdateStatus(ctx, agentRun.OrgID, agentRun.IssueID, "triaged"); err != nil {
-			return fmt.Errorf("update issue status to triaged: %w", err)
+		if agentRun.IssueID != uuid.Nil {
+			if err := s.issues.UpdateStatus(ctx, agentRun.OrgID, agentRun.IssueID, "triaged"); err != nil {
+				return fmt.Errorf("update issue status to triaged: %w", err)
+			}
 		}
 		s.logger.Info().
 			Str("session_id", agentRun.ID.String()).
