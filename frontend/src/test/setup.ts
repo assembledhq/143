@@ -30,5 +30,9 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => {
   cleanup();
   server.resetHandlers();
+  // Reset browser storage so persisted state (e.g. /sessions/new draft) does
+  // not leak between tests.
+  window.sessionStorage.clear();
+  window.localStorage.clear();
 });
 afterAll(() => server.close());
