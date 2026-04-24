@@ -431,12 +431,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	// Issue lookup is optional — sessions may not have an associated issue.
 	var issue *models.Issue
-	if run.IssueID != uuid.Nil {
-		i, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
+	if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *primaryIssueID)
 		if err == nil {
 			issue = &i
 		} else {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to look up issue, proceeding without it")
+			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to look up issue, proceeding without it")
 		}
 	}
 
@@ -569,8 +569,10 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	if issue != nil {
-		if err := s.issues.UpdateStatus(ctx, run.OrgID, run.IssueID, "in_progress"); err != nil {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status")
+		if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+			if err := s.issues.UpdateStatus(ctx, run.OrgID, *primaryIssueID, "in_progress"); err != nil {
+				s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status")
+			}
 		}
 	}
 
@@ -597,12 +599,12 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 	}
 
 	var issue *models.Issue
-	if session.IssueID != uuid.Nil && s.issues != nil {
-		i, err := s.issues.GetByID(ctx, session.OrgID, session.IssueID)
+	if primaryIssueID := session.EffectivePrimaryIssueID(); primaryIssueID != nil && s.issues != nil {
+		i, err := s.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
 		if err == nil {
 			issue = &i
 		} else {
-			s.logger.Warn().Err(err).Str("issue_id", session.IssueID.String()).Msg("failed to load issue for PR title sync")
+			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to load issue for PR title sync")
 		}
 	}
 
@@ -835,8 +837,10 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			}
 
 			// Update issue status to fixed.
-			if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
-				s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+				if err := s.issues.UpdateStatus(ctx, pr.OrgID, *primaryIssueID, "fixed"); err != nil {
+					s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status to fixed")
+				}
 			}
 
 			// Snapshot is no longer needed now that the PR is merged. Cleanup

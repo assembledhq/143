@@ -165,6 +165,34 @@ func TestCodingTaskPreamble(t *testing.T) {
 	assert.Contains(t, result, "risk_factors")
 }
 
+func TestLinkedIssuesContext(t *testing.T) {
+	t.Parallel()
+
+	result := LinkedIssuesContext(LinkedIssueContextData{
+		LinkedIssues: []LinkedIssueContextEntry{
+			{
+				Role:        "primary",
+				Source:      "linear",
+				Title:       "Fix checkout timeout",
+				ExternalID:  "ENG-123",
+				Description: "Customers hit a timeout after payment authorization.",
+			},
+			{
+				Role:   "related",
+				Source: "sentry",
+				Title:  "Nil pointer in cart worker",
+			},
+		},
+	})
+
+	assert.Contains(t, result, "<linked_issues>")
+	assert.Contains(t, result, `role="primary"`)
+	assert.Contains(t, result, "<external_id>ENG-123</external_id>")
+	assert.Contains(t, result, "<description>Customers hit a timeout after payment authorization.</description>")
+	assert.Contains(t, result, `role="related"`)
+	assert.NotContains(t, result, "<external_id></external_id>")
+}
+
 func TestProjectGeneratePrompt(t *testing.T) {
 	t.Parallel()
 

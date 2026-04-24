@@ -127,6 +127,15 @@ type SessionMessageStore interface {
 	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error)
 }
 
+type SessionIssueLinkStore interface {
+	ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionIssueLink, error)
+}
+
+type SessionIssueSnapshotStore interface {
+	Create(ctx context.Context, snapshot *models.SessionTurnIssueSnapshot) error
+	GetByTurn(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int) (models.SessionTurnIssueSnapshot, error)
+}
+
 // DecisionLogStore updates PM decision log outcomes.
 type DecisionLogStore interface {
 	UpdateOutcome(ctx context.Context, orgID, planID, issueID uuid.UUID, outcome models.PMDecisionOutcome) error
@@ -201,6 +210,8 @@ type Orchestrator struct {
 	agentRunLogs      SessionLogStore
 	agentRunQuestions SessionQuestionStore
 	sessionMessages   SessionMessageStore
+	sessionIssueLinks SessionIssueLinkStore
+	issueSnapshots    SessionIssueSnapshotStore
 	decisionLog       DecisionLogStore
 	projectTasks      ProjectTaskUpdater   // can be nil
 	automationRuns    AutomationRunUpdater // can be nil
@@ -232,29 +243,31 @@ type DurableCheckpoint struct {
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Provider         SandboxProvider
-	Adapters         map[models.AgentType]AgentAdapter
-	Sessions         SessionStore
-	SessionLogs      SessionLogStore
-	SessionQuestions SessionQuestionStore
-	SessionMessages  SessionMessageStore
-	DecisionLog      DecisionLogStore
-	ProjectTasks     ProjectTaskUpdater   // optional — updates project tasks on run completion
-	AutomationRuns   AutomationRunUpdater // optional — updates automation_runs on session completion
-	Issues           IssueStore
-	Repositories     RepositoryStore
-	Orgs             OrgStore
-	Jobs             JobStore
-	GitHub           GitHubTokenProvider
-	CodexAuth        CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
-	ClaudeCodeAuth   ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
-	Credentials      CredentialProvider
-	Memory           MemoryService          // optional — injects learned memories into agent prompts
-	UserCredentials  UserCredentialProvider // optional — enables personal/team credential resolution
-	Snapshots        storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
-	UsageTracker     UsageRecorder          // optional — enables billing observability
-	Cancels          *CancelRegistry        // optional — enables session cancellation from API
-	OrgSettingsCache *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
+	Provider          SandboxProvider
+	Adapters          map[models.AgentType]AgentAdapter
+	Sessions          SessionStore
+	SessionLogs       SessionLogStore
+	SessionQuestions  SessionQuestionStore
+	SessionMessages   SessionMessageStore
+	SessionIssueLinks SessionIssueLinkStore
+	IssueSnapshots    SessionIssueSnapshotStore
+	DecisionLog       DecisionLogStore
+	ProjectTasks      ProjectTaskUpdater   // optional — updates project tasks on run completion
+	AutomationRuns    AutomationRunUpdater // optional — updates automation_runs on session completion
+	Issues            IssueStore
+	Repositories      RepositoryStore
+	Orgs              OrgStore
+	Jobs              JobStore
+	GitHub            GitHubTokenProvider
+	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth    ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
+	Credentials       CredentialProvider
+	Memory            MemoryService          // optional — injects learned memories into agent prompts
+	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
+	Snapshots         storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
+	UsageTracker      UsageRecorder          // optional — enables billing observability
+	Cancels           *CancelRegistry        // optional — enables session cancellation from API
+	OrgSettingsCache  *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -295,6 +308,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		agentRunLogs:      cfg.SessionLogs,
 		agentRunQuestions: cfg.SessionQuestions,
 		sessionMessages:   cfg.SessionMessages,
+		sessionIssueLinks: cfg.SessionIssueLinks,
+		issueSnapshots:    cfg.IssueSnapshots,
 		decisionLog:       cfg.DecisionLog,
 		projectTasks:      cfg.ProjectTasks,
 		automationRuns:    cfg.AutomationRuns,
@@ -357,6 +372,252 @@ func latestDurableCheckpoint(session *models.Session) (DurableCheckpoint, bool) 
 	return checkpoint, true
 }
 
+func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == models.MessageRoleUser {
+			return &messages[i]
+		}
+	}
+	return nil
+}
+
+func canonicalReferences(message *models.SessionMessage) []models.SessionInputReference {
+	if message == nil || len(message.References) == 0 {
+		return nil
+	}
+	references := make([]models.SessionInputReference, 0, len(message.References))
+	for _, reference := range message.References {
+		if err := reference.Validate(); err != nil {
+			continue
+		}
+		references = append(references, reference)
+	}
+	return references
+}
+
+func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Issue) {
+	if session == nil {
+		return
+	}
+	if session.Origin == "" {
+		switch {
+		case issue != nil && issue.Source == models.IssueSourceManual:
+			session.Origin = models.SessionOriginManual
+		case session.TriggeredByUserID != nil:
+			session.Origin = models.SessionOriginManual
+		case session.ProjectTaskID != nil:
+			session.Origin = models.SessionOriginProject
+		case session.AutomationRunID != nil:
+			session.Origin = models.SessionOriginAutomation
+		case session.ParentSessionID != nil:
+			session.Origin = models.SessionOriginRevision
+		default:
+			session.Origin = models.SessionOriginIssueTrigger
+		}
+	}
+	if session.InteractionMode == "" {
+		if session.Origin == models.SessionOriginManual {
+			session.InteractionMode = models.SessionInteractionModeInteractive
+		} else {
+			session.InteractionMode = models.SessionInteractionModeSingleRun
+		}
+	}
+	if session.ValidationPolicy == "" {
+		if session.Origin == models.SessionOriginManual {
+			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+		} else {
+			session.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
+		}
+	}
+	if session.PrimaryIssueID == nil && session.IssueID != uuid.Nil {
+		id := session.IssueID
+		session.PrimaryIssueID = &id
+	}
+}
+
+func primaryLinkedIssue(links []models.SessionIssueLink) *models.SessionIssueLink {
+	for i := range links {
+		if links[i].Role == models.SessionIssueLinkRolePrimary {
+			return &links[i]
+		}
+	}
+	return nil
+}
+
+func snapshotEntriesFromLinks(links []models.SessionIssueLink) []models.SessionIssueSnapshotEntry {
+	entries := make([]models.SessionIssueSnapshotEntry, 0, len(links))
+	for _, link := range links {
+		entry := models.SessionIssueSnapshotEntry{
+			IssueID:      link.IssueID,
+			Role:         link.Role,
+			Position:     link.Position,
+			Source:       models.IssueSourcePMAgent,
+			RepositoryID: link.RepositoryID,
+		}
+		if link.IssueTitle != nil {
+			entry.Title = *link.IssueTitle
+		}
+		if link.ExternalID != nil {
+			entry.ExternalID = *link.ExternalID
+		}
+		if link.Description != nil {
+			entry.Description = *link.Description
+		}
+		if link.IssueStatus != nil {
+			entry.Status = *link.IssueStatus
+		}
+		if link.IssueSource != nil {
+			entry.Source = *link.IssueSource
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func (o *Orchestrator) createIssueSnapshotForTurn(ctx context.Context, session *models.Session, turnNumber int) (*models.SessionTurnIssueSnapshot, error) {
+	if o.issueSnapshots == nil || o.sessionIssueLinks == nil {
+		return nil, nil
+	}
+	links, err := o.sessionIssueLinks.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list session issue links: %w", err)
+	}
+	if len(links) > 0 && primaryLinkedIssue(links) == nil {
+		return nil, fmt.Errorf("execution requires exactly one primary issue when links are present")
+	}
+	snapshot := &models.SessionTurnIssueSnapshot{
+		OrgID:        session.OrgID,
+		SessionID:    session.ID,
+		TurnNumber:   turnNumber,
+		LinkedIssues: snapshotEntriesFromLinks(links),
+	}
+	if err := o.issueSnapshots.Create(ctx, snapshot); err != nil {
+		return nil, fmt.Errorf("create issue snapshot: %w", err)
+	}
+	return snapshot, nil
+}
+
+func issueFromSnapshotEntry(entry *models.SessionIssueSnapshotEntry) *models.Issue {
+	if entry == nil {
+		return nil
+	}
+	issue := &models.Issue{
+		ID:           entry.IssueID,
+		Source:       entry.Source,
+		RepositoryID: entry.RepositoryID,
+		Title:        entry.Title,
+	}
+	if entry.ExternalID != "" {
+		issue.ExternalID = entry.ExternalID
+	}
+	if entry.Description != "" {
+		description := entry.Description
+		issue.Description = &description
+	}
+	if entry.Status != "" {
+		issue.Status = entry.Status
+	}
+	return issue
+}
+
+func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessage *models.SessionMessage, snapshot *models.SessionTurnIssueSnapshot) (*models.Issue, []models.SessionIssueSnapshotEntry) {
+	var linkedIssues []models.SessionIssueSnapshotEntry
+	if snapshot != nil {
+		linkedIssues = snapshot.LinkedIssues
+	}
+	var primary *models.SessionIssueSnapshotEntry
+	for i := range linkedIssues {
+		if linkedIssues[i].Role == models.SessionIssueLinkRolePrimary {
+			primary = &linkedIssues[i]
+			break
+		}
+	}
+	if primary != nil {
+		return issueFromSnapshotEntry(primary), linkedIssues
+	}
+	if session.Origin == models.SessionOriginManual {
+		message := ""
+		if latestMessage != nil {
+			message = latestMessage.Content
+		}
+		title := "Manual Session"
+		if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
+			title = *session.Title
+		}
+		issue := &models.Issue{
+			Source: models.IssueSourceManual,
+			Title:  title,
+		}
+		if strings.TrimSpace(message) != "" {
+			issue.Description = &message
+		}
+		return issue, linkedIssues
+	}
+
+	title := "Session task"
+	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
+		title = *session.Title
+	}
+	var descriptionParts []string
+	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
+		descriptionParts = append(descriptionParts, *session.PMApproach)
+	}
+	if session.PMReasoning != nil && strings.TrimSpace(*session.PMReasoning) != "" {
+		descriptionParts = append(descriptionParts, *session.PMReasoning)
+	}
+	issue := &models.Issue{
+		Source:       models.IssueSourcePMAgent,
+		RepositoryID: session.RepositoryID,
+		Title:        title,
+	}
+	if len(descriptionParts) > 0 {
+		description := strings.Join(descriptionParts, "\n\n")
+		issue.Description = &description
+	}
+	return issue, linkedIssues
+}
+
+func issueSnapshotEntriesFromIssue(issue *models.Issue) []models.SessionIssueSnapshotEntry {
+	if issue == nil {
+		return nil
+	}
+	entry := models.SessionIssueSnapshotEntry{
+		IssueID:      issue.ID,
+		Role:         models.SessionIssueLinkRolePrimary,
+		Position:     0,
+		Source:       issue.Source,
+		RepositoryID: issue.RepositoryID,
+		Title:        issue.Title,
+		ExternalID:   issue.ExternalID,
+		Status:       issue.Status,
+	}
+	if issue.Description != nil {
+		entry.Description = *issue.Description
+	}
+	return []models.SessionIssueSnapshotEntry{entry}
+}
+
+func (o *Orchestrator) resolvePromptSeed(ctx context.Context, session *models.Session, latestMessage *models.SessionMessage, snapshot *models.SessionTurnIssueSnapshot) (*models.Issue, []models.SessionIssueSnapshotEntry, error) {
+	issue, linkedIssues := o.promptSeedForSession(session, latestMessage, snapshot)
+	if issue != nil && (issue.ID != uuid.Nil || issue.Source == models.IssueSourceManual) {
+		hydrateSessionPolicyForExecution(session, issue)
+		return issue, linkedIssues, nil
+	}
+
+	primaryIssueID := session.EffectivePrimaryIssueID()
+	if primaryIssueID == nil || o.issues == nil {
+		hydrateSessionPolicyForExecution(session, issue)
+		return issue, linkedIssues, nil
+	}
+
+	fallbackIssue, err := o.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch primary issue: %w", err)
+	}
+	hydrateSessionPolicyForExecution(session, &fallbackIssue)
+	return &fallbackIssue, issueSnapshotEntriesFromIssue(&fallbackIssue), nil
+}
+
 // RunAgent is the main entry point. It executes an agent run end-to-end:
 // concurrency check → sandbox creation → repo clone → agent execution →
 // result handling → follow-up job enqueuing → sandbox cleanup.
@@ -372,7 +633,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	log := o.logger.With().
 		Str("session_id", run.ID.String()).
 		Str("org_id", run.OrgID.String()).
-		Str("issue_id", run.IssueID.String()).
 		Logger()
 
 	// 1. Concurrency check.
@@ -396,16 +656,30 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// during sandbox creation, not the adapter.
 	runStartedAt := time.Now()
 
-	// 3. Fetch the issue (non-fatal when IssueID is nil/zero for project-dispatched sessions).
-	var issue *models.Issue
-	if run.IssueID != uuid.Nil {
-		fetched, err := o.issues.GetByID(ctx, run.OrgID, run.IssueID)
-		if err != nil {
-			o.failRun(ctx, run, fmt.Sprintf("fetch issue: %s", err))
-			return fmt.Errorf("fetch issue: %w", err)
-		}
-		issue = &fetched
+	turnNumber := run.CurrentTurn + 1
+	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, run, turnNumber)
+	if err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("resolve issue context: %s", err))
+		return fmt.Errorf("resolve issue context: %w", err)
 	}
+	var messages []models.SessionMessage
+	if o.sessionMessages != nil {
+		messages, err = o.sessionMessages.ListBySession(ctx, run.OrgID, run.ID)
+		if err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("fetch session messages: %s", err))
+			return fmt.Errorf("fetch session messages: %w", err)
+		}
+	}
+	issue, linkedIssues, err := o.resolvePromptSeed(ctx, run, latestUserMessage(messages), issueSnapshot)
+	if err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("resolve prompt seed: %s", err))
+		return fmt.Errorf("resolve prompt seed: %w", err)
+	}
+	if issue != nil && issue.ID != uuid.Nil {
+		run.IssueID = issue.ID
+		run.PrimaryIssueID = &issue.ID
+	}
+	hydrateSessionPolicyForExecution(run, issue)
 
 	// 4. Resolve which repository to clone.
 	// Priority: session.RepositoryID → issue.RepositoryID (backwards compat).
@@ -460,10 +734,24 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 6. Prepare the prompt.
 	input := &AgentInput{
-		Issue:      issue,
+		Issue:        issue,
+		LinkedIssues: linkedIssues,
+		Manual:       run.Origin == models.SessionOriginManual,
+		UserMessage: func() string {
+			if msg := latestUserMessage(messages); msg != nil {
+				return msg.Content
+			}
+			return ""
+		}(),
 		RepoURL:    repoURL,
 		RepoBranch: branch,
-		References: manualSessionReferences(issue),
+		References: func() []models.SessionInputReference {
+			refs := canonicalReferences(latestUserMessage(messages))
+			if len(refs) > 0 {
+				return refs
+			}
+			return manualSessionReferences(issue)
+		}(),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -795,7 +1083,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// Store the successful result.
 	runResult := o.buildRunResult(run, result)
 	status := "completed"
-	isInteractive := o.isInteractiveSession(issue) && snapshotKey != ""
+	isInteractive := run.IsInteractive() && snapshotKey != ""
 
 	// 11. Confidence gating: use org-configured auto-proceed threshold.
 	if result.ConfidenceScore < confidenceThresholds.AutoProceed {
@@ -818,7 +1106,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 		log.Info().
 			Int("turn", turnNumber).
-			Msg("interactive manual session turn completed and returned to idle")
+			Msg("interactive session turn completed and returned to idle")
 		return nil
 	}
 
@@ -847,17 +1135,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 12. Enqueue follow-up job based on confidence.
 	if result.ConfidenceScore >= confidenceThresholds.AutoProceed {
-		o.enqueueJob(ctx, run.OrgID, "agent", "validate", map[string]interface{}{
+		payload := map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
-		})
+		}
+		if issueSnapshot != nil {
+			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+		}
+		o.enqueueJob(ctx, run.OrgID, "agent", "validate", payload)
 	}
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
 		if outcome != "" {
-			if run.IssueID != uuid.Nil {
-				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, run.IssueID, outcome); err != nil {
+			if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, *primaryIssueID, outcome); err != nil {
 					o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
 				}
 			} else {
@@ -940,18 +1232,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return fmt.Errorf("fetch session messages: %w", err)
 	}
 
-	var userMessage string
-	var planMode bool
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == models.MessageRoleUser {
-			userMessage = messages[i].Content
-			break
-		}
-	}
-	if userMessage == "" {
+	latestMsg := latestUserMessage(messages)
+	if latestMsg == nil || strings.TrimSpace(latestMsg.Content) == "" {
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}
+	userMessage := latestMsg.Content
+	var planMode bool
 
 	// Detect plan mode prefix and strip it, wrapping with plan instructions.
 	const planModePrefix = "[PLAN_MODE]\n"
@@ -968,6 +1255,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			"User's request:\n" + originalMessage
 	}
 	_ = planMode // used by adapters that support explicit plan mode
+
+	turnNumber := session.CurrentTurn + 1
+	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, turnNumber)
+	if err != nil {
+		o.failRun(ctx, session, fmt.Sprintf("resolve issue context: %s", err))
+		return fmt.Errorf("resolve issue context: %w", err)
+	}
+	promptIssue, linkedIssues := o.promptSeedForSession(session, latestMsg, issueSnapshot)
+	if promptIssue != nil && promptIssue.ID != uuid.Nil {
+		session.IssueID = promptIssue.ID
+		session.PrimaryIssueID = &promptIssue.ID
+	}
+	hydrateSessionPolicyForExecution(session, promptIssue)
 
 	// 4. Create sandbox.
 	sandboxCfg := DefaultSandboxConfig()
@@ -1273,7 +1573,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
 		input := &AgentInput{
-			Issue: &issue,
+			Issue:        &issue,
+			LinkedIssues: linkedIssues,
+			Manual:       session.Origin == models.SessionOriginManual,
+			UserMessage:  latestMsg.Content,
+			References: func() []models.SessionInputReference {
+				refs := canonicalReferences(latestMsg)
+				if len(refs) > 0 {
+					return refs
+				}
+				return manualSessionReferences(&issue)
+			}(),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {
 					return ""
@@ -1308,7 +1618,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 6. Execute agent with log streaming.
-	turnNumber := session.CurrentTurn + 1
 	logCh := make(chan LogEntry, 100)
 	var logWg sync.WaitGroup
 	logWg.Add(1)
@@ -1383,16 +1692,29 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // snapshot is available. Returns the issue (for prompt building) and the repo
 // full name (for memory lookup). Handles sessions with or without a repository.
 func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
-	// Fetch the issue to get repository info.
-	issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
-	if err != nil {
-		return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
+	var issue models.Issue
+	if primaryIssueID := session.EffectivePrimaryIssueID(); primaryIssueID != nil {
+		fetched, err := o.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+		if err != nil {
+			return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
+		}
+		issue = fetched
+	} else if session.Title != nil {
+		issue = models.Issue{
+			Source:       models.IssueSourcePMAgent,
+			RepositoryID: session.RepositoryID,
+			Title:        *session.Title,
+		}
 	}
 
 	// Clone repo if the session has one.
 	var repoFullName string
-	if issue.RepositoryID != nil {
-		repo, err := o.repositories.GetByID(ctx, session.OrgID, *issue.RepositoryID)
+	repoID := session.RepositoryID
+	if repoID == nil {
+		repoID = issue.RepositoryID
+	}
+	if repoID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("fetch repository: %w", err)
 		}
@@ -1438,7 +1760,7 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 // silently diverging.
 func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) (string, error) {
 	repoID := session.RepositoryID
-	if repoID == nil {
+	if repoID == nil && session.IssueID != uuid.Nil {
 		issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
 		if err != nil {
 			return "", fmt.Errorf("fetch issue for session repo lookup: %w", err)
@@ -1447,6 +1769,8 @@ func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Sess
 			return "", nil
 		}
 		repoID = issue.RepositoryID
+	} else if repoID == nil {
+		return "", nil
 	}
 	repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
 	if err != nil {
@@ -2133,10 +2457,6 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 	session.SnapshotKey = &snapshotKey
 
 	return snapshotKey, nil
-}
-
-func (o *Orchestrator) isInteractiveSession(issue *models.Issue) bool {
-	return issue != nil && issue.Source == models.IssueSourceManual && o.sessionMessages != nil && o.snapshots != nil
 }
 
 func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {

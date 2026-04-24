@@ -143,7 +143,7 @@ var previewAccessSessionTestCols = []string{
 }
 
 var sessionTestCols = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -155,6 +155,17 @@ var sessionTestCols = []string{
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
 	"deleted_at", "created_at",
+}
+
+func previewManagerSessionRow(values ...any) []any {
+	if len(values) == len(sessionTestCols)-3 {
+		row := make([]any, 0, len(values)+3)
+		row = append(row, values[:3]...)
+		row = append(row, "", "", "")
+		row = append(row, values[3:]...)
+		return row
+	}
+	return values
 }
 
 func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time) []any {
@@ -176,7 +187,7 @@ func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash strin
 
 func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Time) []any {
 	issueID := uuid.New()
-	return []any{
+	return previewManagerSessionRow(
 		sessionID, issueID, orgID, "claude-code", "running", "supervised", "low",
 		nil, nil, nil, nil,
 		containerID, nil, false, &now, nil, nil,
@@ -187,7 +198,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		nil, 0, now, "running", nil,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
-	}
+	)
 }
 
 func newTestManager(mock pgxmock.PgxPoolIface, provider PreviewCapableProvider) *Manager {

@@ -715,7 +715,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 // schema change in one file flips this test red instead of silently
 // returning the wrong shape from pgxmock.
 var sessionRowColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -730,8 +730,24 @@ var sessionRowColumns = []string{
 	"deleted_at", "created_at",
 }
 
+func previewSessionRow(values ...interface{}) []interface{} {
+	if len(values) == len(sessionRowColumns)-3 {
+		row := make([]interface{}, 0, len(values)+3)
+		row = append(row, values[:3]...)
+		row = append(
+			row,
+			"",
+			"",
+			"",
+		)
+		row = append(row, values[3:]...)
+		return row
+	}
+	return values
+}
+
 func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
-	return []interface{}{
+	return previewSessionRow(
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
@@ -746,7 +762,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		"running", nil, nil, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
-	}
+	)
 }
 
 // sessionRowReuseWithSnapshot builds a row that satisfies both the reuse
@@ -754,7 +770,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 // fallback precondition (snapshot_key set). Used by the zombie-reuse tests
 // where IsAlive decides which branch the handler takes.
 func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapshotKey *string) []interface{} {
-	return []interface{}{
+	return previewSessionRow(
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
@@ -766,14 +782,14 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 		"running", snapshotKey, nil, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
-	}
+	)
 }
 
 // sessionRowForHydrate builds a session row with no live container but a
 // configurable snapshot key and sandbox state — used to exercise the three
 // acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
 func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState string) []interface{} {
-	return []interface{}{
+	return previewSessionRow(
 		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		nil, nil, false, nil, nil, json.RawMessage(`{}`),
@@ -785,7 +801,7 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 		sandboxState, snapshotKey, nil, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, time.Now(),
-	}
+	)
 }
 
 // fakeHydrateSnapshotStore is a minimal SnapshotStore that writes a canned

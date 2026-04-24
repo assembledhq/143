@@ -36,8 +36,8 @@ func (a *GeminiCLIAdapter) Name() models.AgentType {
 
 // PreparePrompt constructs the prompts for Gemini CLI based on the issue context.
 func (a *GeminiCLIAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
-	if input == nil || input.Issue == nil {
-		return nil, fmt.Errorf("agent input and issue are required")
+	if input == nil {
+		return nil, fmt.Errorf("agent input is required")
 	}
 
 	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)

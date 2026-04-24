@@ -1,0 +1,13 @@
+<linked_issues>
+{{- range .LinkedIssues }}
+  <issue role="{{ .Role }}" source="{{ .Source }}">
+    <title>{{ .Title }}</title>
+    {{- if .ExternalID }}
+    <external_id>{{ .ExternalID }}</external_id>
+    {{- end }}
+    {{- if .Description }}
+    <description>{{ .Description }}</description>
+    {{- end }}
+  </issue>
+{{- end }}
+</linked_issues>

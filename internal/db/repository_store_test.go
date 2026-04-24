@@ -552,7 +552,7 @@ func TestRepositoryStore_GetSummary(t *testing.T) {
 		"latest_session_status", "active_project_count",
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM repositories r").
+	mock.ExpectQuery(`COALESCE\(s.repository_id, legacy_issue.repository_id\)`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(summaryColumns).
@@ -586,7 +586,7 @@ func TestRepositoryStore_GetSummary_Empty(t *testing.T) {
 		"latest_session_status", "active_project_count",
 	}
 
-	mock.ExpectQuery("SELECT .+ FROM repositories r").
+	mock.ExpectQuery(`COALESCE\(s.repository_id, legacy_issue.repository_id\)`).
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(summaryColumns))
 

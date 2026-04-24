@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +47,8 @@ type SessionHandler struct {
 	orgStore         *db.OrganizationStore
 	jobStore         *db.JobStore
 	messageStore     *db.SessionMessageStore
+	linkStore        *db.SessionIssueLinkStore
+	issueSnapshots   *db.SessionTurnIssueSnapshotStore
 	threadStore      *db.SessionThreadStore
 	viewStore        *db.SessionViewStore
 	prCredentials    githubStatusCredentialStore
@@ -65,6 +66,29 @@ type SessionHandler struct {
 	streams          *cache.SessionStreams
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
+}
+
+func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
+	h.linkStore = store
+}
+
+func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
+	h.issueSnapshots = store
+}
+
+func (h *SessionHandler) enrichSessionLinks(ctx context.Context, orgID uuid.UUID, session *models.Session) {
+	if session == nil || h.linkStore == nil {
+		return
+	}
+	links, err := h.linkStore.ListBySession(ctx, orgID, session.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load session issue links")
+		return
+	}
+	session.LinkedIssues = links
+	if primary := session.EffectivePrimaryIssueID(); primary != nil {
+		session.PrimaryIssueID = primary
+	}
 }
 
 // SetAuditEmitter injects the audit emitter for logging session events.
@@ -256,6 +280,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	items := make([]models.SessionListItem, len(runs))
 	sessionIDs := make([]uuid.UUID, len(runs))
 	for i, s := range runs {
+		h.enrichSessionLinks(r.Context(), orgID, &s)
 		items[i] = models.SessionListItem{Session: s}
 		sessionIDs[i] = s.ID
 	}
@@ -345,6 +370,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "run not found")
 		return
 	}
+	h.enrichSessionLinks(r.Context(), orgID, &run)
 
 	detail := models.SessionDetail{Session: run}
 	if h.threadStore != nil {
@@ -511,6 +537,10 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN_MODE", "token_mode must be one of: low, high")
 		return
 	}
+	if issue.RepositoryID == nil {
+		writeError(w, r, http.StatusBadRequest, "REPOSITORY_REQUIRED", "issue must be attached to a repository before starting a session")
+		return
+	}
 
 	var triggeredByUserID *uuid.UUID
 	if user := middleware.UserFromContext(r.Context()); user != nil {
@@ -519,12 +549,17 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 
 	run := &models.Session{
 		IssueID:           issueID,
+		PrimaryIssueID:    &issueID,
 		OrgID:             orgID,
+		Origin:            models.SessionOriginIssueTrigger,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnTurnComplete,
 		AgentType:         agentType,
 		Status:            "pending",
 		AutonomyLevel:     autonomyLevel,
 		TokenMode:         tokenMode,
 		TriggeredByUserID: triggeredByUserID,
+		RepositoryID:      issue.RepositoryID,
 	}
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
@@ -557,6 +592,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionIDStr := run.ID.String()
+	h.enrichSessionLinks(r.Context(), orgID, run)
 	emitUserAuditWithSession(
 		h.audit,
 		r,
@@ -610,6 +646,7 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch updated session", err)
 		return
 	}
+	h.enrichSessionLinks(r.Context(), orgID, &session)
 
 	sessionIDStr := sessionID.String()
 	retryDetails := sessionAuditSnapshot(&session, nil, map[string]any{
@@ -1551,8 +1588,12 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
-	if session.TriggeredByUserID != nil {
-		// Manual sessions skip validation — go straight to PR creation.
+	if h.issueSnapshots != nil && session.CurrentTurn > 0 {
+		if issueSnapshot, snapErr := h.issueSnapshots.GetByTurn(r.Context(), orgID, sessionID, session.CurrentTurn); snapErr == nil {
+			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+		}
+	}
+	if session.ShouldValidateOnSessionEnd() || session.ValidationPolicy == models.SessionValidationPolicySkip {
 		dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 		if _, err := h.jobStore.Enqueue(r.Context(), orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation", err)
@@ -1575,6 +1616,7 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 	// because it's now status=completed with sandbox_state=snapshotted.
 
 	session.Status = string(models.SessionStatusCompleted)
+	h.enrichSessionLinks(r.Context(), orgID, &session)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
 
@@ -1766,37 +1808,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
-	fingerprint := fmt.Sprintf("manual:%x", sha256.Sum256([]byte(fmt.Sprintf("%s:%d", body.Message, now.UnixNano()))))
-	description := buildManualSessionDescription(body.Message, body.Images)
 	title := manualSessionTitle(body.Message)
-	rawData, err := json.Marshal(map[string]any{
-		"manual_session": true,
-		"images":         body.Images,
-		"references":     body.References,
-	})
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENCODE_FAILED", "failed to encode manual session context", err)
-		return
-	}
-	issue := &models.Issue{
-		OrgID:        orgID,
-		ExternalID:   "manual-" + now.UTC().Format("20060102150405") + "-" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Source:       models.IssueSourceManual,
-		RepositoryID: repoID,
-		Title:        title,
-		Description:  &description,
-		RawData:      rawData,
-		Status:       "open",
-		FirstSeenAt:  now,
-		LastSeenAt:   now,
-		Fingerprint:  fingerprint,
-	}
-
-	if err := h.issueStore.Upsert(r.Context(), issue); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ISSUE_CREATE_FAILED", "failed to create manual issue", err)
-		return
-	}
 
 	var manualTriggeredByUserID *uuid.UUID
 	if user := middleware.UserFromContext(r.Context()); user != nil {
@@ -1804,8 +1816,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &models.Session{
-		IssueID:           issue.ID,
 		OrgID:             orgID,
+		Origin:            models.SessionOriginManual,
+		InteractionMode:   models.SessionInteractionModeInteractive,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
 		AgentType:         agentType,
 		Status:            "pending",
 		AutonomyLevel:     autonomyLevel,
@@ -1882,6 +1896,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	manualSessionIDStr := session.ID.String()
+	h.enrichSessionLinks(r.Context(), orgID, session)
 	emitUserAuditWithSession(
 		h.audit,
 		r,
@@ -1890,7 +1905,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		&manualSessionIDStr,
 		&session.ID,
 		nil,
-		sessionCreateAuditDetails(h.logger, session, issue, map[string]any{
+		sessionCreateAuditDetails(h.logger, session, nil, map[string]any{
 			"manual_session": true,
 			"image_count":    len(body.Images),
 		}),

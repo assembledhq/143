@@ -270,7 +270,9 @@ This is the endpoint hit when a user clicks the invite link in their email. The 
 | Invitation revoked | 410 | `INVITE_REVOKED` |
 
 **Flow:** When the user clicks the email link (`{FRONTEND_URL}/invite/accept?token=...`), the frontend calls this endpoint. Based on the response:
-- If `action: "joined"`, the user is already authenticated and now part of the org — redirect to dashboard.
+- The invite accept surface always starts with a prominent pending-invitation state: org name first, invited email / GitHub username second, and a single obvious primary action.
+- If the browser already has a valid session, the frontend immediately calls `POST /api/v1/auth/claim-invitation` with the token, switches the tab-local active org to the invited org, and redirects into the app. The user should not need to "log in again" just to redeem an invite they already proved ownership for.
+- If `action: "login"`, the frontend redirects to the sign-in page with the invitation token pre-filled and keeps the invitation context visible above the auth controls. This matters for existing-account invitees: the screen must make it obvious that the goal is "join Acme" rather than "sign in to 143.dev" in the abstract.
 - If `action: "register"`, the frontend redirects to the registration page with the invitation token pre-filled and carries the invited email + org for display context. The registration form pre-fills the invited email and keeps it read-only so users set name/password without changing invite identity. After registration completes, the auth handler checks for a pending invitation token, accepts it, and places the user in the correct org with the invited role.
 
 ### Change member role

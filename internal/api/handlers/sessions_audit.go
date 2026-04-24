@@ -15,12 +15,17 @@ import (
 // without copying large prompts, diffs, or other sensitive blobs.
 func sessionAuditSnapshot(session *models.Session, issue *models.Issue, extra map[string]any) map[string]any {
 	details := map[string]any{
-		"session_id":     session.ID.String(),
-		"issue_id":       session.IssueID.String(),
-		"agent_type":     string(session.AgentType),
-		"status":         session.Status,
-		"autonomy_level": session.AutonomyLevel,
-		"token_mode":     session.TokenMode,
+		"session_id":        session.ID.String(),
+		"agent_type":        string(session.AgentType),
+		"status":            session.Status,
+		"origin":            session.Origin,
+		"interaction_mode":  session.InteractionMode,
+		"validation_policy": session.ValidationPolicy,
+		"autonomy_level":    session.AutonomyLevel,
+		"token_mode":        session.TokenMode,
+	}
+	if issueID := session.EffectivePrimaryIssueID(); issueID != nil {
+		details["issue_id"] = issueID.String()
 	}
 	if !session.CreatedAt.IsZero() {
 		details["created_at"] = session.CreatedAt.UTC().Format(time.RFC3339Nano)

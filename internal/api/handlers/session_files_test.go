@@ -70,7 +70,7 @@ func withSessionRoute(handler http.HandlerFunc) http.Handler {
 // column, but the actual SQL also returns diff_stats and diff_history before created_at.
 // We redefine the full set here to avoid coupling.
 var sessionColumnsForFiles = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -81,13 +81,29 @@ var sessionColumnsForFiles = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
 }
 
+func sessionFileTestRow(values ...interface{}) []interface{} {
+	if len(values) == len(sessionColumnsForFiles)-3 {
+		row := make([]interface{}, 0, len(values)+3)
+		row = append(row, values[:3]...)
+		row = append(
+			row,
+			"",
+			"",
+			"",
+		)
+		row = append(row, values[3:]...)
+		return row
+	}
+	return values
+}
+
 func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, containerID *string) {
 	now := time.Now()
 	issueID := uuid.New()
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows(sessionColumnsForFiles).AddRow(
+			pgxmock.NewRows(sessionColumnsForFiles).AddRow(sessionFileTestRow(
 				sessionID, issueID, orgID, "claude_code", "running", "supervised", "standard",
 				nil, nil, nil, nil, // complexity_tier through risk_factors
 				containerID, nil, false, &now, nil, nil, // container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage
@@ -107,7 +123,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 				nil,            // latest_diff_snapshot_id
 				nil,            // deleted_at
 				now,            // created_at
-			),
+			)...),
 		)
 }
 
