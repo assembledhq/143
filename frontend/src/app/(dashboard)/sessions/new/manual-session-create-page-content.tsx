@@ -30,6 +30,7 @@ import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { findActiveMention, insertMentionAtCaret, removeMentionReference, syncReferencesWithMessage } from "@/lib/session-composer-mentions";
+import { clearDraft, loadDraft, saveDraft } from "@/lib/session-draft";
 import { queryKeys } from "@/lib/query-keys";
 import {
   AGENTS,
@@ -115,9 +116,89 @@ export function ManualSessionCreatePageContent() {
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const [mentionPickerPosition, setMentionPickerPosition] = useState<MentionPickerPosition | null>(null);
+  // Gates the persist effect until after hydration so we never overwrite a
+  // stored draft with the component's initial (empty) state on first mount.
+  const [draftHydrated, setDraftHydrated] = useState(false);
   const previousRepoIdRef = useRef<string>("");
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
+
+  // Hydrate once on mount. A `?repo=` URL param represents fresh explicit
+  // intent (e.g. the user just clicked a repo in the switcher), so it wins
+  // over the repo stored in the draft. When the URL's repo conflicts with
+  // the draft's, we keep repo-agnostic fields (prompt, attachments, model)
+  // but drop references/mentions — they were resolved against a different
+  // repo tree and wouldn't match the new one.
+  useEffect(() => {
+    const draft = loadDraft();
+    if (draft) {
+      const repoConflict =
+        !!repoId && !!draft.userSelectedRepoId && repoId !== draft.userSelectedRepoId;
+
+      setAttachments(draft.attachments);
+      setSelectedModel(draft.selectedModel);
+      setShowImageInput(draft.showImageInput);
+      setImageURL(draft.imageURL);
+      setBranchByRepoId(draft.branchByRepoId);
+      if (!repoId) {
+        setUserSelectedRepoId(draft.userSelectedRepoId);
+      }
+
+      if (repoConflict) {
+        const stripped = draft.references.reduce(
+          (text, reference) => removeMentionReference(text, reference),
+          draft.message,
+        );
+        setMessage(stripped);
+        setReferences([]);
+      } else {
+        setMessage(draft.message);
+        setReferences(draft.references);
+      }
+
+      // Put the caret at the end so the user can keep typing where they left
+      // off rather than having to click into the field.
+      requestAnimationFrame(() => {
+        const el = messageInputRef.current;
+        if (!el) return;
+        const end = el.value.length;
+        el.setSelectionRange(end, end);
+        setCaretPosition(end);
+      });
+    }
+    setDraftHydrated(true);
+    // Intentionally one-shot: we only restore at the moment the composer
+    // mounts. Subsequent URL or state changes should not re-hydrate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist the serializable slice of form state on every change. Pure UI
+  // state (caret, dictation, mention picker, errors, upload-in-flight flag)
+  // is deliberately excluded — restoring it on reload would be meaningless or
+  // confusing.
+  useEffect(() => {
+    if (!draftHydrated) return;
+    saveDraft({
+      message,
+      attachments,
+      references,
+      selectedModel,
+      userSelectedRepoId,
+      branchByRepoId,
+      showImageInput,
+      imageURL,
+    });
+  }, [
+    draftHydrated,
+    message,
+    attachments,
+    references,
+    selectedModel,
+    userSelectedRepoId,
+    branchByRepoId,
+    showImageInput,
+    imageURL,
+  ]);
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -234,6 +315,7 @@ export function ManualSessionCreatePageContent() {
       if (selectedRepoId) {
         try { localStorage.setItem("143:lastUsedRepoId", selectedRepoId); } catch {}
       }
+      clearDraft();
       // Keep the optimistic row visible — the sidebar swaps it for the real
       // session once the refetch lands. See OptimisticSession.resolvedId.
       markOptimisticResolved(context.optimisticId, response.data.id);

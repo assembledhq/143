@@ -1,7 +1,10 @@
 import React from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { ManualSessionCreatePageContent } from "./manual-session-create-page-content";
+
+const DRAFT_STORAGE_KEY = "143:new-session-draft";
 
 const mocks = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
@@ -108,6 +111,7 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
 describe("ManualSessionCreatePageContent", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((m) => m.mockClear());
+    window.sessionStorage.clear();
   });
 
   it("renders the session creation form", async () => {
@@ -252,6 +256,83 @@ describe("ManualSessionCreatePageContent", () => {
           reasoning_effort: "max",
         }),
       );
+    });
+  });
+
+  describe("draft persistence", () => {
+    it("restores a stored prompt on mount", async () => {
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 1,
+          message: "Previously typed prompt",
+          attachments: [],
+          references: [],
+          selectedModel: "",
+          userSelectedRepoId: null,
+          branchByRepoId: {},
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        "Tell the agent what to do...",
+      );
+      await waitFor(() => {
+        expect(textarea.value).toBe("Previously typed prompt");
+      });
+    });
+
+    it("writes the prompt to sessionStorage as the user types", async () => {
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        "Tell the agent what to do...",
+      );
+      fireEvent.change(textarea, { target: { value: "draft in progress" } });
+
+      await waitFor(() => {
+        const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+        expect(stored).not.toBeNull();
+        expect(JSON.parse(stored!)).toMatchObject({
+          __v: 1,
+          message: "draft in progress",
+        });
+      });
+    });
+
+    it("clears the stored draft on successful submit", async () => {
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        "Tell the agent what to do...",
+      );
+      fireEvent.change(textarea, { target: { value: "ship it" } });
+
+      await waitFor(() => {
+        expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).not.toBeNull();
+      });
+
+      fireEvent.keyDown(textarea, { key: "Enter" });
+
+      await waitFor(() => {
+        expect(mocks.createSessionMock).toHaveBeenCalled();
+      });
+      await waitFor(() => {
+        expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+      });
+    });
+
+    it("does not persist an empty draft", async () => {
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      await screen.findByPlaceholderText("Tell the agent what to do...");
+      // Give the persist effect a chance to run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
     });
   });
 });
