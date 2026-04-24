@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -92,6 +93,46 @@ func (s *UserStore) GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models
 		return models.User{}, fmt.Errorf("query user: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+// GetLastOrgID returns the user's persisted cross-login active-org preference.
+// Nullable: nil means the user has never explicitly selected an org (or the
+// preference was cleared after losing that membership), so callers should fall
+// back to request-time resolution.
+//
+// lint:allow-no-orgid reason="user-scoped preference lookup by globally unique user id"
+func (s *UserStore) GetLastOrgID(ctx context.Context, userID uuid.UUID) (*uuid.UUID, error) {
+	var lastOrgID pgtype.UUID
+	err := s.db.QueryRow(ctx,
+		`SELECT last_org_id FROM users WHERE id = @id`,
+		pgx.NamedArgs{"id": userID},
+	).Scan(&lastOrgID)
+	if err != nil {
+		return nil, err
+	}
+	if !lastOrgID.Valid {
+		return nil, nil
+	}
+	id, err := uuid.FromBytes(lastOrgID.Bytes[:])
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+// UpdateLastOrgID stores the user's cross-login active-org preference. Passing
+// nil clears the preference (e.g. when the user loses that membership).
+//
+// lint:allow-no-orgid reason="user-scoped preference update by globally unique user id"
+func (s *UserStore) UpdateLastOrgID(ctx context.Context, userID uuid.UUID, lastOrgID *uuid.UUID) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET last_org_id = @last_org_id WHERE id = @id`,
+		pgx.NamedArgs{
+			"id":          userID,
+			"last_org_id": lastOrgID,
+		},
+	)
+	return err
 }
 
 // GetByGitHubID looks up a user by their GitHub user id (cross-org).
