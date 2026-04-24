@@ -39,11 +39,9 @@ Notes:
 - [ ] `ENCRYPTION_MASTER_KEY` (required if you want encrypted credentials at rest)
 - [ ] Worker capacity knobs (for `MODE=worker` or mixed `MODE=all` nodes):
   - `WORKER_PROCESS_COUNT` (default `1`) — how many in-process worker loops run on this node
-  - `SANDBOX_CPU_LIMIT` (default `2`) — CPU cores per sandbox container
-  - `SANDBOX_MEMORY_LIMIT_MB` (default `4096`) — memory per sandbox container
-  - `SANDBOX_DISK_LIMIT_GB` (default `10`) — rootfs disk per sandbox container
-  - For fleet deploys, put these in `.env.production.enc` like other deploy env vars.
-  - For mixed worker sizes, set `WORKER_DEFAULT_BUCKET` plus `WORKER_BUCKET_MAP=10.0.0.4=hcloud-cpx21,10.0.0.5=hcloud-cpx31,10.0.0.6=hcloud-ccx23` (supports CPX shared + CCX dedicated families).
+  - For fleet deploys, put worker sizing env vars in `.env.production.enc` like other deploy env vars.
+  - For mixed worker sizes, set `WORKER_BUCKET_MAP=10.0.0.4=hcloud-cpx21,10.0.0.5=hcloud-cpx31,10.0.0.6=hcloud-ccx23` (supports CPX shared + CCX dedicated families), or set `WORKER_PROCESS_COUNT` directly per worker.
+  - The codebase still has internal sandbox CPU/memory/disk defaults, but those are not part of the documented self-hosting env surface in this checklist.
   - See [worker-capacity-tuning.md](worker-capacity-tuning.md) for sizing guidance by server size.
 
 ### GitHub auth/integration (required for login + GitHub features)
@@ -108,6 +106,6 @@ Optional LLM routing vars:
 These are common points of confusion:
 
 - `readyz` currently verifies database connectivity only.
-- Worker/sandbox sizing knobs are loaded at process startup from env. Changing them requires a container/process restart.
+- Documented worker sizing knobs are loaded at process startup from env. Changing them requires a container/process restart.
 - There is no `Dockerfile.sandbox` in this repo today.
 - Observability env vars like `MEZMO_*` and `DD_*` are documented in design docs, but are not currently loaded by `internal/config/config.go`.

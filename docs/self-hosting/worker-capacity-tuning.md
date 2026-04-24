@@ -50,14 +50,11 @@ This is intentionally not ultra-conservative: it targets full utilization at the
 
 For fleet-managed deploys, set these values in `.env.production.enc` (same pattern as other deploy-time env vars like `MODE`, `DB_HOST`, etc.). Deploy/provision scripts write them into `/opt/143/.env` for worker nodes.
 
-You can set a fleet-wide default bucket with `WORKER_DEFAULT_BUCKET` and map specific hosts in one env var using `WORKER_BUCKET_MAP`.
+For fleet-managed deploys, either set `WORKER_PROCESS_COUNT` directly or map specific hosts in one env var using `WORKER_BUCKET_MAP`.
 
 Example:
 
 ```dotenv
-# optional default bucket for unmapped workers
-WORKER_DEFAULT_BUCKET=hcloud-cpx31
-
 # map host/IP to bucket in one variable
 WORKER_BUCKET_MAP=10.0.0.4=hcloud-cpx21,10.0.0.5=hcloud-cpx31,10.0.0.6=hcloud-ccx23
 ```
