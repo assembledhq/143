@@ -51,11 +51,11 @@ func TestGeminiCLIAdapter_PreparePrompt(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "nil issue returns error",
+			name: "nil issue still prepares prompt",
 			input: &agent.AgentInput{
 				Issue: nil,
 			},
-			expectErr: true,
+			expectedMaxTokens: 50_000,
 		},
 	}
 

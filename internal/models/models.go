@@ -128,17 +128,22 @@ type Issue struct {
 
 // Session represents an attempt to fix an issue via a coding agent.
 type Session struct {
-	ID                  uuid.UUID `db:"id" json:"id"`
-	IssueID             uuid.UUID `db:"issue_id" json:"issue_id"`
-	OrgID               uuid.UUID `db:"org_id" json:"org_id"`
-	AgentType           AgentType `db:"agent_type" json:"agent_type"`
-	Status              string    `db:"status" json:"status"`
-	AutonomyLevel       string    `db:"autonomy_level" json:"autonomy_level"`
-	TokenMode           string    `db:"token_mode" json:"token_mode"`
-	ComplexityTier      *int      `db:"complexity_tier" json:"complexity_tier,omitempty"`
-	ConfidenceScore     *float64  `db:"confidence_score" json:"confidence_score,omitempty"`
-	ConfidenceReasoning *string   `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
-	RiskFactors         []string  `db:"risk_factors" json:"risk_factors,omitempty"`
+	ID                  uuid.UUID               `db:"id" json:"id"`
+	IssueID             uuid.UUID               `db:"issue_id" json:"-"`
+	PrimaryIssueID      *uuid.UUID              `db:"-" json:"primary_issue_id,omitempty"`
+	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
+	Origin              SessionOrigin           `db:"origin" json:"origin"`
+	InteractionMode     SessionInteractionMode  `db:"interaction_mode" json:"interaction_mode"`
+	ValidationPolicy    SessionValidationPolicy `db:"validation_policy" json:"validation_policy"`
+	LinkedIssues        []SessionIssueLink      `db:"-" json:"linked_issues,omitempty"`
+	AgentType           AgentType               `db:"agent_type" json:"agent_type"`
+	Status              string                  `db:"status" json:"status"`
+	AutonomyLevel       string                  `db:"autonomy_level" json:"autonomy_level"`
+	TokenMode           string                  `db:"token_mode" json:"token_mode"`
+	ComplexityTier      *int                    `db:"complexity_tier" json:"complexity_tier,omitempty"`
+	ConfidenceScore     *float64                `db:"confidence_score" json:"confidence_score,omitempty"`
+	ConfidenceReasoning *string                 `db:"confidence_reasoning" json:"confidence_reasoning,omitempty"`
+	RiskFactors         []string                `db:"risk_factors" json:"risk_factors,omitempty"`
 	// ContainerID is the Docker container hosting the session's sandbox when
 	// one is live. Non-null only while at least one holder
 	// (TurnHoldingContainer or an active preview) is keeping it alive — see
@@ -210,6 +215,142 @@ type Session struct {
 type SessionDetail struct {
 	Session
 	Threads []SessionThread `json:"threads"`
+}
+
+// SessionIssueLink is the live join model between a session and an issue.
+type SessionIssueLink struct {
+	ID            uuid.UUID            `db:"id" json:"id"`
+	OrgID         uuid.UUID            `db:"org_id" json:"org_id"`
+	SessionID     uuid.UUID            `db:"session_id" json:"session_id"`
+	IssueID       uuid.UUID            `db:"issue_id" json:"issue_id"`
+	Role          SessionIssueLinkRole `db:"role" json:"role"`
+	Position      int                  `db:"position" json:"position"`
+	AddedByUserID *uuid.UUID           `db:"added_by_user_id" json:"added_by_user_id,omitempty"`
+	CreatedAt     time.Time            `db:"created_at" json:"created_at"`
+	IssueTitle    *string              `db:"issue_title" json:"issue_title,omitempty"`
+	IssueSource   *IssueSource         `db:"issue_source" json:"issue_source,omitempty"`
+	ExternalID    *string              `db:"external_id" json:"external_id,omitempty"`
+	Description   *string              `db:"description" json:"description,omitempty"`
+	RepositoryID  *uuid.UUID           `db:"repository_id" json:"repository_id,omitempty"`
+	IssueStatus   *string              `db:"issue_status" json:"issue_status,omitempty"`
+}
+
+// SessionIssueSnapshotEntry is the immutable execution-time issue context
+// captured for a specific session turn.
+type SessionIssueSnapshotEntry struct {
+	IssueID      uuid.UUID            `json:"issue_id"`
+	Role         SessionIssueLinkRole `json:"role"`
+	Position     int                  `json:"position"`
+	Title        string               `json:"title"`
+	ExternalID   string               `json:"external_id,omitempty"`
+	Source       IssueSource          `json:"source"`
+	Description  string               `json:"description,omitempty"`
+	RepositoryID *uuid.UUID           `json:"repository_id,omitempty"`
+	Status       string               `json:"status,omitempty"`
+}
+
+// SessionTurnIssueSnapshot is the authoritative resolved issue context used by
+// a given execution turn.
+type SessionTurnIssueSnapshot struct {
+	ID              uuid.UUID                   `db:"id" json:"id"`
+	OrgID           uuid.UUID                   `db:"org_id" json:"org_id"`
+	SessionID       uuid.UUID                   `db:"session_id" json:"session_id"`
+	TurnNumber      int                         `db:"turn_number" json:"turn_number"`
+	LinkedIssues    []SessionIssueSnapshotEntry `db:"-" json:"linked_issues"`
+	RawLinkedIssues json.RawMessage             `db:"linked_issues" json:"-"`
+	CreatedAt       time.Time                   `db:"created_at" json:"created_at"`
+}
+
+func (s Session) EffectivePrimaryIssueID() *uuid.UUID {
+	if s.PrimaryIssueID != nil {
+		return s.PrimaryIssueID
+	}
+	if s.IssueID == uuid.Nil {
+		return nil
+	}
+	id := s.IssueID
+	return &id
+}
+
+func (s Session) HasPrimaryIssue() bool {
+	return s.EffectivePrimaryIssueID() != nil
+}
+
+func (s Session) IsInteractive() bool {
+	return s.InteractionMode == SessionInteractionModeInteractive
+}
+
+func (s Session) ShouldValidateOnTurnComplete() bool {
+	return s.ValidationPolicy == SessionValidationPolicyOnTurnComplete
+}
+
+func (s Session) ShouldValidateOnSessionEnd() bool {
+	return s.ValidationPolicy == SessionValidationPolicyOnSessionEnd
+}
+
+func (s Session) MarshalJSON() ([]byte, error) {
+	type alias Session
+	return json.Marshal(struct {
+		alias
+		IssueID *uuid.UUID `json:"issue_id"`
+	}{
+		alias:   alias(s),
+		IssueID: s.EffectivePrimaryIssueID(),
+	})
+}
+
+func (s *Session) UnmarshalJSON(data []byte) error {
+	type alias Session
+	aux := struct {
+		alias
+		IssueID *uuid.UUID `json:"issue_id"`
+	}{}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*s = Session(aux.alias)
+	if aux.IssueID != nil {
+		s.IssueID = *aux.IssueID
+		if s.PrimaryIssueID == nil {
+			s.PrimaryIssueID = aux.IssueID
+		}
+	}
+	return nil
+}
+
+func (s Session) marshalJSONMap() (map[string]any, error) {
+	sessionJSON, err := s.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	var base map[string]any
+	if err := json.Unmarshal(sessionJSON, &base); err != nil {
+		return nil, err
+	}
+	return base, nil
+}
+
+func (s SessionDetail) MarshalJSON() ([]byte, error) {
+	base, err := s.Session.marshalJSONMap()
+	if err != nil {
+		return nil, err
+	}
+	base["threads"] = s.Threads
+	return json.Marshal(base)
+}
+
+func (s SessionListItem) MarshalJSON() ([]byte, error) {
+	base, err := s.Session.marshalJSONMap()
+	if err != nil {
+		return nil, err
+	}
+	if s.LastViewedAt != nil {
+		base["last_viewed_at"] = s.LastViewedAt
+	}
+	if s.PRSummary != nil {
+		base["pr_summary"] = s.PRSummary
+	}
+	return json.Marshal(base)
 }
 
 // SessionResult holds the result fields to update on an agent run.

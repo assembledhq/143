@@ -95,8 +95,17 @@ type SessionCountsFilters struct {
 const sessionCountsCap = 100
 
 // sessionSelectColumns is used for single-session queries where we want all fields.
-const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
-	org_id, agent_type, status, autonomy_level, token_mode,
+const sessionSelectColumns = `id,
+	COALESCE(
+		(SELECT sil.issue_id
+		 FROM session_issue_links sil
+		 WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
+		 ORDER BY sil.created_at ASC
+		 LIMIT 1),
+		issue_id,
+		'00000000-0000-0000-0000-000000000000'::uuid
+	) AS issue_id,
+	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
@@ -107,8 +116,17 @@ const sessionSelectColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-00
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
-const sessionListColumns = `id, COALESCE(issue_id, '00000000-0000-0000-0000-000000000000'::uuid) AS issue_id,
-	org_id, agent_type, status, autonomy_level, token_mode,
+const sessionListColumns = `id,
+	COALESCE(
+		(SELECT sil.issue_id
+		 FROM session_issue_links sil
+		 WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
+		 ORDER BY sil.created_at ASC
+		 LIMIT 1),
+		issue_id,
+		'00000000-0000-0000-0000-000000000000'::uuid
+	) AS issue_id,
+	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
@@ -171,6 +189,43 @@ func parseDiffStatsPayload(raw json.RawMessage) diffStatsPayload {
 		return diffStatsPayload{}
 	}
 	return payload
+}
+
+func hydrateSessionPolicy(session *models.Session) {
+	if session == nil {
+		return
+	}
+	if session.Origin == "" {
+		switch {
+		case session.TriggeredByUserID != nil:
+			session.Origin = models.SessionOriginManual
+		case session.ProjectTaskID != nil:
+			session.Origin = models.SessionOriginProject
+		case session.AutomationRunID != nil:
+			session.Origin = models.SessionOriginAutomation
+		case session.ParentSessionID != nil:
+			session.Origin = models.SessionOriginRevision
+		default:
+			session.Origin = models.SessionOriginIssueTrigger
+		}
+	}
+	if session.InteractionMode == "" {
+		if session.Origin == models.SessionOriginManual {
+			session.InteractionMode = models.SessionInteractionModeInteractive
+		} else {
+			session.InteractionMode = models.SessionInteractionModeSingleRun
+		}
+	}
+	if session.ValidationPolicy == "" {
+		if session.Origin == models.SessionOriginManual {
+			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+		} else {
+			session.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
+		}
+	}
+	if session.PrimaryIssueID == nil && session.IssueID != uuid.Nil {
+		session.PrimaryIssueID = &session.IssueID
+	}
 }
 
 func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters SessionFilters) ([]models.Session, error) {
@@ -236,7 +291,14 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // CountsByOrg returns non-archived, active, and archived session counts for
@@ -306,20 +368,50 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	if err != nil {
 		return models.Session{}, fmt.Errorf("query session: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, err
+	}
+	hydrateSessionPolicy(&session)
+	return session, nil
 }
 
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
+	if run.Origin == "" {
+		run.Origin = models.SessionOriginIssueTrigger
+	}
+	if run.InteractionMode == "" {
+		run.InteractionMode = models.SessionInteractionModeSingleRun
+	}
+	if run.ValidationPolicy == "" {
+		run.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
+	}
+	if run.PrimaryIssueID == nil && run.IssueID != uuid.Nil {
+		id := run.IssueID
+		run.PrimaryIssueID = &id
+	}
+	if run.IssueID == uuid.Nil && run.PrimaryIssueID != nil {
+		run.IssueID = *run.PrimaryIssueID
+	}
+
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin session create transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	query := `
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id, target_branch, repository_id, automation_run_id
+			model_override, triggered_by_user_id, target_branch, repository_id, automation_run_id,
+			origin, interaction_mode, validation_policy
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id
+			@model_override, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
+			@origin, @interaction_mode, @validation_policy
 		)
 		RETURNING id, created_at, last_activity_at`
 
@@ -348,10 +440,33 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"target_branch":        run.TargetBranch,
 		"repository_id":        run.RepositoryID,
 		"automation_run_id":    run.AutomationRunID,
+		"origin":               run.Origin,
+		"interaction_mode":     run.InteractionMode,
+		"validation_policy":    run.ValidationPolicy,
 	}
 
-	row := s.db.QueryRow(ctx, query, args)
-	return row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt)
+	row := tx.QueryRow(ctx, query, args)
+	if err := row.Scan(&run.ID, &run.CreatedAt, &run.LastActivityAt); err != nil {
+		return err
+	}
+	if run.PrimaryIssueID != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO session_issue_links (org_id, session_id, issue_id, role, position, added_by_user_id)
+			VALUES (@org_id, @session_id, @issue_id, 'primary', 0, @added_by_user_id)
+			ON CONFLICT (session_id, issue_id) DO NOTHING
+		`, pgx.NamedArgs{
+			"org_id":           run.OrgID,
+			"session_id":       run.ID,
+			"issue_id":         *run.PrimaryIssueID,
+			"added_by_user_id": run.TriggeredByUserID,
+		}); err != nil {
+			return fmt.Errorf("insert session issue link: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit session create transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error {
@@ -376,6 +491,7 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	if err != nil {
 		return err
 	}
+	hydrateSessionPolicy(&session)
 	s.publishStatus(ctx, &session)
 	return nil
 }
@@ -464,6 +580,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 	if err != nil {
 		return err
 	}
+	hydrateSessionPolicy(&session)
 	s.publishStatus(ctx, &session)
 	return nil
 }
@@ -496,7 +613,14 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 	if err != nil {
 		return nil, fmt.Errorf("list terminal sessions before: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // ClaimIdle atomically transitions an idle session to running and returns the
@@ -518,7 +642,12 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim idle session: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, err
+	}
+	hydrateSessionPolicy(&session)
+	return session, nil
 }
 
 // ClaimForResume atomically transitions a resumable paused session to running
@@ -541,7 +670,12 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim terminal session for resume: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, err
+	}
+	hydrateSessionPolicy(&session)
+	return session, nil
 }
 
 func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error {
@@ -660,7 +794,15 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE org_id = @org_id AND issue_id = @issue_id AND deleted_at IS NULL
+		WHERE (
+			org_id = @org_id AND issue_id = @issue_id AND deleted_at IS NULL
+		  ) OR (
+			org_id = @org_id AND deleted_at IS NULL AND EXISTS (
+				SELECT 1
+				FROM session_issue_links sil
+				WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.issue_id = @issue_id
+			)
+		  )
 		ORDER BY created_at DESC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -670,7 +812,14 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 	if err != nil {
 		return nil, fmt.Errorf("query sessions by issue: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, statuses []string, limit int) ([]models.Session, error) {
@@ -692,7 +841,14 @@ func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, sta
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) ([]models.Session, error) {
@@ -712,7 +868,14 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	if err != nil {
 		return nil, fmt.Errorf("query sessions by ids: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // UpdateTurnComplete sets the session to idle, persists the latest turn result,
@@ -1213,7 +1376,14 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	if err != nil {
 		return nil, fmt.Errorf("list orphaned containers: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.
@@ -1247,7 +1417,14 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, createdBefo
 	if err != nil {
 		return nil, fmt.Errorf("query stale pending sessions: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // ListStaleRunningSessions returns running sessions whose started_at is
@@ -1280,7 +1457,14 @@ func (s *SessionStore) ListStaleRunningSessions(ctx context.Context, startedBefo
 	if err != nil {
 		return nil, fmt.Errorf("query stale running sessions: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // ListStaleIdleSessions returns idle sessions that have been inactive longer
@@ -1303,7 +1487,14 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 	if err != nil {
 		return nil, fmt.Errorf("query stale idle sessions: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // ListExpiredSnapshots returns non-active sessions whose snapshots have
@@ -1327,7 +1518,14 @@ func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.
 	if err != nil {
 		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
 }
 
 // Archive marks a session as archived, hiding it from default list views.

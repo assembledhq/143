@@ -39,8 +39,10 @@ func TestAmpAdapter_PreparePrompt(t *testing.T) {
 	_, err = adapter.PreparePrompt(context.Background(), nil)
 	require.Error(t, err, "nil input should return error")
 
-	_, err = adapter.PreparePrompt(context.Background(), &agent.AgentInput{Issue: nil})
-	require.Error(t, err, "nil issue should return error")
+	prompt, err = adapter.PreparePrompt(context.Background(), &agent.AgentInput{Issue: nil})
+	require.NoError(t, err, "issue-less sessions should still prepare prompts")
+	require.NotNil(t, prompt, "issue-less sessions should still return a prompt")
+	require.NotEmpty(t, prompt.UserPrompt, "issue-less sessions should still include a user prompt")
 }
 
 func TestAmpAdapter_Execute_StreamJSON(t *testing.T) {

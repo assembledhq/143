@@ -48,6 +48,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
+	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
+	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	validationStore := db.NewValidationStore(pool)
@@ -186,6 +188,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	sessionHandler.SetViewStore(sessionViewStore)
+	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
+	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)

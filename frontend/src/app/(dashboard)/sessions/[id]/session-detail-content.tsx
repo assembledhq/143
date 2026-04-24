@@ -735,12 +735,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     refetchInterval: isActive ? 3000 : false,
   });
 
-  // Fetch the linked issue to display its description as the initial prompt.
-  // Manual sessions have no issue — issue_id comes back as the zero UUID.
-  const hasIssue = !!session.issue_id && session.issue_id !== "00000000-0000-0000-0000-000000000000";
+  // Fetch the linked primary issue to display its description as the initial prompt.
+  const primaryIssueId = session.primary_issue_id ?? session.issue_id ?? undefined;
+  const hasIssue = !!primaryIssueId;
   const issueQuery = useQuery({
-    queryKey: ["issue", session.issue_id],
-    queryFn: () => api.issues.get(session.issue_id),
+    queryKey: ["issue", primaryIssueId],
+    queryFn: () => api.issues.get(primaryIssueId!),
     enabled: hasIssue,
   });
 

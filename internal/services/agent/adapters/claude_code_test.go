@@ -40,9 +40,10 @@ func TestClaudeCodeAdapter_PreparePrompt(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "nil issue",
-			input:   &agent.AgentInput{Issue: nil},
-			wantErr: true,
+			name:      "nil issue",
+			input:     &agent.AgentInput{Issue: nil},
+			wantErr:   false,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "low token mode",
