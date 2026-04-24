@@ -214,6 +214,21 @@ export function ManualSessionCreatePageContent() {
   });
   const repositories = useMemo(() => reposResponse?.data ?? [], [reposResponse]);
 
+  // Drop a hydrated repo id (from the draft or the `?repo=` URL param) if the
+  // repos query has resolved and the id isn't in the list — repo was deleted,
+  // access was revoked, or the URL was bogus. Without this, the picker would
+  // silently show "Select repo" while state still held the dead id, and the
+  // dead id would keep getting re-persisted into the draft. We only act once
+  // the query actually resolves (reposResponse truthy) so that transient
+  // loading/error states don't nuke a valid selection.
+  useEffect(() => {
+    if (userSelectedRepoId === null) return;
+    if (!reposResponse) return;
+    if (!repositories.some((r) => r.id === userSelectedRepoId)) {
+      setUserSelectedRepoId(null);
+    }
+  }, [userSelectedRepoId, reposResponse, repositories]);
+
   const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
     queryKey: queryKeys.credentials.resolved,
     queryFn: () => api.userCredentials.listResolved(),

@@ -334,5 +334,40 @@ describe("ManualSessionCreatePageContent", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
     });
+
+    it("clears a hydrated repo id that no longer exists once repos load", async () => {
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 1,
+          message: "still typing",
+          attachments: [],
+          references: [],
+          selectedModel: "",
+          // Not present in repositoriesListMock, which only returns repo-1.
+          userSelectedRepoId: "repo-deleted",
+          branchByRepoId: { "repo-deleted": "feature-branch" },
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      await screen.findByPlaceholderText("Tell the agent what to do...");
+      await waitFor(() => {
+        expect(mocks.repositoriesListMock).toHaveBeenCalled();
+      });
+
+      // The draft should be re-saved with the stale repo id cleared so it
+      // doesn't haunt future mounts. Message content survives.
+      await waitFor(() => {
+        const raw = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+        expect(raw).not.toBeNull();
+        const stored = JSON.parse(raw!);
+        expect(stored.userSelectedRepoId).toBeNull();
+        expect(stored.message).toBe("still typing");
+      });
+    });
   });
 });
