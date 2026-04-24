@@ -676,7 +676,10 @@ type mockPMService struct {
 }
 
 type stubPRService struct {
-	createPRFn func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
+	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
+	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -686,15 +689,24 @@ func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, param
 	return nil, nil
 }
 
-func (s *stubPRService) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
+func (s *stubPRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	if s.syncPullRequestStateFn != nil {
+		return s.syncPullRequestStateFn(ctx, orgID, pullRequestID)
+	}
 	return nil
 }
 
-func (s *stubPRService) ReconcilePullRequestState(context.Context, uuid.UUID, int) error {
+func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
+	if s.reconcilePullRequestFn != nil {
+		return s.reconcilePullRequestFn(ctx, orgID, limit)
+	}
 	return nil
 }
 
-func (s *stubPRService) EnrichPullRequestHealth(context.Context, uuid.UUID, uuid.UUID, int64) error {
+func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
+	if s.enrichPullRequestHealthFn != nil {
+		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
+	}
 	return nil
 }
 
@@ -761,6 +773,172 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	require.ErrorAs(t, err, &fatalErr, "open_pr should dead-letter terminal PR creation failures instead of retrying them")
 	require.ErrorIs(t, fatalErr, ghservice.ErrSnapshotExpired, "open_pr should preserve the underlying terminal PR error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestHealthJobHandlers(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	tests := []struct {
+		name      string
+		handler   func(*Services, zerolog.Logger) JobHandler
+		payload   json.RawMessage
+		expectErr string
+	}{
+		{
+			name:    "sync pull request state passes parsed ids",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPullRequestStateHandler(services, logger)
+			},
+		},
+		{
+			name:    "sync pull request state rejects invalid payload",
+			payload: json.RawMessage(`{bad json`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPullRequestStateHandler(services, logger)
+			},
+			expectErr: "unmarshal sync_pull_request_state payload",
+		},
+		{
+			name:    "sync pull request state rejects invalid org id",
+			payload: json.RawMessage(`{"org_id":"not-a-uuid","pull_request_id":"` + prID.String() + `"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPullRequestStateHandler(services, logger)
+			},
+			expectErr: "parse org ID",
+		},
+		{
+			name:    "sync pull request state rejects invalid pull request id",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"not-a-uuid"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPullRequestStateHandler(services, logger)
+			},
+			expectErr: "parse pull request ID",
+		},
+		{
+			name:    "reconcile pull request state defaults the limit",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","limit":0}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newReconcilePullRequestStateHandler(services, logger)
+			},
+		},
+		{
+			name:    "reconcile pull request state rejects invalid payload",
+			payload: json.RawMessage(`{"org_id":`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newReconcilePullRequestStateHandler(services, logger)
+			},
+			expectErr: "unmarshal reconcile_pull_request_state payload",
+		},
+		{
+			name:    "reconcile pull request state rejects invalid org id",
+			payload: json.RawMessage(`{"org_id":"not-a-uuid","limit":10}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newReconcilePullRequestStateHandler(services, logger)
+			},
+			expectErr: "parse org ID",
+		},
+		{
+			name:    "enrich pull request health passes parsed ids and version",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `","version":"9"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newEnrichPullRequestHealthHandler(services, logger)
+			},
+		},
+		{
+			name:    "enrich pull request health rejects invalid payload",
+			payload: json.RawMessage(`oops`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newEnrichPullRequestHealthHandler(services, logger)
+			},
+			expectErr: "unmarshal enrich_pull_request_health payload",
+		},
+		{
+			name:    "enrich pull request health rejects invalid org id",
+			payload: json.RawMessage(`{"org_id":"not-a-uuid","pull_request_id":"` + prID.String() + `","version":"9"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newEnrichPullRequestHealthHandler(services, logger)
+			},
+			expectErr: "parse org ID",
+		},
+		{
+			name:    "enrich pull request health rejects invalid pull request id",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"not-a-uuid","version":"9"}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newEnrichPullRequestHealthHandler(services, logger)
+			},
+			expectErr: "parse pull request ID",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			called := &prHandlerCalls{}
+			services := &Services{
+				PR: &stubPRService{
+					syncPullRequestStateFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID) error {
+						called.syncCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						return nil
+					},
+					reconcilePullRequestFn: func(_ context.Context, gotOrgID uuid.UUID, gotLimit int) error {
+						called.reconcileCalls++
+						called.orgID = gotOrgID
+						called.limit = gotLimit
+						return nil
+					},
+					enrichPullRequestHealthFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, gotVersion int64) error {
+						called.enrichCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						called.version = gotVersion
+						return nil
+					},
+				},
+			}
+
+			err := tt.handler(services, zerolog.Nop())(context.Background(), "test", tt.payload)
+			if tt.expectErr != "" {
+				require.Error(t, err, "handler should fail for invalid payloads")
+				require.Contains(t, err.Error(), tt.expectErr, "handler should surface the expected parse error")
+				return
+			}
+
+			require.NoError(t, err, "handler should succeed for valid payloads")
+			switch tt.name {
+			case "sync pull request state passes parsed ids":
+				require.Equal(t, 1, called.syncCalls, "sync handler should invoke the PR service once")
+				require.Equal(t, orgID, called.orgID, "sync handler should parse and pass the org ID")
+				require.Equal(t, prID, called.prID, "sync handler should parse and pass the pull request ID")
+			case "reconcile pull request state defaults the limit":
+				require.Equal(t, 1, called.reconcileCalls, "reconcile handler should invoke the PR service once")
+				require.Equal(t, orgID, called.orgID, "reconcile handler should parse and pass the org ID")
+				require.Equal(t, 50, called.limit, "reconcile handler should default the batch size to 50")
+			case "enrich pull request health passes parsed ids and version":
+				require.Equal(t, 1, called.enrichCalls, "enrich handler should invoke the PR service once")
+				require.Equal(t, orgID, called.orgID, "enrich handler should parse and pass the org ID")
+				require.Equal(t, prID, called.prID, "enrich handler should parse and pass the pull request ID")
+				require.Equal(t, int64(9), called.version, "enrich handler should parse and pass the version")
+			}
+		})
+	}
+}
+
+type prHandlerCalls struct {
+	syncCalls      int
+	reconcileCalls int
+	enrichCalls    int
+	orgID          uuid.UUID
+	prID           uuid.UUID
+	limit          int
+	version        int64
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {

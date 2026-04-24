@@ -13,8 +13,10 @@ import (
 
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -412,4 +414,27 @@ func TestWebhook_VerifySignature_NoSecret(t *testing.T) {
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "response body should be valid JSON")
 	require.Equal(t, "ignored", resp["status"], "should return ignored status for unknown ping event")
+}
+
+func TestWebhook_HandleCheckRun(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	prService := ghservice.NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	handler := NewWebhookHandler(&config.Config{}, db.NewOrganizationStore(mock), db.NewUserStore(mock), db.NewRepositoryStore(mock), db.NewIntegrationStore(mock), prService)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(`{bad json`))
+	rr := httptest.NewRecorder()
+	handler.handleCheckRun(rr, req, []byte(`{bad json`))
+	require.Equal(t, http.StatusBadRequest, rr.Code, "handleCheckRun should reject malformed JSON")
+	require.Contains(t, rr.Body.String(), "INVALID_JSON", "handleCheckRun should encode the invalid JSON error")
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(`{}`))
+	rr = httptest.NewRecorder()
+	handler.handleCheckRun(rr, req, []byte(`{"action":"queued","repository":{"full_name":"assembledhq/143"},"check_run":{"pull_requests":[]}}`))
+	require.Equal(t, http.StatusOK, rr.Code, "handleCheckRun should accept successfully processed events")
+	require.Contains(t, rr.Body.String(), "processed", "handleCheckRun should acknowledge processed events")
 }

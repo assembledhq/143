@@ -6,14 +6,19 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -77,6 +82,69 @@ func TestPullRequestHandler_GetHealth(t *testing.T) {
 	require.True(t, resp.Data.CanResolveConflicts, "GetHealth should include conflict repair eligibility")
 }
 
+func TestPullRequestHandler_GetHealth_Errors(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	tests := []struct {
+		name           string
+		handler        *PullRequestHandler
+		requestPathID  string
+		expectedCode   int
+		expectedSubstr string
+	}{
+		{
+			name:           "returns not implemented when service missing",
+			handler:        NewPullRequestHandler(nil),
+			requestPathID:  prID.String(),
+			expectedCode:   http.StatusNotImplemented,
+			expectedSubstr: "NOT_CONFIGURED",
+		},
+		{
+			name: "returns bad request for invalid pull request id",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				getHealthFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error) {
+					return nil, nil
+				},
+			}),
+			requestPathID:  "not-a-uuid",
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "INVALID_ID",
+		},
+		{
+			name: "returns internal server error when service fails",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				getHealthFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error) {
+					return nil, errors.New("boom")
+				},
+			}),
+			requestPathID:  prID.String(),
+			expectedCode:   http.StatusInternalServerError,
+			expectedSubstr: "PULL_REQUEST_HEALTH_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/pull-requests/"+tt.requestPathID+"/health", nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: uuid.New(), OrgID: orgID}))
+			req = req.WithContext(withURLParam(req.Context(), "id", tt.requestPathID))
+			rr := httptest.NewRecorder()
+
+			tt.handler.GetHealth(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "GetHealth should return the expected error code")
+			require.Contains(t, rr.Body.String(), tt.expectedSubstr, "GetHealth should encode the expected error payload")
+		})
+	}
+}
+
 func TestPullRequestHandler_StartRepair(t *testing.T) {
 	t.Parallel()
 
@@ -116,6 +184,113 @@ func TestPullRequestHandler_StartRepair(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "FixTests should return valid JSON")
 	require.Equal(t, sessionID, resp.Data.SessionID, "FixTests should return the launched repair session ID")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, resp.Data.RepairActionType, "FixTests should preserve the repair action type")
+}
+
+func TestPullRequestHandler_StartRepair_ErrorsAndResolveConflicts(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	prID := uuid.New()
+
+	tests := []struct {
+		name           string
+		handler        *PullRequestHandler
+		pathID         string
+		withUser       bool
+		expectedCode   int
+		expectedSubstr string
+	}{
+		{
+			name:           "returns not implemented when repair service missing",
+			handler:        NewPullRequestHandler(nil),
+			pathID:         prID.String(),
+			withUser:       true,
+			expectedCode:   http.StatusNotImplemented,
+			expectedSubstr: "NOT_CONFIGURED",
+		},
+		{
+			name: "returns unauthorized when user missing",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+					return nil, nil
+				},
+			}),
+			pathID:         prID.String(),
+			withUser:       false,
+			expectedCode:   http.StatusUnauthorized,
+			expectedSubstr: "UNAUTHORIZED",
+		},
+		{
+			name: "returns bad request for invalid pull request id",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+					return nil, nil
+				},
+			}),
+			pathID:         "not-a-uuid",
+			withUser:       true,
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "INVALID_ID",
+		},
+		{
+			name: "returns internal server error when repair launch fails",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+					return nil, errors.New("boom")
+				},
+			}),
+			pathID:         prID.String(),
+			withUser:       true,
+			expectedCode:   http.StatusInternalServerError,
+			expectedSubstr: "PULL_REQUEST_REPAIR_FAILED",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+tt.pathID+"/repair/fix-tests", nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			if tt.withUser {
+				req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID}))
+			}
+			req = req.WithContext(withURLParam(req.Context(), "id", tt.pathID))
+			rr := httptest.NewRecorder()
+
+			tt.handler.FixTests(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "FixTests should return the expected error code")
+			require.Contains(t, rr.Body.String(), tt.expectedSubstr, "FixTests should encode the expected error payload")
+		})
+	}
+
+	resolveHandler := NewPullRequestHandler(&stubPullRequestHealthService{
+		repairFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+			require.Equal(t, orgID, gotOrgID, "ResolveConflicts should pass the active org ID to the service")
+			require.Equal(t, prID, gotPRID, "ResolveConflicts should pass the parsed pull request ID to the service")
+			require.Equal(t, userID, gotUserID, "ResolveConflicts should pass the current user ID to the service")
+			require.Equal(t, models.PullRequestRepairActionTypeResolveConflicts, action, "ResolveConflicts should use the resolve_conflicts action")
+			return &models.PullRequestRepairResponse{
+				SessionID:        uuid.New(),
+				Mode:             "existing",
+				RepairActionType: action,
+			}, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+prID.String()+"/repair/resolve-conflicts", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID}))
+	req = req.WithContext(withURLParam(req.Context(), "id", prID.String()))
+	rr := httptest.NewRecorder()
+
+	resolveHandler.ResolveConflicts(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ResolveConflicts should return 200 when the repair launch succeeds")
+	require.Contains(t, rr.Body.String(), "resolve_conflicts", "ResolveConflicts should serialize the selected repair action")
 }
 
 func TestPullRequestHandler_streamOrgIDFromRequest(t *testing.T) {
@@ -194,6 +369,188 @@ func TestPullRequestHandler_streamOrgIDFromRequest(t *testing.T) {
 			require.Equal(t, tt.expectedOrgID, orgID, "streamOrgIDFromRequest should resolve the expected org ID")
 		})
 	}
+}
+
+func TestPullRequestHandler_streamOrgIDFromRequest_AdditionalErrors(t *testing.T) {
+	t.Parallel()
+
+	ctxOrgID := uuid.New()
+	requestedOrgID := uuid.New()
+
+	tests := []struct {
+		name           string
+		withUser       bool
+		membershipErr  error
+		expectedErr    error
+		expectedSubstr string
+	}{
+		{
+			name:        "returns unauthorized when explicit org requested without user",
+			withUser:    false,
+			expectedErr: errPullRequestStreamUnauthorized,
+		},
+		{
+			name:           "returns config error when membership store missing",
+			withUser:       true,
+			expectedSubstr: "membership store not configured",
+		},
+		{
+			name:           "returns membership lookup errors",
+			withUser:       true,
+			membershipErr:  errors.New("db down"),
+			expectedSubstr: "db down",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewPullRequestHandler(nil)
+			if tt.membershipErr != nil {
+				handler.SetMembershipStore(&stubPullRequestMembershipStore{
+					getFunc: func(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+						return models.OrganizationMembership{}, tt.membershipErr
+					},
+				})
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/pull-requests/stream?org_id="+requestedOrgID.String(), nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), ctxOrgID))
+			if tt.withUser {
+				req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: uuid.New(), OrgID: ctxOrgID}))
+			}
+
+			_, err := handler.streamOrgIDFromRequest(req)
+			require.Error(t, err, "streamOrgIDFromRequest should fail for this scenario")
+			if tt.expectedErr != nil {
+				require.True(t, errors.Is(err, tt.expectedErr), "streamOrgIDFromRequest should return the expected sentinel error")
+			}
+			if tt.expectedSubstr != "" {
+				require.Contains(t, err.Error(), tt.expectedSubstr, "streamOrgIDFromRequest should preserve the underlying error context")
+			}
+		})
+	}
+}
+
+func TestPullRequestHandler_StreamUpdates(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	user := &models.User{ID: uuid.New(), OrgID: orgID}
+
+	tests := []struct {
+		name           string
+		handler        *PullRequestHandler
+		query          string
+		expectedCode   int
+		expectedSubstr string
+	}{
+		{
+			name:           "returns service unavailable when streams missing",
+			handler:        NewPullRequestHandler(nil),
+			expectedCode:   http.StatusServiceUnavailable,
+			expectedSubstr: "pull request streams unavailable",
+		},
+		{
+			name: "returns bad request for invalid requested org",
+			handler: func() *PullRequestHandler {
+				h := NewPullRequestHandler(nil)
+				h.SetStreams(newTestPullRequestStreams(t))
+				return h
+			}(),
+			query:          "?org_id=not-a-uuid",
+			expectedCode:   http.StatusBadRequest,
+			expectedSubstr: "invalid pull request stream org",
+		},
+		{
+			name: "returns forbidden when explicit org is not allowed",
+			handler: func() *PullRequestHandler {
+				h := NewPullRequestHandler(nil)
+				h.SetStreams(newTestPullRequestStreams(t))
+				h.SetMembershipStore(&stubPullRequestMembershipStore{
+					getFunc: func(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+						return models.OrganizationMembership{}, pgx.ErrNoRows
+					},
+				})
+				return h
+			}(),
+			query:          "?org_id=" + uuid.New().String(),
+			expectedCode:   http.StatusForbidden,
+			expectedSubstr: "forbidden pull request stream org",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/pull-requests/stream"+tt.query, nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			req = req.WithContext(middleware.WithUser(req.Context(), user))
+			rr := httptest.NewRecorder()
+
+			tt.handler.StreamUpdates(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "StreamUpdates should return the expected error code")
+			require.Contains(t, rr.Body.String(), tt.expectedSubstr, "StreamUpdates should encode the expected error text")
+		})
+	}
+
+	streams := newTestPullRequestStreams(t)
+	handler := NewPullRequestHandler(nil)
+	handler.SetStreams(streams)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pull-requests/stream", nil).WithContext(ctx)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.StreamUpdates(rr, req)
+	}()
+
+	event := models.PullRequestUpdatedEvent{
+		PullRequestID: uuid.New(),
+		Version:       7,
+		HeadSHA:       "head",
+		BaseSHA:       "base",
+		SyncedAt:      time.Now().UTC(),
+	}
+	require.Eventually(t, func() bool {
+		err := streams.PublishUpdated(context.Background(), orgID, event)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(rr.Body.String(), "pull_request.updated")
+	}, 2*time.Second, 20*time.Millisecond, "StreamUpdates should write published pull request update events to the SSE response")
+
+	cancel()
+	<-done
+
+	require.Contains(t, rr.Body.String(), event.PullRequestID.String(), "StreamUpdates should serialize the published pull request ID")
+}
+
+func newTestPullRequestStreams(t *testing.T) *cache.PullRequestStreams {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	metrics, err := cache.NewMetrics()
+	require.NoError(t, err, "Redis metrics should initialize")
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), metrics)
+	require.NotNil(t, client, "Redis client should initialize for pull request stream tests")
+	t.Cleanup(func() {
+		closeErr := client.Close()
+		if closeErr != nil && !strings.Contains(closeErr.Error(), "client is closed") {
+			require.NoError(t, closeErr, "pull request stream test client should close cleanly")
+		}
+	})
+	return cache.NewPullRequestStreams(client, zerolog.Nop())
 }
 
 func withURLParam(ctx context.Context, key, value string) context.Context {

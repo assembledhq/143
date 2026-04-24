@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -346,6 +347,85 @@ func TestFormatPRTitle(t *testing.T) {
 			require.Equal(t, tt.expect, result, "PR title should match expected format")
 		})
 	}
+}
+
+func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	service := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, db.NewJobStore(mock), zerolog.Nop())
+	sessionMessages := db.NewSessionMessageStore(mock)
+	service.SetSessionMessageStore(sessionMessages)
+	require.Same(t, sessionMessages, service.sessionMessages, "SetSessionMessageStore should store the session message dependency")
+
+	streams := &cache.PullRequestStreams{}
+	service.SetPullRequestStreams(streams)
+	require.Same(t, streams, service.prHealthStreams, "SetPullRequestStreams should store the stream dependency")
+
+	repoName := "assembledhq/143"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			newPRTestRow(uuid.New(), nil, uuid.New(), repoName, time.Now(), nil)...,
+		))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     pgxmock.AnyArg(),
+			"queue":      "default",
+			"job_type":   "sync_pull_request_state",
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": pgxmock.AnyArg(),
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
+		Action: "completed",
+		CheckRun: struct {
+			PullRequests []struct {
+				Number int `json:"number"`
+			} `json:"pull_requests"`
+		}{
+			PullRequests: []struct {
+				Number int `json:"number"`
+			}{{Number: 42}},
+		},
+		Repository: struct {
+			FullName string `json:"full_name"`
+		}{
+			FullName: repoName,
+		},
+	})
+	require.NoError(t, err, "HandleCheckRunEvent should enqueue state sync for completed check runs")
+
+	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{Action: "created"})
+	require.NoError(t, err, "HandleCheckRunEvent should ignore non-completed actions")
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
+		Action: "completed",
+		CheckRun: struct {
+			PullRequests []struct {
+				Number int `json:"number"`
+			} `json:"pull_requests"`
+		}{
+			PullRequests: []struct {
+				Number int `json:"number"`
+			}{{Number: 99}},
+		},
+		Repository: struct {
+			FullName string `json:"full_name"`
+		}{
+			FullName: repoName,
+		},
+	})
+	require.NoError(t, err, "HandleCheckRunEvent should ignore check runs for unmanaged pull requests")
+	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
 }
 
 func TestFormatBranchName(t *testing.T) {

@@ -32,6 +32,20 @@ func TestNormalizeMergeState(t *testing.T) {
 			hasConflicts: true,
 		},
 		{
+			name:         "blocked branch is conflicted",
+			mergeable:    boolPtr(false),
+			githubState:  "blocked",
+			expected:     models.PullRequestMergeStateConflicted,
+			hasConflicts: true,
+		},
+		{
+			name:         "non-mergeable branch is conflicted even without explicit dirty state",
+			mergeable:    boolPtr(false),
+			githubState:  "unstable",
+			expected:     models.PullRequestMergeStateConflicted,
+			hasConflicts: true,
+		},
+		{
 			name:         "behind branch is normalized",
 			mergeable:    boolPtr(true),
 			githubState:  "behind",
@@ -68,8 +82,11 @@ func TestClassifyCheckRunCategory(t *testing.T) {
 	}{
 		{name: "unit tests", checkName: "unit tests / api", expected: models.PullRequestCheckCategoryTest},
 		{name: "playwright", checkName: "playwright e2e", expected: models.PullRequestCheckCategoryTest},
+		{name: "empty", checkName: "", expected: models.PullRequestCheckCategoryUnknown},
 		{name: "lint", checkName: "eslint", expected: models.PullRequestCheckCategoryLint},
+		{name: "staticcheck", checkName: "staticcheck", expected: models.PullRequestCheckCategoryLint},
 		{name: "build", checkName: "build frontend", expected: models.PullRequestCheckCategoryBuild},
+		{name: "typecheck", checkName: "tsc typecheck", expected: models.PullRequestCheckCategoryBuild},
 		{name: "deploy", checkName: "deploy preview", expected: models.PullRequestCheckCategoryDeploy},
 		{name: "unknown", checkName: "codeql analyze", expected: models.PullRequestCheckCategoryUnknown},
 	}
@@ -119,6 +136,24 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 				FailingTestCount:  1,
 			},
 			expected: "PR #184 has 1 failing test job.",
+		},
+		{
+			name: "conflicts only",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateConflicted,
+				HasConflicts:      true,
+			},
+			expected: "PR #184 is blocked by merge conflicts.",
+		},
+		{
+			name: "multiple tests only",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateClean,
+				FailingTestCount:  3,
+			},
+			expected: "PR #184 has 3 failing test jobs.",
 		},
 	}
 

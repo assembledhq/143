@@ -74,11 +74,17 @@ func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.Reposit
 type trackingJobs struct {
 	enqueued   []string // jobType values
 	enqueuedTx []string // jobType values inserted in the scheduler tx
+	payloads   []any
+	dedupeKeys []string
 	enqueueErr error
 }
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.enqueued = append(m.enqueued, jobType)
+	m.payloads = append(m.payloads, payload)
+	if dedupeKey != nil {
+		m.dedupeKeys = append(m.dedupeKeys, *dedupeKey)
+	}
 	return uuid.New(), nil
 }
 
@@ -149,6 +155,13 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	s.schedulePullRequestReconciliation(context.Background(), orgIDs, time.Date(2026, 4, 23, 22, 0, 0, 0, time.UTC))
 
 	require.Equal(t, []string{"reconcile_pull_request_state", "reconcile_pull_request_state"}, jobs.enqueued, "should enqueue one reconciliation job per org")
+	require.Len(t, jobs.payloads, 2, "should record a payload for each reconciliation job")
+	firstPayload, ok := jobs.payloads[0].(map[string]any)
+	require.True(t, ok, "scheduler should enqueue reconciliation payloads as maps")
+	require.Equal(t, orgIDs[0].String(), firstPayload["org_id"], "scheduler should include the target org ID in the reconciliation payload")
+	require.Equal(t, pullRequestReconcileBatch, firstPayload["limit"], "scheduler should include the configured reconciliation batch size")
+	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per reconciliation job")
+	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":2026042322", "dedupe key should include the org and UTC hour bucket")
 }
 
 func TestScheduler_ScheduleContextRefreshes_NoDoc(t *testing.T) {
