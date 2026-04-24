@@ -265,7 +265,7 @@ describe("Account settings page", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("combobox", { name: "Codex default coding-agent reasoning" })).toHaveTextContent("High");
-      expect(screen.getByRole("combobox", { name: "Claude Code default coding-agent reasoning" })).toHaveTextContent("Product default");
+      expect(screen.getByRole("combobox", { name: "Claude Code default coding-agent reasoning" })).toHaveTextContent("Default");
     });
   });
 });
