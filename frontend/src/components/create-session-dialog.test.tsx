@@ -68,6 +68,7 @@ describe("CreateSessionDialog", () => {
 
   beforeEach(() => {
     onOpenChange = vi.fn<(open: boolean) => void>();
+    window.localStorage.clear();
   });
 
   it("renders dialog with title when open", () => {
@@ -478,5 +479,64 @@ describe("CreateSessionDialog", () => {
     } finally {
       console.error = origConsoleError;
     }
+  });
+
+  it("does not submit a hidden default reasoning effort for unsupported agents", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("/api/v1/auth/me", () => {
+        return HttpResponse.json({
+          data: {
+            id: "user-1",
+            org_id: "org-1",
+            email: "alice@example.com",
+            name: "Alice Smith",
+            role: "admin",
+            settings: {
+              coding_agent_reasoning_defaults: {
+                codex: "high",
+              },
+            },
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+      http.post("/api/v1/sessions/manual", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({
+          data: {
+            id: "session-new-123",
+            status: "pending",
+            agent_type: "gemini_cli",
+            created_at: "2026-04-09T00:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <CreateSessionDialog open onOpenChange={onOpenChange} />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: /Model/i }));
+    await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
+    await user.type(
+      screen.getByPlaceholderText("Tell the agent what to do..."),
+      "Fix the login bug",
+    );
+    await user.click(screen.getByRole("button", { name: /Create/ }));
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    expect(requestBody).toMatchObject({
+      message: "Fix the login bug",
+      model: "gemini-2.5-pro",
+      agent_type: "gemini_cli",
+    });
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
   });
 });

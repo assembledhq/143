@@ -160,6 +160,8 @@ export const api = {
   auth: {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
+    updateSettings: (body: import('./types').UserSettingsUpdateRequest) =>
+      patch<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me/settings', body),
     login: (invitation?: string) => {
       const searchParams = new URLSearchParams();
       if (invitation) searchParams.set('invitation', invitation);
@@ -318,7 +320,7 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),

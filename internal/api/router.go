@@ -532,6 +532,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
 			// empty active role).
 			r.Get("/api/v1/auth/me", authHandler.Me)
+			r.Patch("/api/v1/auth/me/settings", authHandler.UpdateSettings)
 			// Memberships is zero-membership-safe for the same reason /auth/me
 			// is: a user whose only org was just revoked still needs to see the
 			// empty list so the switcher can render an invite-me state rather

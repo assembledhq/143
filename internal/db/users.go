@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -32,6 +33,7 @@ func NewUserStore(db DBTX) *UserStore {
 }
 
 const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, password_hash, google_id, created_at`
+const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
 // On conflict, it updates the user's name, login, avatar, and email.
@@ -93,6 +95,47 @@ func (s *UserStore) GetByIDGlobal(ctx context.Context, userID uuid.UUID) (models
 		return models.User{}, fmt.Errorf("query user: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+// GetByIDGlobalWithSettings looks up a user by primary key and includes the
+// settings JSONB column for self-service preference reads.
+//
+// lint:allow-no-orgid reason="user-scoped self-settings lookup by primary key"
+func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM users
+		WHERE id = @id`, userWithSettingsSelectColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": userID})
+	if err != nil {
+		return models.UserWithSettings{}, fmt.Errorf("query user with settings: %w", err)
+	}
+	return pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.UserWithSettings, error) {
+		var user models.UserWithSettings
+		var rawSettings json.RawMessage
+		if err := row.Scan(
+			&user.ID,
+			&user.OrgID,
+			&user.Email,
+			&user.Name,
+			&user.Role,
+			&user.GitHubID,
+			&user.GitHubLogin,
+			&user.AvatarURL,
+			&user.GoogleID,
+			&user.CreatedAt,
+			&rawSettings,
+		); err != nil {
+			return models.UserWithSettings{}, err
+		}
+		settings, err := models.ParseUserSettings(rawSettings)
+		if err != nil {
+			return models.UserWithSettings{}, fmt.Errorf("parse user settings: %w", err)
+		}
+		user.Settings = settings
+		return user, nil
+	})
 }
 
 // GetLastOrgID returns the user's persisted cross-login active-org preference.
@@ -201,6 +244,28 @@ func (s *UserStore) CreateWithPassword(ctx context.Context, user *models.User) e
 
 	row := s.db.QueryRow(ctx, query, args)
 	return row.Scan(&user.ID, &user.CreatedAt)
+}
+
+// UpdateSettings replaces the user's settings JSONB document.
+//
+// lint:allow-no-orgid reason="user-scoped self-settings update by primary key"
+func (s *UserStore) UpdateSettings(ctx context.Context, userID uuid.UUID, settings models.UserSettings) error {
+	encodedSettings, err := settings.MarshalJSONB()
+	if err != nil {
+		return fmt.Errorf("marshal user settings: %w", err)
+	}
+	query := `UPDATE users SET settings = @settings WHERE id = @id`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"settings": encodedSettings,
+		"id":       userID,
+	})
+	if err != nil {
+		return fmt.Errorf("update user settings: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 // UpsertFromGoogle creates or updates a user based on their Google subject ID.

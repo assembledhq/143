@@ -40,6 +40,7 @@ type AgentInput struct {
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference
+	ReasoningEffort    models.ReasoningEffort
 	OrgSettings        json.RawMessage
 	TokenMode          string // "low" or "high"
 	ComplexityEstimate *ComplexityEstimate
@@ -182,6 +183,7 @@ type AgentPrompt struct {
 	SystemPrompt    string
 	UserPrompt      string
 	MaxTokens       int
+	ReasoningEffort models.ReasoningEffort
 	Files           []string // relevant files to focus on
 	Continuation    bool     // true when resuming an existing interactive session
 	ResumeSessionID string   // agent's session ID for --resume/--continue (set on subsequent turns)

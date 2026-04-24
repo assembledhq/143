@@ -111,7 +111,7 @@ const sessionSelectColumns = `id,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
@@ -137,7 +137,7 @@ const sessionListColumns = `id,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-	model_override, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
+	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
@@ -414,13 +414,13 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		INSERT INTO sessions (
 			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, triggered_by_user_id, target_branch, repository_id, automation_run_id,
+			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id,
 			origin, interaction_mode, validation_policy
 		)
 		VALUES (
 			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
+			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
 			@origin, @interaction_mode, @validation_policy
 		)
 		RETURNING id, created_at, last_activity_at`
@@ -446,6 +446,7 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 		"pm_reasoning":         run.PMReasoning,
 		"project_task_id":      run.ProjectTaskID,
 		"model_override":       run.ModelOverride,
+		"reasoning_effort":     run.ReasoningEffort,
 		"triggered_by_user_id": run.TriggeredByUserID,
 		"target_branch":        run.TargetBranch,
 		"repository_id":        run.RepositoryID,
