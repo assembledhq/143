@@ -562,14 +562,22 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(parentSession.ID, pr.OrgID, now, string(models.SessionStatusCompleted))...))
 				mock.ExpectBegin()
+				mock.ExpectBegin()
 				mock.ExpectQuery("INSERT INTO sessions").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
+				mock.ExpectExec("INSERT INTO session_issue_links").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				mock.ExpectCommit()
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -609,6 +617,9 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 			name: "resume repair session",
 			run: func(t *testing.T, mock pgxmock.PgxPoolIface, service *PRService, pr models.PullRequest, parentSession models.Session, userID uuid.UUID, now time.Time) {
 				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectQuery("UPDATE sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(parentSession.ID, pr.OrgID, now, string(models.SessionStatusRunning))...))
@@ -1183,7 +1194,7 @@ var prRepairRunTestColumns = []string{
 }
 
 var prHealthSessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -1195,8 +1206,9 @@ var prHealthSessionColumns = []string{
 }
 
 func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status string) []any {
+	issueID := uuid.New()
 	return []any{
-		sessionID, uuid.Nil, orgID, "claude_code", status, "semi", "low",
+		sessionID, issueID, orgID, models.SessionOriginIssueTrigger, models.SessionInteractionModeSingleRun, models.SessionValidationPolicyOnTurnComplete, "claude_code", status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &now, nil, nil,
 		nil, nil, nil, false,
