@@ -33,6 +33,12 @@ import {
   featuredAutomationTemplateIDs,
   getAutomationTemplate,
 } from "@/lib/automation-templates";
+import {
+  browserTimezone,
+  hourOptions,
+  minuteOptions,
+} from "../schedule-time";
+import { TimezonePicker } from "../timezone-picker";
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -48,7 +54,12 @@ export default function NewAutomationPage() {
   const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">(
     initialTemplate?.defaultUnit ?? "days",
   );
-  const [intervalRunAt, setIntervalRunAt] = useState("09:00");
+  const [intervalRunHour, setIntervalRunHour] = useState("09");
+  const [intervalRunMinute, setIntervalRunMinute] = useState("00");
+  // Default to the viewer's detected IANA zone, but let them override via
+  // TimezonePicker for the "schedule in a different region" case.
+  const [detectedTimezone] = useState<string>(() => browserTimezone());
+  const [timezone, setTimezone] = useState<string>(detectedTimezone);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState(50);
@@ -86,7 +97,8 @@ export default function NewAutomationPage() {
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
-        interval_run_at: intervalRunAt,
+        interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+        timezone,
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
       }),
@@ -283,17 +295,41 @@ export default function NewAutomationPage() {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">At</span>
-                <Input
-                  type="time"
-                  step={300}
-                  value={intervalRunAt}
-                  onChange={(e) => setIntervalRunAt(e.target.value)}
-                  className="w-32"
-                  aria-label="Run at time"
+                <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
+                  <SelectTrigger className="w-20" aria-label="Run at hour">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {hourOptions.map((h) => (
+                      <SelectItem key={h} value={h}>
+                        {h}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-sm text-muted-foreground">:</span>
+                <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
+                  <SelectTrigger className="w-20" aria-label="Run at minute">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {minuteOptions.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {m}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <TimezonePicker
+                  value={timezone}
+                  onChange={setTimezone}
+                  detected={detectedTimezone}
                 />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>
+            <p className="text-xs text-muted-foreground">
+              Run time is in {timezone}, selectable in 5-minute increments.
+            </p>
           </div>
 
           {/* Advanced settings */}

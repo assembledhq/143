@@ -85,28 +85,41 @@ func NextRunTime(from time.Time, interval int, unit string) time.Time {
 	}
 }
 
-// NextRunTimeAt computes the next run at a specific HH:MM wall-clock time.
-// The returned time is always >= NextRunTime(from, interval, unit).
-func NextRunTimeAt(from time.Time, interval int, unit string, runAt string) (time.Time, error) {
-	minNext := NextRunTime(from, interval, unit)
+// NextRunTimeAt computes the next run at a specific HH:MM wall-clock time in
+// the given IANA timezone. The returned time is always >= NextRunTime(from,
+// interval, unit) and is expressed in UTC. Timezone is required so that a
+// "daily at 9 AM" schedule fires at 9 AM local even as DST shifts the UTC
+// offset — doing the arithmetic in the target location is what makes that
+// invariant hold. An empty timezone is treated as UTC for backwards
+// compatibility with pre-migration-92 interval rows.
+func NextRunTimeAt(from time.Time, interval int, unit string, runAt string, timezone string) (time.Time, error) {
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("load timezone %q: %w", timezone, err)
+	}
 	parsed, err := time.Parse("15:04", runAt)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse runAt %q: %w", runAt, err)
 	}
 
+	minNext := NextRunTime(from, interval, unit).In(loc)
+
 	switch ScheduleUnit(unit) {
 	case ScheduleUnitHours:
-		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), minNext.Hour(), parsed.Minute(), 0, 0, minNext.Location())
+		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), minNext.Hour(), parsed.Minute(), 0, 0, loc)
 		if candidate.Before(minNext) {
 			candidate = candidate.Add(time.Hour)
 		}
-		return candidate, nil
+		return candidate.UTC(), nil
 	default:
-		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), parsed.Hour(), parsed.Minute(), 0, 0, minNext.Location())
+		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
 		if candidate.Before(minNext) {
 			candidate = candidate.AddDate(0, 0, 1)
 		}
-		return candidate, nil
+		return candidate.UTC(), nil
 	}
 }
 

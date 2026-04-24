@@ -7,6 +7,7 @@ import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
+import { formatRunAtWithTimezone } from "./schedule-time";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -18,8 +19,9 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 
 function formatSchedule(a: Automation): string {
+  const tz = a.timezone || "UTC";
   if (a.schedule_type === "cron" && a.cron_expression) {
-    return `cron: ${a.cron_expression}`;
+    return `cron: ${a.cron_expression} (${tz})`;
   }
   const val = a.interval_value ?? 1;
   const unit = a.interval_unit ?? "days";
@@ -27,7 +29,7 @@ function formatSchedule(a: Automation): string {
   if (!a.interval_run_at) {
     return intervalText;
   }
-  return `${intervalText} at ${a.interval_run_at} UTC`;
+  return `${intervalText} at ${formatRunAtWithTimezone(a.interval_run_at, tz)}`;
 }
 
 function AutomationCard({ automation }: { automation: Automation }) {

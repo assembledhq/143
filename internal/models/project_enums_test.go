@@ -133,6 +133,7 @@ func TestNextRunTimeAt(t *testing.T) {
 		interval int
 		unit     string
 		runAt    string
+		tz       string
 		expected time.Time
 	}{
 		{
@@ -141,6 +142,7 @@ func TestNextRunTimeAt(t *testing.T) {
 			interval: 3,
 			unit:     "hours",
 			runAt:    "11:15",
+			tz:       "UTC",
 			expected: time.Date(2026, 3, 10, 12, 15, 0, 0, time.UTC),
 		},
 		{
@@ -149,6 +151,7 @@ func TestNextRunTimeAt(t *testing.T) {
 			interval: 1,
 			unit:     "days",
 			runAt:    "09:35",
+			tz:       "UTC",
 			expected: time.Date(2026, 3, 12, 9, 35, 0, 0, time.UTC),
 		},
 		{
@@ -157,23 +160,52 @@ func TestNextRunTimeAt(t *testing.T) {
 			interval: 1,
 			unit:     "weeks",
 			runAt:    "09:00",
+			tz:       "UTC",
 			expected: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
+		},
+		{
+			// Daily 09:00 in America/New_York (EDT = UTC-4 on 2026-03-13) —
+			// the stored UTC fire time must be 13:00.
+			name:     "daily in non-UTC zone resolves to zone-local wall clock",
+			from:     time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC),
+			interval: 1,
+			unit:     "days",
+			runAt:    "09:00",
+			tz:       "America/New_York",
+			expected: time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC),
+		},
+		{
+			// Empty timezone falls back to UTC for legacy callers that haven't
+			// yet migrated to passing the field.
+			name:     "empty timezone falls back to UTC",
+			from:     time.Date(2026, 3, 10, 21, 50, 0, 0, time.UTC),
+			interval: 1,
+			unit:     "days",
+			runAt:    "09:35",
+			tz:       "",
+			expected: time.Date(2026, 3, 12, 9, 35, 0, 0, time.UTC),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := NextRunTimeAt(tt.from, tt.interval, tt.unit, tt.runAt)
+			got, err := NextRunTimeAt(tt.from, tt.interval, tt.unit, tt.runAt, tt.tz)
 			require.NoError(t, err, "NextRunTimeAt should parse runAt and compute the next aligned time")
-			require.Equal(t, tt.expected, got, "NextRunTimeAt should return the expected aligned timestamp")
+			require.True(t, tt.expected.Equal(got), "NextRunTimeAt should return the expected aligned timestamp; got %s want %s", got, tt.expected)
 		})
 	}
 
 	t.Run("invalid runAt format returns parse error", func(t *testing.T) {
 		t.Parallel()
-		_, err := NextRunTimeAt(time.Now().UTC(), 1, "days", "ab:cd")
+		_, err := NextRunTimeAt(time.Now().UTC(), 1, "days", "ab:cd", "UTC")
 		require.Error(t, err, "NextRunTimeAt should fail when runAt cannot be parsed")
+	})
+
+	t.Run("invalid timezone returns error", func(t *testing.T) {
+		t.Parallel()
+		_, err := NextRunTimeAt(time.Now().UTC(), 1, "days", "09:00", "Not/AZone")
+		require.Error(t, err, "NextRunTimeAt should fail when timezone cannot be loaded")
 	})
 }
 
