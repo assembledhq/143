@@ -216,6 +216,10 @@ export const handlers = [
     } satisfies SingleResponse<User>);
   }),
 
+  http.post('/api/v1/auth/active-org', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
   http.post('/api/v1/sessions/:id/view', () => {
     return new HttpResponse(null, { status: 204 });
   }),

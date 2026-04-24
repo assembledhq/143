@@ -527,6 +527,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// empty list so the switcher can render an invite-me state rather
 			// than a 403 spinner.
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
+			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.

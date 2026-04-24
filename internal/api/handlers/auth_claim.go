@@ -18,7 +18,8 @@ import (
 // claimInvitationForExistingUser validates a pending invitation and grants the
 // user a membership in the inviting org. Unlike the signup claim helpers,
 // there is no user creation: the caller is already authenticated and this
-// transaction only accepts the invitation and inserts/updates the membership.
+// transaction accepts the invitation, inserts/updates the membership, and
+// updates the user's persisted active-org preference to the claimed org.
 //
 // The (email, githubLogin) pair must match the invitation per the same rules
 // as the signup flow; a mismatch returns an invitationError so handlers can
@@ -70,6 +71,9 @@ func (h *AuthHandler) claimInvitationForExistingUser(
 	effectiveRole, err := txMemberships.GrantAtLeast(ctx, userID, inv.OrgID, role)
 	if err != nil {
 		return &inv, "", nil, fmt.Errorf("grant membership: %w", err)
+	}
+	if err := db.NewUserStore(tx).UpdateLastOrgID(ctx, userID, &inv.OrgID); err != nil {
+		return &inv, "", nil, fmt.Errorf("update user last org: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
