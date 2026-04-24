@@ -18,6 +18,11 @@ export interface MembershipsResponse {
   memberships: MembershipSummary[];
 }
 
+export interface ClaimInvitationResponse {
+  org_id: string;
+  role: string;
+}
+
 export interface OrganizationCreated {
   id: string;
   name: string;

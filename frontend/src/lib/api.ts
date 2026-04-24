@@ -186,6 +186,8 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
     register: (email: string, password: string, name: string, invitation?: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
+    claimInvitation: (token: string) =>
+      post<import('./types').SingleResponse<import('./types').ClaimInvitationResponse>>('/api/v1/invitations/claim', { token }),
     setActiveOrg: (orgId: string) =>
       post('/api/v1/auth/active-org', { org_id: orgId }),
     logout: () => post('/api/v1/auth/logout'),
