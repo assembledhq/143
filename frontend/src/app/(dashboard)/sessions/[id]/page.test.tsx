@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers, mockIssues, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Issue, Session, SessionMessage, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
@@ -13,9 +13,18 @@ const { toast } = vi.hoisted(() => ({
     error: vi.fn(),
   },
 }));
+const { routerPush } = vi.hoisted(() => ({
+  routerPush: vi.fn(),
+}));
 
 vi.mock('sonner', () => ({
   toast,
+}));
+
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: routerPush,
+  }),
 }));
 
 // Mock EventSource (not available in jsdom)
@@ -50,6 +59,7 @@ afterEach(() => {
   MockEventSource.instances = [];
   toast.success.mockReset();
   toast.error.mockReset();
+  routerPush.mockReset();
   vi.useRealTimers();
   window.localStorage.clear();
   vi.restoreAllMocks();
@@ -637,6 +647,30 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('includes the active org in the PR health stream URL', async () => {
+    const activeOrgId = '22222222-2222-2222-2222-222222222222';
+    window.sessionStorage.setItem('active_org_id', activeOrgId);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(MockEventSource.instances).toHaveLength(1);
+    expect(MockEventSource.instances[0].url).toContain(`/api/v1/pull-requests/stream?org_id=${activeOrgId}`);
+  });
+
+  it('reconnects the PR health stream after an SSE error', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    MockEventSource.instances[0].onerror?.(new Event('error'));
+
+    await waitFor(() => {
+      expect(MockEventSource.instances).toHaveLength(2);
+    }, { timeout: 2500 });
+  });
+
   it('preserves plan-mode styling for streamed output logs', async () => {
     const runningSession: Session = {
       ...mockSessions[0],
@@ -745,6 +779,69 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
     expect(await screen.findByText('View PR')).toBeInTheDocument();
+  });
+
+  it('renders the PR health banner at the top of Overview when a linked PR is open', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            has_conflicts: true,
+            can_resolve_conflicts: true,
+            failing_test_count: 2,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 is blocked by conflicts and 2 failing test jobs.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('PR health')).toBeInTheDocument();
+    expect(screen.getByText('PR #42 is blocked by conflicts and 2 failing test jobs.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resolve conflicts' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Fix tests' })).toBeInTheDocument();
+  });
+
+  it('routes to a new revision session after starting a PR repair action', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        return HttpResponse.json({
+          data: {
+            session_id: 'session-revision-123',
+            mode: 'revision',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 2,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+
+    await waitFor(() => {
+      expect(routerPush).toHaveBeenCalledWith('/sessions/session-revision-123');
+    });
   });
 
   it('shows failure next steps and retry button', async () => {

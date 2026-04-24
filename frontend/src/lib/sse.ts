@@ -1,4 +1,4 @@
-import type { Session, SessionLog } from "./types";
+import type { PullRequestUpdatedEvent, Session, SessionLog } from "./types";
 import { captureError } from "./errors";
 
 /**
@@ -12,6 +12,8 @@ export const SSE_EVENT = {
   STATUS: "status",
   /** Sent when the session reaches a terminal status, carries a Session object. */
   DONE: "done",
+  /** Sent when a pull request health snapshot is updated. */
+  PULL_REQUEST_UPDATED: "pull_request.updated",
 } as const;
 
 export type SSEEventType = (typeof SSE_EVENT)[keyof typeof SSE_EVENT];
@@ -21,6 +23,7 @@ export interface SSEEventPayloads {
   [SSE_EVENT.LOG]: SessionLog;
   [SSE_EVENT.STATUS]: Session;
   [SSE_EVENT.DONE]: Session;
+  [SSE_EVENT.PULL_REQUEST_UPDATED]: PullRequestUpdatedEvent;
 }
 
 /** Type-safe event listener adder for session SSE streams. */

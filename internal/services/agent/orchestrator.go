@@ -829,6 +829,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// 6b. Generate integration skills doc from org credentials.
 	// This tells the agent what CLI tools are available in the sandbox.
 	input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
+	if revisionContext, revErr := ParseRevisionContext(run.RevisionContext); revErr != nil {
+		log.Warn().Err(revErr).Msg("failed to parse session revision context")
+	} else {
+		input.RevisionContext = revisionContext
+	}
 
 	prompt, err := adapter.PreparePrompt(ctx, input)
 	if err != nil {
@@ -1321,6 +1326,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			"User's request:\n" + originalMessage
 	}
 	_ = planMode // used by adapters that support explicit plan mode
+	if revisionContext, revErr := ParseRevisionContext(session.RevisionContext); revErr != nil {
+		log.Warn().Err(revErr).Msg("failed to parse session revision context during continue_session")
+	} else if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
+		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+	}
 
 	turnNumber := session.CurrentTurn + 1
 	issueSnapshot, err := o.createIssueSnapshotForTurn(ctx, session, turnNumber)

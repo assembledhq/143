@@ -317,6 +317,58 @@ export interface PullRequest {
   updated_at: string;
 }
 
+export interface PullRequestCheckSummary {
+  name: string;
+  category: "test" | "lint" | "build" | "deploy" | "unknown";
+  provider?: string;
+  details_url?: string;
+  summary?: string;
+}
+
+export interface PullRequestHealthResponse {
+  pull_request_id: string;
+  pull_request_number: number;
+  repository: string;
+  url: string;
+  status: string;
+  head_sha: string;
+  base_sha: string;
+  health_version: number;
+  merge_state: "unknown" | "clean" | "conflicted" | "behind";
+  has_conflicts: boolean;
+  failing_test_count: number;
+  needs_agent_action: boolean;
+  github_state_synced_at?: string;
+  summary: string;
+  checks?: PullRequestCheckSummary[];
+  can_resolve_conflicts: boolean;
+  can_fix_tests: boolean;
+  enrichment_status: "not_requested" | "pending" | "ready" | "failed" | "stale";
+  enrichment_requested: boolean;
+  enrichment_ready: boolean;
+  conflict_detail_available: boolean;
+  failing_test_detail_available: boolean;
+  obsolete_active_repair_sessions?: boolean;
+}
+
+export interface PullRequestRepairResponse {
+  session_id: string;
+  mode: "existing" | "resumed" | "revision";
+  reused_in_flight: boolean;
+  head_sha: string;
+  base_sha: string;
+  health_version: number;
+  repair_action_type: "fix_tests" | "resolve_conflicts";
+}
+
+export interface PullRequestUpdatedEvent {
+  pull_request_id: string;
+  version: number;
+  head_sha: string;
+  base_sha: string;
+  synced_at: string;
+}
+
 export interface SessionReviewComment {
   id: string;
   session_id: string;

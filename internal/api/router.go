@@ -172,6 +172,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	sessionComposerHandler := handlers.NewSessionComposerHandler(repoStore, prService)
+	pullRequestHandler := handlers.NewPullRequestHandler(prService)
+	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
 		sessionLogStore,
@@ -196,6 +198,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
 	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
 	sessionHandler.SetStreams(sessionStreams)
+	pullRequestHandler.SetStreams(prHealthStreams)
+	pullRequestHandler.SetMembershipStore(membershipStore)
 	if prService != nil {
 		sessionHandler.SetPRTitleSyncer(prService)
 	}
@@ -259,12 +263,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
 		prService.SetUserCredentialStore(userCredentialStore)
+		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)
 		prService.SetLLMClient(llmClient)
 		prService.SetPRTemplateStore(prTemplateStore)
 		prService.SetAuditEmitter(auditEmitter)
+		prService.SetPullRequestStreams(prHealthStreams)
 	}
 
 	// Wire user credential store into auth handler for token storage on login.
@@ -603,6 +609,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
 				r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+				r.Get("/api/v1/pull-requests/stream", pullRequestHandler.StreamUpdates)
+				r.Get("/api/v1/pull-requests/{id}/health", pullRequestHandler.GetHealth)
 				r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
 				r.Get("/api/v1/uploads/files/*", uploadHandler.ServeUpload)
 				r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
@@ -701,6 +709,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/archive", sessionHandler.ArchiveSession)
 				r.Post("/api/v1/sessions/{id}/unarchive", sessionHandler.UnarchiveSession)
 				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
+				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
 				r.Post("/api/v1/sessions/{id}/threads", sessionThreadHandler.CreateThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.SendThreadMessage)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/end", sessionThreadHandler.EndThread)

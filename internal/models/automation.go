@@ -29,13 +29,13 @@ type Automation struct {
 	IntervalUnit   *string    `db:"interval_unit"   json:"interval_unit,omitempty"`
 	IntervalRunAt  *string    `db:"interval_run_at" json:"interval_run_at,omitempty"`
 	CronExpression *string    `db:"cron_expression" json:"cron_expression,omitempty"`
-	// Timezone applies ONLY to cron schedules. Interval schedules use fixed
-	// duration arithmetic (NextRunTime) and ignore this field — the API, the
-	// DB CHECK (chk_automations_timezone_interval), and migration 66 all
-	// enforce timezone='UTC' when schedule_type='interval'. When cron lands
-	// (phase 3), the scheduler's next_run_at computation must evaluate the
-	// cron expression in this timezone. Do not read this field outside a cron
-	// codepath: changing it on an interval automation is a no-op by design.
+	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
+	// cron_expression for cron rows, and interval_run_at for interval rows
+	// that specify one. An interval row without interval_run_at uses pure
+	// duration arithmetic (NextRunTime) and the stored timezone is inert.
+	// Migration 93 dropped the chk_automations_timezone_interval DB CHECK so
+	// interval rows can now carry non-UTC zones; writers must still set
+	// timezone='UTC' only when meaningful.
 	Timezone  string     `db:"timezone"        json:"timezone"`
 	NextRunAt *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
 	LastRunAt *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
@@ -185,7 +185,7 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 			if err := ValidateIntervalRunAt(*a.IntervalRunAt); err != nil {
 				return time.Time{}, err
 			}
-			return NextRunTimeAt(from, *a.IntervalValue, *a.IntervalUnit, *a.IntervalRunAt)
+			return NextRunTimeAt(from, *a.IntervalValue, *a.IntervalUnit, *a.IntervalRunAt, a.Timezone)
 		}
 		return NextRunTime(from, *a.IntervalValue, *a.IntervalUnit), nil
 	case AutomationScheduleCron:

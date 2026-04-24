@@ -296,6 +296,55 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestAutomationHandler_Create_IntervalNonUTCTimezone locks in the post-
+// migration-93 contract: an interval schedule may specify any IANA zone for
+// interval_run_at, and ComputeNextRunAt resolves next_run_at in that zone
+// before storing UTC. Prior to migration 93 this combination returned 400
+// INVALID_TIMEZONE.
+func TestAutomationHandler_Create_IntervalNonUTCTimezone(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(20)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":            "my automation",
+		"goal":            "poke at things",
+		"schedule_type":   "interval",
+		"interval_value":  1,
+		"interval_unit":   "days",
+		"interval_run_at": "09:00",
+		"timezone":        "America/New_York",
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "America/New_York", resp.Data.Timezone)
+	require.NotNil(t, resp.Data.NextRunAt)
+	// next_run_at is stored UTC; its wall clock in America/New_York must be
+	// 09:00 — otherwise ComputeNextRunAt is dropping the timezone.
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	localNext := resp.Data.NextRunAt.In(loc)
+	require.Equal(t, 9, localNext.Hour(), "next_run_at should be 09:00 America/New_York")
+	require.Equal(t, 0, localNext.Minute())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAutomationHandler_Create_InvalidRepoID_BadUUID(t *testing.T) {
 	t.Parallel()
 
@@ -466,13 +515,72 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		"interval_unit":  "days",
 		"priority":       75,
 		"base_branch":    "develop",
-		// Interval schedules must be UTC — matches the chk_automations_timezone_interval DB constraint.
+		// Migration 93 dropped chk_automations_timezone_interval, so any IANA
+		// zone is accepted for interval schedules. UTC kept here as the default.
 		"timezone": "UTC",
 	}
 	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
 	rr := httptest.NewRecorder()
 	h.Update(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt pins the Update
+// branch `if req.Timezone != nil { scheduleChanged = true }`: patching *only*
+// the timezone on an interval row with interval_run_at must move next_run_at
+// to the new zone's wall-clock 09:00, not leave the old UTC value in place.
+func TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := "days"
+	runAt := "09:00"
+	// Seed a UTC interval row whose stored next_run_at is 09:00 UTC. After the
+	// PATCH flips timezone to America/New_York the recompute must shift
+	// next_run_at so the wall clock in America/New_York is still 09:00.
+	nextUTC := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true,
+		IntervalValue: &iv, IntervalUnit: &unit, IntervalRunAt: &runAt,
+		NextRunAt: &nextUTC,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(22)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"timezone": "America/New_York",
+	}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, "America/New_York", resp.Data.Timezone)
+	require.NotNil(t, resp.Data.NextRunAt)
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	localNext := resp.Data.NextRunAt.In(loc)
+	require.Equal(t, 9, localNext.Hour(), "next_run_at should be 09:00 America/New_York after tz-only PATCH")
+	require.Equal(t, 0, localNext.Minute())
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

@@ -901,6 +901,19 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 	return err
 }
 
+func (s *SessionStore) UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET revision_context = @revision_context,
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, pgx.NamedArgs{
+		"id":               sessionID,
+		"org_id":           orgID,
+		"revision_context": revisionContext,
+	})
+	return err
+}
+
 var (
 	// ErrSessionNotFound is returned when the session does not exist.
 	ErrSessionNotFound = fmt.Errorf("session not found")
