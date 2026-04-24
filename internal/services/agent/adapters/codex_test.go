@@ -43,7 +43,8 @@ func TestCodexAdapter_PreparePrompt(t *testing.T) {
 			input: &agent.AgentInput{
 				Issue: nil,
 			},
-			wantErr: true,
+			wantErr:   false,
+			wantToken: defaultLowTokenMax,
 		},
 		{
 			name: "basic issue low tokens",

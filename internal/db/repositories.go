@@ -191,6 +191,22 @@ func (s *RepositoryStore) GetByFullName(ctx context.Context, orgID uuid.UUID, fu
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
 }
 
+// GetByFullNameAnyStatus returns a repository by owner/name regardless of its
+// connection status. This is used by read-only flows that need metadata for an
+// already-linked repo after the user has intentionally disconnected it.
+func (s *RepositoryStore) GetByFullNameAnyStatus(ctx context.Context, orgID uuid.UUID, fullName string) (models.Repository, error) {
+	query := `
+		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at
+		FROM repositories
+		WHERE org_id = @org_id AND full_name = @full_name`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "full_name": fullName})
+	if err != nil {
+		return models.Repository{}, fmt.Errorf("query repository by full name: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Repository])
+}
+
 // GetAnyInstallationIDByOrg returns one non-zero GitHub installation_id for an
 // active repo in the org. This is a repair-path fallback for orgs whose
 // integrations.github config is missing installation_id even though repo sync
@@ -254,23 +270,33 @@ func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]Re
 		SELECT
 			r.id AS repository_id,
 			r.full_name,
-			COUNT(DISTINCT s.id) FILTER (
-				WHERE s.status IN ('running', 'pending', 'needs_human_guidance', 'awaiting_input')
+			COUNT(DISTINCT session_repo.id) FILTER (
+				WHERE session_repo.status IN ('running', 'pending', 'needs_human_guidance', 'awaiting_input')
 			) AS active_session_count,
 			latest_s.status AS latest_session_status,
 			COUNT(DISTINCT p.id) FILTER (
 				WHERE p.status IN ('active', 'planning')
 			) AS active_project_count
-		FROM repositories r
-		LEFT JOIN issues i ON i.repository_id = r.id AND i.org_id = r.org_id
-		LEFT JOIN sessions s ON s.issue_id = i.id AND s.org_id = r.org_id
-		LEFT JOIN projects p ON p.repository_id = r.id AND p.org_id = r.org_id
-		LEFT JOIN LATERAL (
-			SELECT s2.status FROM sessions s2
-			JOIN issues i2 ON s2.issue_id = i2.id
-			WHERE i2.repository_id = r.id AND s2.org_id = r.org_id
-			ORDER BY s2.created_at DESC LIMIT 1
-		) latest_s ON true
+	FROM repositories r
+	LEFT JOIN (
+		SELECT
+			s.id,
+			s.org_id,
+			s.status,
+			COALESCE(s.repository_id, legacy_issue.repository_id) AS resolved_repository_id
+		FROM sessions s
+		LEFT JOIN issues legacy_issue ON legacy_issue.id = s.issue_id AND legacy_issue.org_id = s.org_id
+		WHERE s.deleted_at IS NULL
+	) session_repo ON session_repo.org_id = r.org_id AND session_repo.resolved_repository_id = r.id
+	LEFT JOIN projects p ON p.repository_id = r.id AND p.org_id = r.org_id
+	LEFT JOIN LATERAL (
+		SELECT s2.status FROM sessions s2
+		LEFT JOIN issues legacy_issue2 ON legacy_issue2.id = s2.issue_id AND legacy_issue2.org_id = s2.org_id
+		WHERE s2.org_id = r.org_id
+		  AND s2.deleted_at IS NULL
+		  AND COALESCE(s2.repository_id, legacy_issue2.repository_id) = r.id
+		ORDER BY s2.created_at DESC LIMIT 1
+	) latest_s ON true
 		WHERE r.org_id = @org_id AND r.status = 'active'
 		GROUP BY r.id, r.full_name, latest_s.status
 		ORDER BY active_session_count DESC, r.full_name ASC`

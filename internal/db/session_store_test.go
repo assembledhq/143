@@ -20,7 +20,8 @@ import (
 )
 
 var sessionTestColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
+	"agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -41,7 +42,8 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 	lastActivityAt := now                // newest
 	completedAt := now.Add(-5 * time.Minute)
 	return []interface{}{
-		sessionID, issueID, orgID, "claude-code", "completed", "supervised", "low",
+		sessionID, issueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
+		"claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &startedAt, &completedAt, nil,
 		nil, nil, nil, false,
@@ -130,6 +132,9 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 		"base_commit_sha",
 		"diff_collected_at",
 		"latest_diff_snapshot_id",
+		"origin",
+		"interaction_mode",
+		"validation_policy",
 	}
 
 	for _, tt := range []struct {

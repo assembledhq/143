@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,9 @@ type AgentAdapter interface {
 // AgentInput contains everything the agent needs to understand and fix an issue.
 type AgentInput struct {
 	Issue              *models.Issue
+	LinkedIssues       []models.SessionIssueSnapshotEntry
+	Manual             bool
+	UserMessage        string
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference
@@ -202,11 +206,29 @@ func DefaultSandboxConfig() SandboxConfig {
 	if v := os.Getenv("SANDBOX_IMAGE"); v != "" {
 		image = v
 	}
+	cpuLimit := 2.0
+	if v := os.Getenv("SANDBOX_CPU_LIMIT"); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil && parsed > 0 {
+			cpuLimit = parsed
+		}
+	}
+	memoryLimitMB := 4096
+	if v := os.Getenv("SANDBOX_MEMORY_LIMIT_MB"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			memoryLimitMB = parsed
+		}
+	}
+	diskLimitGB := 10
+	if v := os.Getenv("SANDBOX_DISK_LIMIT_GB"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			diskLimitGB = parsed
+		}
+	}
 	return SandboxConfig{
 		Image:         image,
-		CPULimit:      2,
-		MemoryLimitMB: 4096,
-		DiskLimitGB:   10,
+		CPULimit:      cpuLimit,
+		MemoryLimitMB: memoryLimitMB,
+		DiskLimitGB:   diskLimitGB,
 		Timeout:       DefaultSandboxTimeout,
 		NetworkPolicy: "restricted",
 		WorkDir:       "/workspace",

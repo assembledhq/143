@@ -56,12 +56,12 @@ func PMBootstrapPrompt(data PMBootstrapPromptData) string {
 
 // PMRefreshPromptData holds the dynamic values for the PM context refresh prompt.
 type PMRefreshPromptData struct {
-	SkillsDoc     string
-	HasNotion     bool
-	HasLinear     bool
-	HasSentry     bool
-	HasGitHub     bool
-	LastSyncedAt  string // RFC3339 timestamp of last refresh
+	SkillsDoc    string
+	HasNotion    bool
+	HasLinear    bool
+	HasSentry    bool
+	HasGitHub    bool
+	LastSyncedAt string // RFC3339 timestamp of last refresh
 }
 
 // PMRefreshPrompt renders the system prompt for the PM context refresh agent.
@@ -111,6 +111,24 @@ func ReviewCommentPrompt() string {
 // when a PM agent assigns a task to a coding agent.
 func CodingTaskPreamble() string {
 	return render("coding_task_preamble.template", nil)
+}
+
+// LinkedIssueContextData renders the canonical XML issue-context block used by
+// coding agents when a session is linked to issues.
+type LinkedIssueContextData struct {
+	LinkedIssues []LinkedIssueContextEntry
+}
+
+type LinkedIssueContextEntry struct {
+	Role        string
+	Source      string
+	Title       string
+	ExternalID  string
+	Description string
+}
+
+func LinkedIssuesContext(data LinkedIssueContextData) string {
+	return render("linked_issues_context.template", data)
 }
 
 // ─── Slack ────────────────────────────────────────────────────────────────────

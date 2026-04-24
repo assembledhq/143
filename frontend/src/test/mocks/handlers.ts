@@ -216,6 +216,10 @@ export const handlers = [
     } satisfies SingleResponse<User>);
   }),
 
+  http.post('/api/v1/auth/active-org', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
   http.post('/api/v1/sessions/:id/view', () => {
     return new HttpResponse(null, { status: 204 });
   }),
@@ -260,6 +264,23 @@ export const handlers = [
       );
     }
     return HttpResponse.json({ data: session } satisfies SingleResponse<Session>);
+  }),
+
+  http.patch('/api/v1/sessions/:id', async ({ request, params }) => {
+    const body = await request.json() as { title: string };
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (!session) {
+      return HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'Session not found' } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      data: {
+        ...session,
+        title: body.title,
+      },
+    } satisfies SingleResponse<Session>);
   }),
 
   http.get('/api/v1/sessions/:id/logs', () => {

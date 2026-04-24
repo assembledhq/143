@@ -65,7 +65,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { Session, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
+import type { Session, SessionDetail, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -153,8 +153,15 @@ type PRAuthInterceptDetails = {
   can_fallback_to_app: boolean;
 };
 
+type PRActionErrorState = {
+  code?: string;
+  message: string;
+};
+
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
 const TITLE_CLICK_DRAG_THRESHOLD_PX = 4;
+const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
+  "This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.";
 
 function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
   if (!value || typeof value !== "object") return false;
@@ -182,10 +189,6 @@ function SessionHeaderTitle({ session }: { session: Session }) {
   const draggedRef = useRef(false);
   const canEditTitle = user?.role === "admin" || user?.role === "member";
 
-  if (!editing && draftTitle !== displayedTitle) {
-    setDraftTitle(displayedTitle);
-  }
-
   useEffect(() => {
     if (!editing) return;
     inputRef.current?.focus();
@@ -196,9 +199,9 @@ function SessionHeaderTitle({ session }: { session: Session }) {
     mutationFn: (title: string) => api.sessions.update(session.id, { title }),
     onMutate: async (title) => {
       await queryClient.cancelQueries({ queryKey: ["session", session.id] });
-      const previousSession = queryClient.getQueryData<SingleResponse<Session>>(["session", session.id]);
+      const previousSession = queryClient.getQueryData<SingleResponse<SessionDetail>>(["session", session.id]);
       if (previousSession?.data) {
-        queryClient.setQueryData<SingleResponse<Session>>(["session", session.id], {
+        queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", session.id], {
           ...previousSession,
           data: {
             ...previousSession.data,
@@ -332,6 +335,23 @@ function SessionHeaderTitle({ session }: { session: Session }) {
       )}
     </div>
   );
+}
+
+function normalizeSnapshotPRMessage(message?: string | null): string {
+  if (!message || /^session state expired\b/i.test(message)) {
+    return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+  }
+  return message;
+}
+
+function prErrorTitle(snapshotUnavailable: boolean, errorCode?: string): string {
+  if (snapshotUnavailable || errorCode === "SNAPSHOT_EXPIRED") {
+    return "PR snapshot unavailable";
+  }
+  if (errorCode === "PR_RESUME_EXPIRED") {
+    return "Couldn't resume PR creation";
+  }
+  return "Couldn't create the PR";
 }
 
 function OverviewTab({ session, members }: { session: Session; members: User[] }) {
@@ -904,12 +924,12 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     refetchInterval: isActive ? 3000 : false,
   });
 
-  // Fetch the linked issue to display its description as the initial prompt.
-  // Manual sessions have no issue — issue_id comes back as the zero UUID.
-  const hasIssue = !!session.issue_id && session.issue_id !== "00000000-0000-0000-0000-000000000000";
+  // Fetch the linked primary issue to display its description as the initial prompt.
+  const primaryIssueId = session.primary_issue_id ?? session.issue_id ?? undefined;
+  const hasIssue = !!primaryIssueId;
   const issueQuery = useQuery({
-    queryKey: ["issue", session.issue_id],
-    queryFn: () => api.issues.get(session.issue_id),
+    queryKey: ["issue", primaryIssueId],
+    queryFn: () => api.issues.get(primaryIssueId!),
     enabled: hasIssue,
   });
 
@@ -1542,7 +1562,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
-  const [localPRActionError, setLocalPRActionError] = useState<string | null>(null);
+  const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthInterceptDetails | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
 
@@ -1687,13 +1707,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
     },
-    onSuccess: () => {
+    onSuccess: (_data, options) => {
       setLocalPRActionError(null);
       setLocalPRState("queued");
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
     },
-    onError: (err) => {
+    onError: (err, options) => {
       if (err instanceof ApiError &&
         (err.code === "GITHUB_PR_AUTHORSHIP_REQUIRED" || err.code === "GITHUB_PR_AUTHORSHIP_REAUTH_REQUIRED") &&
         isPRAuthInterceptDetails(err.details)) {
@@ -1705,7 +1728,13 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       setLocalPRState("idle");
       const msg = err instanceof Error ? err.message : PR_ERROR_TOAST_MESSAGE;
-      setLocalPRActionError(msg);
+      setLocalPRActionError({
+        code: err instanceof ApiError ? err.code : undefined,
+        message: msg,
+      });
+      if (options?.resumeToken) {
+        clearPRResumeParams();
+      }
       toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
     },
   });
@@ -1809,13 +1838,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   const showValidationTab = !session.triggered_by_user_id;
   const prState = session.pr_creation_state;
   const snapshotExpired = !session.snapshot_key;
-  const snapshotExpiredMessage =
-    session.pr_creation_error || "Session state expired — re-run to create a PR.";
+  const serverSnapshotUnavailable = /^session state expired\b/i.test(session.pr_creation_error || "");
+  const localSnapshotUnavailable = localPRActionError?.code === "SNAPSHOT_EXPIRED";
+  const snapshotUnavailable = snapshotExpired || localSnapshotUnavailable || serverSnapshotUnavailable;
+  const snapshotExpiredMessage = normalizeSnapshotPRMessage(
+    localSnapshotUnavailable ? localPRActionError.message : session.pr_creation_error
+  );
   const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError =
-    localPRActionError ||
-    (snapshotExpired ? snapshotExpiredMessage : null) ||
+    (localSnapshotUnavailable ? snapshotExpiredMessage : localPRActionError?.message) ||
+    (snapshotUnavailable ? snapshotExpiredMessage : null) ||
     (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canCreatePR ||
@@ -1841,12 +1874,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionSpinning = true;
     prActionDisabled = true;
     prActionTitle = "Pushing changes and opening the pull request";
-  } else if (localPRActionError) {
-    prActionLabel = "Retry";
-    prActionTitle = localPRActionError;
-  } else if (snapshotExpired) {
+  } else if (snapshotUnavailable) {
     prActionDisabled = true;
     prActionTitle = snapshotExpiredMessage;
+  } else if (localPRActionError) {
+    prActionLabel = "Retry";
+    prActionTitle = localPRActionError.message;
   } else if (succeededButNoPR) {
     prActionLabel = "Finalizing PR…";
     prActionSpinning = true;
@@ -1860,7 +1893,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: snapshotExpired || /expired/i.test(prActionError) ? "PR session expired" : "Couldn't create the PR",
+    title: prErrorTitle(snapshotUnavailable, localPRActionError?.code),
     description: prActionError,
     action: prActionDisabled ? undefined : {
       label: prActionLabel,
@@ -2016,7 +2049,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
               {prErrorNotice && (
                 <ErrorNotice
-                  className="mt-2"
+                  className="mx-2 mt-2"
                   title={prErrorNotice.title}
                   description={prErrorNotice.description}
                   action={prErrorNotice.action}

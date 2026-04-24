@@ -3,7 +3,8 @@
 import Image from "next/image";
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +30,13 @@ function LoginPageContent() {
 
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
+  const invitedGitHubUsername = searchParams.get("github_username") ?? "";
   const invitedOrg = searchParams.get("org") ?? "";
+  const isSwitchAccount = searchParams.get("switch_account") === "1";
+  const postEmailSignInHref = invitation
+    ? `/invite/accept?token=${encodeURIComponent(invitation)}`
+    : "/sessions";
+  const inviteTarget = invitedEmail || (invitedGitHubUsername ? `@${invitedGitHubUsername}` : "");
   const [tab, setTab] = useState(searchParams.get("tab") === "signup" ? "signup" : "signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,10 +51,10 @@ function LoginPageContent() {
   const [signUpPassword, setSignUpPassword] = useState("");
 
   useEffect(() => {
-    if (!authLoading && isAuthenticated) {
+    if (!isSwitchAccount && !authLoading && isAuthenticated) {
       router.replace("/onboarding");
     }
-  }, [authLoading, isAuthenticated, router]);
+  }, [authLoading, isAuthenticated, isSwitchAccount, router]);
 
   useEffect(() => {
     if (invitedEmail) {
@@ -62,7 +69,7 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await api.auth.loginEmail(signInEmail, signInPassword);
-      window.location.href = "/sessions";
+      window.location.href = postEmailSignInHref;
     } catch (err: unknown) {
       captureError(err, { feature: "auth-signin" });
       const message = err instanceof Error ? err.message : "Sign in failed";
@@ -88,7 +95,7 @@ function LoginPageContent() {
     }
   };
 
-  if (authLoading || isAuthenticated) {
+  if (authLoading || (!isSwitchAccount && isAuthenticated)) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background px-4">
         <div className="w-full max-w-sm rounded-lg border border-border bg-card p-6 space-y-4">
@@ -121,14 +128,28 @@ function LoginPageContent() {
           <CardTitle className="text-lg font-semibold">143.dev</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {invitation && invitedEmail && (
-            <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-              You were invited{invitedOrg ? (
-                <>
-                  {" "}to join <span className="font-medium text-foreground">{invitedOrg}</span>
-                </>
-              ) : null}{" "}
-              as <span className="font-medium text-foreground">{invitedEmail}</span>.
+          {invitation && (invitedEmail || invitedGitHubUsername || invitedOrg) && (
+            <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-left">
+              <div className="mb-2 flex items-center gap-2">
+                <Badge variant="secondary">Invitation pending</Badge>
+              </div>
+              <div className="text-sm font-medium text-foreground">
+                Join {invitedOrg || "this organization"}
+              </div>
+              <CardDescription className="mt-1 text-sm">
+                Someone asked you to join
+                {invitedOrg ? (
+                  <>
+                    {" "} <span className="font-medium text-foreground">{invitedOrg}</span>
+                  </>
+                ) : null}
+                {inviteTarget ? (
+                  <>
+                    {" "}as <span className="font-medium text-foreground">{inviteTarget}</span>
+                  </>
+                ) : null}
+                . Sign in if you already have an account, or create one to accept the invitation.
+              </CardDescription>
             </div>
           )}
 

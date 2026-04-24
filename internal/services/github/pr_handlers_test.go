@@ -33,7 +33,7 @@ var handlerPRColumns = []string{
 // column order is not critical, but the set of names must match the query.
 // If session_store.go changes its SELECT list, update this slice to match.
 var sessionColumns = []string{
-	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -144,7 +144,7 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumns).
-				AddRow(sessionID, issueID, orgID, "claude-code", "completed", "full", "low",
+				AddRow(sessionID, issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
 					nil, nil, nil, nil,
 					nil, nil, false, nil, nil, nil,
 					nil, nil, nil, false,

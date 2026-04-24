@@ -46,6 +46,16 @@ export interface CreateOrgDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+function messageForActiveOrgPersistenceWarning(err: unknown, orgName: string): string {
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  switch (code) {
+    case "UNAUTHORIZED":
+      return `Created ${orgName}, but your session expired before we could save it as the default workspace. Future logins may open your previous workspace until you sign in again.`;
+    default:
+      return `Created ${orgName}, but couldn't save it as your default workspace. Future logins may open your previous workspace.`;
+  }
+}
+
 export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -65,15 +75,24 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
 
   const mutation = useMutation({
     mutationFn: (trimmed: string) => api.organizations.create(trimmed),
-    onSuccess: (response) => {
+    onSuccess: async (response) => {
       const created = response.data;
       setActiveOrgId(created.id);
+      let persistedActiveOrg = true;
+      try {
+        await api.auth.setActiveOrg(created.id);
+      } catch (err: unknown) {
+        persistedActiveOrg = false;
+        toast.error(messageForActiveOrgPersistenceWarning(err, created.name));
+      }
       // clear() over invalidateQueries(): invalidating would fire refetches
       // against the current page right before navigation unmounts it.
       // Clearing drops cached data so the next page's queries fetch fresh
       // under the new active-org header.
       queryClient.clear();
-      toast.success(`Created ${created.name}`);
+      if (persistedActiveOrg) {
+        toast.success(`Created ${created.name}`);
+      }
       handleOpenChange(false);
       router.push("/sessions");
     },

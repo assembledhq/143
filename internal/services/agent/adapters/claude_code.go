@@ -63,8 +63,8 @@ func (a *ClaudeCodeAdapter) Name() models.AgentType {
 // PreparePrompt constructs the system and user prompts for Claude Code
 // based on the issue context.
 func (a *ClaudeCodeAdapter) PreparePrompt(ctx context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
-	if input == nil || input.Issue == nil {
-		return nil, fmt.Errorf("agent input and issue are required")
+	if input == nil {
+		return nil, fmt.Errorf("agent input is required")
 	}
 
 	maxTokens := resolveTokenLimit(input.TokenMode, input.ContextLimits)
@@ -269,7 +269,8 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 	// Manual sessions skip the bug-fixing template — the user's raw message
 	// is the entire prompt. Only inject repo conventions and integration
 	// skills so the agent knows what tools and patterns are available.
-	if input.Issue.Source != models.IssueSourceManual {
+	isManual := input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual)
+	if !isManual {
 		base := prompts.CodingTaskPreamble()
 		b.WriteString(base)
 		if !strings.HasSuffix(base, "\n\n") {
@@ -349,21 +350,48 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 		}
 	}
 
+	if len(input.LinkedIssues) > 0 {
+		entries := make([]prompts.LinkedIssueContextEntry, 0, len(input.LinkedIssues))
+		for _, linked := range input.LinkedIssues {
+			entry := prompts.LinkedIssueContextEntry{
+				Role:       string(linked.Role),
+				Source:     string(linked.Source),
+				Title:      linked.Title,
+				ExternalID: linked.ExternalID,
+			}
+			if linked.Role == models.SessionIssueLinkRolePrimary {
+				entry.Description = linked.Description
+			}
+			entries = append(entries, entry)
+		}
+		b.WriteString("## Linked Issues Context\n\n")
+		b.WriteString(prompts.LinkedIssuesContext(prompts.LinkedIssueContextData{LinkedIssues: entries}))
+		b.WriteString("\n\n")
+	}
+
 	return b.String()
 }
 
 // buildUserPrompt constructs the user prompt with issue-specific details.
 func buildUserPrompt(input *agent.AgentInput) string {
 	// Manual sessions: pass through the user's raw message without any wrapping.
-	if input.Issue.Source == models.IssueSourceManual {
-		base := input.Issue.Title
-		if input.Issue.Description != nil {
-			base = *input.Issue.Description
+	isManual := input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual)
+	if isManual {
+		base := input.UserMessage
+		if strings.TrimSpace(base) == "" && input.Issue != nil {
+			base = input.Issue.Title
+			if input.Issue.Description != nil {
+				base = *input.Issue.Description
+			}
 		}
 		if len(input.References) == 0 {
 			return base
 		}
 		return buildManualPromptWithReferences(base, input.References)
+	}
+
+	if input.Issue == nil {
+		return "No issue context was provided. Use the session title and any repository context to complete the task."
 	}
 
 	var b strings.Builder
@@ -438,6 +466,9 @@ func buildManualPromptWithReferences(message string, references []models.Session
 // extractFileHints parses the issue's raw data for file paths from
 // Sentry stack trace frames.
 func extractFileHints(input *agent.AgentInput) []string {
+	if input == nil || input.Issue == nil {
+		return nil
+	}
 	if input.Issue.Source != models.IssueSourceSentry || len(input.Issue.RawData) == 0 {
 		return nil
 	}

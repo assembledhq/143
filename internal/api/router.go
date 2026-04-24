@@ -48,6 +48,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationStore := db.NewIntegrationStore(pool)
 	issueStore := db.NewIssueStore(pool)
 	sessionStore := db.NewSessionStore(pool)
+	sessionIssueLinkStore := db.NewSessionIssueLinkStore(pool)
+	sessionIssueSnapshotStore := db.NewSessionTurnIssueSnapshotStore(pool)
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	validationStore := db.NewValidationStore(pool)
@@ -186,12 +188,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	sessionHandler.SetViewStore(sessionViewStore)
+	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
+	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)
 	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
 	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
 	sessionHandler.SetStreams(sessionStreams)
+	if prService != nil {
+		sessionHandler.SetPRTitleSyncer(prService)
+	}
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
@@ -470,7 +477,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
 
 	apiRoutes.Group(func(r chi.Router) {
-
 		// Webhook routes (no auth — called by external services, signature verified per-provider)
 		r.Route("/api/v1/webhooks", func(r chi.Router) {
 			r.Post("/github", webhookHandler.HandleGitHub)
@@ -525,6 +531,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// empty list so the switcher can render an invite-me state rather
 			// than a 403 spinner.
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
+			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
 			// Available to any authenticated user (no RequireRole) — an invited
 			// user may not yet have a role in the target org when they claim.
@@ -575,6 +582,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions", sessionHandler.List)
 				r.Get("/api/v1/sessions/counts", sessionHandler.Counts)
 				r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
+				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
 				r.Get("/api/v1/sessions/{id}/validation", sessionHandler.GetValidation)

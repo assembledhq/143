@@ -431,12 +431,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	// Issue lookup is optional — sessions may not have an associated issue.
 	var issue *models.Issue
-	if run.IssueID != uuid.Nil {
-		i, err := s.issues.GetByID(ctx, run.OrgID, run.IssueID)
+	if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *primaryIssueID)
 		if err == nil {
 			issue = &i
 		} else {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to look up issue, proceeding without it")
+			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to look up issue, proceeding without it")
 		}
 	}
 
@@ -569,12 +569,72 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	if issue != nil {
-		if err := s.issues.UpdateStatus(ctx, run.OrgID, run.IssueID, "in_progress"); err != nil {
-			s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status")
+		if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+			if err := s.issues.UpdateStatus(ctx, run.OrgID, *primaryIssueID, "in_progress"); err != nil {
+				s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status")
+			}
 		}
 	}
 
 	return pr, nil
+}
+
+// SyncSessionTitle propagates a user-edited session title to the existing PR,
+// if one exists. Edited titles intentionally override any result-summary-based
+// auto title so the session header and PR stay aligned.
+func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Session) error {
+	if session == nil || session.Title == nil || strings.TrimSpace(*session.Title) == "" {
+		return nil
+	}
+	if s.pullRequests == nil || s.repos == nil || s.tokenProvider == nil {
+		return fmt.Errorf("PRService: title sync dependencies not configured")
+	}
+
+	pr, err := s.pullRequests.GetBySessionID(ctx, session.OrgID, session.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load pull request: %w", err)
+	}
+
+	var issue *models.Issue
+	if primaryIssueID := session.EffectivePrimaryIssueID(); primaryIssueID != nil && s.issues != nil {
+		i, err := s.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+		if err == nil {
+			issue = &i
+		} else {
+			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to load issue for PR title sync")
+		}
+	}
+
+	repo, err := s.repos.GetByFullNameAnyStatus(ctx, session.OrgID, pr.GitHubRepo)
+	if err != nil {
+		return fmt.Errorf("get repository: %w", err)
+	}
+
+	titleSession := *session
+	titleSession.ResultSummary = nil
+	title := formatSyncedPRTitle(&titleSession, issue)
+	if title == "" {
+		return nil
+	}
+
+	token, err := s.getInstallationTokenForRepo(ctx, session.OrgID, &repo)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+
+	owner, repoName := splitRepo(pr.GitHubRepo)
+	if err := s.updatePullRequestTitle(ctx, token, owner, repoName, pr.GitHubPRNumber, title); err != nil {
+		return fmt.Errorf("update pull request title: %w", err)
+	}
+
+	if err := s.pullRequests.UpdateTitle(ctx, session.OrgID, pr.ID, title); err != nil {
+		return fmt.Errorf("store pull request title: %w", err)
+	}
+
+	return nil
 }
 
 // pushSessionBranch hydrates the session's sandbox snapshot into a fresh
@@ -777,8 +837,10 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			}
 
 			// Update issue status to fixed.
-			if err := s.issues.UpdateStatus(ctx, pr.OrgID, run.IssueID, "fixed"); err != nil {
-				s.logger.Warn().Err(err).Str("issue_id", run.IssueID.String()).Msg("failed to update issue status to fixed")
+			if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+				if err := s.issues.UpdateStatus(ctx, pr.OrgID, *primaryIssueID, "fixed"); err != nil {
+					s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status to fixed")
+				}
 			}
 
 			// Snapshot is no longer needed now that the PR is merged. Cleanup
@@ -1321,6 +1383,14 @@ func withDraft(draft bool) prCreateOption {
 	}
 }
 
+func (s *PRService) updatePullRequestTitle(ctx context.Context, token, owner, repo string, number int, title string) error {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+	_, err := s.doGitHubRequest(ctx, token, http.MethodPatch, path, map[string]any{
+		"title": title,
+	})
+	return err
+}
+
 func (s *PRService) createPullRequest(ctx context.Context, token, owner, repo, title, body, head, base string, opts ...prCreateOption) (int, string, error) {
 	cfg := prCreateConfig{}
 	for _, opt := range opts {
@@ -1468,6 +1538,11 @@ func truncatePRTitle(s string, limit int) string {
 }
 
 func bestPRTitleSubject(session *models.Session, fallback string) string {
+	if session.Title != nil && *session.Title != "" {
+		if title := normalizePRTitleCandidate(*session.Title); title != "" {
+			return title
+		}
+	}
 	if session.ResultSummary != nil && *session.ResultSummary != "" {
 		if title := normalizePRTitleCandidate(firstLine(*session.ResultSummary)); title != "" {
 			return title
@@ -1475,11 +1550,6 @@ func bestPRTitleSubject(session *models.Session, fallback string) string {
 	}
 	if fallback != "" {
 		if title := normalizePRTitleCandidate(fallback); title != "" {
-			return title
-		}
-	}
-	if session.Title != nil && *session.Title != "" {
-		if title := normalizePRTitleCandidate(*session.Title); title != "" {
 			return title
 		}
 	}
@@ -1527,6 +1597,28 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 		return title
 	}
 	return fmt.Sprintf("Session %s", session.ID.String()[:8])
+}
+
+func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
+	if issue != nil && issue.Source == models.IssueSourceLinear {
+		title := bestPRTitleSubject(session, issue.Title)
+		if title == "" {
+			title = normalizePRTitleCandidate(issue.Title)
+			if title == "" {
+				title = issue.Title
+			}
+		}
+
+		prefix := strings.TrimSpace(issue.ExternalID)
+		if prefix == "" {
+			return truncatePRTitle(title, maxPRTitleLen)
+		}
+
+		prefix += ": "
+		return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+	}
+
+	return formatPRTitle(session, issue)
 }
 
 func formatCommitMessage(session *models.Session, issue *models.Issue) string {

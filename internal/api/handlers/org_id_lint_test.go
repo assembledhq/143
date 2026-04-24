@@ -50,6 +50,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                   "returns user from context only",
 		"AuthHandler.Logout":               "deletes session by cookie token only",
+		"AuthHandler.SetActiveOrg":         "user-scoped preference write; validates membership directly instead of using request org context",
 		"AuthHandler.ClaimInvitation":      "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
 		"OrganizationsHandler.Create":      "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
 		"SettingsHandler.GetLLMDefaults":   "returns static server config",
