@@ -167,6 +167,19 @@ describe('TeamSettingsPage', () => {
     expect(emailInput).toHaveClass('h-9');
   });
 
+  it('uses the shared modal action sizing for the invite footer buttons', async () => {
+    renderWithProviders(<TeamSettingsPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
+
+    const cancelButton = await screen.findByRole('button', { name: 'Cancel' });
+    const sendInviteButton = screen.getByRole('button', { name: 'Send invite' });
+
+    expect(cancelButton).toHaveClass('h-8');
+    expect(sendInviteButton).toHaveClass('h-8');
+    expect(sendInviteButton).not.toHaveClass('h-9');
+  });
+
   it('renders pending invitations', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
