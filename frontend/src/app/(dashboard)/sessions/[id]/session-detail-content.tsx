@@ -566,133 +566,258 @@ function ChangesTab({
 }
 
 // ---------------------------------------------------------------------------
-// Review comment input bar (shown at bottom during review mode)
+// Shared session composer (used in both chat and review mode)
 // ---------------------------------------------------------------------------
 
-function ReviewCommentInput({
-  sessionId,
-  comments,
-  diffFiles,
+function SessionComposer({
+  message,
+  onMessageChange,
+  planMode,
+  onPlanModeChange,
+  selectedModel,
+  onSelectedModelChange,
+  attachments,
+  isUploading,
+  onUpload,
+  onRemoveAttachment,
+  openComments,
+  availableModels,
   canSendMessage,
+  isRunning,
+  isSnapshotExpired,
+  isClaudeCode,
+  sendPending,
+  sendError,
+  cancelPending,
+  uploadError,
+  onCancelSession,
+  onSend,
+  textareaRef,
+  uploadInputRef,
 }: {
-  sessionId: string;
-  comments: SessionReviewComment[];
-  diffFiles: DiffFile[];
+  message: string;
+  onMessageChange: (value: string) => void;
+  planMode: boolean;
+  onPlanModeChange: (value: boolean) => void;
+  selectedModel: string;
+  onSelectedModelChange: (value: string) => void;
+  attachments: string[];
+  isUploading: boolean;
+  onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemoveAttachment: (url: string) => void;
+  openComments: SessionReviewComment[];
+  availableModels: readonly string[];
   canSendMessage: boolean;
+  isRunning: boolean;
+  isSnapshotExpired: boolean;
+  isClaudeCode: boolean;
+  sendPending: boolean;
+  sendError: unknown;
+  cancelPending: boolean;
+  uploadError: string | null;
+  onCancelSession: () => void;
+  onSend: () => void;
+  textareaRef: { current: HTMLTextAreaElement | null };
+  uploadInputRef: { current: HTMLInputElement | null };
 }) {
-  const [message, setMessage] = useState("");
-  const queryClient = useQueryClient();
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const openComments = useMemo(() => comments.filter((c) => !c.resolved), [comments]);
-
-  const sendMutation = useMutation({
-    mutationFn: () => {
-      const formatted = formatReviewMessage(openComments, diffFiles, message);
-      return api.sessions.sendMessage(sessionId, formatted);
-    },
-    onSuccess: () => {
-      setMessage("");
-      if (textareaRef.current) {
-        textareaRef.current.style.height = "auto";
-      }
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
-    },
-  });
-
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message]);
+  }, [message, textareaRef]);
 
-  const hasContent = message.trim() || openComments.length > 0;
+  const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (hasContent && canSendMessage && !sendMutation.isPending) {
-        sendMutation.mutate();
+      if (hasContent && canSendMessage && !sendPending && !isRunning) {
+        onSend();
       }
+    }
+    if (e.key === "Tab" && e.shiftKey && isClaudeCode && canSendMessage) {
+      e.preventDefault();
+      onPlanModeChange(!planMode);
     }
   }
 
+  const firstError = uploadError || sendError;
+  const errorMessage = typeof firstError === "string"
+    ? firstError
+    : firstError instanceof Error
+      ? firstError.message
+      : firstError
+        ? "An error occurred"
+        : null;
+
   return (
-    <div className="border-t border-border p-3 bg-background shrink-0">
-      <div className={cn("rounded-xl border border-border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring")}>
-        {/* Open comments as chips */}
-        {openComments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
-            {openComments.map((c) => {
-              const fileName = c.file_path.split("/").pop() ?? c.file_path;
-              return (
-                <div
-                  key={c.id}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
-                >
-                  <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
-                  <span className="font-mono text-muted-foreground">
-                    {fileName}:{c.line_number}
-                  </span>
-                  <span className="text-muted-foreground/40">&mdash;</span>
-                  <span className="truncate max-w-[200px]">
-                    {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
-                  </span>
-                </div>
-              );
-            })}
+    <>
+      {errorMessage && (
+        <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {errorMessage}
+        </div>
+      )}
+
+      <div className="border-t border-border p-3 bg-background shrink-0">
+        {planMode && (
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
+              <button
+                onClick={() => onPlanModeChange(false)}
+                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                title="Exit plan mode"
+              >
+                &times;
+              </button>
+            </div>
+            <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
           </div>
         )}
 
-        <Textarea
-          ref={textareaRef}
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={
-            openComments.length > 0
-              ? "Add instructions or send comments to agent..."
-              : "Ask to make changes, @mention files..."
-          }
-          disabled={!canSendMessage || sendMutation.isPending}
-          className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
-        />
-
-        <div className="flex items-center gap-1 px-2 pb-2">
+        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
           {openComments.length > 0 && (
-            <span className="text-xs text-muted-foreground">
-              {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
-            </span>
+            <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+              {openComments.map((c) => {
+                const fileName = c.file_path.split("/").pop() ?? c.file_path;
+                return (
+                  <div
+                    key={c.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                  >
+                    <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
+                    <span className="font-mono text-muted-foreground">
+                      {fileName}:{c.line_number}
+                    </span>
+                    <span className="text-muted-foreground/40">-</span>
+                    <span className="truncate max-w-[200px]">
+                      {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           )}
-          <div className="ml-auto">
+
+          <Textarea
+            ref={textareaRef}
+            value={message}
+            onChange={(e) => onMessageChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={
+              isSnapshotExpired
+                ? "Session environment has expired and can no longer be continued"
+                : !canSendMessage
+                  ? "Session is not active"
+                  : planMode
+                    ? "Describe what you want to plan..."
+                    : isRunning
+                      ? "Agent is responding..."
+                      : "Send a follow-up message..."
+            }
+            disabled={!canSendMessage || sendPending || isRunning}
+            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
+          />
+
+          <PendingAttachmentStrip
+            attachments={attachments}
+            isUploading={isUploading}
+            onRemove={onRemoveAttachment}
+            size="md"
+            className="px-3 pb-2"
+          />
+
+          <div className="flex items-center gap-1 px-2 pb-2">
             <Button
+              type="button"
               size="icon"
-              variant="default"
-              className="h-8 w-8 shrink-0 rounded-lg"
-              title="Send to agent"
-              disabled={!hasContent || !canSendMessage || sendMutation.isPending}
-              onClick={() => sendMutation.mutate()}
+              variant="ghost"
+              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+              title="Attach files or images"
+              disabled={!canSendMessage || isUploading}
+              onClick={() => uploadInputRef.current?.click()}
             >
-              {sendMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <ArrowUp className="h-4 w-4" />
-              )}
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
             </Button>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/*,.pdf,.txt,.md,.json,.csv"
+              multiple
+              className="hidden"
+              onChange={onUpload}
+            />
+
+            {availableModels.length > 0 && (
+              <Select value={selectedModel} onValueChange={onSelectedModelChange}>
+                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
+                  <SelectValue placeholder="Default model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            {isClaudeCode && canSendMessage && !planMode && (
+              <button
+                onClick={() => onPlanModeChange(true)}
+                className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
+                title="Switch to plan mode (Shift+Tab)"
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                <span>Plan</span>
+              </button>
+            )}
+
+            {openComments.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {openComments.length} comment{openComments.length > 1 ? "s" : ""} attached
+              </span>
+            )}
+
+            <div className="ml-auto flex items-center gap-1">
+              {isRunning ? (
+                <Button
+                  size="icon"
+                  variant="outline"
+                  className="h-8 w-8 shrink-0 rounded-lg"
+                  title="Cancel session"
+                  disabled={cancelPending}
+                  onClick={onCancelSession}
+                >
+                  <Square className="h-3 w-3" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  variant={planMode ? "outline" : "default"}
+                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                  title={planMode ? "Send plan request" : "Send message"}
+                  disabled={!hasContent || !canSendMessage || sendPending || isRunning}
+                  onClick={onSend}
+                >
+                  {sendPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : planMode ? (
+                    <ClipboardList className="h-4 w-4" />
+                  ) : (
+                    <ArrowUp className="h-4 w-4" />
+                  )}
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </div>
-
-      {sendMutation.error && (
-        <div className="flex items-center gap-2 mt-2 text-xs text-destructive">
-          <AlertTriangle className="h-3 w-3 shrink-0" />
-          {sendMutation.error instanceof Error ? sendMutation.error.message : "Failed to send"}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -719,18 +844,26 @@ function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
 }
 
-function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Session; sessionId: string; isActive: boolean; onDiffClick?: () => void }) {
+function ChatPanel({
+  session,
+  sessionId,
+  isActive,
+  onDiffClick,
+  onApprovePlan,
+  onAdjustPlan,
+  onRegisterScrollToLiveEdge,
+}: {
+  session: Session;
+  sessionId: string;
+  isActive: boolean;
+  onDiffClick?: () => void;
+  onApprovePlan?: () => void;
+  onAdjustPlan?: () => void;
+  onRegisterScrollToLiveEdge?: (scrollToLiveEdge: (() => void) | null) => void;
+}) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const [message, setMessage] = useState("");
-  const [planMode, setPlanMode] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("");
   const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
-  const [attachments, setAttachments] = useState<string[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
@@ -739,14 +872,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-  const isClaudeCode = session.agent_type === "claude_code";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  // Sourced from the AGENTS registry so the per-agent flag lives in one place
-  // (see lacksHeadlessResume on AgentMeta). When true, follow-up runs replay
-  // only the new user message against the restored filesystem — prior
-  // conversation context is not sent back to the CLI. See runStreamingAgent
-  // in internal/services/agent/adapters/stream_parser.go.
-  const lacksHeadlessResume = AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false;
   const viewerScope = useMemo(
     () => (user ? { userId: user.id, orgId: user.org_id } : null),
     [user],
@@ -754,15 +880,7 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
   const isRunning = session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
-  // Allow messaging in any state except "skipped" (never ran, no workspace),
-  // "pending" (agent not started yet), and sessions whose sandbox snapshot has
-  // expired (sandbox_state === "destroyed") — the environment no longer exists.
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
-
-  const availableModels = useMemo(() => {
-    const agentType = AGENTS.find((a) => a.key === session.agent_type);
-    return agentType?.models ?? [];
-  }, [session.agent_type]);
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
@@ -869,13 +987,22 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     setShowJumpToLatest(!isNearBottomRef.current);
   }, []);
 
-  const scrollToLiveEdge = useCallback(() => {
+  const scrollToLiveEdgePosition = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     isNearBottomRef.current = true;
-    setShowJumpToLatest(false);
   }, []);
+
+  const scrollToLiveEdge = useCallback(() => {
+    scrollToLiveEdgePosition();
+    setShowJumpToLatest(false);
+  }, [scrollToLiveEdgePosition]);
+
+  useEffect(() => {
+    onRegisterScrollToLiveEdge?.(scrollToLiveEdge);
+    return () => onRegisterScrollToLiveEdge?.(null);
+  }, [onRegisterScrollToLiveEdge, scrollToLiveEdge]);
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
@@ -955,79 +1082,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
     };
   }, [sessionId, apiBase, isActive, mergeLogs, queryClient]);
 
-  async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const fileList = event.target.files;
-    if (!fileList || fileList.length === 0) return;
-
-    const files = Array.from(fileList);
-    const oversized = files.filter((f) => f.size > MAX_FILE_SIZE);
-    if (oversized.length > 0) {
-      setUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((f) => f.name).join(", ")}`);
-      event.target.value = "";
-      return;
-    }
-
-    setIsUploading(true);
-    setUploadError(null);
-    try {
-      const results = await Promise.all(
-        files.map((file) => api.uploads.upload(file))
-      );
-      setAttachments((prev) => [...prev, ...results.map((r) => r.url)]);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setIsUploading(false);
-      event.target.value = "";
-    }
-  }
-
-  function removeAttachment(url: string) {
-    setAttachments((prev) => prev.filter((a) => a !== url));
-  }
-
-  const sendMutation = useMutation({
-    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
-      setUploadError(null);
-      const msg = opts.overrideMessage ?? message;
-      const isPlan = opts.planMode ?? planMode;
-      return api.sessions.sendMessage(sessionId, msg, attachments.length > 0 ? attachments : undefined, isPlan, selectedModel || undefined);
-    },
-    onSuccess: () => {
-      setMessage("");
-      setAttachments([]);
-      setPlanMode(false);
-      if (textareaRef.current) {
-        textareaRef.current.style.height = "auto";
-      }
-      // Scroll to bottom after sending a message so the user sees the response.
-      scrollToLiveEdge();
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
-    },
-  });
-
-  const endMutation = useMutation({
-    mutationFn: () => api.sessions.endSession(sessionId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-    },
-  });
-
-  const cancelMutation = useMutation({
-    mutationFn: () => api.sessions.cancelSession(sessionId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
-    },
-  });
-  // Auto-resize textarea
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [message]);
-
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -1038,7 +1092,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
-    setShowJumpToLatest(false);
   }, [sessionId]);
 
   useEffect(() => {
@@ -1086,44 +1139,16 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
       }
     }
 
-    scrollToLiveEdge();
+    scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdge, sessionId, syncScrollState, timelineEntries, viewerScope]);
+  }, [hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
     if (scrollRef.current && isNearBottomRef.current) {
-      scrollToLiveEdge();
+      scrollToLiveEdgePosition();
     }
-  }, [scrollToLiveEdge, timelineEntries.length]);
-
-  const hasContent = message.trim() || attachments.length > 0;
-
-  // Plan mode callbacks for the timeline approve/adjust buttons.
-  const handleApprovePlan = useCallback(() => {
-    if (!canSendMessage || sendMutation.isPending) return;
-    sendMutation.mutate({ planMode: false, overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described." });
-  }, [canSendMessage, sendMutation]);
-
-  const handleAdjustPlan = useCallback(() => {
-    setMessage("Please adjust the plan: ");
-    setPlanMode(false);
-    textareaRef.current?.focus();
-  }, []);
-
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      if (hasContent && canSendMessage && !sendMutation.isPending && !isRunning) {
-        sendMutation.mutate({});
-      }
-    }
-    // Shift+Tab toggles plan mode for Claude Code sessions.
-    if (e.key === "Tab" && e.shiftKey && isClaudeCode && canSendMessage) {
-      e.preventDefault();
-      setPlanMode((prev) => !prev);
-    }
-  }
+  }, [scrollToLiveEdgePosition, timelineEntries.length]);
 
   return (
     <div className="relative flex flex-col h-full">
@@ -1180,8 +1205,8 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           isRunning={isRunning}
           diffStats={session.diff_stats}
           onDiffClick={onDiffClick}
-          onApprovePlan={canSendMessage ? handleApprovePlan : undefined}
-          onAdjustPlan={canSendMessage ? handleAdjustPlan : undefined}
+          onApprovePlan={canSendMessage ? onApprovePlan : undefined}
+          onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
           getEntryContainerProps={(_, index) =>
             ({
               "data-session-entry-index": index,
@@ -1198,163 +1223,6 @@ function ChatPanel({ session, sessionId, isActive, onDiffClick }: { session: Ses
           </div>
         )}
       </div>
-
-      {/* Error display */}
-      {(() => {
-        const firstError = uploadError || [sendMutation, endMutation, cancelMutation].find(m => m.error)?.error;
-        if (!firstError) return null;
-        const msg = typeof firstError === "string" ? firstError : (firstError instanceof Error ? firstError.message : "An error occurred");
-        return (
-          <div className="flex items-center gap-2 px-4 py-2 text-xs text-destructive border-t bg-destructive/5">
-            <AlertTriangle className="h-3 w-3 shrink-0" />
-            {msg}
-          </div>
-        );
-      })()}
-
-      {/* Snapshot expired banner */}
-      {isSnapshotExpired && (
-        <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
-          <Clock className="h-3.5 w-3.5 shrink-0" />
-          <span>
-            This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
-          </span>
-        </div>
-      )}
-
-      {/* No-headless-resume agents: warn users that follow-ups don't carry prior context. */}
-      {lacksHeadlessResume && canSendMessage && !isSnapshotExpired && (
-        <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          <span>
-            {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
-          </span>
-        </div>
-      )}
-
-      {/* Input bar — hidden for PM agent sessions (PM agent doesn't accept interactive input) */}
-      {session.agent_type !== "pm_agent" && <div className="border-t border-border p-3 bg-background">
-        {/* Plan mode indicator */}
-        {planMode && (
-          <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
-              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
-              <button
-                onClick={() => setPlanMode(false)}
-                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
-                title="Exit plan mode"
-              >
-                &times;
-              </button>
-            </div>
-            <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
-          </div>
-        )}
-        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
-          <Textarea
-            ref={textareaRef}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              isSnapshotExpired
-                ? "Session environment has expired and can no longer be continued"
-                : !canSendMessage
-                ? "Session is not active"
-                : planMode
-                ? "Describe what you want to plan..."
-                : isRunning
-                ? "Agent is responding..."
-                : "Send a follow-up message..."
-            }
-            disabled={!canSendMessage || sendMutation.isPending || isRunning}
-            className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
-          />
-
-          <PendingAttachmentStrip
-            attachments={attachments}
-            isUploading={isUploading}
-            onRemove={removeAttachment}
-            size="md"
-            className="px-3 pb-2"
-          />
-
-          <div className="flex items-center gap-1 px-2 pb-2">
-            {/* File upload button */}
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-              title="Attach files or images"
-              disabled={!canSendMessage || isUploading}
-              onClick={() => uploadInputRef.current?.click()}
-            >
-              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-            </Button>
-            <input
-              ref={uploadInputRef}
-              type="file"
-              accept="image/*,.pdf,.txt,.md,.json,.csv"
-              multiple
-              className="hidden"
-              onChange={handleFileUpload}
-            />
-
-            {availableModels.length > 0 && (
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Model override">
-                  <SelectValue placeholder="Default model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={model} value={model}>
-                      {model}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-            {isClaudeCode && canSendMessage && !planMode && (
-              <button
-                onClick={() => setPlanMode(true)}
-                className="flex items-center gap-1 h-8 px-2 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-md"
-                title="Switch to plan mode (Shift+Tab)"
-              >
-                <ClipboardList className="h-3.5 w-3.5" />
-                <span>Plan</span>
-              </button>
-            )}
-
-            <div className="ml-auto flex items-center gap-1">
-              {isRunning ? (
-                <Button
-                  size="icon"
-                  variant="outline"
-                  className="h-8 w-8 shrink-0 rounded-lg"
-                  title="Cancel session"
-                  disabled={cancelMutation.isPending}
-                  onClick={() => cancelMutation.mutate()}
-                >
-                  <Square className="h-3 w-3" />
-                </Button>
-              ) : (
-                <Button
-                  size="icon"
-                  variant={planMode ? "outline" : "default"}
-                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                  title={planMode ? "Send plan request" : "Send message"}
-                  disabled={!hasContent || !canSendMessage || sendMutation.isPending || isRunning}
-                  onClick={() => sendMutation.mutate({})}
-                >
-                  {planMode ? <ClipboardList className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>}
     </div>
   );
 }
@@ -1778,6 +1646,109 @@ export function SessionDetailContent({ id }: { id: string }) {
     [filteredFiles, openReview]
   );
 
+  const [composerMessage, setComposerMessage] = useState("");
+  const [composerPlanMode, setComposerPlanMode] = useState(false);
+  const [composerSelectedModel, setComposerSelectedModel] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<string[]>([]);
+  const [composerIsUploading, setComposerIsUploading] = useState(false);
+  const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerUploadInputRef = useRef<HTMLInputElement>(null);
+  const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
+  const openComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
+  const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
+  const composerIsRunning = session?.status === "running";
+  const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
+  const composerIsClaudeCode = session?.agent_type === "claude_code";
+  const composerLacksHeadlessResume = session ? (AGENTS_BY_KEY[session.agent_type]?.lacksHeadlessResume ?? false) : false;
+  const composerAvailableModels = useMemo(() => {
+    if (!session) {
+      return [];
+    }
+    const agentType = AGENTS.find((agent) => agent.key === session.agent_type);
+    return agentType?.models ?? [];
+  }, [session]);
+
+  async function handleComposerUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const files = Array.from(fileList);
+    const oversized = files.filter((file) => file.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      setComposerUploadError(`File${oversized.length > 1 ? "s" : ""} too large (max 10 MB): ${oversized.map((file) => file.name).join(", ")}`);
+      event.target.value = "";
+      return;
+    }
+
+    setComposerIsUploading(true);
+    setComposerUploadError(null);
+    try {
+      const results = await Promise.all(files.map((file) => api.uploads.upload(file)));
+      setComposerAttachments((previous) => [...previous, ...results.map((result) => result.url)]);
+    } catch (err) {
+      setComposerUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setComposerIsUploading(false);
+      event.target.value = "";
+    }
+  }
+
+  const handleRemoveComposerAttachment = useCallback((url: string) => {
+    setComposerAttachments((previous) => previous.filter((attachment) => attachment !== url));
+  }, []);
+
+  const sendMutation = useMutation({
+    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+      setComposerUploadError(null);
+      const draftMessage = opts.overrideMessage ?? composerMessage;
+      const formattedMessage = openComments.length > 0
+        ? formatReviewMessage(openComments, filteredFiles, draftMessage)
+        : draftMessage;
+      const isPlanRequest = opts.planMode ?? composerPlanMode;
+
+      return api.sessions.sendMessage(
+        id,
+        formattedMessage,
+        composerAttachments.length > 0 ? composerAttachments : undefined,
+        isPlanRequest,
+        composerSelectedModel || undefined
+      );
+    },
+    onSuccess: () => {
+      setComposerMessage("");
+      setComposerAttachments([]);
+      setComposerPlanMode(false);
+      if (composerTextareaRef.current) {
+        composerTextareaRef.current.style.height = "auto";
+      }
+      chatPanelScrollToLiveEdgeRef.current?.();
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+      queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => api.sessions.cancelSession(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session", id] });
+    },
+  });
+
+  const handleApprovePlan = useCallback(() => {
+    if (!composerCanSendMessage || sendMutation.isPending) return;
+    sendMutation.mutate({
+      planMode: false,
+      overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
+    });
+  }, [composerCanSendMessage, sendMutation]);
+
+  const handleAdjustPlan = useCallback(() => {
+    setComposerMessage("Please adjust the plan: ");
+    setComposerPlanMode(false);
+    composerTextareaRef.current?.focus();
+  }, []);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -1962,7 +1933,17 @@ export function SessionDetailContent({ id }: { id: string }) {
         <div className="flex-1 min-h-0 relative">
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-            <ChatPanel session={session} sessionId={id} isActive={isActive} onDiffClick={() => openReview()} />
+            <ChatPanel
+              session={session}
+              sessionId={id}
+              isActive={isActive}
+              onDiffClick={() => openReview()}
+              onApprovePlan={handleApprovePlan}
+              onAdjustPlan={handleAdjustPlan}
+              onRegisterScrollToLiveEdge={(scrollToLiveEdge) => {
+                chatPanelScrollToLiveEdgeRef.current = scrollToLiveEdge;
+              }}
+            />
           </div>
           {/* Review diff view — mounted only when active */}
           {centerMode === "review" && (
@@ -1986,15 +1967,56 @@ export function SessionDetailContent({ id }: { id: string }) {
                   onDiffSearchChange={setDiffSearchQuery}
                 />
               </div>
-              <ReviewCommentInput
-                sessionId={id}
-                comments={comments}
-                diffFiles={filteredFiles}
-                canSendMessage={session.status !== "skipped" && session.status !== "pending" && session.sandbox_state !== "destroyed"}
-              />
             </div>
           )}
         </div>
+
+        {session.agent_type !== "pm_agent" && (
+          <>
+            {composerIsSnapshotExpired && (
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
+                </span>
+              </div>
+            )}
+            {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
+                </span>
+              </div>
+            )}
+            <SessionComposer
+              message={composerMessage}
+              onMessageChange={setComposerMessage}
+              planMode={composerPlanMode}
+              onPlanModeChange={setComposerPlanMode}
+              selectedModel={composerSelectedModel}
+              onSelectedModelChange={setComposerSelectedModel}
+              attachments={composerAttachments}
+              isUploading={composerIsUploading}
+              onUpload={handleComposerUpload}
+              onRemoveAttachment={handleRemoveComposerAttachment}
+              openComments={openComments}
+              availableModels={composerAvailableModels}
+              canSendMessage={composerCanSendMessage}
+              isRunning={composerIsRunning}
+              isSnapshotExpired={composerIsSnapshotExpired}
+              isClaudeCode={composerIsClaudeCode}
+              sendPending={sendMutation.isPending}
+              sendError={sendMutation.error}
+              cancelPending={cancelMutation.isPending}
+              uploadError={composerUploadError}
+              onCancelSession={() => cancelMutation.mutate()}
+              onSend={() => sendMutation.mutate({})}
+              textareaRef={composerTextareaRef}
+              uploadInputRef={composerUploadInputRef}
+            />
+          </>
+        )}
 
         {/* Session footer bar */}
         <SessionFooter

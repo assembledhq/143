@@ -5,7 +5,7 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Issue, Session, SessionMessage, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Issue, Session, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, SingleResponse, ListResponse } from '@/lib/types';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -2362,6 +2362,59 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {
+    let messageSent = false;
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        messageSent = body.message === 'Hello agent';
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSession.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    const scroller = getChatScroller(container);
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+
+    const user = userEvent.setup();
+    await user.type(textarea, 'Hello agent');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(messageSent).toBe(true);
+      expect(scroller.scrollTop).toBe(900);
+    });
+  });
+
   it('opens review mode when clicking diff stats badge in footer', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
@@ -2628,9 +2681,120 @@ describe('SessionDetailPage', () => {
     const viewChangesButtons = screen.getAllByTitle('View changes');
     await user.click(viewChangesButtons[0]);
 
-    // Review comment input should be present
-    expect(await screen.findByPlaceholderText('Ask to make changes, @mention files...')).toBeInTheDocument();
-    expect(screen.getByTitle('Send to agent')).toBeInTheDocument();
+    // The standard shared composer should remain present in review mode.
+    expect(await screen.findByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+    expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
+  it('keeps the expired sandbox warning visible in review mode with the shared composer', async () => {
+    const destroyedSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'destroyed',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: destroyedSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+
+    expect(await screen.findByText(/environment has expired/i)).toBeVisible();
+  });
+
+  it('keeps the no-headless-resume warning visible in review mode with the shared composer', async () => {
+    const ampSessionWithDiff: Session = {
+      ...mockSessions[0],
+      agent_type: 'amp',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: ampSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText(/doesn't support headless conversation resume/i);
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+
+    expect(await screen.findByText(/doesn't support headless conversation resume/i)).toBeVisible();
+  });
+
+  it('shares composer draft state between chat and review mode and keeps review comments visible', async () => {
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const comments: SessionReviewComment[] = [{
+      id: 'comment-1',
+      session_id: 'session-abcdef12-3456-7890',
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: 2,
+      diff_side: 'new',
+      body: 'Handle the null edge case',
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
+    await user.type(composer, 'Please fix this and add tests');
+    expect(composer.value).toBe('Please fix this and add tests');
+
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    const sharedComposerInReview = await screen.findByDisplayValue('Please fix this and add tests');
+    expect(sharedComposerInReview).toBeInTheDocument();
+
+    expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
+    expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+
+    expect(await screen.findByDisplayValue('Please fix this and add tests')).toBeInTheDocument();
+    expect(screen.getByText('1 comment attached')).toBeInTheDocument();
+    expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
   });
 
   it('shows review file count in Changes tab and file click works', async () => {
