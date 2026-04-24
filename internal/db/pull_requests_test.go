@@ -137,3 +137,24 @@ func TestPullRequestStore_UpdateReviewStatus(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestPullRequestStore_UpdateTitle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectExec("UPDATE pull_requests SET title").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTitle(context.Background(), orgID, prID, "Updated PR title")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

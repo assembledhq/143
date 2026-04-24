@@ -145,7 +145,7 @@ var previewAccessSessionTestCols = []string{
 var sessionTestCols = []string{
 	"id", "issue_id", "org_id", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
-	"container_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
+	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
@@ -179,7 +179,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 	return []any{
 		sessionID, issueID, orgID, "claude-code", "running", "supervised", "low",
 		nil, nil, nil, nil,
-		containerID, false, &now, nil, nil,
+		containerID, nil, false, &now, nil, nil,
 		nil, nil, nil, false,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
@@ -1394,7 +1394,7 @@ func TestStopPreview_DestroysSandboxWhenTurnDoesNotHold(t *testing.T) {
 	// FinalizeContainerDestroy CAS: clears container_id and derives
 	// sandbox_state from snapshot_key atomically. Matches one row since no new
 	// holder is present.
-	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+sandbox_state = CASE").
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+worker_node_id = NULL,\\s+sandbox_state = CASE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -1454,7 +1454,7 @@ func TestStopPreview_LeavesSandboxWhenNewHolderAcquiredAfterRelease(t *testing.T
 		)
 	// ...but the FinalizeContainerDestroy CAS matches zero rows because a new
 	// holder acquired in the gap. We must NOT destroy the container.
-	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL").
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+worker_node_id = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), "container-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -2155,7 +2155,7 @@ func TestAbortReservation_ReleasesHoldAndDestroysHydratedContainer(t *testing.T)
 		)
 
 	// FinalizeContainerDestroy CAS succeeds (cleared=true).
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+sandbox_state = CASE`).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL,\s+sandbox_state = CASE`).
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -2285,7 +2285,7 @@ func TestAbortReservation_FinalizeNotClearedSkipsDestroy(t *testing.T) {
 				AddRow(instance.SessionID, "container-1", false),
 		)
 	// FinalizeContainerDestroy: 0 rows (a new holder acquired in the gap).
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL`).
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -2327,7 +2327,7 @@ func TestAbortReservation_FinalizeErrorSkipsDestroy(t *testing.T) {
 			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
 				AddRow(instance.SessionID, "container-1", false),
 		)
-	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL`).
+	mock.ExpectExec(`UPDATE sessions\s+SET container_id = NULL,\s+worker_node_id = NULL`).
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnError(fmt.Errorf("db down"))
 
@@ -2595,4 +2595,15 @@ func TestBuildStoredRecycleInputRoundTrip(t *testing.T) {
 	require.NoError(t, err, "test should be able to marshal the round-tripped config")
 	require.JSONEq(t, string(expectedConfig), string(actualConfig), "recycle config should survive a serialize/deserialize round trip")
 	require.Equal(t, sandbox, got.Sandbox, "recycle sandbox should survive a serialize/deserialize round trip")
+}
+
+func TestManager_HMRWatcherGetter(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(ManagerConfig{Logger: zerolog.Nop(), WorkerNodeID: "worker-1"})
+	require.Nil(t, manager.HMRWatcher(), "HMRWatcher should return nil when no watcher is configured")
+
+	watcher := &HMRWatcher{}
+	manager.hmrWatcher = watcher
+	require.Equal(t, watcher, manager.HMRWatcher(), "HMRWatcher should return the configured watcher")
 }

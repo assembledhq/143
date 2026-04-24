@@ -1173,6 +1173,7 @@ export interface Automation {
   schedule_type: AutomationScheduleType;
   interval_value?: number;
   interval_unit?: 'hours' | 'days' | 'weeks';
+  interval_run_at?: string;
   cron_expression?: string;
   timezone: string;
   next_run_at?: string;

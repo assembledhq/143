@@ -177,6 +177,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
+  const [intervalRunAt, setIntervalRunAt] = useState(automation.interval_run_at ?? "09:00");
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
 
   const updateMutation = useMutation({
@@ -187,6 +188,7 @@ function SettingsTab({ automation }: { automation: Automation }) {
         scope: scope.trim() || undefined,
         interval_value: intervalValue,
         interval_unit: intervalUnit,
+        interval_run_at: intervalRunAt,
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
@@ -213,39 +215,53 @@ function SettingsTab({ automation }: { automation: Automation }) {
       </div>
       <div className="space-y-1.5">
         <Label id="schedule-label">Schedule</Label>
-        <div
-          className="flex items-center gap-2"
-          role="group"
-          aria-labelledby="schedule-label"
-        >
-          <span className="text-sm text-muted-foreground">Run every</span>
-          <Input
-            id="interval-value"
-            aria-label="Interval value"
-            type="number"
-            min={1}
-            max={365}
-            value={intervalValue}
-            onChange={(e) => {
-              const parsed = parseInt(e.target.value, 10);
-              setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-            }}
-            className="w-20"
-          />
-          <Select
-            value={intervalUnit}
-            onValueChange={(v) => setIntervalUnit(toIntervalUnit(v, intervalUnit))}
+        <div className="grid gap-3 md:grid-cols-2">
+          <div
+            className="flex items-center gap-2"
+            role="group"
+            aria-labelledby="schedule-label"
           >
-            <SelectTrigger className="w-28" aria-label="Interval unit">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="hours">hours</SelectItem>
-              <SelectItem value="days">days</SelectItem>
-              <SelectItem value="weeks">weeks</SelectItem>
-            </SelectContent>
-          </Select>
+            <span className="text-sm text-muted-foreground">Run every</span>
+            <Input
+              id="interval-value"
+              aria-label="Interval value"
+              type="number"
+              min={1}
+              max={365}
+              value={intervalValue}
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10);
+                setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
+              }}
+              className="w-20"
+            />
+            <Select
+              value={intervalUnit}
+              onValueChange={(v) => setIntervalUnit(toIntervalUnit(v, intervalUnit))}
+            >
+              <SelectTrigger className="w-28" aria-label="Interval unit">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="hours">hours</SelectItem>
+                <SelectItem value="days">days</SelectItem>
+                <SelectItem value="weeks">weeks</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">At</span>
+            <Input
+              type="time"
+              step={300}
+              value={intervalRunAt}
+              onChange={(e) => setIntervalRunAt(e.target.value)}
+              className="w-32"
+              aria-label="Run at time"
+            />
+          </div>
         </div>
+        <p className="text-xs text-muted-foreground">Run time is in UTC, selectable in 5-minute increments.</p>
       </div>
       <div className="space-y-1.5">
         <Label>Base branch</Label>
@@ -351,7 +367,7 @@ export default function AutomationDetailPage() {
 
   const schedule = automation.schedule_type === "cron" && automation.cron_expression
     ? `cron: ${automation.cron_expression}`
-    : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}`;
+    : `every ${automation.interval_value ?? 1} ${automation.interval_unit ?? "days"}${automation.interval_run_at ? ` at ${automation.interval_run_at} UTC` : ""}`;
 
   const headerDescription = automation.enabled
     ? automation.next_run_at

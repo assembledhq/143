@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -94,4 +97,54 @@ func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
 	require.NoError(t, err, "router construction should accept optional Redis dependencies")
 	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
+}
+
+func TestNewRouter_InternalPreviewRoutesSkipGlobalBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Mode:          "worker",
+		NodeID:        "worker-a",
+		SessionSecret: "test-session-secret",
+	}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
+	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/preview/start", bytes.NewReader(bytes.Repeat([]byte("a"), 2<<20)))
+	req.RemoteAddr = "10.0.0.10:1234"
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "internal preview routes should reach preview auth instead of the global body limit")
+}
+
+func TestNewRouter_InternalPreviewRoutesSkipGlobalRateLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Mode:          "worker",
+		NodeID:        "worker-a",
+		SessionSecret: "test-session-secret",
+	}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
+	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
+
+	for i := 0; i < 25; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/internal/preview/start", http.NoBody)
+		req.RemoteAddr = "10.0.0.10:1234"
+		rr := httptest.NewRecorder()
+
+		router.ServeHTTP(rr, req)
+
+		require.Equal(t, http.StatusUnauthorized, rr.Code, "internal preview routes should bypass the global IP limiter on every request")
+	}
 }

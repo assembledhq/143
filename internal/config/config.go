@@ -34,6 +34,7 @@ type Config struct {
 	Port               int      `env:"PORT"                  envDefault:"8080"`
 	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
 	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
+	NodeID             string   `env:"NODE_ID"`
 	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
 	FrontendURL        string   `env:"FRONTEND_URL"`
 	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
@@ -159,6 +160,7 @@ type Config struct {
 	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
 	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
 	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	PreviewInternalBaseURL  string `env:"PREVIEW_INTERNAL_BASE_URL"`
 	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
 	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
 

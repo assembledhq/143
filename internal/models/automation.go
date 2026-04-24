@@ -27,6 +27,7 @@ type Automation struct {
 	ScheduleType   string     `db:"schedule_type"   json:"schedule_type"`
 	IntervalValue  *int       `db:"interval_value"  json:"interval_value,omitempty"`
 	IntervalUnit   *string    `db:"interval_unit"   json:"interval_unit,omitempty"`
+	IntervalRunAt  *string    `db:"interval_run_at" json:"interval_run_at,omitempty"`
 	CronExpression *string    `db:"cron_expression" json:"cron_expression,omitempty"`
 	// Timezone applies ONLY to cron schedules. Interval schedules use fixed
 	// duration arithmetic (NextRunTime) and ignore this field — the API, the
@@ -35,17 +36,17 @@ type Automation struct {
 	// (phase 3), the scheduler's next_run_at computation must evaluate the
 	// cron expression in this timezone. Do not read this field outside a cron
 	// codepath: changing it on an interval automation is a no-op by design.
-	Timezone string `db:"timezone"        json:"timezone"`
-	NextRunAt      *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
-	LastRunAt      *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
-	Enabled        bool       `db:"enabled"         json:"enabled"`
-	CreatedBy      *uuid.UUID `db:"created_by"      json:"created_by,omitempty"`
-	PausedBy       *uuid.UUID `db:"paused_by"       json:"paused_by,omitempty"`
-	PausedAt       *time.Time `db:"paused_at"       json:"paused_at,omitempty"`
-	Priority       int        `db:"priority"        json:"priority"`
-	CreatedAt      time.Time  `db:"created_at"      json:"created_at"`
-	UpdatedAt      time.Time  `db:"updated_at"      json:"updated_at"`
-	DeletedAt      *time.Time `db:"deleted_at"      json:"-"`
+	Timezone  string     `db:"timezone"        json:"timezone"`
+	NextRunAt *time.Time `db:"next_run_at"     json:"next_run_at,omitempty"`
+	LastRunAt *time.Time `db:"last_run_at"     json:"last_run_at,omitempty"`
+	Enabled   bool       `db:"enabled"         json:"enabled"`
+	CreatedBy *uuid.UUID `db:"created_by"      json:"created_by,omitempty"`
+	PausedBy  *uuid.UUID `db:"paused_by"       json:"paused_by,omitempty"`
+	PausedAt  *time.Time `db:"paused_at"       json:"paused_at,omitempty"`
+	Priority  int        `db:"priority"        json:"priority"`
+	CreatedAt time.Time  `db:"created_at"      json:"created_at"`
+	UpdatedAt time.Time  `db:"updated_at"      json:"updated_at"`
+	DeletedAt *time.Time `db:"deleted_at"      json:"-"`
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
@@ -131,6 +132,21 @@ func ValidateCronExpression(expr string) error {
 	return nil
 }
 
+// ValidateIntervalRunAt checks HH:MM (24h) time strings aligned to 5 minutes.
+func ValidateIntervalRunAt(v string) error {
+	if len(v) != len("15:04") {
+		return fmt.Errorf("interval_run_at must be in HH:MM format")
+	}
+	parsed, err := time.Parse("15:04", v)
+	if err != nil {
+		return fmt.Errorf("interval_run_at must be in HH:MM format")
+	}
+	if parsed.Minute()%5 != 0 {
+		return fmt.Errorf("interval_run_at minute must be divisible by 5")
+	}
+	return nil
+}
+
 // NextCronRunTime returns the next fire time for the cron expression in the
 // given IANA timezone. Returns an error if the expression is malformed, the
 // timezone is unknown, or the cron has no future occurrences (e.g. a fixed-
@@ -164,6 +180,12 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 	case AutomationScheduleInterval:
 		if a.IntervalValue == nil || a.IntervalUnit == nil {
 			return time.Time{}, fmt.Errorf("interval schedule requires interval_value and interval_unit")
+		}
+		if a.IntervalRunAt != nil && *a.IntervalRunAt != "" {
+			if err := ValidateIntervalRunAt(*a.IntervalRunAt); err != nil {
+				return time.Time{}, err
+			}
+			return NextRunTimeAt(from, *a.IntervalValue, *a.IntervalUnit, *a.IntervalRunAt)
 		}
 		return NextRunTime(from, *a.IntervalValue, *a.IntervalUnit), nil
 	case AutomationScheduleCron:
