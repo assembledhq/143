@@ -6,6 +6,7 @@ import {
   FlaskConical,
   Gauge,
   Shield,
+  TestTube2,
   Waypoints,
   Wrench,
 } from "lucide-react";
@@ -330,6 +331,37 @@ Verification
     ],
     tags: ["api", "contracts", "docs"],
     defaultInterval: 2,
+    defaultUnit: "weeks",
+  },
+  {
+    id: "test-coverage-gaps",
+    name: "Test coverage for recent features",
+    icon: TestTube2,
+    category: "reliability",
+    summary: "Identify recently shipped features that lack tests and add only the small number of tests that would actually catch real regressions.",
+    goal: `What to do
+- Look at features, endpoints, or modules added or substantially changed recently in this repository that do not yet have meaningful test coverage.
+- Be extremely conservative about what deserves a new test. Only target code where a missing test would plausibly let a real, user-visible bug ship: core business logic, tricky conditionals, data transformations, auth boundaries, error handling, or known past regressions.
+- Skip trivial wrappers, straightforward getters/setters, UI glue with no branching, generated code, and anything already covered indirectly by existing tests. When in doubt, leave it alone.
+- Reuse the existing test style, frameworks, helpers, and fixtures in this repository instead of inventing new patterns. Match the surrounding testing conventions exactly.
+
+Output requirements
+- Return a short list of the highest-leverage coverage gaps, with the file or feature, what it does, and the specific risk a test would catch.
+- Propose only the minimum number of tests worth writing. Prefer a few focused tests over broad coverage sweeps; do not generate tests just to raise coverage numbers.
+- For each proposed test, give a concrete description (inputs, expected behavior, and why it matters). Draft the test if it is obviously safe and small; otherwise flag it for human review.
+- If recent changes already appear adequately tested, say that plainly and add nothing.
+
+Verification
+- Confirm each gap against the current code and the existing test files before proposing anything new. Do not propose tests for behavior you did not actually read.
+- Reject candidates whose "test" would just re-assert the implementation or lock in incidental details. Tests should describe behavior an engineer would care about preserving.
+- Call out any proposed test that depends on external services, flaky timing, or unstable fixtures, and prefer to omit it rather than introduce a brittle test.`,
+    outcomes: [
+      "A short, high-signal list of real coverage gaps",
+      "Only the tests worth writing, with clear justification",
+      "Drafts that follow existing repo testing conventions",
+    ],
+    tags: ["tests", "coverage", "quality"],
+    defaultInterval: 1,
     defaultUnit: "weeks",
   },
   {
