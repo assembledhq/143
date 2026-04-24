@@ -20,15 +20,20 @@ describe("ImageLightbox", () => {
     expect(dialog).toHaveClass("flex");
     expect(dialog).toHaveClass("items-center");
     expect(dialog).toHaveClass("justify-center");
+    expect(dialog).toHaveClass("h-screen");
+    expect(dialog).toHaveClass("w-screen");
+    expect(dialog).toHaveClass("border-none");
+    expect(dialog).toHaveClass("bg-transparent");
 
     const image = screen.getByRole("img", { name: "screenshot.png" });
     expect(image).toHaveClass("max-h-[88vh]");
     expect(image).toHaveClass("max-w-[92vw]");
 
     const closeButton = screen.getByRole("button", { name: "Close image preview" });
-    expect(closeButton).toHaveClass("fixed");
+    expect(closeButton).toHaveClass("absolute");
     expect(closeButton).toHaveClass("right-4");
     expect(closeButton).toHaveClass("top-4");
+    expect(dialog).toContainElement(closeButton);
   });
 
   it("closes when the backdrop is clicked", async () => {
