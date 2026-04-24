@@ -33,6 +33,10 @@ type SessionCanceller interface {
 	CancelSession(sessionID uuid.UUID) bool
 }
 
+type sessionPRTitleSyncer interface {
+	SyncSessionTitle(ctx context.Context, session *models.Session) error
+}
+
 type SessionHandler struct {
 	runStore         *db.SessionStore
 	logStore         *db.SessionLogStore
@@ -55,6 +59,7 @@ type SessionHandler struct {
 	logger           zerolog.Logger
 	audit            *db.AuditEmitter
 	canceller        SessionCanceller // optional — enables cancelling running sessions
+	prTitleSyncer    sessionPRTitleSyncer
 	prAuthSigningKey []byte
 	frontendURL      string
 	streams          *cache.SessionStreams
@@ -70,6 +75,10 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
+}
+
+func (h *SessionHandler) SetPRTitleSyncer(syncer sessionPRTitleSyncer) {
+	h.prTitleSyncer = syncer
 }
 
 // SetViewStore injects the session view store for tracking unread sessions.
@@ -352,6 +361,61 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	var body struct {
+		Title *string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if body.Title == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "title is required")
+		return
+	}
+
+	title, ok := services.CleanTitle(*body.Title)
+	if !ok {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TITLE", "title must be between 1 and 120 characters")
+		return
+	}
+
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	if session.Title != nil && *session.Title == title {
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+		return
+	}
+
+	if err := h.runStore.UpdateTitle(r.Context(), orgID, sessionID, title); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update session title", err)
+		return
+	}
+	session.Title = &title
+
+	if h.prTitleSyncer != nil {
+		if err := h.prTitleSyncer.SyncSessionTitle(r.Context(), &session); err != nil {
+			zerolog.Ctx(r.Context()).Warn().
+				Err(err).
+				Str("session_id", sessionID.String()).
+				Msg("failed to sync PR title after session title update")
+		}
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
 
 // RecordView records that the current user has viewed a session (for unread tracking).

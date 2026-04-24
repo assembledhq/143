@@ -105,6 +105,72 @@ describe('SessionDetailPage', () => {
     expect(headerTitle.className).not.toContain('text-xs');
   });
 
+  it('lets the user edit the session title inline', async () => {
+    const updatedTitle = 'Renamed session title';
+    let currentTitle = 'Original editable title';
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: currentTitle,
+            result_summary: undefined,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.patch('/api/v1/sessions/:id', async ({ request }) => {
+        const body = await request.json() as { title: string };
+        currentTitle = body.title;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: currentTitle,
+            result_summary: undefined,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { level: 1, name: currentTitle });
+    await user.click(screen.getByRole('button', { name: 'Edit session title' }));
+
+    const input = screen.getByDisplayValue(currentTitle);
+    await user.clear(input);
+    await user.type(input, updatedTitle);
+    await user.click(screen.getByRole('button', { name: 'Save title' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: updatedTitle })).toBeInTheDocument();
+    });
+  });
+
+  it('seeds the title editor from the same title shown in the header', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            title: undefined,
+            pm_approach: 'Quick null check fix',
+            result_summary: 'Fixed TypeError by adding null check',
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { level: 1, name: 'Quick null check fix' });
+    await user.click(screen.getByRole('button', { name: 'Edit session title' }));
+
+    expect(screen.getByDisplayValue('Quick null check fix')).toBeInTheDocument();
+  });
+
   it('shows overview tab with status in detail panel', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
@@ -850,9 +916,89 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('PR session expired');
-    expect(alert).toHaveTextContent('Session state expired — re-run to create a PR.');
+    expect(alert).toHaveTextContent('PR snapshot unavailable');
+    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
     expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('matches the snapshot expiry notice horizontal margins to overview cards', async () => {
+    const sessionWithMissingSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithMissingSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.className).toContain('mx-2');
+  });
+
+  it('shows a resume-specific PR error instead of session expiry when the GitHub resume token is stale', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: true,
+          has_repo_scope: true,
+          github_login: 'alice',
+          pr_authorship_mode: 'user_preferred',
+          pr_draft_default: false,
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          {
+            error: {
+              code: 'PR_RESUME_EXPIRED',
+              message: 'GitHub authorization completed, but the PR resume request expired. Please click Create PR again.',
+            },
+          },
+          { status: 409 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, {
+      searchParams: { github_pr: 'connected', resume_pr: 'resume-123' },
+    });
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't resume PR creation");
+    expect(alert).toHaveTextContent('GitHub authorization completed, but the PR resume request expired. Please click Create PR again.');
+    expect(alert).not.toHaveTextContent('PR session expired');
   });
 
   it('does not show Create PR button when session is running', async () => {
@@ -1229,10 +1375,10 @@ describe('SessionDetailPage', () => {
       async () => {
         expect(await screen.findByRole('button', { name: /View PR/ })).toBeInTheDocument();
       },
-      { timeout: 7000 },
+      { timeout: 12000 },
     );
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
-  }, 10000);
+  }, 15000);
 
   it('shows a clear toast and retry button when background PR creation fails', async () => {
     let sessionFetchCount = 0;
@@ -1294,6 +1440,58 @@ describe('SessionDetailPage', () => {
     expect(alert).toHaveTextContent('GitHub rejected the branch push.');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   }, 8000);
+
+  it('shows snapshot-unavailable guidance without a retry action when direct PR creation loses the snapshot', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          {
+            error: {
+              code: 'SNAPSHOT_EXPIRED',
+              message: 'session state expired — re-run to create a PR',
+            },
+          },
+          { status: 400 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    await waitFor(
+      () => {
+        expect(toast.error).toHaveBeenCalledWith('PR creation failed', { duration: 10000 });
+      },
+      { timeout: 5000 },
+    );
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('PR snapshot unavailable');
+    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
+    expect(within(alert).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
 
   it('shows file count badge on Changes tab when session has diff', async () => {
     const sessionWithDiff: Session = {

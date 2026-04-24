@@ -97,11 +97,12 @@ Per-request flow in the `Auth` middleware:
 2. Resolve active org:
    - If the request carries `X-Active-Org-ID: <uuid>`, use that.
    - Otherwise, fall back to `AuthSession.last_org_id`.
+   - Otherwise, fall back to the user's persisted last-selected org preference (seeded by explicit switch actions and copied into new sessions at login).
    - Otherwise (no hint), pick the user's oldest membership.
 3. Assert `(user.id, active_org_id)` has a row in `organization_memberships`. If not, fall back to the user's oldest remaining membership; if none, 401. Increment a metric on this fallback path — it should be vanishingly rare in steady state.
 4. Set `user`, `org_id`, and active membership role on the request context. Downstream handlers continue to read `org_id` from context and RBAC reads the active role from context.
 
-The frontend attaches `X-Active-Org-ID` via the API client, reading from an `ActiveOrgProvider`. The provider is seeded in this order: explicit `?org=<uuid>` in the current app URL, `sessionStorage` for the current tab, then the session bootstrap hint returned by `/auth/me`. Switching orgs updates React state and `sessionStorage`, then fires `POST /auth/active-org` so new tabs can open in the last-used org. Data mutation on switch is a hint, not a contract.
+The frontend attaches `X-Active-Org-ID` via the API client, reading from an `ActiveOrgProvider`. The provider is seeded in this order: explicit `?org=<uuid>` in the current app URL, `sessionStorage` for the current tab, then the session bootstrap hint returned by `/auth/me`. Switching orgs updates React state and `sessionStorage`, then fires `POST /auth/active-org` so the current session and future logins open in the last-used org. Data mutation on switch is a hint, not a contract.
 
 Do not use `localStorage` as the source of truth for active org. It is shared across tabs and violates the tab-independence goal. `sessionStorage` plus in-memory React state gives each tab its own active org while still surviving reloads in that tab.
 

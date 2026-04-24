@@ -188,6 +188,8 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
     register: (email: string, password: string, name: string, invitation?: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
+    setActiveOrg: (orgId: string) =>
+      post('/api/v1/auth/active-org', { org_id: orgId }),
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
@@ -296,6 +298,8 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
+    update: (id: string, body: { title: string }) =>
+      patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getValidation: (sessionId: string) => get<import('./types').SingleResponse<import('./types').Validation>>(`/api/v1/sessions/${sessionId}/validation`),
