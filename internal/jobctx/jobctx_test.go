@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/jobctx"
@@ -114,4 +115,15 @@ func TestRegisterDeadLetterHook_ConcurrentRegistrationIsSafe(t *testing.T) {
 
 	jobctx.RunDeadLetterHooks(ctx, nil)
 	require.Equal(t, 32, calls)
+}
+
+func TestWithLockToken_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := uuid.New()
+	ctx := jobctx.WithLockToken(context.Background(), want)
+
+	got, ok := jobctx.LockTokenFromContext(ctx)
+	require.True(t, ok, "WithLockToken should store the lock token in context")
+	require.Equal(t, want, got, "LockTokenFromContext should return the stored token")
 }
