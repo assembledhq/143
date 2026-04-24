@@ -136,6 +136,21 @@ func TestScheduler_ScheduleContextRefreshes_NilStore(t *testing.T) {
 	require.Empty(t, jobs.enqueued, "should not enqueue any jobs when pmDocs is nil")
 }
 
+func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
+	t.Parallel()
+
+	orgIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	jobs := &trackingJobs{}
+	s := &Scheduler{
+		jobs:   jobs,
+		logger: zerolog.Nop(),
+	}
+
+	s.schedulePullRequestReconciliation(context.Background(), orgIDs, time.Date(2026, 4, 23, 22, 0, 0, 0, time.UTC))
+
+	require.Equal(t, []string{"reconcile_pull_request_state", "reconcile_pull_request_state"}, jobs.enqueued, "should enqueue one reconciliation job per org")
+}
+
 func TestScheduler_ScheduleContextRefreshes_NoDoc(t *testing.T) {
 	t.Parallel()
 

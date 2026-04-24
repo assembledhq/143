@@ -60,6 +60,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("validate", newValidateHandler(stores, services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
+		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
+		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
 	}
 	if services != nil && services.Feedback != nil {
@@ -126,6 +129,9 @@ type MemoryReinforcer interface {
 
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
+	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 }
 
 // Services holds the service dependencies needed by job handlers.
@@ -931,6 +937,76 @@ func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid
 		}
 	}
 	return nil
+}
+
+func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID         string `json:"org_id"`
+			PullRequestID string `json:"pull_request_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal sync_pull_request_state payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		pullRequestID, err := uuid.Parse(input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("starting sync_pull_request_state job")
+		return services.PR.SyncPullRequestState(ctx, orgID, pullRequestID)
+	}
+}
+
+func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID string `json:"org_id"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal reconcile_pull_request_state payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		if input.Limit <= 0 {
+			input.Limit = 50
+		}
+		logger.Info().Str("org_id", orgID.String()).Int("limit", input.Limit).Msg("starting reconcile_pull_request_state job")
+		return services.PR.ReconcilePullRequestState(ctx, orgID, input.Limit)
+	}
+}
+
+func newEnrichPullRequestHealthHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID         string `json:"org_id"`
+			PullRequestID string `json:"pull_request_id"`
+			Version       int64  `json:"version,string"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal enrich_pull_request_health payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		pullRequestID, err := uuid.Parse(input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("pull_request_id", pullRequestID.String()).
+			Int64("version", input.Version).
+			Msg("starting enrich_pull_request_health job")
+		return services.PR.EnrichPullRequestHealth(ctx, orgID, pullRequestID, input.Version)
+	}
 }
 
 // validate handler runs validation checks on a completed agent run.

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -23,7 +24,9 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 
 	cols := []string{
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-		"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -36,7 +39,8 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, now, now),
+					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
 		)
 
 	pr, err := store.GetByRepoAndNumber(context.Background(), "org/repo", 42)
@@ -78,7 +82,9 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 
 	cols := []string{
 		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
-		"title", "body", "status", "review_status", "authored_by", "ci_status", "merged_at", "created_at", "updated_at",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merged_at", "created_at", "updated_at",
 	}
 
 	orgID := uuid.New()
@@ -91,7 +97,8 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(cols).
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
-					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, now, now),
+					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), nil, now, now),
 		)
 
 	result, err := store.BatchGetBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionID})

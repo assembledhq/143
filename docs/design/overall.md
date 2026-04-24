@@ -78,7 +78,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 5: Open PR and ship
     - The system opens a new PR on github, using whatever Github template already exists. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
     - It makes sure to attach the relevant Linear issue to the PR title, or references the original sentry issue / customer complaint, while keeping title cleanup minimal and relying on the LLM to generate the reviewer-facing phrasing when available
-    - Session detail should grow a compact **PR health** row near the existing top-of-Overview PR/error notice area, backed by synced GitHub state and SSE updates, so operators can see conflicts or failing tests quickly and launch one-click repair actions like `Resolve conflicts` and `Fix tests`; see [future/61-pr-state-sync-and-repair-actions.md](future/61-pr-state-sync-and-repair-actions.md).
+    - Session detail now includes a compact **PR health** row near the existing top-of-Overview PR/error notice area, backed by synced GitHub state, reconciliation, and org-scoped SSE updates so operators can see conflicts or failing tests quickly and launch one-click repair actions like `Resolve conflicts` and `Fix tests`; see [implemented/61-pr-state-sync-and-repair-actions.md](implemented/61-pr-state-sync-and-repair-actions.md).
     - Sends the PR for human review (depending on the settings, could be a push notification or just puts it out for a group of reviewers).
 - Step 6: Observe impact and close the customer loop
     - After a fix is deployed, the system automatically evaluates whether it reduced real customer pain.

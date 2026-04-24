@@ -686,6 +686,18 @@ func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, param
 	return nil, nil
 }
 
+func (s *stubPRService) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *stubPRService) ReconcilePullRequestState(context.Context, uuid.UUID, int) error {
+	return nil
+}
+
+func (s *stubPRService) EnrichPullRequestHealth(context.Context, uuid.UUID, uuid.UUID, int64) error {
+	return nil
+}
+
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID
 	m.trigger = trigger
