@@ -231,6 +231,15 @@ func (s *PRService) SnapshotStore() storage.SnapshotStore {
 // The UI translates this into "session state expired — re-run to create a PR".
 var ErrSnapshotExpired = errors.New("session snapshot expired")
 
+// ErrGitHubUserAuthRequired and ErrGitHubUserAuthRepoAccessDenied are
+// re-exports of the identity-package sentinels so handlers in the api/handlers
+// package can match resolver errors via errors.Is without taking a direct
+// dependency on the identity package.
+var (
+	ErrGitHubUserAuthRequired        = identity.ErrUserAuthRequired
+	ErrGitHubUserAuthRepoAccessDenied = identity.ErrUserAuthRepoAccessDenied
+)
+
 // ErrNoChanges is returned by CreatePR when the restored workspace has no
 // uncommitted changes relative to the base branch — there's nothing to push.
 // This typically means the diff was reverted or the session produced no edits.
@@ -452,7 +461,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		// GitHub returns 422 "No commits between" when the pushed branch
 		// has no diff against the base. Map that to ErrNoChanges so the UI
 		// can show a targeted message instead of a generic API error.
-		var apiErr *githubAPIError
+		var apiErr *GitHubAPIError
 		if errors.As(err, &apiErr) && apiErr.IsNoCommitsBetween() {
 			return nil, ErrNoChanges
 		}
@@ -741,43 +750,64 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
+		s.runMergedPullRequestFollowUps(ctx, pr, event.PR.Head.SHA)
+	} else {
+		// PR was closed without merging.
+		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
+			return fmt.Errorf("update PR status to closed: %w", err)
+		}
+		s.teardownPRPreview(ctx, pr, false)
+		s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
+	}
 
-		// Get the agent run to find the issue (only if PR is linked to a session).
-		if pr.SessionID != nil {
-			run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
-			if err != nil {
-				return fmt.Errorf("get agent run: %w", err)
-			}
+	s.enqueuePullRequestStateSync(ctx, pr)
+	return nil
+}
 
-			// Update issue status to fixed.
-			if run.PrimaryIssueID != nil {
-				if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, "fixed"); err != nil {
-					s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status to fixed")
+func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models.PullRequest, commitSHA string) {
+	var snapshotKey *string
+
+	if pr.SessionID != nil && s.sessions != nil {
+		run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to load session for merged pull request follow-ups")
+		} else {
+			snapshotKey = run.SnapshotKey
+			if s.issues != nil {
+				if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
+					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *primaryIssueID, "fixed"); err != nil {
+						s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status to fixed")
+					}
 				}
 			}
-
-			// Snapshot is no longer needed now that the PR is merged. Cleanup
-			// is best-effort: reaper + archive sweep pick up any stragglers.
 			if s.snapshots != nil {
-				if err := storage.CleanupSessionSnapshot(ctx, s.snapshots, s.sessions, pr.OrgID, *pr.SessionID, run.SnapshotKey); err != nil {
+				if err := storage.CleanupSessionSnapshot(ctx, s.snapshots, s.sessions, pr.OrgID, *pr.SessionID, snapshotKey); err != nil {
 					s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to clean up snapshot on merge")
 				}
 			}
 		}
+	}
 
-		// Create deploy record.
-		commitSHA := event.PR.Head.SHA
-		deploy := &models.Deploy{
-			PullRequestID: pr.ID,
-			OrgID:         pr.OrgID,
-			Environment:   "production",
-			CommitSHA:     &commitSHA,
+	if s.deploys != nil {
+		if _, err := s.deploys.GetByPullRequestID(ctx, pr.OrgID, pr.ID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				commitSHAPtr := commitSHA
+				deploy := &models.Deploy{
+					PullRequestID: pr.ID,
+					OrgID:         pr.OrgID,
+					Environment:   "production",
+					CommitSHA:     &commitSHAPtr,
+				}
+				if err := s.deploys.Create(ctx, deploy); err != nil {
+					s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create deploy record")
+				}
+			} else {
+				s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to check existing deploy record")
+			}
 		}
-		if err := s.deploys.Create(ctx, deploy); err != nil {
-			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to create deploy record")
-		}
+	}
 
-		// Enqueue experiment evaluation job.
+	if s.jobs != nil {
 		dedupeKey := fmt.Sprintf("evaluate_experiment:%s", pr.ID)
 		if _, err := s.jobs.Enqueue(ctx, pr.OrgID, "default", "evaluate_experiment", map[string]string{
 			"pull_request_id": pr.ID.String(),
@@ -785,76 +815,80 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}, 5, &dedupeKey); err != nil {
 			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to enqueue evaluate_experiment job")
 		}
-	} else {
-		// PR was closed without merging.
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
-			return fmt.Errorf("update PR status to closed: %w", err)
-		}
 	}
 
-	// Stop any active preview for this PR. Runs in both merged and closed
-	// branches: once a PR is no longer open, the preview is obsolete.
-	s.teardownPRPreview(ctx, pr, event.PR.Merged)
+	s.teardownPRPreview(ctx, pr, true)
+	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, snapshotKey, true)
+}
 
-	// Auto-archive the linked session if the org has opted in.
-	if pr.SessionID != nil && s.orgs != nil {
-		if org, err := s.orgs.GetByID(ctx, pr.OrgID); err != nil {
-			s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to load org for auto-archive check")
-		} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
-			s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to parse org settings for auto-archive")
-		} else if settings.AutoArchiveOnPRClose {
-			// Fetch snapshot_key before archiving so we only round-trip to
-			// the DB once for the cleanup path.
-			var snapshotKey *string
-			if s.snapshots != nil {
-				if run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID); err == nil {
-					snapshotKey = run.SnapshotKey
-				}
-			}
-			if err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID); err != nil {
-				s.logger.Warn().Err(err).
-					Str("session_id", pr.SessionID.String()).
-					Str("pr_id", pr.ID.String()).
-					Msg("failed to auto-archive session on PR close")
+func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr models.PullRequest, snapshotKey *string, merged bool) {
+	if pr.SessionID == nil || s.orgs == nil || s.sessions == nil {
+		return
+	}
+
+	org, err := s.orgs.GetByID(ctx, pr.OrgID)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to load org for auto-archive check")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to parse org settings for auto-archive")
+		return
+	}
+	if !settings.AutoArchiveOnPRClose {
+		return
+	}
+
+	if err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", pr.SessionID.String()).
+			Str("pr_id", pr.ID.String()).
+			Msg("failed to auto-archive session on PR close")
+		return
+	}
+
+	if s.snapshots != nil {
+		if snapshotKey == nil {
+			run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+			if err != nil {
+				s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to load session snapshot key for auto-archive")
 			} else {
-				if s.snapshots != nil {
-					if err := storage.CleanupSessionSnapshot(ctx, s.snapshots, s.sessions, pr.OrgID, *pr.SessionID, snapshotKey); err != nil {
-						s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to clean up snapshot on auto-archive")
-					}
-				}
-				if s.audit != nil {
-					sessionIDStr := pr.SessionID.String()
-					details, marshalErr := json.Marshal(map[string]any{
-						"session_id":       sessionIDStr,
-						"pull_request_id":  pr.ID.String(),
-						"github_repo":      pr.GitHubRepo,
-						"github_pr_number": pr.GitHubPRNumber,
-						"merged":           event.PR.Merged,
-						"auto_archive":     true,
-						"changes": map[string]any{
-							"archived_at":         map[string]any{"before": nil, "after": "set"},
-							"archived_by_user_id": map[string]any{"before": nil, "after": nil},
-						},
-					})
-					if marshalErr != nil {
-						s.logger.Warn().Err(marshalErr).Str("session_id", sessionIDStr).Msg("failed to marshal auto-archive audit details")
-					}
-					s.audit.EmitWebhookAction(ctx, db.WebhookActionParams{
-						OrgID:        pr.OrgID,
-						ProviderName: "github",
-						Action:       models.AuditActionSessionArchived,
-						ResourceType: models.AuditResourceSession,
-						ResourceID:   &sessionIDStr,
-						Details:      details,
-						SessionID:    pr.SessionID,
-					})
-				}
+				snapshotKey = run.SnapshotKey
 			}
+		}
+		if err := storage.CleanupSessionSnapshot(ctx, s.snapshots, s.sessions, pr.OrgID, *pr.SessionID, snapshotKey); err != nil {
+			s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to clean up snapshot on auto-archive")
 		}
 	}
 
-	s.enqueuePullRequestStateSync(ctx, pr)
-	return nil
+	if s.audit != nil {
+		sessionIDStr := pr.SessionID.String()
+		details, marshalErr := json.Marshal(map[string]any{
+			"session_id":       sessionIDStr,
+			"pull_request_id":  pr.ID.String(),
+			"github_repo":      pr.GitHubRepo,
+			"github_pr_number": pr.GitHubPRNumber,
+			"merged":           merged,
+			"auto_archive":     true,
+			"changes": map[string]any{
+				"archived_at":         map[string]any{"before": nil, "after": "set"},
+				"archived_by_user_id": map[string]any{"before": nil, "after": nil},
+			},
+		})
+		if marshalErr != nil {
+			s.logger.Warn().Err(marshalErr).Str("session_id", sessionIDStr).Msg("failed to marshal auto-archive audit details")
+		}
+		s.audit.EmitWebhookAction(ctx, db.WebhookActionParams{
+			OrgID:        pr.OrgID,
+			ProviderName: "github",
+			Action:       models.AuditActionSessionArchived,
+			ResourceType: models.AuditResourceSession,
+			ResourceID:   &sessionIDStr,
+			Details:      details,
+			SessionID:    pr.SessionID,
+		})
+	}
 }
 
 // teardownPRPreview stops the running preview (if any) for a closed PR and
@@ -1102,7 +1136,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &githubAPIError{
+		return nil, &GitHubAPIError{
 			Method:     method,
 			Path:       path,
 			StatusCode: resp.StatusCode,
@@ -1113,17 +1147,17 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 	return respBody, nil
 }
 
-// githubAPIError wraps a non-2xx response from the GitHub REST API so callers
+// GitHubAPIError wraps a non-2xx response from the GitHub REST API so callers
 // can inspect the status and parsed error details with errors.As rather than
 // matching on prose.
-type githubAPIError struct {
+type GitHubAPIError struct {
 	Method     string
 	Path       string
 	StatusCode int
 	Body       []byte
 }
 
-func (e *githubAPIError) Error() string {
+func (e *GitHubAPIError) Error() string {
 	return fmt.Sprintf("GitHub API %s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
@@ -1132,11 +1166,31 @@ func (e *githubAPIError) Error() string {
 // method (not just the StatusCode field) so that downstream packages can
 // detect the status structurally with errors.As against a small interface
 // without taking a build-time dependency on this concrete type.
-func (e *githubAPIError) HTTPStatus() int {
+func (e *GitHubAPIError) HTTPStatus() int {
 	if e == nil {
 		return 0
 	}
 	return e.StatusCode
+}
+
+// Message extracts the human-readable message from GitHub's standard error
+// envelope ({"message": "..."}). Falls back to the raw body when the body
+// is not JSON or the message field is empty. Returned strings are suitable
+// for surfacing in toasts.
+func (e *GitHubAPIError) Message() string {
+	if e == nil {
+		return ""
+	}
+	var parsed struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(e.Body, &parsed); err == nil && strings.TrimSpace(parsed.Message) != "" {
+		return parsed.Message
+	}
+	if len(e.Body) > 0 {
+		return string(e.Body)
+	}
+	return fmt.Sprintf("GitHub API returned %d", e.StatusCode)
 }
 
 // IsNoCommitsBetween reports whether this 422 indicates the pushed branch
@@ -1149,7 +1203,7 @@ func (e *githubAPIError) HTTPStatus() int {
 // We parse the structured body so the check doesn't break on wrapped errors
 // and so an unrelated field containing the phrase can't trigger a false
 // positive.
-func (e *githubAPIError) IsNoCommitsBetween() bool {
+func (e *GitHubAPIError) IsNoCommitsBetween() bool {
 	if e == nil || e.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
@@ -1171,7 +1225,7 @@ func (e *githubAPIError) IsNoCommitsBetween() bool {
 	return false
 }
 
-func (e *githubAPIError) IsExistingPullRequest() bool {
+func (e *GitHubAPIError) IsExistingPullRequest() bool {
 	if e == nil || e.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
@@ -1352,7 +1406,7 @@ func (s *PRService) createOrGetPullRequest(ctx context.Context, token, owner, re
 		return prNumber, prURL, nil
 	}
 
-	var apiErr *githubAPIError
+	var apiErr *GitHubAPIError
 	if errors.As(err, &apiErr) && apiErr.IsExistingPullRequest() {
 		return s.findOpenPullRequestByHead(ctx, token, owner, repo, head)
 	}

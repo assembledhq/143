@@ -1,0 +1,454 @@
+package github
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+)
+
+// TestFetchRepoMergeSettings verifies the helper decodes GitHub's repo
+// response shape and forwards the auth header.
+func TestFetchRepoMergeSettings(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143", r.URL.Path)
+		require.Equal(t, "token install-token", r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"name":"143","allow_squash_merge":true,"allow_merge_commit":false,"allow_rebase_merge":false}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	settings, err := service.fetchRepoMergeSettings(context.Background(), "install-token", "assembledhq", "143")
+	require.NoError(t, err)
+	require.NotNil(t, settings.AllowSquashMerge)
+	require.True(t, *settings.AllowSquashMerge, "squash should be allowed")
+	require.NotNil(t, settings.AllowMergeCommit)
+	require.False(t, *settings.AllowMergeCommit, "merge commit should be disallowed")
+	require.NotNil(t, settings.AllowRebaseMerge)
+	require.False(t, *settings.AllowRebaseMerge, "rebase should be disallowed")
+}
+
+// TestMergePullRequestOnGitHubSuccess covers the happy path: GitHub returns 200
+// with merged=true and we forward the response intact.
+func TestMergePullRequestOnGitHubSuccess(t *testing.T) {
+	t.Parallel()
+
+	var capturedBody gitHubMergeRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method)
+		require.Equal(t, "/repos/assembledhq/143/pulls/42/merge", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		_, _ = w.Write([]byte(`{"sha":"merge-sha","merged":true,"message":"Pull Request successfully merged"}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	resp, err := service.mergePullRequestOnGitHub(context.Background(), "install-token", "assembledhq", "143", 42, gitHubMergeRequest{
+		SHA:         "head-sha",
+		MergeMethod: "squash",
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Merged)
+	require.Equal(t, "merge-sha", resp.SHA)
+	require.Equal(t, "head-sha", capturedBody.SHA, "head SHA should be sent so GitHub can guard against races")
+	require.Equal(t, "squash", capturedBody.MergeMethod, "selected merge method should be sent")
+}
+
+// TestMergePullRequestOnGitHubHeadSHAMismatch verifies that GitHub's 409 for a
+// head SHA mismatch surfaces as a *GitHubAPIError that callers can match on.
+func TestMergePullRequestOnGitHubHeadSHAMismatch(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Head branch was modified. Review and try the merge again."}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	_, err := service.mergePullRequestOnGitHub(context.Background(), "install-token", "assembledhq", "143", 42, gitHubMergeRequest{
+		SHA: "stale-head",
+	})
+	require.Error(t, err)
+	var apiErr *GitHubAPIError
+	require.True(t, errors.As(err, &apiErr), "GitHub conflicts should be wrapped as GitHubAPIError")
+	require.Equal(t, http.StatusConflict, apiErr.StatusCode)
+	require.Contains(t, apiErr.Message(), "Head branch was modified")
+}
+
+// TestGitHubAPIErrorMessage covers the Message() helper, which the HTTP
+// handler relies on to surface a useful message in the toast.
+func TestGitHubAPIErrorMessage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("parses standard GitHub error envelope", func(t *testing.T) {
+		t.Parallel()
+		err := &GitHubAPIError{
+			StatusCode: http.StatusUnprocessableEntity,
+			Body:       []byte(`{"message":"Validation Failed","errors":[]}`),
+		}
+		require.Equal(t, "Validation Failed", err.Message())
+	})
+
+	t.Run("falls back to raw body when not JSON", func(t *testing.T) {
+		t.Parallel()
+		err := &GitHubAPIError{
+			StatusCode: http.StatusInternalServerError,
+			Body:       []byte("upstream timeout"),
+		}
+		require.Equal(t, "upstream timeout", err.Message())
+	})
+
+	t.Run("falls back to status when body is empty", func(t *testing.T) {
+		t.Parallel()
+		err := &GitHubAPIError{StatusCode: http.StatusForbidden}
+		require.Equal(t, "GitHub API returned 403", err.Message())
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		t.Parallel()
+		var err *GitHubAPIError
+		require.Equal(t, "", err.Message())
+	})
+}
+
+// guardrails: ensure timeouts are respected so slow GitHub responses do not
+// hang the merge mutation indefinitely. The httpClient injected into PRService
+// already enforces 30s in production; this test confirms a configurable
+// deadline propagates through.
+func TestMergePullRequestOnGitHubRespectsContextTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(2 * time.Second):
+			_, _ = w.Write([]byte(`{"sha":"x","merged":true,"message":"ok"}`))
+		}
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := service.mergePullRequestOnGitHub(ctx, "install-token", "assembledhq", "143", 42, gitHubMergeRequest{})
+	require.Error(t, err, "merge should propagate context deadline")
+}
+
+func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	prPreviewStateID := uuid.New()
+	previewInstanceID := uuid.New()
+	now := time.Now().UTC()
+	summaryJSON := json.RawMessage(`{"merge_state":"clean","has_conflicts":false,"failing_test_count":0,"needs_agent_action":false,"checks":[]}`)
+	headSHA := "head-merge"
+	baseSHA := "base-merge"
+	snapshotKey := "snap-merge"
+	mergeCommitSHA := "merge-commit-sha"
+
+	prMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pull request mock")
+	defer prMock.Close()
+
+	repoMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create repository mock")
+	defer repoMock.Close()
+
+	sessionMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create session mock")
+	defer sessionMock.Close()
+
+	issueMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create issue mock")
+	defer issueMock.Close()
+
+	deployMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create deploy mock")
+	defer deployMock.Close()
+
+	jobMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create job mock")
+	defer jobMock.Close()
+
+	orgMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create organization mock")
+	defer orgMock.Close()
+
+	previewMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create preview mock")
+	defer previewMock.Close()
+
+	snapshotStore := &prTestSnapshotStore{}
+	stopper := &recordingPreviewStopper{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-merge"},"base":{"ref":"main","sha":"base-merge"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143/commits/head-merge/check-runs":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/assembledhq/143":
+			_, _ = w.Write([]byte(`{"allow_squash_merge":true,"allow_merge_commit":true,"allow_rebase_merge":false}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/assembledhq/143/pulls/42/merge":
+			var req gitHubMergeRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req), "merge request should decode")
+			require.Equal(t, "head-merge", req.SHA, "merge should send the latest head SHA")
+			require.Equal(t, "squash", req.MergeMethod, "merge should prefer squash when allowed")
+			_, _ = w.Write([]byte(`{"sha":"merge-commit-sha","merged":true,"message":"Pull Request successfully merged"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	prStore := db.NewPullRequestStore(prMock)
+	repoStore := db.NewRepositoryStore(repoMock)
+	sessionStore := db.NewSessionStore(sessionMock)
+	issueStore := db.NewIssueStore(issueMock)
+	deployStore := db.NewDeployStore(deployMock)
+	jobStore := db.NewJobStore(jobMock)
+	orgStore := db.NewOrganizationStore(orgMock)
+	previewStore := db.NewPreviewStore(previewMock)
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+		))
+
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+
+	prMock.ExpectBegin()
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	prMock.ExpectExec("INSERT INTO pull_request_health_snapshots").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":   prID,
+			"org_id":            orgID,
+			"version":           int64(1),
+			"head_sha":          "head-merge",
+			"base_sha":          "base-merge",
+			"summary_json":      pgxmock.AnyArg(),
+			"enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	prMock.ExpectExec("UPDATE pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "version": int64(1)}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	prMock.ExpectExec("INSERT INTO pull_request_health_current").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":      prID,
+			"org_id":               orgID,
+			"version":              int64(1),
+			"head_sha":             "head-merge",
+			"base_sha":             "base-merge",
+			"summary_json":         pgxmock.AnyArg(),
+			"summary_preview_json": pgxmock.AnyArg(),
+			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
+			"enriched_at":          (*time.Time)(nil),
+			"created_at":           pgxmock.AnyArg(),
+			"updated_at":           pgxmock.AnyArg(),
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	prMock.ExpectExec("UPDATE pull_requests").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":    prID,
+			"org_id":             orgID,
+			"head_sha":           "head-merge",
+			"base_sha":           "base-merge",
+			"merge_state":        models.PullRequestMergeStateClean,
+			"has_conflicts":      false,
+			"failing_test_count": 0,
+			"needs_agent_action": false,
+			"version":            int64(1),
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	prMock.ExpectCommit()
+	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "ci_status": "success"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "success", &headSHA, &baseSHA,
+			models.PullRequestMergeStateClean, false, 0, false, &now, int64(1), (*time.Time)(nil), now, now,
+		))
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
+		))
+	prMock.ExpectExec("UPDATE pull_requests SET status = @status, merged_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": "merged"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
+		))
+
+	sessionMock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prHealthSessionColumns).AddRow(
+				sessionID, issueID, orgID, "", "", "", "codex", "completed", "full", "low",
+				nil, nil, nil, nil,
+				nil, nil, false, nil, nil, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, 0, now, "snapshot", &snapshotKey,
+				nil, nil, nil, "", "", 0, 0, "", nil,
+				nil, "", "", int64(0), nil,
+				"", nil, nil, 0,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+				"idle", (*string)(nil), nil, nil, nil, now,
+			),
+		)
+	issueMock.ExpectExec("UPDATE issues SET status")
+	WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	sessionMock.ExpectExec("UPDATE sessions\n\t\tSET snapshot_key = NULL, sandbox_state = 'destroyed'")
+	WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgx.NamedArgs{"pull_request_id": prID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID,
+			"org_id":          orgID,
+			"environment":     "production",
+			"commit_sha":      &mergeCommitSHA,
+		}).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).
+				AddRow(uuid.New(), now, now),
+		)
+
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+
+	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "pr_number": 42}).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
+				"last_preview_instance_id", "last_screenshot_blob_path",
+				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"created_at", "updated_at",
+			}).AddRow(
+				prPreviewStateID, orgID, repoID, 42, nil,
+				&previewInstanceID, "", "", "", "running", now, now,
+			),
+		)
+	previewMock.ExpectExec("UPDATE pr_preview_state SET status").
+		WithArgs(models.PRPreviewStatusMerged, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
+		WithArgs(pgx.NamedArgs{"id": orgID}).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).
+				AddRow(orgID, "Acme", []byte(`{"auto_archive_on_pr_close":true}`), now, now),
+		)
+	sessionMock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{
+			123: {Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
+		pullRequests:   prStore,
+		repos:          repoStore,
+		sessions:       sessionStore,
+		issues:         issueStore,
+		deploys:        deployStore,
+		jobs:           jobStore,
+		orgs:           orgStore,
+		previews:       previewStore,
+		previewStopper: stopper,
+		snapshots:      snapshotStore,
+		logger:         zerolog.New(io.Discard),
+		baseURL:        server.URL,
+		httpClient:     server.Client(),
+	}
+
+	resp, err := service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
+	require.NoError(t, err, "MergePullRequest should succeed")
+	require.True(t, resp.Merged, "MergePullRequest should report merged=true")
+	require.Equal(t, models.PullRequestMergeMethodSquash, resp.MergeMethod, "MergePullRequest should report the selected merge method")
+	require.Equal(t, []string{"snap-merge"}, snapshotStore.deleted, "MergePullRequest should clean up the session snapshot")
+	require.Equal(t, 1, stopper.calls, "MergePullRequest should stop any active PR preview")
+	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
+	require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "job expectations should be met")
+	require.NoError(t, orgMock.ExpectationsWereMet(), "organization expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+}

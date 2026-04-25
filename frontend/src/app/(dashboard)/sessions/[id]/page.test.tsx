@@ -1026,6 +1026,151 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: 'Fix tests' })).not.toBeInTheDocument();
   });
 
+  it('shows the Merge button when the PR is mergeable, calls the merge API, and toasts on success', async () => {
+    let mergeCalled = false;
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            summary: 'PR #42 is mergeable and all required test checks are passing.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/merge', () => {
+        mergeCalled = true;
+        return HttpResponse.json({
+          data: {
+            merged: true,
+            sha: 'merge-sha',
+            message: 'Pull Request successfully merged',
+            merge_method: 'squash' as const,
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const mergeButton = await screen.findByRole('button', { name: /^Merge$/ });
+    expect(mergeButton).not.toBeDisabled();
+
+    await user.click(mergeButton);
+
+    await waitFor(() => expect(mergeCalled).toBe(true));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR merged', expect.any(Object)));
+  });
+
+  it('shows merged PR state when a linked PR has already been merged', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            id: 'pr-1',
+            session_id: 'session-abcdef12-3456-7890',
+            org_id: 'org-1',
+            github_pr_number: 42,
+            github_pr_url: 'https://github.com/example/repo/pull/42',
+            github_repo: 'example/repo',
+            title: 'Fix TypeError by adding null check',
+            body: 'Adds a null check before accessing properties.',
+            status: 'merged',
+            branch_name: 'fix/type-error-null-check',
+            review_status: 'pending',
+            ci_status: 'success',
+            merged_at: '2026-02-17T07:10:00Z',
+            closed_at: null,
+            created_at: '2026-02-17T07:06:00Z',
+            updated_at: '2026-02-17T07:10:00Z',
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect((await screen.findAllByText('PR merged')).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+  });
+
+  it('hides the Merge button while CI is still in flight', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            can_merge: false,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, summary: 'running' },
+            ],
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText('PR health');
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+  });
+
+  it('hides the Merge button when the org requires GitHub user auth and the user is disconnected', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: { ...mockPRHealth, can_merge: true },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.get('/api/v1/users/me/github-status', () => {
+        return HttpResponse.json({
+          connected: false,
+          has_repo_scope: false,
+          pr_authorship_mode: 'user_required',
+          pr_draft_default: false,
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByText('PR health');
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+  });
+
+  it('toasts the API error message when the merge call fails', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: { ...mockPRHealth, can_merge: true },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/merge', () => {
+        return HttpResponse.json(
+          {
+            error: {
+              code: 'PULL_REQUEST_MERGE_REJECTED',
+              message: 'Head branch was modified. Review and try the merge again.',
+            },
+          },
+          { status: 409 },
+        );
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: /^Merge$/ }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('Head branch was modified. Review and try the merge again.'),
+    );
+  });
+
   it('routes to a new revision session after starting a PR repair action', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {

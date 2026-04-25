@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 
 import { PRHealthBanner } from "./pr-health-banner";
 
@@ -23,6 +23,7 @@ const baseHealth: PullRequestHealthResponse = {
   checks: [],
   can_resolve_conflicts: false,
   can_fix_tests: false,
+  can_merge: false,
   enrichment_status: "ready",
   enrichment_requested: true,
   enrichment_ready: true,
@@ -40,10 +41,76 @@ describe("PRHealthBanner", () => {
         repairError={null}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
       />,
     );
 
     expect(screen.getByText("PR health")).toHaveClass("text-sm");
     expect(screen.getByText("PR #42 · acme/widgets")).toHaveClass("text-sm");
+  });
+
+  it("hides the Merge button when can_merge is false", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={baseHealth}
+        pendingAction={null}
+        repairError={null}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /^Merge$/ })).toBeNull();
+  });
+
+  it("renders the Merge button when can_merge is true and invokes onMerge", async () => {
+    const onMerge = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, can_merge: true }}
+        pendingAction={null}
+        repairError={null}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={onMerge}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /^Merge$/ });
+    expect(button).not.toBeDisabled();
+    await userEvent.setup().click(button);
+    expect(onMerge).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a Merging… label and disables the button while pendingAction is merge", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, can_merge: true }}
+        pendingAction="merge"
+        repairError={null}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /Merging…/ });
+    expect(button).toBeDisabled();
+  });
+
+  it("disables the Merge button when another repair action is pending", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, can_merge: true, can_fix_tests: true }}
+        pendingAction="fix_tests"
+        repairError={null}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
   });
 });

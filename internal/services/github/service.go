@@ -97,7 +97,7 @@ func (s *Service) exchangeForInstallationToken(ctx context.Context, jwtToken str
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", time.Time{}, &githubAPIError{
+		return "", time.Time{}, &GitHubAPIError{
 			Method:     http.MethodPost,
 			Path:       path,
 			StatusCode: resp.StatusCode,

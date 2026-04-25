@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type lockedRecorder struct {
@@ -47,6 +48,7 @@ func (r *lockedRecorder) BodyString() string {
 type stubPullRequestHealthService struct {
 	getHealthFunc func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error)
 	repairFunc    func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
+	mergeFunc     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error)
 }
 
 type stubPullRequestMembershipStore struct {
@@ -59,6 +61,13 @@ func (s *stubPullRequestHealthService) GetPullRequestHealth(ctx context.Context,
 
 func (s *stubPullRequestHealthService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
 	return s.repairFunc(ctx, orgID, pullRequestID, userID, action)
+}
+
+func (s *stubPullRequestHealthService) MergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeResponse, error) {
+	if s.mergeFunc == nil {
+		return nil, errors.New("merge not stubbed")
+	}
+	return s.mergeFunc(ctx, orgID, pullRequestID, userID)
 }
 
 func (s *stubPullRequestMembershipStore) Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
@@ -313,6 +322,177 @@ func TestPullRequestHandler_StartRepair_ErrorsAndResolveConflicts(t *testing.T) 
 
 	require.Equal(t, http.StatusOK, rr.Code, "ResolveConflicts should return 200 when the repair launch succeeds")
 	require.Contains(t, rr.Body.String(), "resolve_conflicts", "ResolveConflicts should serialize the selected repair action")
+}
+
+func TestPullRequestHandler_Merge(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	prID := uuid.New()
+
+	t.Run("returns 200 with merge response on success", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				require.Equal(t, orgID, gotOrgID, "Merge should pass the active org ID to the service")
+				require.Equal(t, prID, gotPRID, "Merge should pass the parsed pull request ID to the service")
+				require.Equal(t, userID, gotUserID, "Merge should pass the current user ID to the service")
+				return &models.PullRequestMergeResponse{
+					Merged:      true,
+					SHA:         "merge-sha",
+					Message:     "Pull Request successfully merged",
+					MergeMethod: models.PullRequestMergeMethodSquash,
+				}, nil
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, "Merge should return 200 on success")
+		var resp models.SingleResponse[models.PullRequestMergeResponse]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Merge should return valid JSON")
+		require.True(t, resp.Data.Merged, "Merge response should expose merged=true")
+		require.Equal(t, "merge-sha", resp.Data.SHA, "Merge response should expose the resulting SHA")
+		require.Equal(t, models.PullRequestMergeMethodSquash, resp.Data.MergeMethod, "Merge response should expose the chosen method")
+	})
+
+	t.Run("returns 409 PR_NOT_MERGEABLE when service rejects", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrPullRequestNotMergeable
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusConflict, rr.Code, "Merge should return 409 when the PR is not mergeable")
+		require.Contains(t, rr.Body.String(), "PR_NOT_MERGEABLE", "Merge should return the PR_NOT_MERGEABLE error code")
+	})
+
+	t.Run("returns 503 PR_MERGE_STATE_UNAVAILABLE when refresh fails", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrMergeStateRefreshFailed
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code, "Merge should return 503 when GitHub refresh fails")
+		require.Contains(t, rr.Body.String(), "PR_MERGE_STATE_UNAVAILABLE")
+	})
+
+	t.Run("returns 409 NO_MERGE_METHOD_ALLOWED", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrNoMergeMethodAllowed
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusConflict, rr.Code, "Merge should return 409 when no merge method is allowed")
+		require.Contains(t, rr.Body.String(), "NO_MERGE_METHOD_ALLOWED")
+	})
+
+	t.Run("returns 409 when GitHub user auth is required", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrGitHubUserAuthRequired
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusConflict, rr.Code, "Merge should return 409 when GitHub user auth is required")
+		require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "Merge should return the user-auth-required code")
+	})
+
+	t.Run("returns 500 on unknown failures", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, errors.New("boom")
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "Merge should return 500 on unknown failures")
+		require.Contains(t, rr.Body.String(), "PULL_REQUEST_MERGE_FAILED")
+	})
+
+	t.Run("returns 401 when user missing", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewPullRequestHandler(&stubPullRequestHealthService{})
+		req := mergeRequest(prID.String(), nil, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusUnauthorized, rr.Code, "Merge should return 401 when user is missing")
+	})
+
+	t.Run("returns 400 for invalid PR id", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewPullRequestHandler(&stubPullRequestHealthService{})
+		req := mergeRequest("not-a-uuid", &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusBadRequest, rr.Code, "Merge should return 400 for malformed PR id")
+	})
+
+	t.Run("returns 501 when service unavailable", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewPullRequestHandler(nil)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusNotImplemented, rr.Code, "Merge should return 501 when the service is unconfigured")
+	})
+}
+
+func mergeRequest(pathID string, user *models.User, orgID uuid.UUID) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+pathID+"/merge", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	if user != nil {
+		req = req.WithContext(middleware.WithUser(req.Context(), user))
+	}
+	req = req.WithContext(withURLParam(req.Context(), "id", pathID))
+	return req
 }
 
 func TestPullRequestHandler_streamOrgIDFromRequest(t *testing.T) {

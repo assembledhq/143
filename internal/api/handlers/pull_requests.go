@@ -16,11 +16,13 @@ import (
 	"github.com/assembledhq/143/internal/api/sse"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type pullRequestHealthService interface {
 	GetPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID) (*models.PullRequestHealthResponse, error)
 	StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
+	MergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeResponse, error)
 }
 
 type pullRequestMembershipStore interface {
@@ -200,4 +202,75 @@ func (h *PullRequestHandler) startRepair(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestRepairResponse]{Data: *resp})
+}
+
+func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "pull request merge is not configured")
+		return
+	}
+
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found in context")
+		return
+	}
+	pullRequestID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pull request ID")
+		return
+	}
+
+	resp, err := h.service.MergePullRequest(r.Context(), orgID, pullRequestID, user.ID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ghservice.ErrPullRequestNotMergeable):
+			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "pull request is not in a mergeable state", err)
+		case errors.Is(err, ghservice.ErrNoMergeMethodAllowed):
+			writeError(w, r, http.StatusConflict, "NO_MERGE_METHOD_ALLOWED", "repository does not allow any merge method", err)
+		case errors.Is(err, ghservice.ErrGitHubUserAuthRequired):
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account to merge this pull request as yourself", err)
+		case errors.Is(err, ghservice.ErrGitHubUserAuthRepoAccessDenied):
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REPO_ACCESS_DENIED", "your GitHub account cannot access this repository for merge", err)
+		case errors.Is(err, ghservice.ErrMergeStateRefreshFailed):
+			// Returned when GitHub or the DB couldn't be reached to confirm
+			// the PR is still in a mergeable state. 503 lets the UI prompt the
+			// user to retry rather than treating this as a permanent rejection.
+			writeError(w, r, http.StatusServiceUnavailable, "PR_MERGE_STATE_UNAVAILABLE", "could not confirm pull request is still mergeable; please retry", err)
+		default:
+			// GitHub itself can refuse with 405 (method not allowed) or 409
+			// (head SHA mismatch / branch protection); surface those as 409
+			// with the GitHub error message bubbled up so the toast is
+			// actionable. Anything else is a 500.
+			if status, message, ok := classifyGitHubMergeError(err); ok {
+				writeError(w, r, status, "PULL_REQUEST_MERGE_REJECTED", message, err)
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_MERGE_FAILED", "failed to merge pull request", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestMergeResponse]{Data: *resp})
+}
+
+// classifyGitHubMergeError maps an error returned from the GitHub merge call
+// onto an HTTP status + user-facing message when it represents a known,
+// user-actionable failure (branch protection, SHA mismatch, method disabled).
+// Returns false for unrelated errors so the caller can return a 500.
+func classifyGitHubMergeError(err error) (int, string, bool) {
+	var apiErr *ghservice.GitHubAPIError
+	if !errors.As(err, &apiErr) {
+		return 0, "", false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusMethodNotAllowed:
+		return http.StatusConflict, apiErr.Message(), true
+	case http.StatusConflict:
+		return http.StatusConflict, apiErr.Message(), true
+	case http.StatusUnprocessableEntity:
+		return http.StatusUnprocessableEntity, apiErr.Message(), true
+	default:
+		return 0, "", false
+	}
 }
