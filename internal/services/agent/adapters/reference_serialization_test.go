@@ -20,6 +20,8 @@ func TestPreparePrompt_SerializesCanonicalReferencesForManualSessions(t *testing
 			Source:      models.IssueSourceManual,
 			Description: &message,
 		},
+		Manual:      true,
+		UserMessage: message,
 		References: []models.SessionInputReference{
 			{
 				Kind:    models.SessionInputReferenceKindFile,

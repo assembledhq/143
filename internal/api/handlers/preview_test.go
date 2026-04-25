@@ -715,7 +715,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 // schema change in one file flips this test red instead of silently
 // returning the wrong shape from pgxmock.
 var sessionRowColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -753,7 +753,7 @@ func previewSessionRow(values ...interface{}) []interface{} {
 
 func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interface{} {
 	return previewSessionRow(
-		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		id, nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
@@ -795,7 +795,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 // where IsAlive decides which branch the handler takes.
 func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapshotKey *string) []interface{} {
 	return previewSessionRow(
-		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		id, nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		&containerID, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,
@@ -833,7 +833,7 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 // acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
 func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState string) []interface{} {
 	return previewSessionRow(
-		id, uuid.Nil, orgID, "claude_code", "running", "supervised", "low",
+		id, nil, orgID, "claude_code", "running", "supervised", "low",
 		nil, nil, nil, []string{},
 		nil, nil, false, nil, nil, json.RawMessage(`{}`),
 		nil, nil, []string{}, false,

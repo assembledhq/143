@@ -926,7 +926,7 @@ function ChatPanel({
   });
 
   // Fetch the linked primary issue to display its description as the initial prompt.
-  const primaryIssueId = session.primary_issue_id ?? session.issue_id ?? undefined;
+  const primaryIssueId = session.primary_issue_id ?? undefined;
   const hasIssue = !!primaryIssueId;
   const issueQuery = useQuery({
     queryKey: ["issue", primaryIssueId],

@@ -215,20 +215,20 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		}
 
 		run := &models.Session{
-			OrgID:         orgID,
-			IssueID:       placeholderIssueID(task),
-			AgentType:     agentType,
-			Status:        string(models.SessionStatusPending),
-			AutonomyLevel: string(settings.AutonomyLevel),
-			TokenMode:     tokenModeFromTaskComplexity(task.Complexity),
-			PMPlanID:      &planID,
-			Title:         &task.Title,
-			PMApproach:    &approach,
-			PMReasoning:   &reasoning,
-			ProjectTaskID: &task.ID,
-			ModelOverride: project.ModelOverride,
-			RepositoryID:  project.RepositoryID,
-			TargetBranch:  &branchName,
+			OrgID:          orgID,
+			PrimaryIssueID: task.IssueID,
+			AgentType:      agentType,
+			Status:         string(models.SessionStatusPending),
+			AutonomyLevel:  string(settings.AutonomyLevel),
+			TokenMode:      tokenModeFromTaskComplexity(task.Complexity),
+			PMPlanID:       &planID,
+			Title:          &task.Title,
+			PMApproach:     &approach,
+			PMReasoning:    &reasoning,
+			ProjectTaskID:  &task.ID,
+			ModelOverride:  project.ModelOverride,
+			RepositoryID:   project.RepositoryID,
+			TargetBranch:   &branchName,
 		}
 		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Str("task_id", task.ID.String()).Msg("failed to create agent run for project task")
@@ -247,7 +247,7 @@ func (s *Service) dispatchProjectTasks(ctx context.Context, orgID uuid.UUID, pro
 		// Enqueue the agent run job.
 		payload := map[string]string{
 			"session_id": run.ID.String(),
-			"org_id":       orgID.String(),
+			"org_id":     orgID.String(),
 		}
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
 			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue project agent run")
@@ -380,15 +380,6 @@ func slugifyTitle(title string, maxLen int) string {
 		s = "task"
 	}
 	return s
-}
-
-// placeholderIssueID returns the task's associated issue ID if it has one,
-// otherwise returns uuid.Nil. The sessions store maps uuid.Nil to SQL NULL.
-func placeholderIssueID(task *models.ProjectTask) uuid.UUID {
-	if task.IssueID != nil {
-		return *task.IssueID
-	}
-	return uuid.Nil
 }
 
 // depStatus represents the aggregate state of a task's dependencies.

@@ -653,6 +653,7 @@ func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
 
 	input := &agent.AgentInput{
 		Issue:       &models.Issue{Title: "help me refactor", Source: models.IssueSourceManual},
+		Manual:      true,
 		ContextDocs: []string{"Use Go 1.22"},
 	}
 
@@ -804,6 +805,8 @@ func TestBuildUserPrompt_ManualSessionReturnsRawMessage(t *testing.T) {
 			Source:      models.IssueSourceManual,
 			Description: &msg,
 		},
+		Manual:      true,
+		UserMessage: msg,
 	}
 
 	prompt := buildUserPrompt(input)
@@ -824,6 +827,8 @@ func TestBuildUserPrompt_ManualSessionAppendsCanonicalReferences(t *testing.T) {
 			Source:      models.IssueSourceManual,
 			Description: &msg,
 		},
+		Manual:      true,
+		UserMessage: msg,
 		References: []models.SessionInputReference{
 			{
 				Kind:    models.SessionInputReferenceKindFile,

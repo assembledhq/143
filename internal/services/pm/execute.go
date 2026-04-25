@@ -60,17 +60,17 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		}
 
 		run := &models.Session{
-			IssueID:       primaryIssueID,
-			OrgID:         orgID,
-			AgentType:     agentType,
-			Status:        "pending",
-			AutonomyLevel: string(settings.AutonomyLevel),
-			TokenMode:     tokenModeFromComplexity(task.Complexity),
-			PMPlanID:      &plan.ID,
-			Title:         &task.Title,
-			PMApproach:    &task.Approach,
-			PMReasoning:   &task.Reasoning,
-			RepositoryID:  repoID,
+			PrimaryIssueID: &primaryIssueID,
+			OrgID:          orgID,
+			AgentType:      agentType,
+			Status:         "pending",
+			AutonomyLevel:  string(settings.AutonomyLevel),
+			TokenMode:      tokenModeFromComplexity(task.Complexity),
+			PMPlanID:       &plan.ID,
+			Title:          &task.Title,
+			PMApproach:     &task.Approach,
+			PMReasoning:    &task.Reasoning,
+			RepositoryID:   repoID,
 		}
 		if err := s.sessions.Create(ctx, run); err != nil {
 			s.logger.Error().Err(err).Msg("failed to create agent run from PM plan")
@@ -86,7 +86,7 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 
 		payload := map[string]string{
 			"session_id": run.ID.String(),
-			"org_id":       orgID.String(),
+			"org_id":     orgID.String(),
 		}
 		if _, err := s.jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload, 5, nil); err != nil {
 			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to enqueue agent run job")

@@ -116,7 +116,6 @@ export interface Issue {
 
 export interface Session {
   id: string;
-  issue_id?: string | null;
   primary_issue_id?: string | null;
   org_id: string;
   origin?: string;
