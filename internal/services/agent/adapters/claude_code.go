@@ -467,6 +467,7 @@ func buildUserPrompt(input *agent.AgentInput) string {
 				base = *input.Issue.Description
 			}
 		}
+		base = EnsureSlashCommandsInPrompt(base, input.Commands)
 		if len(input.References) == 0 {
 			return base
 		}

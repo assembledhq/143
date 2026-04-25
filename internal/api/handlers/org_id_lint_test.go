@@ -68,14 +68,15 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"IntegrationHandler.StartSlackOAuth":  "OAuth redirect only",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
-		"PMHandler.Bootstrap":               "delegates to enqueueAndRespond which uses OrgIDFromContext",
-		"PMHandler.Refresh":                 "delegates to enqueueAndRespond which uses OrgIDFromContext",
-		"ProjectHandler.Start":              "delegates to transitionStatus which uses OrgIDFromContext",
-		"RepositoryHandler.Disconnect":      "delegates to setRepoStatus which uses OrgIDFromContext",
-		"RepositoryHandler.Reconnect":       "delegates to setRepoStatus which uses OrgIDFromContext",
-		"SessionFileHandler.ListFiles":      "delegates to getSessionContainer which uses OrgIDFromContext",
-		"SessionFileHandler.GetFileContent": "delegates to getSessionContainer which uses OrgIDFromContext",
-		"SessionFileHandler.GetFileContext": "delegates to getSessionContainer which uses OrgIDFromContext",
+		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",
+		"PMHandler.Refresh":                        "delegates to enqueueAndRespond which uses OrgIDFromContext",
+		"ProjectHandler.Start":                     "delegates to transitionStatus which uses OrgIDFromContext",
+		"RepositoryHandler.Disconnect":             "delegates to setRepoStatus which uses OrgIDFromContext",
+		"RepositoryHandler.Reconnect":              "delegates to setRepoStatus which uses OrgIDFromContext",
+		"SessionFileHandler.ListFiles":             "delegates to getSessionContainer which uses OrgIDFromContext",
+		"SessionFileHandler.GetFileContent":        "delegates to getSessionContainer which uses OrgIDFromContext",
+		"SessionFileHandler.GetFileContext":        "delegates to getSessionContainer which uses OrgIDFromContext",
+		"SessionComposerHandler.ListSlashCommands": "built-in catalog is not org-scoped; project discovery branch delegates to buildProjectSlashCommandGroup which uses OrgIDFromContext",
 
 		// Preview inspector handlers — delegate to requireInspector + getActivePreview
 		// which use OrgIDFromContext.

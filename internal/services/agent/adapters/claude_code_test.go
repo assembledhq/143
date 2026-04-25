@@ -922,6 +922,39 @@ func TestBuildUserPrompt_ManualSessionAppendsCanonicalReferences(t *testing.T) {
 	require.Contains(t, prompt, "- GitHub [github]", "manual prompts should render id-backed references without requiring a token")
 }
 
+func TestBuildUserPrompt_ManualSessionPreservesSlashCommandTokens(t *testing.T) {
+	t.Parallel()
+
+	msg := "/review focus on the auth handler"
+	input := &agent.AgentInput{
+		Manual:      true,
+		UserMessage: msg,
+		Commands: []models.SessionInputCommand{
+			{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: "review", Token: "/review", Display: "/review", Arguments: "focus on the auth handler"},
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Equal(t, msg, prompt, "manual prompt should preserve the user message verbatim when commands are already inlined")
+}
+
+func TestBuildUserPrompt_ManualSessionPrependsMissingCommand(t *testing.T) {
+	t.Parallel()
+
+	msg := "fix the bug"
+	input := &agent.AgentInput{
+		Manual:      true,
+		UserMessage: msg,
+		Commands: []models.SessionInputCommand{
+			{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: "review", Token: "/review", Display: "/review", Arguments: "focus on auth"},
+		},
+	}
+
+	prompt := buildUserPrompt(input)
+	require.Contains(t, prompt, "/review focus on auth", "missing command tokens should be prepended so the agent still sees them")
+	require.Contains(t, prompt, msg, "the original user message should still appear after the prepended commands")
+}
+
 // ---------------------------------------------------------------------------
 // extractFileHints
 // ---------------------------------------------------------------------------

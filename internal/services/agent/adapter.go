@@ -40,6 +40,7 @@ type AgentInput struct {
 	RepoURL            string
 	RepoBranch         string
 	References         []models.SessionInputReference
+	Commands           []models.SessionInputCommand
 	ReasoningEffort    models.ReasoningEffort
 	OrgSettings        json.RawMessage
 	TokenMode          string // "low" or "high"

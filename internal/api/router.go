@@ -608,6 +608,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/repositories/{id}", repoHandler.Get)
 				r.Get("/api/v1/repositories/{id}/branches", repoHandler.ListBranches)
 				r.Get("/api/v1/session-composer/files", sessionComposerHandler.ListFileMentions)
+				r.Get("/api/v1/session-composer/slash-commands", sessionComposerHandler.ListSlashCommands)
+				r.Get("/api/v1/session-composer/slash-commands/details", sessionComposerHandler.GetSlashCommandDetail)
 				r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)

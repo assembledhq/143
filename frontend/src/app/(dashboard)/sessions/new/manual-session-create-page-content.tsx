@@ -1,9 +1,8 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, X } from "lucide-react";
+import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,9 +26,20 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { BranchPicker } from "@/components/branch-picker";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
+import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
-import { findActiveMention, insertMentionAtCaret, removeMentionReference, syncReferencesWithMessage } from "@/lib/session-composer-mentions";
+import {
+  COMPOSER_TRIGGER_SPECS,
+  findActiveTrigger,
+  insertCommandAtCaret,
+  insertMentionAtCaret,
+  removeCommandReference,
+  removeMentionReference,
+  syncCommandsWithMessage,
+  syncReferencesWithMessage,
+} from "@/lib/session-composer-mentions";
+import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/session-draft";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -50,7 +60,7 @@ import {
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputReference } from "@/lib/types";
+import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputCommand, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -75,13 +85,7 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
-type MentionPickerPosition = {
-  left: number;
-  top: number;
-  width: number;
-  maxHeight: number;
-  side: "top" | "bottom";
-};
+type MentionPickerPosition = TriggerPickerPosition;
 
 export function ManualSessionCreatePageContent() {
   const { user } = useAuth();
@@ -103,6 +107,7 @@ export function ManualSessionCreatePageContent() {
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
   const [references, setReferences] = useState<SessionInputReference[]>([]);
+  const [commands, setCommands] = useState<SessionInputCommand[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [showImageInput, setShowImageInput] = useState(false);
   const [imageURL, setImageURL] = useState("");
@@ -127,6 +132,17 @@ export function ManualSessionCreatePageContent() {
 
   const { addOptimisticSession, removeOptimisticSession, markOptimisticResolved } = useOptimisticSessions();
 
+  function projectCommandsOnly(items: SessionInputCommand[]): SessionInputCommand[] {
+    return items.filter((command) => command.source === "project");
+  }
+
+  function removeCommandsFromMessage(text: string, items: SessionInputCommand[]): string {
+    return items.reduce(
+      (next, command) => removeCommandReference(next, command),
+      text,
+    );
+  }
+
   // Hydrate once on mount. A `?repo=` URL param represents fresh explicit
   // intent (e.g. the user just clicked a repo in the switcher), so it wins
   // over the repo stored in the draft. When the URL's repo conflicts with
@@ -149,16 +165,19 @@ export function ManualSessionCreatePageContent() {
         setUserSelectedRepoId(draft.userSelectedRepoId);
       }
 
+      const draftProjectCommands = projectCommandsOnly(draft.commands);
       if (repoConflict) {
-        const stripped = draft.references.reduce(
+        const strippedReferences = draft.references.reduce(
           (text, reference) => removeMentionReference(text, reference),
           draft.message,
         );
-        setMessage(stripped);
+        setMessage(removeCommandsFromMessage(strippedReferences, draftProjectCommands));
         setReferences([]);
+        setCommands(draft.commands.filter((command) => command.source !== "project"));
       } else {
         setMessage(draft.message);
         setReferences(draft.references);
+        setCommands(draft.commands);
       }
 
       // Put the caret at the end so the user can keep typing where they left
@@ -187,6 +206,7 @@ export function ManualSessionCreatePageContent() {
       message,
       attachments,
       references,
+      commands,
       selectedModel,
       reasoningOverride,
       userSelectedRepoId,
@@ -199,6 +219,7 @@ export function ManualSessionCreatePageContent() {
     message,
     attachments,
     references,
+    commands,
     selectedModel,
     reasoningOverride,
     userSelectedRepoId,
@@ -269,12 +290,15 @@ export function ManualSessionCreatePageContent() {
     return selectedRepo?.default_branch ?? "";
   }, [selectedRepoId, branchByRepoId, selectedRepo]);
 
-  const activeMention = useMemo(
-    () => findActiveMention(message, caretPosition),
+  const activeTrigger = useMemo(
+    () => findActiveTrigger(message, caretPosition, COMPOSER_TRIGGER_SPECS),
     [message, caretPosition],
   );
+  const activeMention = activeTrigger?.trigger === "@" ? activeTrigger : null;
+  const activeCommand = activeTrigger?.trigger === "/" ? activeTrigger : null;
   const deferredMentionQuery = useDeferredValue(activeMention?.query ?? "");
-  const mentionQueryKey = `${selectedRepoId}:${selectedBranch}:${activeMention?.start ?? -1}:${activeMention?.query ?? ""}`;
+  const deferredCommandQuery = useDeferredValue(activeCommand?.query ?? "");
+  const triggerQueryKey = `${activeTrigger?.trigger ?? ""}:${selectedRepoId}:${selectedBranch}:${activeTrigger?.start ?? -1}:${activeTrigger?.query ?? ""}`;
   const { data: fileMentionsResponse, isFetching: fileMentionsLoading } = useQuery<ListResponse<SessionInputReference>>({
     queryKey: queryKeys.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
     queryFn: () => api.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
@@ -282,7 +306,6 @@ export function ManualSessionCreatePageContent() {
     staleTime: 30 * 1000,
   });
   const fileMentions = useMemo(() => fileMentionsResponse?.data ?? [], [fileMentionsResponse]);
-  const showMentionPicker = !!selectedRepoId && activeMention !== null && !mentionDismissed;
 
   const setSelectedRepoId = (id: string) => {
     setUserSelectedRepoId(id);
@@ -303,7 +326,7 @@ export function ManualSessionCreatePageContent() {
   }, [defaultAgentType]);
 
   // Determine which agent type would be used and whether credentials exist.
-  const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
+  const effectiveAgentType: string = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
   const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType);
   const effectiveReasoningOverride = isCodingAgentReasoningEffortSupported(effectiveAgentType, reasoningOverride) ? reasoningOverride : "";
   const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
@@ -315,12 +338,76 @@ export function ManualSessionCreatePageContent() {
     resolvedCredentials.some((c) => c.provider === requiredProvider && c.source !== "none")
       || (effectiveAgentType === "codex" && codexAuthResponse?.data?.status === "completed");
 
+  const slashCommandsQuery = useSessionComposerSlashCommands({
+    agentType: effectiveAgentType,
+    query: deferredCommandQuery,
+    repositoryId: selectedRepoId || undefined,
+    branch: selectedBranch || undefined,
+    enabled: activeCommand !== null && !mentionDismissed,
+  });
+  const slashCommandGroups = useMemo(() => slashCommandsQuery.data?.groups ?? [], [slashCommandsQuery.data]);
+  const slashCommandItems = useMemo(
+    () => slashCommandGroups.flatMap((group) => group.items),
+    [slashCommandGroups],
+  );
+  const showMentionPicker = !!selectedRepoId && activeMention !== null && !mentionDismissed;
+  const showCommandPicker = activeCommand !== null && !mentionDismissed;
+
+  const pickerGroups = useMemo<TriggerPickerGroup[]>(() => {
+    if (showMentionPicker) {
+      return [
+        {
+          id: "mentions",
+          label: "Files and directories",
+          items: fileMentions.map((reference) => ({
+            id: `${reference.kind}:${reference.path ?? reference.id ?? reference.display}`,
+            primary: reference.display,
+            icon: reference.kind === "directory"
+              ? <FolderTree className="h-4 w-4 shrink-0" />
+              : <FileCode2 className="h-4 w-4 shrink-0" />,
+          })),
+        },
+      ];
+    }
+    if (showCommandPicker) {
+      return slashCommandGroups.map((group) => ({
+        id: group.source,
+        label: group.label,
+        items: group.items.map((command) => ({
+          id: command.name,
+          primary: command.token,
+          secondary: command.description,
+          icon: <Slash className="h-4 w-4 shrink-0" />,
+        })),
+      }));
+    }
+    return [];
+  }, [showMentionPicker, showCommandPicker, fileMentions, slashCommandGroups]);
+  const flattenedPickerItems = useMemo(() => flattenGroups(pickerGroups), [pickerGroups]);
+
+  const pickerLoading = showMentionPicker
+    ? fileMentionsLoading
+    : showCommandPicker
+      ? slashCommandsQuery.isFetching
+      : false;
+  const pickerEmptyLabel = showCommandPicker
+    ? `No commands for /${activeCommand?.query ?? ""}`
+    : `No matches for @${activeMention?.query ?? ""}`;
+  const pickerOpen = showMentionPicker || showCommandPicker;
+
+  const invalidCommandTokens = useMemo(
+    () => commands.filter((command) => command.agent_type !== effectiveAgentType).map((command) => command.token),
+    [commands, effectiveAgentType],
+  );
+  const hasInvalidCommands = invalidCommandTokens.length > 0;
+
   const createManualSessionMutation = useMutation({
     mutationFn: () =>
       api.sessions.createManual({
         message: message.trim(),
         images: attachments,
         references,
+        commands,
         ...(submittedReasoningEffort ? { reasoning_effort: submittedReasoningEffort } : {}),
         ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
@@ -359,6 +446,7 @@ export function ManualSessionCreatePageContent() {
   function submitManualSession() {
     if (submittingRef.current) return;
     if (message.trim().length === 0) return;
+    if (hasInvalidCommands) return;
     submittingRef.current = true;
     createManualSessionMutation.mutate();
   }
@@ -390,7 +478,7 @@ export function ManualSessionCreatePageContent() {
   useEffect(() => {
     setMentionDismissed(false);
     setSelectedMentionIndex(0);
-  }, [mentionQueryKey]);
+  }, [triggerQueryKey]);
 
   useEffect(() => {
     const previousRepoID = previousRepoIdRef.current;
@@ -402,12 +490,16 @@ export function ManualSessionCreatePageContent() {
       return;
     }
     previousRepoIdRef.current = selectedRepoId;
-    setMessage((previous) => references.reduce((next, reference) => removeMentionReference(next, reference), previous));
+    setMessage((previous) => {
+      const withoutReferences = references.reduce((next, reference) => removeMentionReference(next, reference), previous);
+      return removeCommandsFromMessage(withoutReferences, projectCommandsOnly(commands));
+    });
     setReferences([]);
-  }, [references, selectedRepoId]);
+    setCommands((previous) => previous.filter((command) => command.source !== "project"));
+  }, [commands, references, selectedRepoId]);
 
   useEffect(() => {
-    if (!showMentionPicker) {
+    if (!pickerOpen) {
       setMentionPickerPosition(null);
       return;
     }
@@ -457,11 +549,12 @@ export function ManualSessionCreatePageContent() {
       window.removeEventListener("scroll", updateMentionPickerPosition, true);
       resizeObserver?.disconnect();
     };
-  }, [showMentionPicker, fileMentions.length, fileMentionsLoading]);
+  }, [pickerOpen, fileMentions.length, fileMentionsLoading, slashCommandItems.length]);
 
   function updateMessage(nextMessage: string, nextCaret: number) {
     setMessage(nextMessage);
     setReferences((previous) => syncReferencesWithMessage(nextMessage, previous));
+    setCommands((previous) => syncCommandsWithMessage(nextMessage, previous));
     setCaretPosition(nextCaret);
   }
 
@@ -491,10 +584,42 @@ export function ManualSessionCreatePageContent() {
     });
   }
 
+  function applyCommand(command: SessionInputCommand) {
+    if (!activeCommand || !messageInputRef.current) {
+      return;
+    }
+    const inserted = insertCommandAtCaret(message, activeCommand, command);
+    setMessage(inserted.text);
+    setCommands((previous) => {
+      const existing = previous.find((item) => item.token === command.token);
+      if (existing) {
+        return syncCommandsWithMessage(inserted.text, previous);
+      }
+      return syncCommandsWithMessage(inserted.text, [...previous, command]);
+    });
+    setCaretPosition(inserted.caret);
+    setMentionDismissed(false);
+
+    requestAnimationFrame(() => {
+      if (!messageInputRef.current) {
+        return;
+      }
+      messageInputRef.current.focus();
+      messageInputRef.current.setSelectionRange(inserted.caret, inserted.caret);
+    });
+  }
+
   function removeReference(reference: SessionInputReference) {
     const nextMessage = removeMentionReference(message, reference);
     setMessage(nextMessage);
     setReferences((previous) => previous.filter((item) => (item.token ?? item.display) !== (reference.token ?? reference.display)));
+    setCaretPosition(nextMessage.length);
+  }
+
+  function removeCommand(command: SessionInputCommand) {
+    const nextMessage = removeCommandReference(message, command);
+    setMessage(nextMessage);
+    setCommands((previous) => previous.filter((item) => item.token !== command.token));
     setCaretPosition(nextMessage.length);
   }
 
@@ -755,51 +880,27 @@ export function ManualSessionCreatePageContent() {
           {/* Composer pinned to bottom */}
           <div className="shrink-0 px-0">
             <div className="relative mx-auto w-full max-w-3xl">
-          {showMentionPicker && mentionPickerPosition && typeof document !== "undefined" && createPortal(
-            <Card
-              className="fixed z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
-              data-side={mentionPickerPosition.side}
-              data-testid="mention-picker-overlay"
-              style={{
-                left: mentionPickerPosition.left,
-                top: mentionPickerPosition.top,
-                width: mentionPickerPosition.width,
-              }}
-            >
-              <CardContent className="p-2">
-                <div className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                  Files and directories
-                </div>
-                <div aria-label="Mention suggestions" role="listbox">
-                  {fileMentionsLoading && (
-                    <p className="px-2 py-1 text-xs text-muted-foreground">Loading matches…</p>
-                  )}
-                  {!fileMentionsLoading && fileMentions.length === 0 && (
-                    <p className="px-2 py-1 text-xs text-muted-foreground">No matches for @{activeMention?.query}</p>
-                  )}
-                  {!fileMentionsLoading && fileMentions.length > 0 && (
-                    <div className="space-y-1 overflow-y-auto" style={{ maxHeight: mentionPickerPosition.maxHeight }}>
-                      {fileMentions.map((reference, index) => (
-                        <Button
-                          key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
-                          type="button"
-                          variant="ghost"
-                          aria-selected={index === selectedMentionIndex}
-                          className={`flex h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-2 text-left ${index === selectedMentionIndex ? "bg-accent text-accent-foreground" : ""}`}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => applyMention(reference)}
-                        >
-                          {reference.kind === "directory" ? <FolderTree className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
-                          <span className="truncate text-xs">{reference.display}</span>
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>,
-            document.body,
-          )}
+          <SessionComposerTriggerPicker
+            open={pickerOpen}
+            position={mentionPickerPosition}
+            groups={pickerGroups}
+            loading={pickerLoading}
+            emptyLabel={pickerEmptyLabel}
+            selectedIndex={selectedMentionIndex}
+            onSelectedIndexChange={setSelectedMentionIndex}
+            onSelect={(_item, group) => {
+              const flatIndex = flattenedPickerItems.findIndex((entry) => entry.group.id === group.id && entry.item.id === _item.id);
+              if (flatIndex < 0) return;
+              if (showMentionPicker) {
+                applyMention(fileMentions[flatIndex]);
+                return;
+              }
+              if (showCommandPicker) {
+                applyCommand(slashCommandItems[flatIndex]);
+              }
+            }}
+            testId="mention-picker-overlay"
+          />
 
           <Card
             ref={composerCardRef}
@@ -822,24 +923,30 @@ export function ManualSessionCreatePageContent() {
                 onKeyUp={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onSelect={(event) => setCaretPosition(event.currentTarget.selectionStart ?? message.length)}
                 onKeyDown={(event) => {
-                  if (showMentionPicker && fileMentions.length > 0) {
+                  if (pickerOpen && flattenedPickerItems.length > 0) {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
-                      setSelectedMentionIndex((previous) => (previous + 1) % fileMentions.length);
+                      setSelectedMentionIndex((previous) => (previous + 1) % flattenedPickerItems.length);
                       return;
                     }
                     if (event.key === "ArrowUp") {
                       event.preventDefault();
-                      setSelectedMentionIndex((previous) => (previous - 1 + fileMentions.length) % fileMentions.length);
+                      setSelectedMentionIndex((previous) => (previous - 1 + flattenedPickerItems.length) % flattenedPickerItems.length);
                       return;
                     }
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
-                      applyMention(fileMentions[selectedMentionIndex]);
+                      const selection = flattenedPickerItems[selectedMentionIndex];
+                      if (!selection) return;
+                      if (showMentionPicker) {
+                        applyMention(fileMentions[selectedMentionIndex]);
+                      } else if (showCommandPicker) {
+                        applyCommand(slashCommandItems[selectedMentionIndex]);
+                      }
                       return;
                     }
                   }
-                  if (showMentionPicker && event.key === "Escape") {
+                  if (pickerOpen && event.key === "Escape") {
                     event.preventDefault();
                     setMentionDismissed(true);
                     return;
@@ -856,11 +963,11 @@ export function ManualSessionCreatePageContent() {
                 aria-label="Manual session prompt"
               />
 
-            {references.length > 0 && (
-              <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references">
+            {(references.length > 0 || commands.length > 0) && (
+              <div className="flex flex-wrap gap-2 pb-3" aria-label="Selected references and commands">
                 {references.map((reference) => (
                   <Badge
-                    key={`${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                    key={`ref:${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
                     variant="secondary"
                     className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
                   >
@@ -878,7 +985,42 @@ export function ManualSessionCreatePageContent() {
                     </Button>
                   </Badge>
                 ))}
+                {commands.map((command) => {
+                  const isInvalid = command.agent_type !== effectiveAgentType;
+                  return (
+                    <Badge
+                      key={`cmd:${command.token}`}
+                      variant="secondary"
+                      className={cn(
+                        "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
+                        isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                      )}
+                      data-invalid={isInvalid || undefined}
+                      title={isInvalid
+                        ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.`
+                        : undefined}
+                    >
+                      <Slash className="h-3 w-3" />
+                      <span className="max-w-[18rem] truncate">{command.token}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5 rounded-full"
+                        aria-label={`Remove ${command.token}`}
+                        onClick={() => removeCommand(command)}
+                      >
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </Badge>
+                  );
+                })}
               </div>
+            )}
+            {hasInvalidCommands && (
+              <p className="pb-3 text-xs text-amber-600 dark:text-amber-300" role="alert">
+                {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for the selected agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} or switch agents to continue.
+              </p>
             )}
 
             <PendingAttachmentStrip

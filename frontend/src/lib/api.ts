@@ -230,6 +230,22 @@ export const api = {
       }
       return get<import('./types').ListResponse<import('./types').SessionInputReference>>(`/api/v1/session-composer/files?${searchParams.toString()}`);
     },
+    slashCommands: (params: { agentType: string; query?: string; repositoryId?: string; branch?: string }) => {
+      const searchParams = new URLSearchParams({ agent_type: params.agentType });
+      if (params.query) searchParams.set("q", params.query);
+      if (params.repositoryId) searchParams.set("repository_id", params.repositoryId);
+      if (params.branch) searchParams.set("branch", params.branch);
+      return get<import('./types').SlashCommandListResponse>(`/api/v1/session-composer/slash-commands?${searchParams.toString()}`);
+    },
+    slashCommandDetail: (params: { agentType: string; name: string; repositoryId: string; branch?: string }) => {
+      const searchParams = new URLSearchParams({
+        agent_type: params.agentType,
+        name: params.name,
+        repository_id: params.repositoryId,
+      });
+      if (params.branch) searchParams.set("branch", params.branch);
+      return get<import('./types').SlashCommandDetailResponse>(`/api/v1/session-composer/slash-commands/details?${searchParams.toString()}`);
+    },
   },
   issues: {
     list: (params?: { status?: string; source?: string; severity?: string; sort?: string; cursor?: string; limit?: number }) => {
@@ -320,12 +336,22 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, message: string, images?: string[], planMode?: boolean, model?: string) =>
-      post<import('./types').SingleResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`, { message, images, plan_mode: planMode || undefined, ...(model ? { model } : {}) }),
+    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string }) =>
+      post<import('./types').SingleResponse<import('./types').SessionMessage>>(
+        `/api/v1/sessions/${sessionId}/messages`,
+        {
+          message: body.message,
+          images: body.images,
+          references: body.references && body.references.length > 0 ? body.references : undefined,
+          commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
+          plan_mode: body.planMode || undefined,
+          ...(body.model ? { model: body.model } : {}),
+        },
+      ),
     endSession: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
     retry: (sessionId: string) =>

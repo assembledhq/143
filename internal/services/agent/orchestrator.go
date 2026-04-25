@@ -439,6 +439,29 @@ func isLegacySyntheticManualSession(session *models.Session, issue *models.Issue
 	return session.Origin == "" || session.Origin == models.SessionOriginIssueTrigger
 }
 
+// canonicalCommands filters a message's commands[] to those that pass
+// validation and that target the session's agent. Commands targeting another
+// agent are silently dropped here: the API layer rejects them at submit time,
+// so the only way they reach this code path is a stale row in storage where
+// the user later switched the session's agent — surfacing the orphan to the
+// adapter would only confuse the prompt.
+func canonicalCommands(message *models.SessionMessage, agentType models.AgentType) []models.SessionInputCommand {
+	if message == nil || len(message.Commands) == 0 {
+		return nil
+	}
+	commands := make([]models.SessionInputCommand, 0, len(message.Commands))
+	for _, command := range message.Commands {
+		if err := command.Validate(); err != nil {
+			continue
+		}
+		if agentType != "" && command.AgentType != agentType {
+			continue
+		}
+		commands = append(commands, command)
+	}
+	return commands
+}
+
 func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Issue) {
 	if session == nil {
 		return
@@ -815,7 +838,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}(),
 		RepoURL:    repoURL,
 		RepoBranch: branch,
-		References: resolvedInputReferences(latestUserMessage(messages), issue),
+		References: func() []models.SessionInputReference {
+			refs := canonicalReferences(latestUserMessage(messages))
+			if len(refs) > 0 {
+				return refs
+			}
+			return manualSessionReferences(issue)
+		}(),
+		Commands: canonicalCommands(latestUserMessage(messages), run.AgentType),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -1670,6 +1700,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if session.AgentSessionID != nil {
 			resumeSessionID = *session.AgentSessionID
 		}
+		// UserMessage carries the user's textarea content verbatim, including
+		// any visible /command tokens. This branch builds the prompt directly
+		// rather than calling adapter.PreparePrompt, so input.Commands and the
+		// EnsureSlashCommandsInPrompt safety net are NOT threaded through. That
+		// is correct today because slash commands always appear in the textarea
+		// (see frontend insertCommandAtCaret + the design's "textarea is the
+		// source of truth" principle), but a future codepath that populates
+		// Commands without echoing them in UserMessage would silently drop them
+		// here. See docs/design/implemented/64-session-composer-slash-commands.md.
 		prompt = &AgentPrompt{
 			Continuation:    true,
 			ResumeSessionID: resumeSessionID,
@@ -1708,7 +1747,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
 			UserMessage:  latestMsg.Content,
-			References:   resolvedInputReferences(latestMsg, &issue),
+			References: func() []models.SessionInputReference {
+				refs := canonicalReferences(latestMsg)
+				if len(refs) > 0 {
+					return refs
+				}
+				return manualSessionReferences(&issue)
+			}(),
+			Commands: canonicalCommands(latestMsg, session.AgentType),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {
 					return ""

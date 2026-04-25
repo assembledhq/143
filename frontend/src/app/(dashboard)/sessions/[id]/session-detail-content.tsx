@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -11,6 +11,7 @@ import {
   ClipboardList,
   ExternalLink,
   FileCode2,
+  FolderTree,
   GitPullRequest,
   Loader2,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   XCircle,
   X,
   MinusCircle,
+  Slash,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -55,6 +57,19 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
+import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
+import {
+  COMPOSER_TRIGGER_SPECS,
+  findActiveTrigger,
+  insertCommandAtCaret,
+  insertMentionAtCaret,
+  removeCommandReference,
+  removeMentionReference,
+  syncCommandsWithMessage,
+  syncReferencesWithMessage,
+} from "@/lib/session-composer-mentions";
+import { queryKeys } from "@/lib/query-keys";
 import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
@@ -68,7 +83,7 @@ import {
   resolveInitialSessionAnchor,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
-import type { Session, SessionDetail, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
+import type { ListResponse, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, User, Validation, CodexAuthStatus, PullRequestHealthResponse, SingleResponse } from "@/lib/types";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge, FileTree, SessionFooter, CommentsSummary, ReviewDiffView, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
@@ -590,6 +605,13 @@ function SessionComposer({
   onSend,
   textareaRef,
   uploadInputRef,
+  references,
+  onReferencesChange,
+  commands,
+  onCommandsChange,
+  repositoryId,
+  branch,
+  agentType,
 }: {
   message: string;
   onMessageChange: (value: string) => void;
@@ -615,6 +637,13 @@ function SessionComposer({
   onSend: () => void;
   textareaRef: { current: HTMLTextAreaElement | null };
   uploadInputRef: { current: HTMLInputElement | null };
+  references: SessionInputReference[];
+  onReferencesChange: (next: SessionInputReference[]) => void;
+  commands: SessionInputCommand[];
+  onCommandsChange: (next: SessionInputCommand[]) => void;
+  repositoryId?: string;
+  branch?: string;
+  agentType: string;
 }) {
   useEffect(() => {
     const el = textareaRef.current;
@@ -623,12 +652,216 @@ function SessionComposer({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [message, textareaRef]);
 
-  const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
+  const composerCardRef = useRef<HTMLDivElement>(null);
+  const [caretPosition, setCaretPosition] = useState(message.length);
+  const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
+  const [triggerDismissed, setTriggerDismissed] = useState(false);
+  const [pickerPosition, setPickerPosition] = useState<TriggerPickerPosition | null>(null);
 
-  function handleKeyDown(e: React.KeyboardEvent) {
+  const activeTrigger = useMemo(
+    () => findActiveTrigger(message, caretPosition, COMPOSER_TRIGGER_SPECS),
+    [message, caretPosition],
+  );
+  const activeMention = activeTrigger?.trigger === "@" ? activeTrigger : null;
+  const activeCommand = activeTrigger?.trigger === "/" ? activeTrigger : null;
+  const deferredMentionQuery = useDeferredValue(activeMention?.query ?? "");
+  const deferredCommandQuery = useDeferredValue(activeCommand?.query ?? "");
+  const triggerQueryKey = `${activeTrigger?.trigger ?? ""}:${repositoryId ?? ""}:${branch ?? ""}:${activeTrigger?.start ?? -1}:${activeTrigger?.query ?? ""}`;
+
+  const showMentionPicker = !!repositoryId && activeMention !== null && !triggerDismissed;
+  const showCommandPicker = activeCommand !== null && !triggerDismissed;
+  const pickerOpen = showMentionPicker || showCommandPicker;
+
+  const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
+    queryKey: queryKeys.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
+    queryFn: () => api.sessionComposer.files(repositoryId ?? "", branch ?? "", deferredMentionQuery),
+    enabled: showMentionPicker,
+    staleTime: 30 * 1000,
+  });
+  const fileMentions = useMemo(() => fileMentionsQuery.data?.data ?? [], [fileMentionsQuery.data]);
+
+  const slashCommandsQuery = useSessionComposerSlashCommands({
+    agentType,
+    query: deferredCommandQuery,
+    repositoryId,
+    branch,
+    enabled: showCommandPicker,
+  });
+  const slashCommandGroups = useMemo(() => slashCommandsQuery.data?.groups ?? [], [slashCommandsQuery.data]);
+  const slashCommandItems = useMemo(
+    () => slashCommandGroups.flatMap((group) => group.items),
+    [slashCommandGroups],
+  );
+
+  const pickerGroups = useMemo<TriggerPickerGroup[]>(() => {
+    if (showMentionPicker) {
+      return [
+        {
+          id: "mentions",
+          label: "Files and directories",
+          items: fileMentions.map((reference) => ({
+            id: `${reference.kind}:${reference.path ?? reference.id ?? reference.display}`,
+            primary: reference.display,
+            icon: reference.kind === "directory"
+              ? <FolderTree className="h-4 w-4 shrink-0" />
+              : <FileCode2 className="h-4 w-4 shrink-0" />,
+          })),
+        },
+      ];
+    }
+    if (showCommandPicker) {
+      return slashCommandGroups.map((group) => ({
+        id: group.source,
+        label: group.label,
+        items: group.items.map((command) => ({
+          id: command.name,
+          primary: command.token,
+          secondary: command.description,
+          icon: <Slash className="h-4 w-4 shrink-0" />,
+        })),
+      }));
+    }
+    return [];
+  }, [showMentionPicker, showCommandPicker, fileMentions, slashCommandGroups]);
+  const flattenedPickerItems = useMemo(() => flattenGroups(pickerGroups), [pickerGroups]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTriggerDismissed(false);
+    setSelectedTriggerIndex(0);
+  }, [triggerQueryKey]);
+
+  useEffect(() => {
+    if (!pickerOpen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPickerPosition(null);
+      return;
+    }
+    function update() {
+      const card = composerCardRef.current;
+      if (!card) return;
+      const rect = card.getBoundingClientRect();
+      const spacing = 8;
+      const viewportHeight = window.innerHeight;
+      const spaceAbove = rect.top - spacing;
+      const spaceBelow = viewportHeight - rect.bottom - spacing;
+      const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
+      const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
+      const top = side === "top"
+        ? Math.max(spacing, rect.top - Math.min(280, availableHeight) - spacing)
+        : Math.min(viewportHeight - spacing - Math.min(280, availableHeight), rect.bottom + spacing);
+      setPickerPosition({
+        left: rect.left,
+        top,
+        width: rect.width,
+        maxHeight: Math.min(280, availableHeight),
+        side,
+      });
+    }
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [pickerOpen, fileMentions.length, slashCommandItems.length]);
+
+  function applyMention(reference: SessionInputReference) {
+    if (!activeMention) return;
+    const inserted = insertMentionAtCaret(message, activeMention, reference);
+    onMessageChange(inserted.text);
+    const exists = references.find((item) => (item.token ?? item.display) === (reference.token ?? reference.display));
+    onReferencesChange(syncReferencesWithMessage(inserted.text, exists ? references : [...references, reference]));
+    setCaretPosition(inserted.caret);
+    setTriggerDismissed(false);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(inserted.caret, inserted.caret);
+    });
+  }
+
+  function applyCommand(command: SessionInputCommand) {
+    if (!activeCommand) return;
+    const inserted = insertCommandAtCaret(message, activeCommand, command);
+    onMessageChange(inserted.text);
+    const exists = commands.find((item) => item.token === command.token);
+    onCommandsChange(syncCommandsWithMessage(inserted.text, exists ? commands : [...commands, command]));
+    setCaretPosition(inserted.caret);
+    setTriggerDismissed(false);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(inserted.caret, inserted.caret);
+    });
+  }
+
+  function handleMessageChange(next: string, caret: number) {
+    onMessageChange(next);
+    onReferencesChange(syncReferencesWithMessage(next, references));
+    onCommandsChange(syncCommandsWithMessage(next, commands));
+    setCaretPosition(caret);
+  }
+
+  function removeReference(reference: SessionInputReference) {
+    const next = removeMentionReference(message, reference);
+    onMessageChange(next);
+    onReferencesChange(references.filter((item) => (item.token ?? item.display) !== (reference.token ?? reference.display)));
+    setCaretPosition(next.length);
+  }
+
+  function removeCommand(command: SessionInputCommand) {
+    const next = removeCommandReference(message, command);
+    onMessageChange(next);
+    onCommandsChange(commands.filter((item) => item.token !== command.token));
+    setCaretPosition(next.length);
+  }
+
+  const invalidCommandTokens = useMemo(
+    () => commands.filter((command) => command.agent_type !== agentType).map((command) => command.token),
+    [commands, agentType],
+  );
+  const hasInvalidCommands = invalidCommandTokens.length > 0;
+
+  const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
+  const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending || isRunning;
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    setCaretPosition(e.currentTarget.selectionStart ?? message.length);
+    if (pickerOpen && flattenedPickerItems.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedTriggerIndex((previous) => (previous + 1) % flattenedPickerItems.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedTriggerIndex((previous) => (previous - 1 + flattenedPickerItems.length) % flattenedPickerItems.length);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const selection = flattenedPickerItems[selectedTriggerIndex];
+        if (!selection) return;
+        if (showMentionPicker) {
+          applyMention(fileMentions[selectedTriggerIndex]);
+        } else if (showCommandPicker) {
+          applyCommand(slashCommandItems[selectedTriggerIndex]);
+        }
+        return;
+      }
+    }
+    if (pickerOpen && e.key === "Escape") {
+      e.preventDefault();
+      setTriggerDismissed(true);
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (hasContent && canSendMessage && !sendPending && !isRunning) {
+      if (!sendDisabled) {
         onSend();
       }
     }
@@ -656,7 +889,28 @@ function SessionComposer({
         </div>
       )}
 
-      <div className="border-t border-border p-3 bg-background shrink-0">
+      <SessionComposerTriggerPicker
+        open={pickerOpen}
+        position={pickerPosition}
+        groups={pickerGroups}
+        loading={showMentionPicker ? fileMentionsQuery.isFetching : slashCommandsQuery.isFetching}
+        emptyLabel={showCommandPicker
+          ? `No commands for /${activeCommand?.query ?? ""}`
+          : `No matches for @${activeMention?.query ?? ""}`}
+        selectedIndex={selectedTriggerIndex}
+        onSelectedIndexChange={setSelectedTriggerIndex}
+        onSelect={(item, group) => {
+          const flatIndex = flattenedPickerItems.findIndex((entry) => entry.group.id === group.id && entry.item.id === item.id);
+          if (flatIndex < 0) return;
+          if (showMentionPicker) {
+            applyMention(fileMentions[flatIndex]);
+          } else if (showCommandPicker) {
+            applyCommand(slashCommandItems[flatIndex]);
+          }
+        }}
+      />
+
+      <div className="border-t border-border p-3 bg-background shrink-0" ref={composerCardRef}>
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
@@ -701,8 +955,11 @@ function SessionComposer({
           <Textarea
             ref={textareaRef}
             value={message}
-            onChange={(e) => onMessageChange(e.target.value)}
+            onChange={(e) => handleMessageChange(e.target.value, e.target.selectionStart ?? e.target.value.length)}
             onKeyDown={handleKeyDown}
+            onClick={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
+            onKeyUp={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
+            onSelect={(e) => setCaretPosition(e.currentTarget.selectionStart ?? message.length)}
             placeholder={
               isSnapshotExpired
                 ? "Session environment has expired and can no longer be continued"
@@ -717,6 +974,64 @@ function SessionComposer({
             disabled={!canSendMessage || sendPending || isRunning}
             className="min-h-[44px] max-h-[200px] resize-none border-none bg-transparent shadow-none focus-visible:ring-0"
           />
+
+          {(references.length > 0 || commands.length > 0) && (
+            <div className="flex flex-wrap gap-1.5 px-3 pb-2" aria-label="Selected references and commands">
+              {references.map((reference) => (
+                <Badge
+                  key={`ref:${reference.kind}:${reference.path ?? reference.id ?? reference.display}`}
+                  variant="secondary"
+                  className="gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1"
+                >
+                  {reference.kind === "directory" ? <FolderTree className="h-3 w-3" /> : <FileCode2 className="h-3 w-3" />}
+                  <span className="max-w-[14rem] truncate">{reference.display}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 rounded-full"
+                    aria-label={`Remove ${reference.display}`}
+                    onClick={() => removeReference(reference)}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </Badge>
+              ))}
+              {commands.map((command) => {
+                const isInvalid = command.agent_type !== agentType;
+                return (
+                  <Badge
+                    key={`cmd:${command.token}`}
+                    variant="secondary"
+                    className={cn(
+                      "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
+                      isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                    )}
+                    data-invalid={isInvalid || undefined}
+                    title={isInvalid ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.` : undefined}
+                  >
+                    <Slash className="h-3 w-3" />
+                    <span className="max-w-[14rem] truncate">{command.token}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-5 w-5 rounded-full"
+                      aria-label={`Remove ${command.token}`}
+                      onClick={() => removeCommand(command)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </Badge>
+                );
+              })}
+            </div>
+          )}
+          {hasInvalidCommands && (
+            <p className="px-3 pb-2 text-xs text-amber-600 dark:text-amber-300" role="alert">
+              {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} to continue.
+            </p>
+          )}
 
           <PendingAttachmentStrip
             attachments={attachments}
@@ -1706,6 +2021,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerPlanMode, setComposerPlanMode] = useState(false);
   const [composerSelectedModel, setComposerSelectedModel] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<string[]>([]);
+  const [composerReferences, setComposerReferences] = useState<SessionInputReference[]>([]);
+  const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1763,17 +2080,20 @@ export function SessionDetailContent({ id }: { id: string }) {
         : draftMessage;
       const isPlanRequest = opts.planMode ?? composerPlanMode;
 
-      return api.sessions.sendMessage(
-        id,
-        formattedMessage,
-        composerAttachments.length > 0 ? composerAttachments : undefined,
-        isPlanRequest,
-        composerSelectedModel || undefined
-      );
+      return api.sessions.sendMessage(id, {
+        message: formattedMessage,
+        images: composerAttachments.length > 0 ? composerAttachments : undefined,
+        references: composerReferences.length > 0 ? composerReferences : undefined,
+        commands: composerCommands.length > 0 ? composerCommands : undefined,
+        planMode: isPlanRequest,
+        model: composerSelectedModel || undefined,
+      });
     },
     onSuccess: () => {
       setComposerMessage("");
       setComposerAttachments([]);
+      setComposerReferences([]);
+      setComposerCommands([]);
       setComposerPlanMode(false);
       if (composerTextareaRef.current) {
         composerTextareaRef.current.style.height = "auto";
@@ -2070,6 +2390,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               onSend={() => sendMutation.mutate({})}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
+              references={composerReferences}
+              onReferencesChange={setComposerReferences}
+              commands={composerCommands}
+              onCommandsChange={setComposerCommands}
+              repositoryId={session.repository_id}
+              branch={session.target_branch}
+              agentType={session.agent_type}
             />
           </>
         )}

@@ -19,15 +19,19 @@ import (
 )
 
 type mockSessionComposerRepoTreeService struct {
-	token      string
-	tree       []models.RepositoryTreeEntry
-	err        error
-	lastBranch string
-	lastToken  string
-	lastOwner  string
-	lastRepo   string
-	tokenCalls int
-	treeCalls  int
+	token           string
+	tree            []models.RepositoryTreeEntry
+	err             error
+	lastBranch      string
+	lastToken       string
+	lastOwner       string
+	lastRepo        string
+	tokenCalls      int
+	treeCalls       int
+	contents        map[string]string
+	contentErr      error
+	contentCalls    int
+	lastContentPath string
 }
 
 func (m *mockSessionComposerRepoTreeService) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
@@ -48,6 +52,18 @@ func (m *mockSessionComposerRepoTreeService) ListRepositoryTree(ctx context.Cont
 	m.lastRepo = repo
 	m.lastBranch = branch
 	return m.tree, nil
+}
+
+func (m *mockSessionComposerRepoTreeService) GetFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, error) {
+	if m.contentErr != nil {
+		return "", m.contentErr
+	}
+	m.contentCalls++
+	m.lastContentPath = path
+	if m.contents == nil {
+		return "", nil
+	}
+	return m.contents[path], nil
 }
 
 func TestSessionComposerHandler_ListFileMentions(t *testing.T) {
@@ -435,4 +451,396 @@ func TestRankSessionComposerReferences_FiltersUnsupportedEntries(t *testing.T) {
 			Display: "docs/session-guide.md",
 		},
 	}, results, "rankSessionComposerReferences should skip empty paths and unsupported tree entry types")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_BuiltinOnly(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands?agent_type=claude_code", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp SlashCommandListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Groups, 1)
+	require.Equal(t, models.SessionInputCommandSourceBuiltin, resp.Groups[0].Source)
+	require.Equal(t, "Claude Code commands", resp.Groups[0].Label)
+
+	names := make([]string, 0, len(resp.Groups[0].Items))
+	for _, item := range resp.Groups[0].Items {
+		require.Equal(t, models.AgentTypeClaudeCode, item.AgentType)
+		require.Equal(t, "command", item.Kind)
+		require.Equal(t, "/"+item.Name, item.Token)
+		names = append(names, item.Name)
+	}
+	require.Contains(t, names, "review")
+	require.Contains(t, names, "init")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_FiltersByQuery(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands?agent_type=claude_code&q=rev", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp SlashCommandListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Groups, 1)
+	require.NotEmpty(t, resp.Groups[0].Items)
+	require.Equal(t, "review", resp.Groups[0].Items[0].Name, "name-prefix matches should rank first")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_EmptyForAgentWithoutCatalog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands?agent_type=pi", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp SlashCommandListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Empty(t, resp.Groups, "Pi has no built-in catalog and no project-discovery convention; response should be empty")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_RejectsInvalidAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands?agent_type=nope", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_AGENT_TYPE")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_RequiresAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_AGENT_TYPE")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_IncludesProjectGroup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	service := &mockSessionComposerRepoTreeService{
+		token: "ghs_test",
+		tree: []models.RepositoryTreeEntry{
+			{Path: ".claude/commands/review.md", Type: models.RepositoryTreeEntryTypeFile},
+			{Path: ".claude/commands/auth/setup.md", Type: models.RepositoryTreeEntryTypeFile},
+			{Path: "src/main.go", Type: models.RepositoryTreeEntryTypeFile},
+		},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp SlashCommandListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Groups, 2)
+	require.Equal(t, models.SessionInputCommandSourceProject, resp.Groups[1].Source)
+	require.Equal(t, "Project commands", resp.Groups[1].Label)
+
+	names := make([]string, 0, len(resp.Groups[1].Items))
+	for _, item := range resp.Groups[1].Items {
+		require.Equal(t, models.SessionInputCommandSourceProject, item.Source)
+		names = append(names, item.Name)
+	}
+	require.Contains(t, names, "review")
+	require.Contains(t, names, "auth:setup")
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_FiltersInvalidProjectNames(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	service := &mockSessionComposerRepoTreeService{
+		token: "ghs_test",
+		tree: []models.RepositoryTreeEntry{
+			{Path: ".claude/commands/review.md", Type: models.RepositoryTreeEntryTypeFile},
+			{Path: ".claude/commands/name with space.md", Type: models.RepositoryTreeEntryTypeFile},
+			{Path: ".claude/commands/-leading-dash.md", Type: models.RepositoryTreeEntryTypeFile},
+			{Path: ".claude/commands/auth/setup.md", Type: models.RepositoryTreeEntryTypeFile},
+		},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp SlashCommandListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Groups, 2)
+
+	projectNames := make([]string, 0, len(resp.Groups[1].Items))
+	for _, item := range resp.Groups[1].Items {
+		projectNames = append(projectNames, item.Name)
+	}
+	require.Equal(t, []string{"review", "auth:setup"}, projectNames, "invalid project command names should not be listed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_AgentWithoutProjectConventionSkipsRepoLookup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	service := &mockSessionComposerRepoTreeService{token: "ghs_test"}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=amp&repository_id=%s", uuid.New()), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, 0, service.treeCalls, "amp has no project commands convention so the repo tree must not be fetched")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	frontmatter := "---\nname: review\ndescription: Review pending changes\n---\n\nDo a code review."
+	service := &mockSessionComposerRepoTreeService{
+		token: "ghs_test",
+		contents: map[string]string{
+			".claude/commands/review.md": frontmatter,
+		},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&repository_id=%s&name=review", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp SlashCommandDetailResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, "review", resp.Command.Name)
+	require.Equal(t, "Review pending changes", resp.Command.Description)
+	require.Equal(t, models.SessionInputCommandSourceProject, resp.Command.Source)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_NestedName(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	service := &mockSessionComposerRepoTreeService{
+		token: "ghs_test",
+		contents: map[string]string{
+			".claude/commands/auth/setup.md": "# Configure auth\n\nProvision new auth provider.",
+		},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&repository_id=%s&name=auth:setup", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, ".claude/commands/auth/setup.md", service.lastContentPath)
+
+	var resp SlashCommandDetailResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, "Configure auth", resp.Command.Description)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsTraversalName(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	cases := []string{
+		"../etc/passwd",
+		"..",
+		"name with space",
+		"foo/bar",
+		"-leading-dash",
+		"",
+	}
+
+	for _, raw := range cases {
+		raw := raw
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+			url := fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&repository_id=%s&name=%s", uuid.New(), urlEscape(raw))
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+			w := httptest.NewRecorder()
+
+			handler.GetSlashCommandDetail(w, req)
+			require.Equal(t, http.StatusBadRequest, w.Code, "name %q should be rejected", raw)
+			require.Contains(t, w.Body.String(), "INVALID_NAME")
+		})
+	}
+}
+
+// urlEscape avoids pulling in net/url just for a one-shot helper in tests; the
+// inputs here are short and ASCII-only.
+func urlEscape(s string) string {
+	out := make([]byte, 0, len(s)*3)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
+			out = append(out, c)
+			continue
+		}
+		out = append(out, '%')
+		out = append(out, "0123456789ABCDEF"[c>>4])
+		out = append(out, "0123456789ABCDEF"[c&0x0F])
+	}
+	return string(out)
+}
+
+func TestExtractCommandDescription(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "empty", content: "", want: ""},
+		{name: "frontmatter description", content: "---\nname: review\ndescription: Review pending changes\n---\nbody", want: "Review pending changes"},
+		{name: "frontmatter quoted", content: "---\ndescription: \"Quoted description\"\n---\n", want: "Quoted description"},
+		{name: "no frontmatter, first markdown heading", content: "# First heading\n\nBody copy.", want: "First heading"},
+		{name: "no frontmatter, plain first line", content: "Plain description on first line.\n\nMore body.", want: "Plain description on first line."},
+		{name: "frontmatter without description, falls back to body", content: "---\nname: x\n---\n\nFallback description.", want: "Fallback description."},
+		{name: "preserves hashtag-prefixed body line", content: "#tag and content", want: "#tag and content"},
+		{name: "strips heading marker only, not subsequent hashes", content: "## Plan: #1 stage", want: "Plan: #1 stage"},
+		{name: "CRLF frontmatter description", content: "---\r\ndescription: CRLF description\r\n---\r\nbody", want: "CRLF description"},
+		{name: "CRLF body without frontmatter", content: "first line\r\nsecond line", want: "first line"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, extractCommandDescription(tt.content))
+		})
+	}
 }

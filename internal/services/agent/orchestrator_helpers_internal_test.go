@@ -83,6 +83,25 @@ func TestCanonicalReferences_FiltersInvalidEntries(t *testing.T) {
 	require.Equal(t, "github", refs[1].ID, "canonicalReferences should preserve valid app references")
 }
 
+func TestCanonicalCommands_FiltersInvalidAndOtherAgents(t *testing.T) {
+	t.Parallel()
+
+	message := &models.SessionMessage{
+		Commands: models.SessionInputCommands{
+			{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: "review", Token: "/review", Display: "/review"},
+			{Kind: "command", AgentType: models.AgentTypeCodex, Name: "diff", Token: "/diff", Display: "/diff"},
+			{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: "", Token: "/x", Display: "/x"},
+		},
+	}
+
+	commands := canonicalCommands(message, models.AgentTypeClaudeCode)
+	require.Len(t, commands, 1, "canonicalCommands should drop invalid entries and entries targeting another agent")
+	require.Equal(t, "review", commands[0].Name)
+
+	require.Nil(t, canonicalCommands(nil, models.AgentTypeClaudeCode), "nil message returns nil")
+	require.Nil(t, canonicalCommands(&models.SessionMessage{}, models.AgentTypeClaudeCode), "empty commands returns nil")
+}
+
 func TestHydrateSessionPolicyForExecution(t *testing.T) {
 	t.Parallel()
 
