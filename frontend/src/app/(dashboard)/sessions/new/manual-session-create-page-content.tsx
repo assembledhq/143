@@ -721,14 +721,15 @@ export function ManualSessionCreatePageContent() {
               >
                 Let&apos;s build
               </p>
-              <p className="mt-2 text-xs text-muted-foreground">Start a manual session with text, files, photos, or dictation.</p>
               <p
                 className={cn(
-                  "mt-3 text-xs text-muted-foreground transition-all duration-200",
-                  isDragActive ? "translate-y-0 opacity-100" : "translate-y-1 opacity-70",
+                  "mt-2 text-xs text-muted-foreground transition-all duration-200",
+                  isDragActive ? "translate-y-0 opacity-100" : "translate-y-1 opacity-95",
                 )}
               >
-                {isDragActive ? (dragMessage ?? "Drop images to attach") : "Drop a screenshot anywhere here, or use +"}
+                {isDragActive
+                  ? (dragMessage ?? "Drop images to attach")
+                  : "Start a manual session with text, files, photos, dictation, or a screenshot anywhere here."}
               </p>
             </div>
           </div>
