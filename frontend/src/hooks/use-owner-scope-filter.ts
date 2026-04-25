@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { parseAsString, useQueryState } from "nuqs";
 import { useAuth } from "@/hooks/use-auth";
 import type { User } from "@/lib/types";
@@ -35,6 +36,24 @@ export function ownerScopeParamForMember(
   currentUserId: string | undefined,
 ): OwnerScopeParam {
   return memberId === currentUserId ? null : memberId;
+}
+
+// Builds the `?user=…&status=…&repo=…` suffix to append to detail-page links
+// so the sidebar's filters survive navigation. "mine" is the implicit default
+// and is never serialized.
+export function useFilterSuffix(
+  currentUserFilter: string,
+  status: string | null,
+  repo: string | null,
+): string {
+  return useMemo(() => {
+    const params = new URLSearchParams();
+    if (currentUserFilter !== "mine") params.set("user", currentUserFilter);
+    if (status) params.set("status", status);
+    if (repo) params.set("repo", repo);
+    const qs = params.toString();
+    return qs ? `?${qs}` : "";
+  }, [currentUserFilter, status, repo]);
 }
 
 export function useOwnerScopeFilter() {
