@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { useFilterSuffix } from "@/hooks/use-owner-scope-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import { queryKeys } from "@/lib/query-keys";
 import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimistic-sessions";
@@ -292,6 +293,10 @@ export function SessionSidebar() {
 
   const counts = countsData?.data;
 
+  // Carry the sidebar's filters into detail-page links so opening a session
+  // doesn't reset the scope back to "Mine".
+  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo);
+
   const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
@@ -420,7 +425,7 @@ export function SessionSidebar() {
           return (
             <div key={session.id} className="group relative">
               <Link
-                href={`/sessions/${session.id}`}
+                href={`/sessions/${session.id}${filterSuffix}`}
                 className={cn(
                   "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
                   isSelected
