@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail } from '@/lib/types';
+import type { Issue, Session, SessionLog, SessionMessage, SessionReviewComment, SessionTimelineEntry, User, Validation, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, SessionReviewCapabilities, SessionReviewResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -400,6 +400,26 @@ export const handlers = [
       data: [] as SessionReviewComment[],
       meta: {},
     } satisfies ListResponse<SessionReviewComment>);
+  }),
+
+  http.get('/api/v1/sessions/:id/review-capabilities', ({ params }) => {
+    const session = mockSessions.find((candidate) => candidate.id === params.id);
+    const capabilities: SessionReviewCapabilities =
+      session?.agent_type === 'claude_code'
+        ? { can_review: false, reason: 'session is not reviewable in this test fixture', modes: ['default', 'security'] }
+        : { can_review: false, modes: [] };
+
+    return HttpResponse.json({ data: capabilities } satisfies SingleResponse<SessionReviewCapabilities>);
+  }),
+
+  http.post('/api/v1/sessions/:id/review', async ({ request, params }) => {
+    const body = await request.json().catch(() => ({})) as { mode?: 'default' | 'security' };
+    return HttpResponse.json({
+      data: {
+        session_id: params.id as string,
+        mode: body.mode ?? 'default',
+      },
+    } satisfies SingleResponse<SessionReviewResponse>, { status: 202 });
   }),
 
   http.post('/api/v1/sessions/:id/review-comments', async ({ request, params }) => {

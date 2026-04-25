@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -123,4 +124,89 @@ func TestParseAndFormatRevisionContext(t *testing.T) {
 	require.Equal(t, "", FormatRevisionContextForContinuation(nil), "FormatRevisionContextForContinuation should return an empty string for nil input")
 	require.Equal(t, "", FormatRevisionContextForContinuation(&RevisionContext{}), "FormatRevisionContextForContinuation should return an empty string for empty revision context")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, parsed.RepairAction, "ParseRevisionContext should decode the repair action type")
+}
+
+// stubReviewAdapter implements both AgentAdapter and ReviewCapableAdapter so
+// the helpers can be exercised against a known-good fake without depending
+// on the concrete adapter packages.
+type stubReviewAdapter struct {
+	name  models.AgentType
+	modes []models.SessionReviewMode
+}
+
+func (s *stubReviewAdapter) Name() models.AgentType { return s.name }
+func (s *stubReviewAdapter) PreparePrompt(_ context.Context, _ *AgentInput) (*AgentPrompt, error) {
+	return nil, nil
+}
+func (s *stubReviewAdapter) Execute(_ context.Context, _ *Sandbox, _ *AgentPrompt, _ chan<- LogEntry) (*AgentResult, error) {
+	return nil, nil
+}
+func (s *stubReviewAdapter) ReviewModes() []models.SessionReviewMode { return s.modes }
+
+type stubBareAdapter struct{ name models.AgentType }
+
+func (s *stubBareAdapter) Name() models.AgentType { return s.name }
+func (s *stubBareAdapter) PreparePrompt(_ context.Context, _ *AgentInput) (*AgentPrompt, error) {
+	return nil, nil
+}
+func (s *stubBareAdapter) Execute(_ context.Context, _ *Sandbox, _ *AgentPrompt, _ chan<- LogEntry) (*AgentResult, error) {
+	return nil, nil
+}
+
+func TestAdapterReviewModes(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, AdapterReviewModes(nil), "nil adapter has no review modes")
+
+	bare := &stubBareAdapter{name: models.AgentTypeGeminiCLI}
+	require.Nil(t, AdapterReviewModes(bare), "adapters that don't implement ReviewCapableAdapter should report no modes")
+
+	emptyCapable := &stubReviewAdapter{name: models.AgentTypePi}
+	require.Nil(t, AdapterReviewModes(emptyCapable), "adapters returning an empty slice are treated as not review-capable")
+
+	full := &stubReviewAdapter{
+		name:  models.AgentTypeClaudeCode,
+		modes: []models.SessionReviewMode{models.SessionReviewModeDefault, models.SessionReviewModeSecurity},
+	}
+	require.Equal(
+		t,
+		[]models.SessionReviewMode{models.SessionReviewModeDefault, models.SessionReviewModeSecurity},
+		AdapterReviewModes(full),
+	)
+
+	require.True(t, AdapterSupportsReviewMode(full, models.SessionReviewModeSecurity))
+	require.False(t, AdapterSupportsReviewMode(full, models.SessionReviewMode("unknown")))
+	require.False(t, AdapterSupportsReviewMode(bare, models.SessionReviewModeDefault))
+}
+
+func TestReviewModeProvider(t *testing.T) {
+	t.Parallel()
+
+	full := &stubReviewAdapter{
+		name:  models.AgentTypeClaudeCode,
+		modes: []models.SessionReviewMode{models.SessionReviewModeDefault},
+	}
+	bare := &stubBareAdapter{name: models.AgentTypeCodex}
+
+	provider := ReviewModeProvider(map[models.AgentType]AgentAdapter{
+		models.AgentTypeClaudeCode: full,
+		models.AgentTypeCodex:      bare,
+	})
+
+	require.Equal(t, []models.SessionReviewMode{models.SessionReviewModeDefault}, provider(models.AgentTypeClaudeCode))
+	require.Nil(t, provider(models.AgentTypeCodex), "agents whose adapter lacks ReviewCapableAdapter must report no modes")
+	require.Nil(t, provider(models.AgentTypeAmp), "unknown agent types should report no modes")
+}
+
+func TestAgentPrompt_IsReview(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, (*AgentPrompt)(nil).IsReview(), "nil prompt is not a review")
+	require.False(t, (&AgentPrompt{}).IsReview(), "prompt with no revision context is not a review")
+	require.False(t, (&AgentPrompt{RevisionContext: &RevisionContext{}}).IsReview(), "prompt with revision context but no review context is not a review")
+	require.True(t, (&AgentPrompt{
+		RevisionContext: &RevisionContext{
+			ReviewContext: &SessionReviewContext{Mode: models.SessionReviewModeDefault},
+		},
+	}).IsReview(), "prompt with review context is a review")
 }

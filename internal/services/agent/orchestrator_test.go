@@ -147,29 +147,30 @@ func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.
 
 // mockSessionStore implements agent.SessionStore.
 type mockSessionStore struct {
-	mu               sync.Mutex
-	countRunning     int
-	statusUpdates    []string
-	resultUpdates    []resultUpdate
-	turnUpdates      []turnUpdate
-	runtimeBegins    []runtimeBegin
-	progressUpdates  []runtimeProgressUpdate
-	extensionGrants  []runtimeExtensionGrant
-	checkpoints      []checkpointUpdate
-	recoveryStates   []recoveryStateUpdate
-	baseCommitSHAs   []string
-	failureUpdates   []failureUpdate
-	workerOwnerships []workerOwnershipUpdate
-	countRunningErr  error
-	beginRuntimeErr  error
-	acquireHoldFn    func(proposedContainerID string) (string, error)
-	acquireHoldErr   error
-	setWorkerNodeErr error
-	releaseHoldFn    func() (bool, string, error)
-	finalizeFn       func(expectedContainerID string) (bool, error)
-	acquireHoldCalls int
-	releaseHoldCalls int
-	finalizeCalls    int
+	mu                     sync.Mutex
+	countRunning           int
+	statusUpdates          []string
+	resultUpdates          []resultUpdate
+	turnUpdates            []turnUpdate
+	runtimeBegins          []runtimeBegin
+	progressUpdates        []runtimeProgressUpdate
+	extensionGrants        []runtimeExtensionGrant
+	checkpoints            []checkpointUpdate
+	recoveryStates         []recoveryStateUpdate
+	baseCommitSHAs         []string
+	failureUpdates         []failureUpdate
+	workerOwnerships       []workerOwnershipUpdate
+	revisionContextUpdates [][]byte
+	countRunningErr        error
+	beginRuntimeErr        error
+	acquireHoldFn          func(proposedContainerID string) (string, error)
+	acquireHoldErr         error
+	setWorkerNodeErr       error
+	releaseHoldFn          func() (bool, string, error)
+	finalizeFn             func(expectedContainerID string) (bool, error)
+	acquireHoldCalls       int
+	releaseHoldCalls       int
+	finalizeCalls          int
 }
 
 type failureUpdate struct {
@@ -341,6 +342,13 @@ func (m *mockSessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessi
 }
 
 func (m *mockSessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
+	return nil
+}
+
+func (m *mockSessionStore) UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revisionContextUpdates = append(m.revisionContextUpdates, revisionContext)
 	return nil
 }
 
@@ -2610,6 +2618,70 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 // lifecycle. Named so grep picks it up and future refactors don't silently
 // change behavior if Create's call site moves.
 var errForcedCreateFailure = errors.New("forced create failure to short-circuit test")
+
+// TestContinueSession_ClearsReviewContextAfterConsumption guarantees the
+// one-shot review directive is wiped from sessions.revision_context before
+// (or during) the turn so the next user message can't be silently swapped
+// for /review again. Persists immediately on read; even if the agent run
+// fails or is retried, the user retries by clicking the button — never by
+// re-firing the same stale directive against an unrelated message.
+func TestContinueSession_ClearsReviewContextAfterConsumption(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-abc"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+	// Persist a review-only RevisionContext.
+	reviewCtxJSON, err := json.Marshal(agent.RevisionContext{
+		ReviewContext: &agent.SessionReviewContext{
+			Mode:           models.SessionReviewModeDefault,
+			RequestSummary: "user clicked Review",
+		},
+	})
+	require.NoError(t, err)
+	session.RevisionContext = reviewCtxJSON
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review your changes.",
+		},
+	}
+	// Capture the prompt the adapter sees so we can assert the review
+	// context survived the threading even though it was cleared from the
+	// persisted row.
+	var promptSeen *agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		promptSeen = prompt
+		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
+	}
+	d.sessions.releaseHoldFn = func() (bool, string, error) { return false, existing, nil }
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.ContinueSession(context.Background(), session))
+
+	require.NotNil(t, promptSeen, "adapter should have run")
+	require.True(t, promptSeen.IsReview(), "the in-memory prompt must still see the review directive even after the row is cleared")
+
+	d.sessions.mu.Lock()
+	defer d.sessions.mu.Unlock()
+	require.NotEmpty(t, d.sessions.revisionContextUpdates, "orchestrator must call UpdateRevisionContext to clear the consumed review directive")
+	// Review-only context: the cleared write should be a nil/empty payload.
+	last := d.sessions.revisionContextUpdates[len(d.sessions.revisionContextUpdates)-1]
+	require.True(t, len(last) == 0, "review-only context should clear the row entirely (got %q)", string(last))
+}
 
 // TestContinueSession_ReusesExistingContainer covers the branch where
 // session.ContainerID is populated (a preview hydrated the sandbox) so

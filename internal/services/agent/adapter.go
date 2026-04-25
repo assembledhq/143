@@ -68,6 +68,79 @@ type RevisionContext struct {
 	CommentSummary    string                             `json:"comment_summary"`
 	RepairAction      models.PullRequestRepairActionType `json:"repair_action,omitempty"`
 	RepairContext     *PullRequestRepairContext          `json:"repair_context,omitempty"`
+	// ReviewContext is set when the user triggered a session-native review
+	// turn (e.g. via the Review button). Adapters that implement
+	// ReviewCapableAdapter branch on this to invoke the agent's native
+	// review surface (Claude Code's /review skill, etc.) instead of
+	// running the next conversational turn.
+	ReviewContext *SessionReviewContext `json:"review_context,omitempty"`
+}
+
+// SessionReviewContext describes a single user-initiated review turn. It is
+// session-scoped — reviews can run before a PR exists — and intentionally
+// distinct from PullRequestRepairContext so the two flows don't drift.
+type SessionReviewContext struct {
+	Mode           models.SessionReviewMode `json:"mode"`
+	PreviousDiff   string                   `json:"previous_diff,omitempty"`
+	RequestSummary string                   `json:"request_summary,omitempty"`
+}
+
+// ReviewCapableAdapter is implemented by adapters whose underlying agent has
+// a curated, native review surface (e.g. Claude Code's /review and
+// /security-review skills). Adapters without a native review surface MUST
+// NOT implement this interface — the Review button will hide for sessions
+// using those agents, by design (see doc 63: "no fallback prompt-based
+// review for agents without native support").
+type ReviewCapableAdapter interface {
+	// ReviewModes returns the review modes this adapter supports natively,
+	// in display order. Returning nil or an empty slice has the same effect
+	// as not implementing the interface.
+	ReviewModes() []models.SessionReviewMode
+}
+
+// AdapterReviewModes returns the review modes a given adapter supports, or
+// nil if the adapter does not implement ReviewCapableAdapter. Centralized so
+// callers (HTTP handlers, the session review service) don't have to repeat
+// the type assertion and nil-check pattern.
+func AdapterReviewModes(adapter AgentAdapter) []models.SessionReviewMode {
+	if adapter == nil {
+		return nil
+	}
+	capable, ok := adapter.(ReviewCapableAdapter)
+	if !ok {
+		return nil
+	}
+	modes := capable.ReviewModes()
+	if len(modes) == 0 {
+		return nil
+	}
+	return modes
+}
+
+// AdapterSupportsReviewMode reports whether the adapter natively supports
+// the given review mode.
+func AdapterSupportsReviewMode(adapter AgentAdapter, mode models.SessionReviewMode) bool {
+	for _, m := range AdapterReviewModes(adapter) {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// ReviewModeProvider returns a function that maps an agent type to the
+// review modes its adapter supports natively. Empty/nil result means the
+// agent has no native review surface. Used to wire the session review
+// service to the orchestrator's adapter map without coupling the
+// sessionreview package to the full agent package.
+func ReviewModeProvider(adapters map[models.AgentType]AgentAdapter) func(models.AgentType) []models.SessionReviewMode {
+	return func(agentType models.AgentType) []models.SessionReviewMode {
+		adapter, ok := adapters[agentType]
+		if !ok {
+			return nil
+		}
+		return AdapterReviewModes(adapter)
+	}
 }
 
 type PullRequestRepairContext struct {
@@ -100,10 +173,51 @@ func ParseRevisionContext(raw json.RawMessage) (*RevisionContext, error) {
 	return &parsed, nil
 }
 
+// MarshalRevisionContextWithoutReview returns the JSON encoding of ctx with
+// ReviewContext stripped out. Returns (nil, nil) when ctx is nil or only
+// carried review context — a nil byte slice cleanly clears the persisted
+// row. Returns the re-encoded payload otherwise so other fields
+// (RepairAction, RepairContext, FormattedFeedback, ...) are preserved.
+//
+// Used by the orchestrator to consume a one-shot review directive without
+// disturbing PR-repair revision state that may be set on the same row.
+func MarshalRevisionContextWithoutReview(ctx *RevisionContext) ([]byte, error) {
+	if ctx == nil {
+		return nil, nil
+	}
+	stripped := *ctx
+	stripped.ReviewContext = nil
+	if isRevisionContextEmpty(&stripped) {
+		return nil, nil
+	}
+	return json.Marshal(stripped)
+}
+
+func isRevisionContextEmpty(ctx *RevisionContext) bool {
+	if ctx == nil {
+		return true
+	}
+	return ctx.FormattedFeedback == "" &&
+		ctx.PreviousDiff == "" &&
+		ctx.CommentSummary == "" &&
+		ctx.RepairAction == "" &&
+		ctx.RepairContext == nil &&
+		ctx.ReviewContext == nil
+}
+
 func FormatRevisionContextForContinuation(ctx *RevisionContext) string {
 	if ctx == nil {
 		return ""
 	}
+
+	// Reviews are routed through adapter-native review surfaces by Execute
+	// when ReviewCapableAdapter is implemented. The orchestrator only reaches
+	// FormatRevisionContextForContinuation here for the prompt-text fallback,
+	// so emitting any review framing here would double-prompt or — worse —
+	// silently produce a hand-rolled review on agents the design explicitly
+	// chose not to fake (see doc 63 § "What we are explicitly *not* building").
+	// Adapters that handle reviews natively read ReviewContext directly off
+	// AgentPrompt.RevisionContext.
 
 	var b strings.Builder
 	if ctx.FormattedFeedback != "" || ctx.CommentSummary != "" || ctx.PreviousDiff != "" {
@@ -188,6 +302,17 @@ type AgentPrompt struct {
 	Continuation    bool     // true when resuming an existing interactive session
 	ResumeSessionID string   // agent's session ID for --resume/--continue (set on subsequent turns)
 	UserMessage     string   // follow-up message from the user (set on subsequent turns)
+	// RevisionContext carries revision/repair/review metadata into Execute.
+	// PreparePrompt is bypassed on continuation turns, so adapters that need
+	// to branch on review or repair context (e.g. to invoke Claude Code's
+	// /review skill) read it from here. Nil for ordinary turns.
+	RevisionContext *RevisionContext
+}
+
+// IsReview reports whether this prompt represents a session-native review
+// turn that adapters should route to the agent's curated review surface.
+func (p *AgentPrompt) IsReview() bool {
+	return p != nil && p.RevisionContext != nil && p.RevisionContext.ReviewContext != nil
 }
 
 // AgentResult is the outcome of an agent execution.
