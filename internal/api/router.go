@@ -677,28 +677,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
 				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
-				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
-				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
-				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
-				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
-				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
-				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
-				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
-				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
-				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
-				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
-				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
-				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
-				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
-				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
-				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
-				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
-				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+
+				// Team roster read — sits in the admin+member group (not the
+				// all-roles read group) so viewers cannot enumerate org members.
+				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
@@ -777,14 +760,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
 				r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
 
-				// Eval write routes
-				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
-				r.Patch("/api/v1/evals/tasks/{id}", evalHandler.UpdateTask)
-				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
-				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
-				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
-				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
-				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 			})
 
 			// Admin-only routes
@@ -850,8 +825,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
 
-				// Team management
-				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+				// Team management. The roster read (GET /team/members) is registered
+				// in the admin+member group above; mutations and invite flows stay
+				// admin-only here.
 				r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 				r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
 				r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
@@ -859,6 +835,41 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 				r.Get("/api/v1/team/github/status", teamHandler.GitHubInviteStatus)
 				r.Get("/api/v1/team/github/users", teamHandler.SearchGitHubUsers)
+
+				// Integration management (OAuth flows + connect/disconnect/sync).
+				// Connecting an integration is an org-wide trust decision, so members
+				// shouldn't be able to wire prod Slack/GitHub/Linear/Sentry/Notion.
+				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
+				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
+				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
+				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
+				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
+				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
+				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
+				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
+				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
+				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
+				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
+				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+
+				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
+				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
+				r.Patch("/api/v1/evals/tasks/{id}", evalHandler.UpdateTask)
+				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
+				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
+				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
+				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 			})
 		})
 	})
