@@ -63,6 +63,7 @@ export default function NewAutomationPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState(50);
+  const [redirecting, setRedirecting] = useState(false);
 
   // Load repos
   const { data: reposData } = useQuery({
@@ -103,6 +104,7 @@ export default function NewAutomationPage() {
         priority,
       }),
     onSuccess: (res) => {
+      setRedirecting(true);
       router.push(`/automations/${res.data.id}`);
     },
   });
@@ -383,9 +385,9 @@ export default function NewAutomationPage() {
           <div className="flex items-center gap-3 pt-2">
             <Button
               onClick={() => createMutation.mutate()}
-              disabled={!canSubmit || createMutation.isPending}
+              disabled={!canSubmit || createMutation.isPending || redirecting}
             >
-              {createMutation.isPending ? (
+              {createMutation.isPending || redirecting ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Creating...
