@@ -67,6 +67,10 @@ func (w *CleanupWorker) run() {
 }
 
 func (w *CleanupWorker) cleanup() {
+	if w == nil || w.manager == nil || w.manager.store == nil {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
