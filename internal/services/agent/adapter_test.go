@@ -210,3 +210,54 @@ func TestAgentPrompt_IsReview(t *testing.T) {
 		},
 	}).IsReview(), "prompt with review context is a review")
 }
+
+func TestMarshalRevisionContextWithoutReview(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		ctx      *RevisionContext
+		wantNil  bool
+		wantJSON string
+	}{
+		{
+			name:    "nil context clears row",
+			ctx:     nil,
+			wantNil: true,
+		},
+		{
+			name: "review-only context clears row",
+			ctx: &RevisionContext{
+				ReviewContext: &SessionReviewContext{Mode: models.SessionReviewModeDefault},
+			},
+			wantNil: true,
+		},
+		{
+			name: "non-review fields are preserved",
+			ctx: &RevisionContext{
+				FormattedFeedback: "fix the bug",
+				CommentSummary:    "one comment left",
+				RepairAction:      models.PullRequestRepairActionTypeFixTests,
+				ReviewContext:     &SessionReviewContext{Mode: models.SessionReviewModeSecurity},
+			},
+			wantJSON: `"repair_action":"fix_tests"`,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := MarshalRevisionContextWithoutReview(tt.ctx)
+			require.NoError(t, err, "MarshalRevisionContextWithoutReview should not fail for supported revision payloads")
+			if tt.wantNil {
+				require.Nil(t, raw, "MarshalRevisionContextWithoutReview should clear review-only payloads")
+				return
+			}
+			require.NotNil(t, raw, "MarshalRevisionContextWithoutReview should preserve non-review revision fields")
+			require.Contains(t, string(raw), tt.wantJSON, "MarshalRevisionContextWithoutReview should keep the non-review state intact")
+			require.NotContains(t, string(raw), "review_context", "MarshalRevisionContextWithoutReview should strip the review directive before persistence")
+		})
+	}
+}

@@ -99,6 +99,18 @@ func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
 	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
 }
 
+func TestNewRouter_NilReviewModesProviderDefaultsToNoCapabilities(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{}
+	codexSvc := codexauth.NewService(nil, zerolog.Nop())
+	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	require.NoError(t, err, "NewRouter should install the fallback no-review-capabilities provider when none is supplied")
+	require.NotNil(t, router, "NewRouter should still construct the router when review mode wiring is omitted")
+}
+
 func TestNewRouter_InternalPreviewRoutesSkipGlobalBodyLimit(t *testing.T) {
 	t.Parallel()
 

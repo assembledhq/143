@@ -3,6 +3,7 @@ package sessionreview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -93,6 +94,17 @@ func TestSessionReviewReadiness(t *testing.T) {
 			},
 			wantReady: false,
 			wantHint:  "no changes",
+		},
+		{
+			name: "session with unsupported status is rejected",
+			session: models.Session{
+				Status:       string(models.SessionStatusSkipped),
+				SandboxState: string(models.SandboxStateSnapshotted),
+				SnapshotKey:  &snapshot,
+				Diff:         &diff,
+			},
+			wantReady: false,
+			wantHint:  "not resumable",
 		},
 	}
 
@@ -494,4 +506,394 @@ func TestCapabilities_ModesIsNeverNil(t *testing.T) {
 	encoded, err := json.Marshal(caps)
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), `"modes":[]`, "encoded payload must use [] for empty modes")
+}
+
+func TestCapabilities_ErrorAndReadinessPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		setupMock    func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, now time.Time)
+		reviewModes  ReviewModeProvider
+		expectedErr  error
+		expectReady  bool
+		expectedHint string
+	}{
+		{
+			name: "returns session not found",
+			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			reviewModes: func(models.AgentType) []models.SessionReviewMode {
+				return []models.SessionReviewMode{models.SessionReviewModeDefault}
+			},
+			expectedErr: ErrSessionNotFound,
+		},
+		{
+			name: "wraps load errors",
+			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("database offline"))
+			},
+			reviewModes: func(models.AgentType) []models.SessionReviewMode {
+				return []models.SessionReviewMode{models.SessionReviewModeDefault}
+			},
+			expectedHint: "load session",
+		},
+		{
+			name: "returns readiness reason for running session",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusRunning), &snapshot, &diff, now)...,
+					))
+			},
+			reviewModes: func(models.AgentType) []models.SessionReviewMode {
+				return []models.SessionReviewMode{models.SessionReviewModeDefault}
+			},
+			expectedHint: "currently running",
+		},
+		{
+			name: "returns ready capabilities",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusCompleted), &snapshot, &diff, now)...,
+					))
+			},
+			reviewModes: func(models.AgentType) []models.SessionReviewMode {
+				return []models.SessionReviewMode{models.SessionReviewModeDefault, models.SessionReviewModeSecurity}
+			},
+			expectReady: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock.NewPool should create the capability test store")
+			defer mock.Close()
+
+			now := time.Now().UTC()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			tt.setupMock(mock, orgID, sessionID, now)
+
+			svc := NewService(Deps{
+				Sessions:        db.NewSessionStore(mock),
+				SessionMessages: db.NewSessionMessageStore(mock),
+				Jobs:            db.NewJobStore(mock),
+				ReviewModes:     tt.reviewModes,
+				Logger:          zerolog.New(io.Discard),
+			})
+
+			caps, err := svc.Capabilities(context.Background(), orgID, sessionID)
+			if tt.expectedErr != nil {
+				require.ErrorIs(t, err, tt.expectedErr, "Capabilities should surface typed service errors for caller-specific HTTP mapping")
+				require.Nil(t, caps, "Capabilities should not return payload data when the session lookup fails")
+			} else if tt.expectedHint == "load session" {
+				require.Error(t, err, "Capabilities should wrap unexpected store errors")
+				require.Contains(t, err.Error(), tt.expectedHint, "Capabilities should annotate unexpected store failures with context")
+			} else {
+				require.NoError(t, err, "Capabilities should succeed for readiness-only scenarios")
+				require.NotNil(t, caps, "Capabilities should return a payload when the session lookup succeeds")
+				require.Equal(t, tt.expectReady, caps.CanReview, "Capabilities should reflect the session's review readiness")
+				if tt.expectedHint != "" {
+					require.Contains(t, caps.Reason, tt.expectedHint, "Capabilities should surface the session readiness reason for blocked reviews")
+				}
+			}
+
+			require.NoError(t, mock.ExpectationsWereMet(), "Capabilities should satisfy the expected query plan")
+		})
+	}
+}
+
+func TestStartReview_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		mode        models.SessionReviewMode
+		setupMock   func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, userID uuid.UUID, now time.Time)
+		reviewModes ReviewModeProvider
+		expectedErr error
+		contains    string
+	}{
+		{
+			name: "wraps session load errors",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ uuid.UUID, _ time.Time) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("database offline"))
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "load session",
+		},
+		{
+			name: "rejects supported-but-unconfigured review mode",
+			mode: models.SessionReviewModeSecurity,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+			},
+			reviewModes: func(models.AgentType) []models.SessionReviewMode {
+				return []models.SessionReviewMode{models.SessionReviewModeDefault}
+			},
+			expectedErr: ErrReviewModeUnsupported,
+		},
+		{
+			name: "returns begin transaction error",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin().WillReturnError(errors.New("tx unavailable"))
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "begin session review tx",
+		},
+		{
+			name: "returns not resumable when both claim paths miss",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusCompleted), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			expectedErr: ErrSessionNotResumable,
+		},
+		{
+			name: "returns not resumable when claim queries fail unexpectedly",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusCompleted), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("claim idle failed"))
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("claim resume failed"))
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			expectedErr: ErrSessionNotResumable,
+		},
+		{
+			name: "returns update revision context error",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusRunning), &snapshot, &diff, now)...,
+					))
+				mock.ExpectExec("UPDATE sessions.+SET revision_context").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("update failed"))
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "persist review revision context",
+		},
+		{
+			name: "returns create message error",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusRunning), &snapshot, &diff, now)...,
+					))
+				mock.ExpectExec("UPDATE sessions.+SET revision_context").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnError(errors.New("insert message failed"))
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "create review message",
+		},
+		{
+			name: "returns enqueue error",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusRunning), &snapshot, &diff, now)...,
+					))
+				mock.ExpectExec("UPDATE sessions.+SET revision_context").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgx.NamedArgs{
+						"org_id":     orgID,
+						"queue":      "agent",
+						"job_type":   "continue_session",
+						"payload":    pgxmock.AnyArg(),
+						"priority":   5,
+						"dedupe_key": (*string)(nil),
+					}).
+					WillReturnError(errors.New("enqueue failed"))
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "enqueue continue_session",
+		},
+		{
+			name: "returns commit error",
+			mode: models.SessionReviewModeDefault,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, _ uuid.UUID, now time.Time) {
+				snapshot := "snapshots/foo.tar"
+				diff := "diff --git a/a b/a\n"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusIdle), &snapshot, &diff, now)...,
+					))
+				mock.ExpectBegin()
+				mock.ExpectQuery("UPDATE sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(sessionReviewSessionColumns).AddRow(
+						newSessionReviewSessionRow(sessionID, orgID, string(models.SessionStatusRunning), &snapshot, &diff, now)...,
+					))
+				mock.ExpectExec("UPDATE sessions.+SET revision_context").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgx.NamedArgs{
+						"org_id":     orgID,
+						"queue":      "agent",
+						"job_type":   "continue_session",
+						"payload":    pgxmock.AnyArg(),
+						"priority":   5,
+						"dedupe_key": (*string)(nil),
+					}).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+				mock.ExpectRollback()
+			},
+			reviewModes: reviewModesAlwaysClaude,
+			contains:    "commit session review",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock.NewPool should create the review service mock")
+			defer mock.Close()
+
+			now := time.Now().UTC()
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			userID := uuid.New()
+			tt.setupMock(mock, orgID, sessionID, userID, now)
+
+			svc := NewService(Deps{
+				Sessions:        db.NewSessionStore(mock),
+				SessionMessages: db.NewSessionMessageStore(mock),
+				Jobs:            db.NewJobStore(mock),
+				ReviewModes:     tt.reviewModes,
+				Logger:          zerolog.New(io.Discard),
+			})
+
+			resp, err := svc.StartReview(context.Background(), orgID, sessionID, userID, tt.mode)
+			require.Nil(t, resp, "StartReview should not return a response payload on failure")
+			if tt.expectedErr != nil {
+				require.ErrorIs(t, err, tt.expectedErr, "StartReview should surface typed errors for expected review failure modes")
+			} else {
+				require.Error(t, err, "StartReview should return an annotated error for infrastructure failures")
+				require.Contains(t, err.Error(), tt.contains, "StartReview should explain which step in the review transaction failed")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "StartReview should satisfy the expected store interactions")
+		})
+	}
 }
