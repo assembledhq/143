@@ -538,9 +538,14 @@ describe("ManualSessionCreatePageContent", () => {
       renderWithProviders(<ManualSessionCreatePageContent />);
 
       await screen.findByPlaceholderText("Tell the agent what to do...");
-      // Give the persist effect a chance to run.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+      await waitFor(() => {
+        expect(mocks.settingsGetMock).toHaveBeenCalledTimes(1);
+        expect(mocks.repositoriesListMock).toHaveBeenCalledTimes(1);
+        expect(mocks.resolvedCredsMock).toHaveBeenCalledTimes(1);
+        expect(mocks.codexAuthStatusMock).toHaveBeenCalledTimes(1);
+        expect(mocks.authMeMock).toHaveBeenCalledTimes(1);
+        expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+      });
     });
 
     it("restores a hydrated reasoning override and uses it at submit time", async () => {

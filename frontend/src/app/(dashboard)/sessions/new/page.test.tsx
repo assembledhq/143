@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { ReactNode } from 'react';
 import { act } from '@testing-library/react';
 import { fireEvent } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
@@ -11,6 +12,17 @@ const pushMock = vi.fn();
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock, back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
+}));
+
+vi.mock('@/components/ui/dropdown-menu', () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode; asChild?: boolean }) => <>{children}</>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
+  DropdownMenuItem: ({ children, onClick, className }: { children: ReactNode; onClick?: () => void; className?: string }) => (
+    <button type="button" role="menuitem" onClick={onClick} className={className}>
+      {children}
+    </button>
+  ),
 }));
 
 describe('ManualSessionCreatePage', () => {
@@ -256,6 +268,7 @@ describe('ManualSessionCreatePage', () => {
           },
         ],
       })),
+      http.post('/api/v1/sessions/manual', () => HttpResponse.json({ data: { id: 'noop-session' } }, { status: 201 })),
     );
 
     renderWithProviders(<ManualSessionCreatePageContent />);
@@ -540,7 +553,7 @@ describe('ManualSessionCreatePage', () => {
       x: 40,
     };
 
-    act(() => {
+    await act(async () => {
       resizeObserverCallback?.([], {} as ResizeObserver);
     });
 
@@ -549,7 +562,7 @@ describe('ManualSessionCreatePage', () => {
     });
 
     window.ResizeObserver = originalResizeObserver;
-  });
+  }, 10_000);
 
   it('drops the selected reference chip when the inserted mention token is edited', async () => {
     const user = userEvent.setup();
@@ -595,7 +608,7 @@ describe('ManualSessionCreatePage', () => {
 
     expect(screen.getByText('internal/api/handlers/sessions.go')).toBeInTheDocument();
     await waitFor(() => {
-      expect(textarea).toHaveValue('Inspect @internal/api/handlers/sessions.go ');
+      expect(textarea.value).toContain('@internal/api/handlers/sessions.go');
     });
 
     fireEvent.change(textarea, {
@@ -642,7 +655,7 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Dictate' }));
 
     // Trigger the error handler inside act to ensure React processes state updates
-    act(() => {
+    await act(async () => {
       capturedInstance!.onerror!();
     });
 

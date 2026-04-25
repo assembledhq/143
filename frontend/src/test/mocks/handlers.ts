@@ -596,6 +596,12 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/projects/proposals/summary', () => {
+    return HttpResponse.json({
+      data: { count: 0 },
+    });
+  }),
+
   http.get('/api/v1/pm/decisions', () => {
     return HttpResponse.json({
       data: [],
