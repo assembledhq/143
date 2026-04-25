@@ -139,7 +139,7 @@ func newSessionHandler(t *testing.T, mock pgxmock.PgxPoolIface) *SessionHandler 
 // Must match sessionSelectColumns in session_store.go. Update all inline
 // AddRow calls in this file when adding/removing/reordering columns.
 var sessionColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -174,6 +174,26 @@ func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
 		validationPolicy,
 	)
 	row = append(row, values[3:]...)
+	return normalizeSessionRowPrimaryIssueID(row)
+}
+
+// normalizeSessionRowPrimaryIssueID converts a legacy uuid.UUID issue_id
+// placeholder at position 1 into the *uuid.UUID primary_issue_id value that
+// pgx expects for the SessionStore.sessionSelectColumns subquery. A uuid.Nil
+// is mapped to nil so NULL primary links round-trip cleanly.
+func normalizeSessionRowPrimaryIssueID(row []interface{}) []interface{} {
+	if len(row) < 2 {
+		return row
+	}
+	switch v := row[1].(type) {
+	case uuid.UUID:
+		if v == uuid.Nil {
+			row[1] = nil
+		} else {
+			id := v
+			row[1] = &id
+		}
+	}
 	return row
 }
 
@@ -395,41 +415,41 @@ func sessionTestRow(values ...interface{}) []interface{} {
 
 	switch len(values) {
 	case len(sessionColumns):
-		return values
+		return normalizeSessionRowPrimaryIssueID(values)
 	case legacySessionColumnsLen:
-		return expandLegacySessionRow(values)
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(values))
 	case legacySessionColumnsLen - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, false))
+			return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, false)))
 		}
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, false))
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, false)))
 	case legacySessionColumnsLen - 2:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, false))
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, false)))
 	case legacySessionColumnsLen - 4:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, false, true))
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, false, true)))
 	case legacySessionColumnsLen - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, true))
+			return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, true)))
 		}
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true))
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true)))
 	case legacySessionColumnsLen - 5:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true))
+		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true)))
 	case len(sessionColumns) - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return sessionRowWithCurrentOptionalDefaults(values, false, true, false)
+			return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, true, false))
 		}
-		return sessionRowWithCurrentOptionalDefaults(values, true, false, false)
+		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, false, false))
 	case len(sessionColumns) - 2:
-		return sessionRowWithCurrentOptionalDefaults(values, true, true, false)
+		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, true, false))
 	case len(sessionColumns) - 4:
-		return sessionRowWithCurrentOptionalDefaults(values, false, false, true)
+		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, false, true))
 	case len(sessionColumns) - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return sessionRowWithCurrentOptionalDefaults(values, false, true, true)
+			return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, true, true))
 		}
-		return sessionRowWithCurrentOptionalDefaults(values, true, false, true)
+		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, false, true))
 	case len(sessionColumns) - 5:
-		return sessionRowWithCurrentOptionalDefaults(values, true, true, true)
+		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, true, true))
 	default:
 		panic(fmt.Sprintf(
 			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
@@ -465,7 +485,7 @@ func sessionAnyArgs(count int) []interface{} {
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(23)...).
+		WithArgs(sessionAnyArgs(22)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectCommit()
 }
@@ -473,7 +493,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(23)...).
+		WithArgs(sessionAnyArgs(22)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
@@ -2383,7 +2403,8 @@ func TestSessionHandler_StreamLogsViaRedis_FallsBackWhenRedisUnavailable(t *test
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	rec := httptest.NewRecorder()
 	sw := sse.NewWriter(rec)
@@ -2407,7 +2428,8 @@ func TestSessionHandler_StreamLogsViaRedis_ContextCanceledAfterSetup(t *testing.
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2450,7 +2472,8 @@ func TestSessionHandler_StreamLogsViaRedis_ShutdownSignalAfterSetup(t *testing.T
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2479,7 +2502,8 @@ func TestSessionHandler_StreamLogsViaRedis_ReplayAndStatusWriteFailures(t *testi
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 	require.NoError(t, streams.PublishLog(context.Background(), &models.SessionLog{ID: 11, SessionID: runID, OrgID: orgID, Level: "info", Message: "hello", Timestamp: time.Now()}), "test should seed Redis replay logs")
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
@@ -2518,7 +2542,8 @@ func TestSessionHandler_StreamLogsViaRedis_SubscriptionClosureWritesRetryEvent(t
 
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2560,7 +2585,7 @@ func TestSessionHandler_StreamLogsViaPolling_ReplaysAndFinishes(t *testing.T) {
 	runID := uuid.New()
 	issueID := uuid.New()
 	now := time.Now()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: issueID, Status: string(models.SessionStatusRunning)}
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2631,7 +2656,8 @@ func TestSessionHandler_StreamLogsViaPolling_InvalidLastEventIDFallsBackAndWrite
 	handler := newSessionHandler(t, mock)
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 	now := time.Now()
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
@@ -2658,7 +2684,8 @@ func TestSessionHandler_StreamLogsViaPolling_InitialLoadFailureReturns(t *testin
 	handler := newSessionHandler(t, mock)
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id .+ sl.id >").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), int64(2)).
@@ -2682,7 +2709,8 @@ func TestSessionHandler_StreamLogsViaPolling_ReloadFailureReturns(t *testing.T) 
 	handler := newSessionHandler(t, mock)
 	orgID := uuid.New()
 	runID := uuid.New()
-	run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2722,7 +2750,8 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 		handler := newSessionHandler(t, mock)
 		orgID := uuid.New()
 		runID := uuid.New()
-		run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+		issueID := uuid.New()
+		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2748,7 +2777,8 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 
 		orgID := uuid.New()
 		runID := uuid.New()
-		run := models.Session{ID: runID, OrgID: orgID, IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+		issueID := uuid.New()
+		run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 		mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2789,7 +2819,7 @@ func TestSessionHandler_StreamLogsViaPolling_StatusAndDoneWriteFailures(t *testi
 				runID := uuid.New()
 				issueID := uuid.New()
 				now := time.Now()
-				run := models.Session{ID: runID, OrgID: orgID, IssueID: issueID, Status: string(models.SessionStatusRunning)}
+				run := models.Session{ID: runID, OrgID: orgID, PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 
 				mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.session_id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

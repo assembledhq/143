@@ -1,8 +1,8 @@
 # 59 - Session/Issue Decoupling and Multi-Issue Linking
 
-> **Status:** Phase 1 implemented; Phase 2 future cleanup
+> **Status:** Phase 1 and Phase 2 implemented
 >
-> **Last reviewed:** 2026-04-23
+> **Last reviewed:** 2026-04-24
 >
 > **Depends on:** [../overall.md](../overall.md), [../29-projects.md](../29-projects.md), [../34-repo-ribbons-nav.md](../34-repo-ribbons-nav.md), [../implemented/53-session-composer-mentions.md](../implemented/53-session-composer-mentions.md)
 
@@ -722,6 +722,27 @@ Recommendation:
 - if a convenience `primary_issue_id` is needed in APIs or queries, compute it from the join table or materialize it in a dedicated read model
 
 The long-term write model should have one canonical truth: `session_issue_links`.
+
+Phase 2 implementation status as of 2026-04-24:
+
+- Implemented: `sessions.issue_id` column dropped in migration 000097; API responses expose `primary_issue_id` derived from `session_issue_links` via a subquery alias, with no persisted primary column on `sessions`.
+- Implemented: all backend reads and writes go through `session_issue_links` (session creation, worker handlers, PR flow, validation, orchestrator resume) — no code path depends on `sessions.issue_id`.
+- Implemented: new sessions use `Origin` as the canonical signal for manual-mode policy; `hydrateSessionPolicyForExecution` no longer derives mode purely from `issue.source == 'manual'` for fresh rows.
+- Compatibility shim retained: `isLegacySyntheticManualSession` in `orchestrator.go` still recognises pre-Phase 2 sessions whose persisted origin is `issue_trigger` but which point at a `source = 'manual'` issue, and re-classifies them as interactive manual sessions at execution time. This keeps historical interactive sessions working without rewriting their persisted origin. Safe to remove once historical rows have been audited.
+- Compatibility shim retained: `manualSessionReferences` is still consulted as a fallback in `resolvedInputReferences` so legacy synthetic manual sessions whose canonical message references are absent still recover attachments from the manual issue's `raw_data`. New manual sessions persist references on `session_messages.references` and never hit this fallback.
+- Implemented: API no longer returns the legacy `issue_id` alias on session responses; frontend `Session` type drops `issue_id`. `primary_issue_id` is the only identifier surfaced for the primary linked issue.
+- Implemented: `sessionRepoSlug` resolves repository strictly from `sessions.repository_id` — no fallback to the primary issue's repository for resume workdir derivation. `setupFreshSandbox` still fetches the primary issue for prompt context but repository selection is session-first.
+
+Status: complete. The long-term write model is now `session_issue_links` as the single canonical truth.
+
+#### Phase 2 down-migration caveat
+
+`migrations/000097_drop_sessions_issue_id.down.sql` re-adds the column and backfills `issue_id` from the current `role = 'primary'` row in `session_issue_links`. This means:
+
+- Sessions whose primary link was **added or changed between the Phase 2 deploy and a rollback** will have the rolled-back `issue_id` reflect the *new* primary, not the original Phase 1 value.
+- Sessions whose primary link was **deleted** post-Phase 2 will rollback to `issue_id = NULL`.
+
+For an emergency rollback, this is the best the down-migration can do (the original `issue_id` value is no longer recoverable once the column is dropped). Operators rolling back should be aware that the restored column reflects the *current* primary link, not the historical one.
 
 ## Recommended Rollout Order
 

@@ -442,26 +442,21 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	// Issue lookup is optional — sessions may not have an associated issue.
 	var issue *models.Issue
-	if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
-		i, err := s.issues.GetByID(ctx, run.OrgID, *primaryIssueID)
+	if run.PrimaryIssueID != nil {
+		i, err := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
 		if err == nil {
 			issue = &i
 		} else {
-			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to look up issue, proceeding without it")
+			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to look up issue, proceeding without it")
 		}
 	}
 
-	// Resolve repository: session.RepositoryID first, then issue.RepositoryID.
-	var repoID *uuid.UUID
-	if run.RepositoryID != nil {
-		repoID = run.RepositoryID
-	} else if issue != nil && issue.RepositoryID != nil {
-		repoID = issue.RepositoryID
-	}
-	if repoID == nil {
+	// Resolve repository. sessions.repository_id is the canonical source of
+	// truth — session creation copies issue.repository_id into it up front.
+	if run.RepositoryID == nil {
 		return nil, fmt.Errorf("session %s has no repository", run.ID)
 	}
-	repo, err := s.repos.GetByID(ctx, run.OrgID, *repoID)
+	repo, err := s.repos.GetByID(ctx, run.OrgID, *run.RepositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("get repository: %w", err)
 	}
@@ -514,7 +509,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	var title, body string
-	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *repoID, run.OrgID, run, issue); genErr == nil {
+	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr == nil {
 		title = generated.Title
 		body = generated.Body
 	} else {
@@ -579,11 +574,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
 
-	if issue != nil {
-		if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
-			if err := s.issues.UpdateStatus(ctx, run.OrgID, *primaryIssueID, "in_progress"); err != nil {
-				s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status")
-			}
+	if issue != nil && run.PrimaryIssueID != nil {
+		if err := s.issues.UpdateStatus(ctx, run.OrgID, *run.PrimaryIssueID, "in_progress"); err != nil {
+			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status")
 		}
 	}
 
@@ -610,12 +603,12 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 	}
 
 	var issue *models.Issue
-	if primaryIssueID := session.EffectivePrimaryIssueID(); primaryIssueID != nil && s.issues != nil {
-		i, err := s.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+	if session.PrimaryIssueID != nil && s.issues != nil {
+		i, err := s.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
 		if err == nil {
 			issue = &i
 		} else {
-			s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to load issue for PR title sync")
+			s.logger.Warn().Err(err).Str("issue_id", session.PrimaryIssueID.String()).Msg("failed to load issue for PR title sync")
 		}
 	}
 
@@ -854,9 +847,9 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			}
 
 			// Update issue status to fixed.
-			if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
-				if err := s.issues.UpdateStatus(ctx, pr.OrgID, *primaryIssueID, "fixed"); err != nil {
-					s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status to fixed")
+			if run.PrimaryIssueID != nil {
+				if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, "fixed"); err != nil {
+					s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status to fixed")
 				}
 			}
 

@@ -1071,13 +1071,12 @@ func newValidateHandler(stores *Stores, services *Services, logger zerolog.Logge
 		}
 
 		if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
-			run.IssueID = *issueID
 			run.PrimaryIssueID = issueID
 		}
 
 		var issue *models.Issue
-		if run.IssueID != uuid.Nil {
-			resolvedIssue, err := stores.Issues.GetByID(ctx, orgID, run.IssueID)
+		if run.PrimaryIssueID != nil {
+			resolvedIssue, err := stores.Issues.GetByID(ctx, orgID, *run.PrimaryIssueID)
 			if err != nil {
 				return fmt.Errorf("fetch issue for validation: %w", err)
 			}
@@ -1142,7 +1141,6 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				}
 			}
 			if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
-				run.IssueID = *issueID
 				run.PrimaryIssueID = issueID
 			}
 		}

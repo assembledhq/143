@@ -745,13 +745,13 @@ func testRepo(orgID uuid.UUID) models.Repository {
 func testRun(orgID, issueID uuid.UUID) *models.Session {
 	repoID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
 	return &models.Session{
-		ID:           uuid.MustParse("00000000-0000-0000-0000-000000000003"),
-		IssueID:      issueID,
-		OrgID:        orgID,
-		AgentType:    models.AgentTypeClaudeCode,
-		Status:       "pending",
-		TokenMode:    "low",
-		RepositoryID: &repoID,
+		ID:             uuid.MustParse("00000000-0000-0000-0000-000000000003"),
+		PrimaryIssueID: &issueID,
+		OrgID:          orgID,
+		AgentType:      models.AgentTypeClaudeCode,
+		Status:         "pending",
+		TokenMode:      "low",
+		RepositoryID:   &repoID,
 	}
 }
 
@@ -905,6 +905,9 @@ func TestRunAgent_MarksFinalOutputLogAsTranscriptDuplicate(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	run.InteractionMode = models.SessionInteractionModeInteractive
+	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -933,6 +936,9 @@ func TestRunAgent_ContinuesWhenAssistantMessageCreateFails(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	run.InteractionMode = models.SessionInteractionModeInteractive
+	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -956,6 +962,9 @@ func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	run.InteractionMode = models.SessionInteractionModeInteractive
+	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -1003,6 +1012,9 @@ func TestRecoverSession_ResumesFromLatestDurableCheckpoint(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusRunning)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
@@ -1392,14 +1404,14 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	pmReasoning := "High impact"
 
 	run := &models.Session{
-		ID:          runID,
-		IssueID:     issueID,
-		OrgID:       orgID,
-		AgentType:   "claude_code",
-		Status:      "pending",
-		TokenMode:   "low",
-		PMApproach:  &pmApproach,
-		PMReasoning: &pmReasoning,
+		ID:             runID,
+		PrimaryIssueID: &issueID,
+		OrgID:          orgID,
+		AgentType:      "claude_code",
+		Status:         "pending",
+		TokenMode:      "low",
+		PMApproach:     &pmApproach,
+		PMReasoning:    &pmReasoning,
 	}
 
 	mockRuns := &mockSessionStore{}
@@ -1453,41 +1465,48 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 	require.WithinDuration(t, now, time.Now(), time.Minute, "sanity check")
 }
 
-func TestRunAgent_ThreadsManualSessionReferencesToAdapter(t *testing.T) {
+func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReferences(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
+	repo := testRepo(orgID)
 	issueID := uuid.New()
-	runID := uuid.New()
 	description := "Investigate the session composer"
 	rawData := []byte(`{"manual_session":true,"references":[{"kind":"file","token":"@internal/api/handlers/sessions.go","path":"internal/api/handlers/sessions.go","display":"internal/api/handlers/sessions.go"},{"kind":"directory","token":"@frontend/src/app/(dashboard)/sessions/new","path":"frontend/src/app/(dashboard)/sessions/new","display":"frontend/src/app/(dashboard)/sessions/new"}]}`)
 
 	run := &models.Session{
-		ID:        runID,
-		IssueID:   issueID,
-		OrgID:     orgID,
-		AgentType: "claude_code",
-		Status:    "pending",
-		TokenMode: "low",
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          orgID,
+		AgentType:      "claude_code",
+		Status:         "pending",
+		TokenMode:      "low",
+		RepositoryID:   &repo.ID,
 	}
 
 	mockRuns := &mockSessionStore{}
 	mockIssues := &mockIssueStore{issue: models.Issue{
-		ID:          issueID,
-		OrgID:       orgID,
-		Source:      models.IssueSourceManual,
-		Title:       "Manual session",
-		Description: &description,
-		RawData:     rawData,
+		ID:           issueID,
+		OrgID:        orgID,
+		Source:       models.IssueSourceManual,
+		RepositoryID: &repo.ID,
+		Title:        "Manual session",
+		Description:  &description,
+		RawData:      rawData,
 	}}
-	mockRepos := &mockRepositoryStore{}
+	mockRepos := &mockRepositoryStore{repo: repo}
 	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
 	mockJobs := &mockJobStore{}
 	mockLogs := &mockSessionLogStore{}
 	mockQuestions := &mockSessionQuestionStore{}
+	mockMessages := &mockSessionMessageStore{}
 	mockDecisions := &mockDecisionLogStore{}
+	mockGitHub := &mockGitHubTokenProvider{token: "ghp_test123"}
+	mockSnapshots := &mockSnapshotStore{}
 	sandboxProvider := testutil.NewMockSandboxProvider()
-
+	sandboxProvider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snapshot-bytes"))), nil
+	}
 	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
@@ -1496,11 +1515,13 @@ func TestRunAgent_ThreadsManualSessionReferencesToAdapter(t *testing.T) {
 		Sessions:         mockRuns,
 		SessionLogs:      mockLogs,
 		SessionQuestions: mockQuestions,
+		SessionMessages:  mockMessages,
 		DecisionLog:      mockDecisions,
 		Issues:           mockIssues,
 		Repositories:     mockRepos,
 		Orgs:             mockOrgs,
 		Jobs:             mockJobs,
+		GitHub:           mockGitHub,
 		Credentials: &mockCredentialProvider{
 			byProvider: map[models.ProviderName]*models.DecryptedCredential{
 				models.ProviderAnthropic: {
@@ -1509,15 +1530,19 @@ func TestRunAgent_ThreadsManualSessionReferencesToAdapter(t *testing.T) {
 				},
 			},
 		},
-		Logger: zerolog.Nop(),
+		Snapshots: mockSnapshots,
+		Logger:    zerolog.Nop(),
 	})
 
 	err := orchestrator.RunAgent(context.Background(), run)
-	require.NoError(t, err, "RunAgent should succeed")
+	require.NoError(t, err, "RunAgent should succeed for legacy synthetic manual sessions")
 	require.NotNil(t, capAdapter.captured, "adapter should capture input")
-	require.Len(t, capAdapter.captured.References, 2, "manual references should be threaded into agent input")
+	require.True(t, capAdapter.captured.Manual, "legacy synthetic manual sessions should still run in manual mode")
+	require.Len(t, capAdapter.captured.References, 2, "legacy synthetic manual sessions should recover references from manual issue raw_data when message refs are absent")
 	require.Equal(t, "internal/api/handlers/sessions.go", capAdapter.captured.References[0].Path, "file path should be preserved")
 	require.Equal(t, models.SessionInputReferenceKindDirectory, capAdapter.captured.References[1].Kind, "directory references should remain typed")
+	require.Len(t, mockRuns.turnUpdates, 1, "legacy synthetic manual sessions should complete an interactive turn and return to idle")
+	require.Empty(t, mockRuns.resultUpdates, "legacy synthetic manual sessions should not be finalized as single-run sessions")
 }
 
 func TestRunAgent_FailedExecution(t *testing.T) {
@@ -1753,6 +1778,9 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	agentSessionID := "existing-agent-session"
 	snapshotKey := "existing-snapshot"
 	session.Status = string(models.SessionStatusIdle)
@@ -2316,6 +2344,9 @@ func TestRunAgent_ManualSessionTransitionsToIdle(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	run := testRun(orgID, issue.ID)
+	run.Origin = models.SessionOriginManual
+	run.InteractionMode = models.SessionInteractionModeInteractive
+	run.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 
 	d := defaultDeps()
 	d.issues.issue = issue
@@ -2361,6 +2392,9 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
@@ -2431,6 +2465,9 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
@@ -2550,6 +2587,9 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
@@ -2623,6 +2663,9 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	existing := "preview-container-abc"
@@ -2688,6 +2731,9 @@ func TestContinueSession_AcquireHoldErrorFailsTurn(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	// No ContainerID and no SnapshotKey — forces the Create path, which is
@@ -2718,6 +2764,9 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 
@@ -2741,12 +2790,13 @@ func TestContinueSession_SetWorkerNodeIDFailureFailsTurn(t *testing.T) {
 
 // TestContinueSession_SessionRepoSlug exercises every branch of
 // sessionRepoSlug through ContinueSession.
-//   - The two "happy" branches (session.RepositoryID set; issue.RepositoryID
-//     set) must produce the slug-derived WorkDir and then fail at provider.Create.
-//   - The "no repo at all" branch (issue.RepositoryID == nil) must fall back to
-//     the default WorkDir and fail at Create.
-//   - Both lookup-failure branches must hard-fail (resolve workdir error) WITHOUT
-//     ever calling Create — otherwise we'd risk running the agent in /workspace
+//   - "session with repo" must produce the slug-derived WorkDir and then fail
+//     at provider.Create.
+//   - "session without repo" must fall back to the default WorkDir and fail at
+//     Create — the primary issue's repository is NOT consulted; sessions.repository_id
+//     is the canonical source of truth after the Phase 2 decoupling.
+//   - "repo fetch failure" must hard-fail (resolve workdir error) WITHOUT ever
+//     calling Create — otherwise we'd risk running the agent in /workspace
 //     while the snapshot tar restored files under /home/sandbox/<slug>.
 func TestContinueSession_SessionRepoSlug(t *testing.T) {
 	t.Parallel()
@@ -2771,37 +2821,13 @@ func TestContinueSession_SessionRepoSlug(t *testing.T) {
 			wantErrMatch: "create sandbox",
 		},
 		{
-			name: "session without repo falls back to issue's repo",
+			name: "session without repo uses default workdir",
 			prepSession: func(s *models.Session) {
 				s.RepositoryID = nil
 			},
 			prepDeps:     func(d testDeps) {},
-			wantWorkDir:  slugWorkDir,
-			wantErrMatch: "create sandbox",
-		},
-		{
-			name: "session and issue both without repo use default workdir",
-			prepSession: func(s *models.Session) {
-				s.RepositoryID = nil
-			},
-			prepDeps: func(d testDeps) {
-				issue := d.issues.issue
-				issue.RepositoryID = nil
-				d.issues.issue = issue
-			},
 			wantWorkDir:  defaultWorkDir,
 			wantErrMatch: "create sandbox",
-		},
-		{
-			name: "issue fetch failure hard-fails resume",
-			prepSession: func(s *models.Session) {
-				s.RepositoryID = nil
-			},
-			prepDeps: func(d testDeps) {
-				d.issues.err = errors.New("db flaky")
-			},
-			wantWorkDir:  "",
-			wantErrMatch: "resolve workdir",
 		},
 		{
 			name:        "repo fetch failure hard-fails resume",
@@ -2967,10 +2993,8 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 					return nil, errForcedCreateFailure
 				}
 			case workdirResolveFailure:
-				// Force sessionRepoSlug to fail: drop the session's repo and
-				// make the fallback issue-repo lookup error out.
-				session.RepositoryID = nil
-				d.issues.err = errors.New("db flaky")
+				// Force sessionRepoSlug to fail at the repo lookup.
+				d.repos.err = errors.New("db flaky")
 			}
 
 			ctx := context.Background()
@@ -3104,6 +3128,9 @@ func TestContinueSession_InjectsSandboxProviderIntoContext(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
@@ -3475,6 +3502,9 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 	session.Status = string(models.SessionStatusIdle)
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")

@@ -141,10 +141,15 @@ type Issue struct {
 }
 
 // Session represents an attempt to fix an issue via a coding agent.
+//
+// PrimaryIssueID is derived from the session_issue_links join table (role =
+// 'primary') via the sessionPrimaryIssueIDColumn SELECT expression. It is the
+// canonical way to identify a session's primary issue — there is no persisted
+// primary_issue_id column on sessions. nil means the session has no primary
+// issue linked (zero-issue sessions are a first-class execution path).
 type Session struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
-	IssueID             uuid.UUID               `db:"issue_id" json:"-"`
-	PrimaryIssueID      *uuid.UUID              `db:"-" json:"primary_issue_id,omitempty"`
+	PrimaryIssueID      *uuid.UUID              `db:"primary_issue_id" json:"primary_issue_id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
 	Origin              SessionOrigin           `db:"origin" json:"origin"`
 	InteractionMode     SessionInteractionMode  `db:"interaction_mode" json:"interaction_mode"`
@@ -294,19 +299,8 @@ type SessionTurnIssueSnapshot struct {
 	CreatedAt       time.Time                   `db:"created_at" json:"created_at"`
 }
 
-func (s Session) EffectivePrimaryIssueID() *uuid.UUID {
-	if s.PrimaryIssueID != nil {
-		return s.PrimaryIssueID
-	}
-	if s.IssueID == uuid.Nil {
-		return nil
-	}
-	id := s.IssueID
-	return &id
-}
-
 func (s Session) HasPrimaryIssue() bool {
-	return s.EffectivePrimaryIssueID() != nil
+	return s.PrimaryIssueID != nil
 }
 
 func (s Session) IsInteractive() bool {
@@ -321,38 +315,28 @@ func (s Session) ShouldValidateOnSessionEnd() bool {
 	return s.ValidationPolicy == SessionValidationPolicyOnSessionEnd
 }
 
-func (s Session) MarshalJSON() ([]byte, error) {
-	type alias Session
-	return json.Marshal(struct {
-		alias
-		IssueID *uuid.UUID `json:"issue_id"`
-	}{
-		alias:   alias(s),
-		IssueID: s.EffectivePrimaryIssueID(),
-	})
-}
-
+// UnmarshalJSON accepts both the canonical Phase 2 wire format (primary_issue_id)
+// and the legacy Phase 1 format (issue_id). Old workers in a rolling deploy may
+// still write the legacy field into Redis status streams; reading both keeps
+// PrimaryIssueID populated across the deploy boundary. Safe to remove once all
+// workers have rolled past Phase 2.
 func (s *Session) UnmarshalJSON(data []byte) error {
 	type alias Session
 	aux := struct {
-		alias
-		IssueID *uuid.UUID `json:"issue_id"`
-	}{}
+		*alias
+		LegacyIssueID *uuid.UUID `json:"issue_id"`
+	}{alias: (*alias)(s)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	*s = Session(aux.alias)
-	if aux.IssueID != nil {
-		s.IssueID = *aux.IssueID
-		if s.PrimaryIssueID == nil {
-			s.PrimaryIssueID = aux.IssueID
-		}
+	if s.PrimaryIssueID == nil && aux.LegacyIssueID != nil && *aux.LegacyIssueID != uuid.Nil {
+		s.PrimaryIssueID = aux.LegacyIssueID
 	}
 	return nil
 }
 
 func (s Session) marshalJSONMap() (map[string]any, error) {
-	sessionJSON, err := s.MarshalJSON()
+	sessionJSON, err := json.Marshal(s)
 	if err != nil {
 		return nil, err
 	}

@@ -70,7 +70,7 @@ func withSessionRoute(handler http.HandlerFunc) http.Handler {
 // column, but the actual SQL also returns diff_stats and diff_history before created_at.
 // We redefine the full set here to avoid coupling.
 var sessionColumnsForFiles = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -108,7 +108,7 @@ func setupSessionMock(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, con
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionColumnsForFiles).AddRow(sessionFileTestRow(
-				sessionID, issueID, orgID, "claude_code", "running", "supervised", "standard",
+				sessionID, &issueID, orgID, "claude_code", "running", "supervised", "standard",
 				nil, nil, nil, nil, // complexity_tier through risk_factors
 				containerID, nil, false, &now, nil, nil, // container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage
 				nil, nil, nil, false, // failure fields

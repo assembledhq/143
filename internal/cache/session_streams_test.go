@@ -156,13 +156,14 @@ func TestSessionStreams_PublishStatusSchedulesExpiryForTerminalSessions(t *testi
 	streams := NewSessionStreams(client, zerolog.Nop(), nil)
 	sessionID := uuid.New()
 	now := time.Now()
+	issueID := uuid.New()
 	session := &models.Session{
-		ID:          sessionID,
-		OrgID:       uuid.New(),
-		IssueID:     uuid.New(),
-		AgentType:   models.AgentType("codex"),
-		Status:      string(models.SessionStatusCompleted),
-		CompletedAt: &now,
+		ID:             sessionID,
+		OrgID:          uuid.New(),
+		PrimaryIssueID: &issueID,
+		AgentType:      models.AgentType("codex"),
+		Status:         string(models.SessionStatusCompleted),
+		CompletedAt:    &now,
 	}
 
 	require.NoError(t, streams.PublishStatus(context.Background(), session), "terminal status publish should succeed")
@@ -350,7 +351,7 @@ func TestSessionStreams_DecodeHelpers_NonStringJSONValue(t *testing.T) {
 	sessionID := uuid.New()
 	orgID := uuid.New()
 	issueID := uuid.New()
-	statusPayload := jsonStringer(`{"id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","issue_id":"` + issueID.String() + `","agent_type":"codex","status":"running"}`)
+	statusPayload := jsonStringer(`{"id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","primary_issue_id":"` + issueID.String() + `","agent_type":"codex","status":"running"}`)
 	session, err := decodeStatusEntry(redis.XMessage{Values: map[string]any{"json": statusPayload}})
 	require.NoError(t, err, "decoder should coerce non-string status payloads")
 	require.Equal(t, sessionID, session.ID, "decoder should unmarshal coerced status payloads")
@@ -420,7 +421,8 @@ func TestSessionStreams_StartCleanup_StopsOnCanceledContext(t *testing.T) {
 func TestSessionStreams_DecodeStatusEntryAndInvalidStreamID(t *testing.T) {
 	t.Parallel()
 
-	want := models.Session{ID: uuid.New(), OrgID: uuid.New(), IssueID: uuid.New(), Status: string(models.SessionStatusRunning)}
+	issueID := uuid.New()
+	want := models.Session{ID: uuid.New(), OrgID: uuid.New(), PrimaryIssueID: &issueID, Status: string(models.SessionStatusRunning)}
 	payload, err := json.Marshal(want)
 	require.NoError(t, err, "test payload should marshal")
 

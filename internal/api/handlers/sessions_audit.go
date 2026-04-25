@@ -24,8 +24,8 @@ func sessionAuditSnapshot(session *models.Session, issue *models.Issue, extra ma
 		"autonomy_level":    session.AutonomyLevel,
 		"token_mode":        session.TokenMode,
 	}
-	if issueID := session.EffectivePrimaryIssueID(); issueID != nil {
-		details["issue_id"] = issueID.String()
+	if session.PrimaryIssueID != nil {
+		details["issue_id"] = session.PrimaryIssueID.String()
 	}
 	if !session.CreatedAt.IsZero() {
 		details["created_at"] = session.CreatedAt.UTC().Format(time.RFC3339Nano)

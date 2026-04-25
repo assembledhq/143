@@ -82,7 +82,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 	for _, run := range inFlight {
 		inFlightSummaries = append(inFlightSummaries, RunSummary{
 			ID:        run.ID,
-			IssueID:   run.IssueID,
+			IssueID:   run.PrimaryIssueID,
 			Status:    run.Status,
 			StartedAt: run.StartedAt,
 		})
@@ -96,7 +96,7 @@ func (s *Service) gatherContext(ctx context.Context, orgID uuid.UUID, repo *mode
 	for _, run := range recentRuns {
 		outcomes = append(outcomes, OutcomeSummary{
 			RunID:              run.ID,
-			IssueID:            run.IssueID,
+			IssueID:            run.PrimaryIssueID,
 			Status:             run.Status,
 			ConfidenceScore:    run.ConfidenceScore,
 			FailureCategory:    run.FailureCategory,
@@ -415,17 +415,17 @@ func (s *Service) buildProjectSummary(ctx context.Context, orgID uuid.UUID, proj
 	}
 
 	summary := ProjectSummary{
-		ID:             project.ID.String(),
-		Title:          project.Title,
-		Goal:           project.Goal,
-		Priority:       project.Priority,
-		Status:         string(project.Status),
-		ExecutionMode:  string(project.ExecutionMode),
-		MaxConcurrent:  project.MaxConcurrent,
-		TotalTasks:     project.TotalTasks,
-		CompletedTasks: project.CompletedTasks,
-		FailedTasks:    project.FailedTasks,
-		LessonsLearned: project.LessonsLearned,
+		ID:              project.ID.String(),
+		Title:           project.Title,
+		Goal:            project.Goal,
+		Priority:        project.Priority,
+		Status:          string(project.Status),
+		ExecutionMode:   string(project.ExecutionMode),
+		MaxConcurrent:   project.MaxConcurrent,
+		TotalTasks:      project.TotalTasks,
+		CompletedTasks:  project.CompletedTasks,
+		FailedTasks:     project.FailedTasks,
+		LessonsLearned:  project.LessonsLearned,
 		ApproachHistory: project.ApproachHistory,
 	}
 
@@ -488,4 +488,3 @@ func (s *Service) buildProjectSummary(ctx context.Context, orgID uuid.UUID, proj
 
 	return summary, nil
 }
-

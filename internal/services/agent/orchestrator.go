@@ -425,9 +425,23 @@ func canonicalReferences(message *models.SessionMessage) []models.SessionInputRe
 	return references
 }
 
+func isLegacySyntheticManualSession(session *models.Session, issue *models.Issue) bool {
+	if session == nil || issue == nil || issue.Source != models.IssueSourceManual {
+		return false
+	}
+	if session.ProjectTaskID != nil || session.AutomationRunID != nil || session.ParentSessionID != nil {
+		return false
+	}
+	return session.Origin == "" || session.Origin == models.SessionOriginIssueTrigger
+}
+
 func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Issue) {
 	if session == nil {
 		return
+	}
+	legacyManual := isLegacySyntheticManualSession(session, issue)
+	if legacyManual {
+		session.Origin = models.SessionOriginManual
 	}
 	if session.Origin == "" {
 		switch {
@@ -445,23 +459,23 @@ func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Iss
 			session.Origin = models.SessionOriginIssueTrigger
 		}
 	}
-	if session.InteractionMode == "" {
+	if legacyManual && (session.InteractionMode == "" || session.InteractionMode == models.SessionInteractionModeSingleRun) {
+		session.InteractionMode = models.SessionInteractionModeInteractive
+	} else if session.InteractionMode == "" {
 		if session.Origin == models.SessionOriginManual {
 			session.InteractionMode = models.SessionInteractionModeInteractive
 		} else {
 			session.InteractionMode = models.SessionInteractionModeSingleRun
 		}
 	}
-	if session.ValidationPolicy == "" {
+	if legacyManual && (session.ValidationPolicy == "" || session.ValidationPolicy == models.SessionValidationPolicyOnTurnComplete) {
+		session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	} else if session.ValidationPolicy == "" {
 		if session.Origin == models.SessionOriginManual {
 			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
 		} else {
 			session.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 		}
-	}
-	if session.PrimaryIssueID == nil && session.IssueID != uuid.Nil {
-		id := session.IssueID
-		session.PrimaryIssueID = &id
 	}
 }
 
@@ -627,20 +641,42 @@ func issueSnapshotEntriesFromIssue(issue *models.Issue) []models.SessionIssueSna
 	return []models.SessionIssueSnapshotEntry{entry}
 }
 
+// resolvePromptSeed resolves the *models.Issue used to seed prompt construction.
+//
+// Priority:
+//  1. A snapshot- or synthetic-derived seed produced by promptSeedForSession.
+//     For a session with a primary linked issue, this comes straight from the
+//     per-turn snapshot. For a manual session, it is an in-memory placeholder
+//     carrying the session title/message — not a persisted issue row.
+//  2. If the synthetic seed carries no identifying context and the session has
+//     a primary issue, fetch that issue from the DB as a defensive fallback for
+//     edge cases where snapshot hydration returned a placeholder.
+//
+// The returned []SessionIssueSnapshotEntry is the linked-issue context that
+// should flow into the agent prompt (primary first, then related).
 func (o *Orchestrator) resolvePromptSeed(ctx context.Context, session *models.Session, latestMessage *models.SessionMessage, snapshot *models.SessionTurnIssueSnapshot) (*models.Issue, []models.SessionIssueSnapshotEntry, error) {
 	issue, linkedIssues := o.promptSeedForSession(session, latestMessage, snapshot)
-	if issue != nil && (issue.ID != uuid.Nil || issue.Source == models.IssueSourceManual) {
+	if issue != nil && (issue.ID != uuid.Nil || session.Origin == models.SessionOriginManual) {
 		hydrateSessionPolicyForExecution(session, issue)
 		return issue, linkedIssues, nil
 	}
 
-	primaryIssueID := session.EffectivePrimaryIssueID()
-	if primaryIssueID == nil || o.issues == nil {
+	if session.PrimaryIssueID == nil || o.issues == nil {
 		hydrateSessionPolicyForExecution(session, issue)
 		return issue, linkedIssues, nil
 	}
 
-	fallbackIssue, err := o.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+	// Defensive fallback: after phase 2 of the session/issue decoupling,
+	// createIssueSnapshotForTurn should have populated a snapshot with the
+	// primary issue hydrated from session_issue_links. If we get here, the
+	// snapshot was empty or missing — log so ops can detect silent snapshot
+	// regressions rather than having them masked by a live join-table read.
+	o.logger.Warn().
+		Str("session_id", session.ID.String()).
+		Str("org_id", session.OrgID.String()).
+		Str("primary_issue_id", session.PrimaryIssueID.String()).
+		Msg("resolvePromptSeed falling back to live issue lookup; expected per-turn snapshot")
+	fallbackIssue, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetch primary issue: %w", err)
 	}
@@ -712,23 +748,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return fmt.Errorf("resolve prompt seed: %w", err)
 	}
 	if issue != nil && issue.ID != uuid.Nil {
-		run.IssueID = issue.ID
 		run.PrimaryIssueID = &issue.ID
 	}
 	hydrateSessionPolicyForExecution(run, issue)
 
-	// 4. Resolve which repository to clone.
-	// Priority: session.RepositoryID → issue.RepositoryID (backwards compat).
-	var resolvedRepoID *uuid.UUID
-	if run.RepositoryID != nil {
-		resolvedRepoID = run.RepositoryID
-	} else if issue != nil && issue.RepositoryID != nil {
-		resolvedRepoID = issue.RepositoryID
-	}
-
+	// 4. Resolve which repository to clone. sessions.repository_id is the
+	// canonical source of truth — session creation copies issue.repository_id
+	// into it up front, so execution never needs to re-derive repo from the
+	// primary issue.
 	var repoURL, branch, token, repoFullName string
-	if resolvedRepoID != nil {
-		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
+	if run.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, run.OrgID, *run.RepositoryID)
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("fetch repository: %s", err))
 			return fmt.Errorf("fetch repository: %w", err)
@@ -781,13 +811,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}(),
 		RepoURL:    repoURL,
 		RepoBranch: branch,
-		References: func() []models.SessionInputReference {
-			refs := canonicalReferences(latestUserMessage(messages))
-			if len(refs) > 0 {
-				return refs
-			}
-			return manualSessionReferences(issue)
-		}(),
+		References: resolvedInputReferences(latestUserMessage(messages), issue),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -1209,12 +1233,12 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
 		if outcome != "" {
-			if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
-				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, *primaryIssueID, outcome); err != nil {
+			if run.PrimaryIssueID != nil {
+				if err := o.decisionLog.UpdateOutcome(ctx, run.OrgID, *run.PMPlanID, *run.PrimaryIssueID, outcome); err != nil {
 					o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update PM decision log outcome")
 				}
 			} else {
-				o.logger.Debug().Str("run_id", run.ID.String()).Msg("skipping PM decision log outcome update because run has no issue_id")
+				o.logger.Debug().Str("run_id", run.ID.String()).Msg("skipping PM decision log outcome update because run has no primary issue")
 			}
 		}
 	}
@@ -1340,7 +1364,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	promptIssue, linkedIssues := o.promptSeedForSession(session, latestMsg, issueSnapshot)
 	if promptIssue != nil && promptIssue.ID != uuid.Nil {
-		session.IssueID = promptIssue.ID
 		session.PrimaryIssueID = &promptIssue.ID
 	}
 	hydrateSessionPolicyForExecution(session, promptIssue)
@@ -1653,13 +1676,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
 			UserMessage:  latestMsg.Content,
-			References: func() []models.SessionInputReference {
-				refs := canonicalReferences(latestMsg)
-				if len(refs) > 0 {
-					return refs
-				}
-				return manualSessionReferences(&issue)
-			}(),
+			References:   resolvedInputReferences(latestMsg, &issue),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {
 					return ""
@@ -1789,8 +1806,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 // full name (for memory lookup). Handles sessions with or without a repository.
 func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox) (models.Issue, string, error) {
 	var issue models.Issue
-	if primaryIssueID := session.EffectivePrimaryIssueID(); primaryIssueID != nil {
-		fetched, err := o.issues.GetByID(ctx, session.OrgID, *primaryIssueID)
+	if session.PrimaryIssueID != nil {
+		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
 		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("fetch issue: %w", err)
 		}
@@ -1803,14 +1820,13 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
-	// Clone repo if the session has one.
+	// Clone repo if the session has one. sessions.repository_id is the
+	// canonical source of truth — session creation copies issue.repository_id
+	// into it up front, so execution never needs to re-derive repo from the
+	// primary issue.
 	var repoFullName string
-	repoID := session.RepositoryID
-	if repoID == nil {
-		repoID = issue.RepositoryID
-	}
-	if repoID != nil {
-		repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
+	if session.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
 		if err != nil {
 			return models.Issue{}, "", fmt.Errorf("fetch repository: %w", err)
 		}
@@ -1855,20 +1871,10 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 // failure is returned as an error so the caller can surface it rather than
 // silently diverging.
 func (o *Orchestrator) sessionRepoSlug(ctx context.Context, session *models.Session) (string, error) {
-	repoID := session.RepositoryID
-	if repoID == nil && session.IssueID != uuid.Nil {
-		issue, err := o.issues.GetByID(ctx, session.OrgID, session.IssueID)
-		if err != nil {
-			return "", fmt.Errorf("fetch issue for session repo lookup: %w", err)
-		}
-		if issue.RepositoryID == nil {
-			return "", nil
-		}
-		repoID = issue.RepositoryID
-	} else if repoID == nil {
+	if session.RepositoryID == nil {
 		return "", nil
 	}
-	repo, err := o.repositories.GetByID(ctx, session.OrgID, *repoID)
+	repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
 	if err != nil {
 		return "", fmt.Errorf("fetch repo for session workdir: %w", err)
 	}
@@ -2000,6 +2006,14 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 		references = append(references, reference)
 	}
 	return references
+}
+
+func resolvedInputReferences(message *models.SessionMessage, issue *models.Issue) []models.SessionInputReference {
+	references := canonicalReferences(message)
+	if len(references) > 0 {
+		return references
+	}
+	return manualSessionReferences(issue)
 }
 
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {

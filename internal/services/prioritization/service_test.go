@@ -415,6 +415,54 @@ func TestCheckAutoTrigger(t *testing.T) {
 	}
 }
 
+func TestCheckAutoTrigger_PropagatesIssueRepositoryToSession(t *testing.T) {
+	t.Parallel()
+
+	// After session/issue decoupling, the orchestrator no longer falls back to
+	// issue.RepositoryID when cloning, so CheckAutoTrigger must copy the
+	// issue's repository onto the created session at insert time.
+	orgID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+
+	runs := &fakeSessionStore{
+		countRunningByOrgFn: func(ctx context.Context, gotOrgID uuid.UUID) (int, error) {
+			return 0, nil
+		},
+		createFn: func(ctx context.Context, run *models.Session) error {
+			run.ID = uuid.New()
+			return nil
+		},
+	}
+	jobs := &fakeJobStore{}
+	orgs := &fakeOrgStore{
+		getByIDFn: func(ctx context.Context, id uuid.UUID) (models.Organization, error) {
+			return models.Organization{
+				ID:       id,
+				Settings: json.RawMessage(`{"autonomy_level":"auto","execution_aggressiveness":3,"default_agent_type":"codex"}`),
+			}, nil
+		},
+	}
+
+	svc := NewService(&fakeIssueStore{}, &fakePriorityStore{}, &fakeComplexityStore{}, runs, orgs, jobs, nil, zerolog.Nop())
+
+	err := svc.CheckAutoTrigger(
+		context.Background(),
+		orgID,
+		&models.PriorityScore{Score: 95},
+		&models.ComplexityEstimate{Tier: 2},
+		&models.Issue{ID: issueID, Severity: "critical", RepositoryID: &repoID},
+	)
+	require.NoError(t, err, "CheckAutoTrigger should not return an error when gates pass")
+	require.Len(t, runs.createdRuns, 1, "CheckAutoTrigger should create exactly one session")
+
+	created := runs.createdRuns[0]
+	require.NotNil(t, created.PrimaryIssueID, "created session should record the primary issue id")
+	require.Equal(t, issueID, *created.PrimaryIssueID, "created session should reference the auto-triggered issue")
+	require.NotNil(t, created.RepositoryID, "created session must inherit the issue's repository so the orchestrator can clone")
+	require.Equal(t, repoID, *created.RepositoryID, "created session should copy issue.RepositoryID, not invent a new one")
+}
+
 func TestScoringAndHelpers(t *testing.T) {
 	t.Parallel()
 
