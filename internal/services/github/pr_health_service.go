@@ -212,6 +212,20 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 	summary.NeedsAgentAction = summary.HasConflicts || summary.FailingTestCount > 0
 
+	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns)
+	if mergeStateIndeterminate || testsIndeterminate {
+		prior, priorErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+		if priorErr == nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, prior) {
+			s.logger.Debug().
+				Str("pull_request_id", pullRequestID.String()).
+				Str("head_sha", details.Head.SHA).
+				Bool("merge_state_indeterminate", mergeStateIndeterminate).
+				Bool("tests_indeterminate", testsIndeterminate).
+				Msg("skipping pull request health snapshot write; GitHub data still indeterminate on same head SHA")
+			return nil
+		}
+	}
+
 	current, err := s.pullRequests.UpsertHealthSummary(ctx, orgID, pullRequestID, details.Head.SHA, details.Base.SHA, summary, nil)
 	if err != nil {
 		return err
