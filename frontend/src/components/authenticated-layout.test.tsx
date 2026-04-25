@@ -146,7 +146,7 @@ describe("AuthenticatedLayout", () => {
     expect(await screen.findByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
   });
 
-  it("hides audit log from non-admin users", async () => {
+  it("hides admin-only settings entries from non-admin users", async () => {
     useAuthMock.mockReturnValue({
       user: memberUser,
       isLoading: false,
@@ -165,9 +165,17 @@ describe("AuthenticatedLayout", () => {
     // Expand the settings section
     await user.click(screen.getByRole("button", { name: /Settings/ }));
 
-    expect(screen.getByRole("link", { name: "General" })).toBeInTheDocument();
+    // Members can see Team and the read-only pages (Integrations, Coding agents, Evals).
     expect(screen.getByRole("link", { name: "Team" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Integrations" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Coding agents" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Evals" })).toBeInTheDocument();
+
+    // Admin-only entries are hidden.
+    expect(screen.queryByRole("link", { name: "General" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "LLM" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Usage" })).not.toBeInTheDocument();
   });
 
   it("hides Autopilot settings from non-admin users", async () => {
