@@ -436,13 +436,14 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText(/2 log entries/)).toBeInTheDocument();
   });
 
-  it('shows empty message state when no messages', async () => {
+  it('shows loading skeleton when no messages and hides files-changed pill', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
       completed_at: undefined,
       current_turn: 1,
       sandbox_state: 'snapshotted',
+      diff_stats: { added: 2, removed: 5, files_changed: 2 },
     };
 
     server.use(
@@ -463,9 +464,79 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id={idleSession.id} />);
-    expect(await screen.findByText('No activity yet')).toBeInTheDocument();
-    expect(screen.getByText('The session is processing its initial turn.')).toBeInTheDocument();
+    expect(await screen.findByTestId('session-timeline-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('No activity yet')).not.toBeInTheDocument();
+    expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
+  });
+
+  it('shows loading skeleton for a running session before any timeline entries arrive', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        return HttpResponse.json({ data: [] as SessionTimelineEntry[], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get('/api/v1/issues/:id', ({ params }) => {
+        const issue = mockIssues.find((i) => i.id === params.id);
+        if (!issue) {
+          return HttpResponse.json(
+            { error: { code: 'NOT_FOUND', message: 'Issue not found' } },
+            { status: 404 },
+          );
+        }
+        return HttpResponse.json({ data: { ...issue, description: '' } } satisfies SingleResponse<typeof issue>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={runningSession.id} />);
+    expect(await screen.findByTestId('session-timeline-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    expect(screen.queryByText(/files? changed/)).not.toBeInTheDocument();
+  });
+
+  it('does not shimmer forever for a terminal session with an empty timeline', async () => {
+    const completedSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: completedSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/timeline', () => {
+        return HttpResponse.json({ data: [] as SessionTimelineEntry[], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get('/api/v1/issues/:id', ({ params }) => {
+        const issue = mockIssues.find((i) => i.id === params.id);
+        if (!issue) {
+          return HttpResponse.json(
+            { error: { code: 'NOT_FOUND', message: 'Issue not found' } },
+            { status: 404 },
+          );
+        }
+        return HttpResponse.json({ data: { ...issue, description: '' } } satisfies SingleResponse<typeof issue>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={completedSession.id} />);
+    // Wait for the timeline query to settle by looking for the diff-summary
+    // pill, which lives inside ChatTimeline (only rendered once we're past
+    // the loading state).
+    expect(await screen.findByText(/files? changed/)).toBeInTheDocument();
+    expect(screen.queryByTestId('session-timeline-skeleton')).not.toBeInTheDocument();
   });
 
   it('restores the saved scroll position when reopening an existing session', async () => {
