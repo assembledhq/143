@@ -234,7 +234,7 @@ export default function AccountPage() {
                         <SelectValue placeholder="Default" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__default__">Product default</SelectItem>
+                        <SelectItem value="__default__">Default</SelectItem>
                         {config.options.map((option) => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
@@ -245,7 +245,7 @@ export default function AccountPage() {
                   </div>
                 );
               })}
-              <p className="text-sm text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Used as the default for supported coding agents in the session composer. You can still override it per prompt.
               </p>
             </div>
