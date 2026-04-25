@@ -290,6 +290,22 @@ describe('SessionSidebar', () => {
     expect(screen.getByTitle('Merged')).toBeInTheDocument();
   });
 
+  it('shows PR badge with "Closed" status even when CI previously passed', async () => {
+    serveSessions([
+      makeSession({
+        id: 's1',
+        status: 'pr_created',
+        result_summary: 'Closed PR session',
+        pr_summary: { status: 'closed', ci_status: 'success', number: 5, url: '#' },
+      }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Closed PR session');
+    expect(screen.getByTitle('Closed')).toBeInTheDocument();
+    expect(screen.queryByTitle('CI passed')).not.toBeInTheDocument();
+  });
+
   it('shows PR badge with "CI passed" status', async () => {
     serveSessions([
       makeSession({

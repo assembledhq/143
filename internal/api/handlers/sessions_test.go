@@ -145,7 +145,7 @@ var sessionColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
-	"project_task_id", "model_override", "triggered_by_user_id",
+	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
@@ -178,18 +178,20 @@ func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
 }
 
 const (
-	legacySessionColumnsLen         = 57
-	legacyRuntimeInsertIndex        = 41
-	legacySessionBaseCommitSHAIndex = 43
-	legacySessionDiffCollectedIndex = 53
-	legacySessionLatestDiffIndex    = 54
+	legacySessionColumnsLen         = 58
+	legacyRuntimeInsertIndex        = 42
+	legacySessionReasoningIndex     = 35
+	legacySessionBaseCommitSHAIndex = 44
+	legacySessionDiffCollectedIndex = 54
+	legacySessionLatestDiffIndex    = 55
 )
 
 const (
 	sessionWorkerNodeIndex      = 15
-	sessionBaseCommitSHAIndex   = 61
-	sessionDiffCollectedAtIndex = 71
-	sessionLatestDiffIndex      = 72
+	sessionReasoningIndex       = 35
+	sessionBaseCommitSHAIndex   = 62
+	sessionDiffCollectedAtIndex = 72
+	sessionLatestDiffIndex      = 73
 )
 
 var sessionPullRequestColumns = []string{
@@ -275,28 +277,34 @@ func insertSessionValue(values []interface{}, idx int, value interface{}) []inte
 	return row
 }
 
-func sessionRowWithCurrentOptionalDefaults(values []interface{}, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
+func sessionRowWithCurrentOptionalDefaults(values []interface{}, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
 	row := values
 	if includeWorkerNode {
 		row = insertSessionValue(row, sessionWorkerNodeIndex, nil)
 	}
+	if includeReasoning {
+		row = insertSessionValue(row, sessionReasoningIndex, nil)
+	}
 	if includeDiffMetadata {
-		row = insertSessionValue(row, sessionDiffCollectedAtIndex, nil)
-		row = insertSessionValue(row, sessionDiffCollectedAtIndex, nil)
 		row = insertSessionValue(row, sessionBaseCommitSHAIndex, nil)
+		row = insertSessionValue(row, sessionDiffCollectedAtIndex, nil)
+		row = insertSessionValue(row, sessionLatestDiffIndex, nil)
 	}
 	return row
 }
 
-func sessionRowWithLegacyOptionalDefaults(values []interface{}, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
+func sessionRowWithLegacyOptionalDefaults(values []interface{}, includeReasoning bool, includeWorkerNode bool, includeDiffMetadata bool) []interface{} {
 	row := values
 	if includeWorkerNode {
 		row = insertSessionValue(row, sessionWorkerNodeIndex, nil)
 	}
+	if includeReasoning {
+		row = insertSessionValue(row, legacySessionReasoningIndex, nil)
+	}
 	if includeDiffMetadata {
-		row = insertSessionValue(row, legacySessionDiffCollectedIndex, nil)
-		row = insertSessionValue(row, legacySessionDiffCollectedIndex, nil)
 		row = insertSessionValue(row, legacySessionBaseCommitSHAIndex, nil)
+		row = insertSessionValue(row, legacySessionDiffCollectedIndex, nil)
+		row = insertSessionValue(row, legacySessionLatestDiffIndex, nil)
 	}
 	return row
 }
@@ -332,6 +340,15 @@ func expandLegacySessionRow(values []interface{}) []interface{} {
 	return row
 }
 
+func sessionRowLikelyOmitsWorkerNodeID(values []interface{}) bool {
+	if len(values) <= sessionWorkerNodeIndex {
+		return false
+	}
+
+	_, ok := values[sessionWorkerNodeIndex].(bool)
+	return ok
+}
+
 func sessionTestRow(values ...interface{}) []interface{} {
 	if sessionRowNeedsPolicyDefaults(values) {
 		values = normalizeSessionRowAgentType(values, 3)
@@ -339,19 +356,39 @@ func sessionTestRow(values ...interface{}) []interface{} {
 		case len(sessionColumns) - 3:
 			return sessionTestRowWithPolicyDefaults(values)
 		case len(sessionColumns) - 4:
-			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false)
+			if sessionRowLikelyOmitsWorkerNodeID(values) {
+				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, false)
+			}
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, false)
+		case len(sessionColumns) - 5:
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, false)
 		case len(sessionColumns) - 6:
-			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true)
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, false, true)
 		case len(sessionColumns) - 7:
-			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true)
+			if sessionRowLikelyOmitsWorkerNodeID(values) {
+				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, true)
+			}
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, true)
+		case len(sessionColumns) - 8:
+			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true)
 		case legacySessionColumnsLen - 3:
 			return expandLegacySessionRow(sessionTestRowWithPolicyDefaults(values))
 		case legacySessionColumnsLen - 4:
-			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false))
+			if sessionRowLikelyOmitsWorkerNodeID(values) {
+				return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, false))
+			}
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, false))
+		case legacySessionColumnsLen - 5:
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, false))
 		case legacySessionColumnsLen - 6:
-			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true))
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, false, true))
 		case legacySessionColumnsLen - 7:
-			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true))
+			if sessionRowLikelyOmitsWorkerNodeID(values) {
+				return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, true))
+			}
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, true))
+		case legacySessionColumnsLen - 8:
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true))
 		}
 	}
 	values = normalizeSessionRowAgentType(values, 6)
@@ -362,29 +399,53 @@ func sessionTestRow(values ...interface{}) []interface{} {
 	case legacySessionColumnsLen:
 		return expandLegacySessionRow(values)
 	case legacySessionColumnsLen - 1:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false))
+		if sessionRowLikelyOmitsWorkerNodeID(values) {
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, false))
+		}
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, false))
+	case legacySessionColumnsLen - 2:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, false))
 	case legacySessionColumnsLen - 4:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true))
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, false, true))
 	case legacySessionColumnsLen - 3:
-		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true))
+		if sessionRowLikelyOmitsWorkerNodeID(values) {
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, true))
+		}
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true))
+	case legacySessionColumnsLen - 5:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true))
 	case len(sessionColumns) - 1:
-		return sessionRowWithCurrentOptionalDefaults(values, true, false)
+		if sessionRowLikelyOmitsWorkerNodeID(values) {
+			return sessionRowWithCurrentOptionalDefaults(values, false, true, false)
+		}
+		return sessionRowWithCurrentOptionalDefaults(values, true, false, false)
+	case len(sessionColumns) - 2:
+		return sessionRowWithCurrentOptionalDefaults(values, true, true, false)
 	case len(sessionColumns) - 4:
-		return sessionRowWithCurrentOptionalDefaults(values, true, true)
+		return sessionRowWithCurrentOptionalDefaults(values, false, false, true)
 	case len(sessionColumns) - 3:
-		return sessionRowWithCurrentOptionalDefaults(values, false, true)
+		if sessionRowLikelyOmitsWorkerNodeID(values) {
+			return sessionRowWithCurrentOptionalDefaults(values, false, true, true)
+		}
+		return sessionRowWithCurrentOptionalDefaults(values, true, false, true)
+	case len(sessionColumns) - 5:
+		return sessionRowWithCurrentOptionalDefaults(values, true, true, true)
 	default:
 		panic(fmt.Sprintf(
-			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
+			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
 			len(values),
 			len(sessionColumns),
 			len(sessionColumns)-1,
+			len(sessionColumns)-2,
 			len(sessionColumns)-3,
 			len(sessionColumns)-4,
+			len(sessionColumns)-5,
 			legacySessionColumnsLen,
 			legacySessionColumnsLen-1,
+			legacySessionColumnsLen-2,
 			legacySessionColumnsLen-3,
 			legacySessionColumnsLen-4,
+			legacySessionColumnsLen-5,
 		))
 	}
 }
@@ -404,7 +465,7 @@ func sessionAnyArgs(count int) []interface{} {
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(23)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectCommit()
 }
@@ -412,7 +473,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(22)...).
+		WithArgs(sessionAnyArgs(23)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
@@ -2990,6 +3051,115 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_TOKEN_MODE",
+		},
+		{
+			name: "accepts xhigh reasoning effort for supported agent type",
+			body: `{"message":"Fix bug","agent_type":"codex","reasoning_effort":"xhigh"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "codex",
+		},
+		{
+			name: "accepts max reasoning effort for Claude Code",
+			body: `{"message":"Fix bug","agent_type":"claude_code","reasoning_effort":"max"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				runID := uuid.New()
+				messageID := int64(1)
+				jobID := uuid.New()
+
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+
+				expectManualSessionCreate(mock, runID, now)
+
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+
+				mock.ExpectQuery("SELECT count").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+				mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
+					).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "claude_code",
+		},
+		{
+			name: "returns bad request for invalid reasoning effort",
+			body: `{"message":"Fix bug","agent_type":"claude_code","reasoning_effort":"turbo"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REASONING_EFFORT",
+		},
+		{
+			name: "returns bad request when reasoning effort level is unsupported for agent type",
+			body: `{"message":"Fix bug","agent_type":"codex","reasoning_effort":"max"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REASONING_EFFORT",
+		},
+		{
+			name: "returns bad request when reasoning effort is unsupported for agent type",
+			body: `{"message":"Fix bug","agent_type":"gemini_cli","reasoning_effort":"high"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_REASONING_EFFORT",
 		},
 		{
 			name:         "returns bad request for invalid branch characters",

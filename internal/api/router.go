@@ -532,6 +532,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// OrgContext (which 403s on uuid.Nil) or RequireRole (which 403s on
 			// empty active role).
 			r.Get("/api/v1/auth/me", authHandler.Me)
+			r.Patch("/api/v1/auth/me/settings", authHandler.UpdateSettings)
 			// Memberships is zero-membership-safe for the same reason /auth/me
 			// is: a user whose only org was just revoked still needs to see the
 			// empty list so the switcher can render an invite-me state rather
@@ -546,6 +547,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// token the server looks up, so tightening beyond the default 20 rps
 			// IP limit forces any enumeration attempt into detectable territory.
 			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/claim", authHandler.ClaimInvitation)
+
+			// In-app pending-invitation surface (org switcher dot + dropdown
+			// section). Sits alongside /invitations/claim outside the
+			// OrgContext block because invitations span organizations and
+			// matter most to users with no usable active org (e.g. a fresh
+			// signup or someone removed from their last org). The mutation
+			// routes share the claim endpoint's 10/min ClaimRateLimit since
+			// they are equivalent brute-force surfaces — the URL names a
+			// specific invitation row that the server validates against the
+			// session's email/github_login.
+			r.Get("/api/v1/invitations/pending", authHandler.ListPendingInvitations)
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/accept", authHandler.AcceptInvitationByID)
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/decline", authHandler.DeclineInvitationByID)
 
 			// Creating a new org is zero-membership-safe for the same reason the
 			// other routes in this block are: a user whose only membership was

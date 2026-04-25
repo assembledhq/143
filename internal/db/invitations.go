@@ -60,6 +60,78 @@ func (s *InvitationStore) GetByToken(ctx context.Context, token string) (models.
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Invitation])
 }
 
+// GetByID looks up an invitation by id regardless of status. The caller is
+// responsible for any status / expiry / recipient-match checks; this is the
+// primary entry point for the invitee-side accept and decline routes, which
+// authenticate the *user* via the session and then re-validate the invite
+// against that user's email and github_login.
+//
+// lint:allow-no-orgid reason="invitation id is globally unique; org context comes from the row itself"
+func (s *InvitationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Invitation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM invitations WHERE id = @id`, invitationSelectColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id})
+	if err != nil {
+		return models.Invitation{}, fmt.Errorf("query invitation by id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Invitation])
+}
+
+// ListPendingForUser returns the active invitations addressed to the given
+// user — those where the invitation's email or github_username matches and
+// the user is not already a member of the target org. Used by the in-app
+// pending-invitations surface (org switcher dot + dropdown section).
+//
+// Match semantics intentionally mirror validateInvitationWithStore in the
+// auth handler: case-insensitive equality on either identifier, with empty
+// inputs treated as no-match (an unauthenticated identifier cannot satisfy
+// either branch). Drift between this query and the claim-time check would
+// produce the worst-possible UX: an invitation visible in the dropdown that
+// rejects on accept with INVITE_MISMATCH. Any change here needs a matching
+// edit there.
+//
+// Dedupe by org: an admin can technically issue both an email-invite and a
+// github-invite that resolve to the same person (the partial unique indexes
+// only constrain duplicates of the *same* identifier, not cross-identifier
+// duplicates for the same target). DISTINCT ON folds those down to one row
+// per org so the UI doesn't show two "Acme [Accept]" rows for one human; the
+// outer ORDER BY restores the most-recent-first display order.
+//
+// lint:allow-no-orgid reason="user-scoped query spanning all orgs the user is invited to"
+func (s *InvitationStore) ListPendingForUser(ctx context.Context, userID uuid.UUID, email, githubLogin string) ([]models.PendingInvitationForUserRow, error) {
+	query := `
+		SELECT id, org_id, org_name, role, invited_by, inviter_name, expires_at, created_at
+		FROM (
+			SELECT DISTINCT ON (i.org_id)
+				i.id, i.org_id, o.name AS org_name, i.role,
+				i.invited_by, COALESCE(u.name, '') AS inviter_name,
+				i.expires_at, i.created_at
+			FROM invitations i
+			JOIN organizations o ON o.id = i.org_id
+			LEFT JOIN users u ON u.id = i.invited_by
+			WHERE i.status = 'pending'
+			  AND i.expires_at > now()
+			  AND (
+			      (i.email IS NOT NULL          AND @email        <> '' AND lower(i.email)          = lower(@email))
+			   OR (i.github_username IS NOT NULL AND @github_login <> '' AND lower(i.github_username) = lower(@github_login))
+			  )
+			  AND NOT EXISTS (
+			      SELECT 1 FROM organization_memberships m
+			      WHERE m.user_id = @user_id AND m.org_id = i.org_id
+			  )
+			ORDER BY i.org_id, i.created_at DESC
+		) deduped
+		ORDER BY created_at DESC`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"user_id":      userID,
+		"email":        email,
+		"github_login": githubLogin,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query pending invitations for user: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PendingInvitationForUserRow])
+}
+
 // ListPendingByOrg returns all pending invitations for the org.
 func (s *InvitationStore) ListPendingByOrg(ctx context.Context, orgID uuid.UUID) ([]models.Invitation, error) {
 	query := fmt.Sprintf(`SELECT %s FROM invitations WHERE org_id = @org_id AND status = 'pending' ORDER BY created_at DESC`, invitationSelectColumns)

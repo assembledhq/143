@@ -40,6 +40,15 @@ import {
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
+import { useAuth } from "@/hooks/use-auth";
+import {
+  type CodingAgentReasoningEffort,
+  getDefaultCodingAgentReasoningForAgent,
+  getCodingAgentReasoningOptions,
+  isCodingAgentReasoningEffortSupported,
+  supportsReasoningEffort,
+  toCodingAgentReasoningEffort,
+} from "@/lib/coding-agent-reasoning";
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -74,6 +83,7 @@ type MentionPickerPosition = {
 };
 
 export function ManualSessionCreatePageContent() {
+  const { user } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
@@ -98,6 +108,7 @@ export function ManualSessionCreatePageContent() {
   const [isDictating, setIsDictating] = useState(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState("");
+  const [reasoningOverride, setReasoningOverride] = useState<CodingAgentReasoningEffort>("");
   const [userSelectedRepoId, setUserSelectedRepoId] = useState<string | null>(repoId ?? null);
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -194,6 +205,12 @@ export function ManualSessionCreatePageContent() {
 
   // Determine which agent type would be used and whether credentials exist.
   const effectiveAgentType = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
+  const defaultReasoningEffort = getDefaultCodingAgentReasoningForAgent(user?.settings, effectiveAgentType);
+  const effectiveReasoningOverride = isCodingAgentReasoningEffortSupported(effectiveAgentType, reasoningOverride) ? reasoningOverride : "";
+  const effectiveReasoningEffort = effectiveReasoningOverride || defaultReasoningEffort;
+  const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
+  const submittedReasoningEffort = showReasoningSelector ? effectiveReasoningEffort : "";
+  const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
   const requiredProvider = AGENTS_BY_KEY[effectiveAgentType]?.providerKey ?? "";
   const hasAgentCredentials =
     resolvedCredentials.some((c) => c.provider === requiredProvider && c.source !== "none")
@@ -205,6 +222,7 @@ export function ManualSessionCreatePageContent() {
         message: message.trim(),
         images: attachments,
         references,
+        ...(submittedReasoningEffort ? { reasoning_effort: submittedReasoningEffort } : {}),
         ...(selectedModel ? { model: selectedModel, agent_type: agentTypeForModel(selectedModel) } : {}),
         ...(selectedRepoId ? { repository_id: selectedRepoId } : {}),
         ...(selectedBranch ? { branch: selectedBranch } : {}),
@@ -869,6 +887,24 @@ export function ManualSessionCreatePageContent() {
                   ))}
                 </SelectContent>
               </Select>
+
+              {showReasoningSelector ? (
+                <Select value={effectiveReasoningOverride || "__default__"} onValueChange={(v) => setReasoningOverride(v === "__default__" ? "" : toCodingAgentReasoningEffort(v))}>
+                  <SelectTrigger className="h-8 w-auto gap-1.5 border-none bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:text-foreground focus:ring-0" aria-label="Reasoning override">
+                    <SelectValue placeholder="Reasoning" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">
+                      {defaultReasoningEffort ? `Default (${defaultReasoningEffort})` : "Default"}
+                    </SelectItem>
+                    {reasoningOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
 
               <div className="ml-auto flex items-center gap-1">
                 <Button

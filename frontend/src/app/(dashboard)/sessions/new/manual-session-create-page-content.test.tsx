@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { ManualSessionCreatePageContent } from "./manual-session-create-page-content";
 
 const mocks = vi.hoisted(() => ({
@@ -39,6 +39,19 @@ const mocks = vi.hoisted(() => ({
     file_name: "uploaded-shot.png",
     content_type: "image/png",
   }),
+  resolvedCredsMock: vi.fn().mockResolvedValue({ data: [] }),
+  codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
+  authMeMock: vi.fn().mockResolvedValue({
+    data: {
+      id: "user-1",
+      org_id: "org-1",
+      email: "alice@example.com",
+      name: "Alice Smith",
+      role: "admin",
+      settings: {},
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  }),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -56,6 +69,15 @@ vi.mock("@/lib/api", () => ({
     },
     uploads: {
       upload: mocks.uploadMock,
+    },
+    userCredentials: {
+      listResolved: mocks.resolvedCredsMock,
+    },
+    codexAuth: {
+      status: mocks.codexAuthStatusMock,
+    },
+    auth: {
+      me: mocks.authMeMock,
     },
     sessions: {
       createManual: mocks.createSessionMock,
@@ -252,5 +274,115 @@ describe("ManualSessionCreatePageContent", () => {
       expect(screen.getByText("File too large (max 10 MB): too-large.png")).toBeInTheDocument();
     });
     expect(mocks.uploadMock).not.toHaveBeenCalled();
+  });
+
+  it("submits the saved default reasoning effort with a new session", async () => {
+    const user = userEvent.setup();
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: {
+          coding_agent_reasoning_defaults: {
+            codex: "xhigh",
+          },
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await user.type(textarea, "Fix the login bug");
+    await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+    await waitFor(() => {
+        expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Fix the login bug",
+          reasoning_effort: "xhigh",
+        }),
+      );
+    });
+  });
+
+  it("does not submit a hidden default reasoning effort for unsupported agents", async () => {
+    const user = userEvent.setup();
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: {
+          coding_agent_reasoning_defaults: {
+            codex: "high",
+          },
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Model/i }));
+    await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await user.type(textarea, "Fix the login bug");
+    await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalled();
+    });
+
+    const requestBody = mocks.createSessionMock.mock.calls.at(-1)?.[0];
+    expect(requestBody).toMatchObject({
+      message: "Fix the login bug",
+      model: "gemini-2.5-pro",
+      agent_type: "gemini_cli",
+    });
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("uses the Claude Code-specific default reasoning effort", async () => {
+    const user = userEvent.setup();
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: {
+          coding_agent_reasoning_defaults: {
+            claude_code: "max",
+          },
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Model/i }));
+    await user.click(screen.getByRole("option", { name: "claude-sonnet-4-6" }));
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await user.type(textarea, "Fix the login bug");
+    await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: "Fix the login bug",
+          model: "claude-sonnet-4-6",
+          agent_type: "claude_code",
+          reasoning_effort: "max",
+        }),
+      );
+    });
   });
 });

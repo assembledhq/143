@@ -721,7 +721,7 @@ var sessionRowColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
-	"project_task_id", "model_override", "triggered_by_user_id",
+	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -759,7 +759,7 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		0, time.Now(),
 		// sandbox_state must be "running" for the reuse branch of
 		// acquireSandbox to attach to the lingering container_id; otherwise
@@ -801,7 +801,7 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		0, time.Now(),
 		"running", snapshotKey,
 		nil,      // runtime_soft_deadline_at
@@ -839,7 +839,7 @@ func sessionRowForHydrate(id, orgID uuid.UUID, snapshotKey *string, sandboxState
 		nil, nil, []string{}, false,
 		nil, json.RawMessage(`{}`), nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, nil, nil, nil,
+		nil, nil, nil, nil, nil,
 		0, time.Now(),
 		sandboxState, snapshotKey,
 		nil,      // runtime_soft_deadline_at

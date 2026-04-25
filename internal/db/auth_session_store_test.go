@@ -22,7 +22,7 @@ var sessionColumns = []string{
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
-	"project_task_id", "model_override", "triggered_by_user_id",
+	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
 	"sandbox_state", "snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
@@ -47,6 +47,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil, nil, nil, nil,
 		nil,      // project_task_id
 		nil,      // model_override
+		nil,      // reasoning_effort
 		nil,      // triggered_by_user_id
 		nil,      // agent_session_id
 		0,        // current_turn
@@ -296,7 +297,7 @@ func TestSessionStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
@@ -343,7 +344,7 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
@@ -386,7 +387,7 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(generatedID, now, now),
@@ -420,7 +421,7 @@ func TestSessionStore_GetByID_PreservesPersistedPolicy(t *testing.T) {
 	row[3] = models.SessionOriginIssueTrigger
 	row[4] = models.SessionInteractionModeSingleRun
 	row[5] = models.SessionValidationPolicyOnTurnComplete
-	row[35] = &userID
+	row[36] = &userID
 
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

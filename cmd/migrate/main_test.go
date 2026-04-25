@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,4 +56,34 @@ func TestResolveMigrationSourceReturnsErrorWhenNoDirectoryExists(t *testing.T) {
 	})
 
 	require.Error(t, err, "resolveMigrationSource should fail when no migrations directory is available")
+}
+
+func TestMigrationVersionsAreUnique(t *testing.T) {
+	t.Parallel()
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
+	require.NoError(t, err, "should glob migration files without error")
+
+	versionPattern := regexp.MustCompile(`^(\d{6})_.+\.(up|down)\.sql$`)
+	seen := make(map[string]string, len(files))
+
+	for _, path := range files {
+		base := filepath.Base(path)
+		matches := versionPattern.FindStringSubmatch(base)
+		require.Len(t, matches, 3, "migration filename should include a 6-digit version and direction")
+
+		key := matches[1] + "." + matches[2]
+
+		if previous, ok := seen[key]; ok {
+			require.Failf(
+				t,
+				"duplicate migration version-direction",
+				"migration slot %s is used by both %s and %s",
+				key,
+				previous,
+				base,
+			)
+		}
+		seen[key] = base
+	}
 }

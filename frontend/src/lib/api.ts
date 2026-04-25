@@ -160,6 +160,8 @@ export const api = {
   auth: {
     providers: () => get<import('./types').SingleResponse<import('./types').AuthProviders>>('/api/v1/auth/providers'),
     me: () => get<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me'),
+    updateSettings: (body: import('./types').UserSettingsUpdateRequest) =>
+      patch<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/me/settings', body),
     login: (invitation?: string) => {
       const searchParams = new URLSearchParams();
       if (invitation) searchParams.set('invitation', invitation);
@@ -318,7 +320,7 @@ export const api = {
     getQuestions: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions`),
     answerQuestion: (sessionId: string, questionId: string, answer: string) =>
       post<import('./types').SingleResponse<import('./types').SessionQuestion>>(`/api/v1/sessions/${sessionId}/questions/${questionId}/answer`, { answer }),
-    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
+    createManual: (body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; agent_type?: string; model?: string; reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; autonomy_level?: string; token_mode?: string; repository_id?: string; branch?: string }) =>
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
@@ -548,6 +550,21 @@ export const api = {
     },
     create: (memory: { repo: string; rule: string; category?: string; scope?: string; file_patterns?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').Memory>>('/api/v1/memories', memory),
+  },
+  // Invitations addressed to the current user, across orgs. Distinct from
+  // `team.listInvitations` (which lists invitations the *current org's admins*
+  // have sent out): these are the invites *I* can claim, surfaced in the org
+  // switcher's "Pending invitations" section.
+  invitations: {
+    listPending: () =>
+      get<import('./types').ListResponse<import('./types').PendingInvitationForUser>>(
+        '/api/v1/invitations/pending',
+      ),
+    accept: (id: string) =>
+      post<import('./types').SingleResponse<{ org_id: string; role: string }>>(
+        `/api/v1/invitations/${id}/accept`,
+      ),
+    decline: (id: string) => post<void>(`/api/v1/invitations/${id}/decline`),
   },
   team: {
     listMembers: () => get<import('./types').ListResponse<import('./types').User>>('/api/v1/team/members'),

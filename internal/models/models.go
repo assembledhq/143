@@ -29,6 +29,20 @@ type User struct {
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
 }
 
+type UserWithSettings struct {
+	ID          uuid.UUID    `db:"id" json:"id"`
+	OrgID       uuid.UUID    `db:"org_id" json:"org_id"`
+	Email       string       `db:"email" json:"email"`
+	Name        string       `db:"name" json:"name"`
+	Role        string       `db:"role" json:"role"`
+	GitHubID    *int64       `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin *string      `db:"github_login" json:"github_login,omitempty"`
+	AvatarURL   *string      `db:"avatar_url" json:"avatar_url,omitempty"`
+	GoogleID    *string      `db:"google_id" json:"google_id,omitempty"`
+	Settings    UserSettings `json:"settings"`
+	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
+}
+
 type AuthSession struct {
 	ID     uuid.UUID `db:"id" json:"id"`
 	UserID uuid.UUID `db:"user_id" json:"user_id"`
@@ -166,21 +180,22 @@ type Session struct {
 	// FailureRetryAdvised uses plain bool (not *bool) because false is the
 	// meaningful default — a session that hasn't failed never advises retry.
 	// The DB column is NOT NULL DEFAULT false, so pgx scans cleanly into bool.
-	FailureRetryAdvised bool            `db:"failure_retry_advised" json:"failure_retry_advised"`
-	ParentSessionID     *uuid.UUID      `db:"parent_session_id" json:"parent_session_id,omitempty"`
-	RevisionContext     json.RawMessage `db:"revision_context" json:"revision_context,omitempty"`
-	Error               *string         `db:"error" json:"error,omitempty"`
-	ResultSummary       *string         `db:"result_summary" json:"result_summary,omitempty"`
-	Diff                *string         `db:"diff" json:"diff,omitempty"`
-	PMPlanID            *uuid.UUID      `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
-	Title               *string         `db:"title" json:"title,omitempty"`
-	PMApproach          *string         `db:"pm_approach" json:"pm_approach,omitempty"`
-	PMReasoning         *string         `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
-	ProjectTaskID       *uuid.UUID      `db:"project_task_id" json:"project_task_id,omitempty"`
-	ModelOverride       *string         `db:"model_override" json:"model_override,omitempty"`
-	TriggeredByUserID   *uuid.UUID      `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
-	AgentSessionID      *string         `db:"agent_session_id" json:"agent_session_id,omitempty"`
-	CurrentTurn         int             `db:"current_turn" json:"current_turn"`
+	FailureRetryAdvised bool             `db:"failure_retry_advised" json:"failure_retry_advised"`
+	ParentSessionID     *uuid.UUID       `db:"parent_session_id" json:"parent_session_id,omitempty"`
+	RevisionContext     json.RawMessage  `db:"revision_context" json:"revision_context,omitempty"`
+	Error               *string          `db:"error" json:"error,omitempty"`
+	ResultSummary       *string          `db:"result_summary" json:"result_summary,omitempty"`
+	Diff                *string          `db:"diff" json:"diff,omitempty"`
+	PMPlanID            *uuid.UUID       `db:"pm_plan_id" json:"pm_plan_id,omitempty"`
+	Title               *string          `db:"title" json:"title,omitempty"`
+	PMApproach          *string          `db:"pm_approach" json:"pm_approach,omitempty"`
+	PMReasoning         *string          `db:"pm_reasoning" json:"pm_reasoning,omitempty"`
+	ProjectTaskID       *uuid.UUID       `db:"project_task_id" json:"project_task_id,omitempty"`
+	ModelOverride       *string          `db:"model_override" json:"model_override,omitempty"`
+	ReasoningEffort     *ReasoningEffort `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
+	TriggeredByUserID   *uuid.UUID       `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
+	AgentSessionID      *string          `db:"agent_session_id" json:"agent_session_id,omitempty"`
+	CurrentTurn         int              `db:"current_turn" json:"current_turn"`
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.

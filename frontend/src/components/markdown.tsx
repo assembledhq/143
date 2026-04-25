@@ -61,8 +61,15 @@ const components: Components = {
   ul({ children }) {
     return <ul className="mb-2 ml-4 list-disc space-y-0.5 last:mb-0">{children}</ul>;
   },
-  ol({ children }) {
-    return <ol className="mb-2 ml-4 list-decimal space-y-0.5 last:mb-0">{children}</ol>;
+  ol({ children, className, ...props }) {
+    return (
+      <ol
+        className={cn("mb-2 ml-4 list-decimal space-y-0.5 last:mb-0", className)}
+        {...props}
+      >
+        {children}
+      </ol>
+    );
   },
   li({ children }) {
     return <li className="leading-relaxed">{children}</li>;
