@@ -81,6 +81,7 @@ import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
 import { useAuth } from "@/hooks/use-auth";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { activeSet } from "@/lib/session-status-groups";
 
 const PREVIEW_ORIGIN_TEMPLATE =
   process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
@@ -121,12 +122,6 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
 }
-
-/** Returns true if the session has been pending for more than 2 minutes. */
-function isPendingTooLong(createdAt: string): boolean {
-  return Date.now() - new Date(createdAt).getTime() > 2 * 60 * 1000;
-}
-
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -844,6 +839,48 @@ function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
 }
 
+function SessionTimelineSkeleton() {
+  const rows: { align: "left" | "right"; widths: string[] }[] = [
+    { align: "right", widths: ["w-3/5", "w-2/5"] },
+    { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
+    { align: "left", widths: ["w-2/3", "w-1/3"] },
+    { align: "left", widths: ["w-3/4", "w-3/5"] },
+  ];
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label="Loading session activity"
+      data-testid="session-timeline-skeleton"
+      className="space-y-3 py-1"
+    >
+      {rows.map((row, i) => (
+        <div
+          key={i}
+          className={`flex ${row.align === "right" ? "justify-end" : "justify-start"}`}
+        >
+          <div
+            className={`max-w-[92%] min-w-[40%] rounded-lg px-3 py-2.5 space-y-2 animate-pulse ${
+              row.align === "right" ? "bg-primary/10" : "bg-muted"
+            }`}
+          >
+            {row.widths.map((w, j) => (
+              <div
+                key={j}
+                className={`h-3 rounded ${w} ${
+                  row.align === "right" ? "bg-primary/20" : "bg-muted-foreground/15"
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+      <span className="sr-only">Loading session activity…</span>
+    </div>
+  );
+}
+
 function ChatPanel({
   session,
   sessionId,
@@ -966,6 +1003,12 @@ function ChatPanel({
     return [...baseTimelineEntries, ...overlayEntries];
   }, [baseTimelineEntries, streamedLogs]);
   const hasLoadedTimelineInputs = timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
+  // Skeleton only while we'd reasonably expect content: timeline still loading,
+  // or session is active. Terminal sessions with empty timelines must not shimmer forever.
+  const showLoadingSkeleton =
+    timelineEntries.length === 0 &&
+    session.status !== "pending" &&
+    (!hasLoadedTimelineInputs || activeSet.has(session.status));
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -1168,51 +1211,23 @@ function ChatPanel({
       )}
       {/* Unified timeline */}
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto space-y-2 p-4">
-        {timelineEntries.length === 0 && !isRunning && session.status !== "pending" && (
-          <div className="flex items-center justify-center py-12">
-            <div className="text-center space-y-2 max-w-[320px]">
-              {session.status === "pending" ? (
-                <>
-                  <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
-                  <p className="text-xs font-medium text-muted-foreground">Waiting to start</p>
-                  <p className="text-xs text-muted-foreground/60">
-                    This session is queued and waiting for an available slot. Queued {formatTimeAgo(session.created_at)}.
-                  </p>
-                  {isPendingTooLong(session.created_at) && (
-                    <div className="mt-3 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 px-3 py-2 text-left">
-                      <p className="text-xs font-medium text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
-                        <AlertTriangle className="h-3 w-3 shrink-0" />
-                        Taking longer than expected
-                      </p>
-                      <p className="text-xs text-amber-600 dark:text-amber-500 mt-1">
-                        This session has been waiting for over 2 minutes. It may be blocked by other running sessions or an internal issue. Try cancelling and retrying if it doesn&apos;t start soon.
-                      </p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <>
-                  <MessageSquare className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-                  <p className="text-xs font-medium text-muted-foreground">No activity yet</p>
-                  <p className="text-xs text-muted-foreground/60">The session is processing its initial turn.</p>
-                </>
-              )}
-            </div>
-          </div>
+        {showLoadingSkeleton ? (
+          <SessionTimelineSkeleton />
+        ) : (
+          <ChatTimeline
+            entries={timelineEntries}
+            isRunning={isRunning}
+            diffStats={session.diff_stats}
+            onDiffClick={onDiffClick}
+            onApprovePlan={canSendMessage ? onApprovePlan : undefined}
+            onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
+            getEntryContainerProps={(_, index) =>
+              ({
+                "data-session-entry-index": index,
+              }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>
+            }
+          />
         )}
-        <ChatTimeline
-          entries={timelineEntries}
-          isRunning={isRunning}
-          diffStats={session.diff_stats}
-          onDiffClick={onDiffClick}
-          onApprovePlan={canSendMessage ? onApprovePlan : undefined}
-          onAdjustPlan={canSendMessage ? onAdjustPlan : undefined}
-          getEntryContainerProps={(_, index) =>
-            ({
-              "data-session-entry-index": index,
-            }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>
-          }
-        />
         {session.status === "pending" && (
           <div className="flex items-center justify-center py-12">
             <div className="text-center space-y-2 max-w-[280px]">
