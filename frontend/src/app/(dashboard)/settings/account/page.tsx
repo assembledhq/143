@@ -196,7 +196,7 @@ export default function AccountPage() {
                 )) : (
                   <TableRow>
                     <TableCell colSpan={5} className="text-muted-foreground">
-                      No personal auth configured yet. Add one to take precedence over the organization stack.
+                      No personal auth configured. Click &ldquo;Add auth&rdquo; above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.
                     </TableCell>
                   </TableRow>
                 )}
