@@ -369,6 +369,151 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all sync expectations should be met")
 }
 
+// When GitHub returns mergeable=null while it recomputes (without an explicit
+// dirty/blocked label) on the same head SHA where we already know the PR is
+// conflicted, persisting the new snapshot would clobber has_conflicts=true
+// with false and break the "Resolve conflicts" repair button. The sync should
+// skip the write and let the next sync pick up GitHub's resolved value.
+func TestPRServiceSyncPullRequestStateSkipsIndeterminateMergeRegression(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":null,"mergeable_state":"unknown","head":{"ref":"feature","sha":"head-flap"},"base":{"ref":"main","sha":"base-flap"}}`))
+		case "/repos/assembledhq/143/commits/head-flap/check-runs":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	priorSummary := models.PullRequestHealthSummary{
+		MergeState:       models.PullRequestMergeStateConflicted,
+		HasConflicts:     true,
+		FailingTestCount: 0,
+		NeedsAgentAction: true,
+	}
+	priorJSON, err := json.Marshal(priorSummary)
+	require.NoError(t, err)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Flaky PR", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateConflicted, true, 0, true, (*time.Time)(nil), int64(3), &now, now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(3), "head-flap", "base-flap", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+		))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "SyncPullRequestState should not error when skipping an indeterminate snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "no snapshot upsert should have been issued")
+}
+
+// Same fix shape for the fix-tests path: when test-category checks are still
+// in_progress on the same head SHA and the apparent failing-test count would
+// regress below the prior snapshot's count, skip the write so the
+// "Fix tests" button keeps working until checks finish.
+func TestPRServiceSyncPullRequestStateSkipsIndeterminateTestRegression(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-rerun"},"base":{"ref":"main","sha":"base-rerun"}}`))
+		case "/repos/assembledhq/143/commits/head-rerun/check-runs":
+			// Rerun in progress: no conclusion yet, so it would not be counted as failing,
+			// dropping FailingTestCount from the prior snapshot's value of 2 down to 0.
+			_, _ = w.Write([]byte(`{"check_runs":[{"id":11,"name":"unit tests","status":"in_progress","conclusion":"","app":{"slug":"github-actions"},"output":{}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	priorSummary := models.PullRequestHealthSummary{
+		MergeState:       models.PullRequestMergeStateClean,
+		HasConflicts:     false,
+		FailingTestCount: 2,
+		NeedsAgentAction: true,
+	}
+	priorJSON, err := json.Marshal(priorSummary)
+	require.NoError(t, err)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Tests rerun", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateClean, false, 2, true, (*time.Time)(nil), int64(4), &now, now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(4), "head-rerun", "base-rerun", priorJSON, priorJSON, models.PullRequestHealthEnrichmentStatusReady, &now, now, now,
+		))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "SyncPullRequestState should not error when skipping an indeterminate test snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "no snapshot upsert should have been issued")
+}
+
 func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 	t.Parallel()
 
