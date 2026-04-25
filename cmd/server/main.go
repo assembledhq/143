@@ -359,6 +359,7 @@ func main() {
 			LogsDays:    cfg.DataRetentionLogsDays,
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
+		previewCapable := pvProvider != nil
 		processWorkers = startProcessWorkers(
 			ctx,
 			pool,
@@ -370,6 +371,8 @@ func main() {
 			retentionCfg,
 			jobNotifier,
 			nodeManager,
+			previewCapable,
+			cfg.PreviewInternalBaseURL,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
@@ -527,6 +530,8 @@ func startProcessWorkers(
 	retentionCfg worker.DataRetentionConfig,
 	jobNotifier *cache.JobNotifier,
 	nodeManager *cluster.NodeManager,
+	previewCapable bool,
+	previewInternalBaseURL string,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -543,12 +548,22 @@ func startProcessWorkers(
 		})
 	}
 
+	// Preserve preview-routing fields here. SetMetadataProvider replaces
+	// the previous provider, so omitting these would let the next heartbeat
+	// wipe preview_capable from the node row and route requests to nothing.
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return map[string]any{
+		metadata := map[string]any{
 			"build_sha":              version.BuildSHA,
 			"active_job_count":       totalActiveJobs(workers),
 			"active_run_agent_count": totalActiveRunAgentJobs(workers),
 		}
+		if previewCapable {
+			metadata["preview_capable"] = true
+		}
+		if previewInternalBaseURL != "" {
+			metadata["preview_internal_base_url"] = previewInternalBaseURL
+		}
+		return metadata
 	})
 
 	for i, w := range workers {
