@@ -251,3 +251,51 @@ func TestSessionInputCommandsValueEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("[]"), value)
 }
+
+func TestSessionInputCommandsScanEmptyAndInvalid(t *testing.T) {
+	t.Parallel()
+
+	var fromEmpty SessionInputCommands
+	require.NoError(t, fromEmpty.Scan([]byte{}))
+	require.Nil(t, fromEmpty, "empty raw bytes should reset to nil")
+
+	var fromBadJSON SessionInputCommands
+	require.Error(t, fromBadJSON.Scan([]byte("not-json")), "malformed JSON should surface an unmarshal error")
+}
+
+func TestProjectCommandSpecHasFileExtension(t *testing.T) {
+	t.Parallel()
+
+	noExt := ProjectCommandSpec{Dir: "any", FileExtension: ""}
+	require.True(t, noExt.HasFileExtension("anything"), "spec with no required extension always matches")
+	require.True(t, noExt.HasFileExtension(""), "empty path with no required extension matches")
+
+	mdSpec := ProjectCommandSpec{Dir: ".claude/commands", FileExtension: "md"}
+	require.False(t, mdSpec.HasFileExtension(""), "empty path cannot match a required extension")
+	require.False(t, mdSpec.HasFileExtension(".md"), "path that is only the suffix should not count as having the extension")
+	require.True(t, mdSpec.HasFileExtension("review.md"))
+	require.True(t, mdSpec.HasFileExtension("review.MD"), "extension comparison must be case-insensitive")
+}
+
+func TestProjectCommandSpecCommandNameFromPathEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	emptyDir := ProjectCommandSpec{Dir: "", FileExtension: "md"}
+	require.Equal(t, "", emptyDir.CommandNameFromPath(".claude/commands/review.md"), "empty Dir disables matching to avoid prefixing every path")
+
+	noExt := ProjectCommandSpec{Dir: "cmds", FileExtension: ""}
+	require.Equal(t, "review", noExt.CommandNameFromPath("cmds/review"), "no required extension returns the basename verbatim")
+
+	mdSpec := ProjectCommandSpec{Dir: "cmds", FileExtension: "md"}
+	require.Equal(t, "", mdSpec.CommandNameFromPath("cmds/.md"), "filename consisting only of the extension yields an empty name")
+}
+
+func TestLowerSuffix(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", lowerSuffix("hello", 0), "n==0 returns empty")
+	require.Equal(t, "", lowerSuffix("hello", -1), "negative n returns empty")
+	require.Equal(t, "", lowerSuffix("hi", 5), "n greater than length returns empty")
+	require.Equal(t, ".md", lowerSuffix("FOO.MD", 3), "uppercase suffix should be lowercased")
+	require.Equal(t, ".md", lowerSuffix("foo.md", 3), "lowercase suffix passes through unchanged")
+}

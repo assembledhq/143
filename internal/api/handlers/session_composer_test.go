@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -815,6 +817,573 @@ func urlEscape(s string) string {
 		out = append(out, "0123456789ABCDEF"[c&0x0F])
 	}
 	return string(out)
+}
+
+func TestSessionComposerHandler_ListFileMentions_RepoNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnError(fmt.Errorf("not found"))
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/files?repository_id=%s&q=sess", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListFileMentions(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_InvalidRepoID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=not-a-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestSessionComposerHandler_ListSlashCommands_DisconnectedRepoMapsToBadRequest(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "disconnected",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "REPO_DISCONNECTED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_GitHubUnconfiguredWithProjectAgent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Contains(t, w.Body.String(), "GITHUB_NOT_CONFIGURED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_InvalidRepoFullName(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme-only-noslash", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	var logs bytes.Buffer
+	req = req.WithContext(zerolog.New(&logs).WithContext(req.Context()))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY")
+	require.Contains(t, logs.String(), "invalid repository full name", "invalid repo metadata should be logged for oncall debugging")
+	require.Contains(t, logs.String(), repoID.String(), "invalid repo log should include the repository id")
+	require.Contains(t, logs.String(), "acme-only-noslash", "invalid repo log should include the malformed full name")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_ListSlashCommands_TreeFetchTokenError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{
+		err: fmt.Errorf("github token exchange failed"),
+	})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands?agent_type=claude_code&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlashCommands(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Contains(t, w.Body.String(), "GITHUB_TOKEN_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsMissingAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?name=review&repository_id="+uuid.New().String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_AGENT_TYPE")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsInvalidAgentType(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?agent_type=nope&name=review&repository_id="+uuid.New().String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_AGENT_TYPE")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsAgentWithoutProjectConvention(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?agent_type=amp&name=help&repository_id="+uuid.New().String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "UNSUPPORTED_AGENT_TYPE")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsMissingName(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?agent_type=claude_code&repository_id="+uuid.New().String(), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_NAME")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsMissingRepoID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RejectsInvalidRepoIDFormat(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=not-uuid", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY_ID")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RepoNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnError(fmt.Errorf("not found"))
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RepoDisconnected(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "disconnected",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "REPO_DISCONNECTED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_RepoStoreUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	handler := NewSessionComposerHandler(nil, &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", uuid.New()), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "REPO_STORE_UNCONFIGURED")
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_GitHubUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Contains(t, w.Body.String(), "GITHUB_NOT_CONFIGURED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_InvalidRepoFullName(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acmeonly", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{token: "ghs_test"})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_REPOSITORY")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_FetchContentError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), &mockSessionComposerRepoTreeService{
+		token:      "ghs_test",
+		contentErr: fmt.Errorf("github 500"),
+	})
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.Contains(t, w.Body.String(), "GITHUB_API_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_GetSlashCommandDetail_DefaultsToRepoBranch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(repoID, orgID).
+		WillReturnRows(
+			pgxmock.NewRows(repoColumns()).AddRow(
+				repoID, orgID, uuid.New(), int64(1001), "acme/app", "trunk",
+				false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+				nil, nil, []byte(`{}`), now, now,
+			),
+		)
+
+	service := &mockSessionComposerRepoTreeService{
+		token:    "ghs_test",
+		contents: map[string]string{".claude/commands/review.md": "Pick a review focus."},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlashCommandDetail(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, ".claude/commands/review.md", service.lastContentPath)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionComposerHandler_FetchCommandContentCachesAndPrunes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	baseTime := time.Now()
+	for range 3 {
+		mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+			WithArgs(repoID, orgID).
+			WillReturnRows(
+				pgxmock.NewRows(repoColumns()).AddRow(
+					repoID, orgID, uuid.New(), int64(1001), "acme/app", "main",
+					false, nil, nil, "https://github.com/acme/app.git", int64(99), "active",
+					nil, nil, []byte(`{}`), baseTime, baseTime,
+				),
+			)
+	}
+
+	service := &mockSessionComposerRepoTreeService{
+		token:    "ghs_test",
+		contents: map[string]string{".claude/commands/review.md": "First version"},
+	}
+	handler := NewSessionComposerHandler(db.NewRepositoryStore(mock), service)
+	currentTime := baseTime
+	handler.clock = func() time.Time { return currentTime }
+
+	first := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	first = first.WithContext(middleware.WithOrgID(first.Context(), orgID))
+	firstW := httptest.NewRecorder()
+	handler.GetSlashCommandDetail(firstW, first)
+	require.Equal(t, http.StatusOK, firstW.Code, firstW.Body.String())
+	require.Equal(t, 1, service.contentCalls, "first request should populate the cache")
+
+	cached := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	cached = cached.WithContext(middleware.WithOrgID(cached.Context(), orgID))
+	cachedW := httptest.NewRecorder()
+	handler.GetSlashCommandDetail(cachedW, cached)
+	require.Equal(t, http.StatusOK, cachedW.Code)
+	require.Equal(t, 1, service.contentCalls, "cached lookups must not refetch the file content")
+	require.Len(t, handler.commandContents, 1)
+
+	currentTime = baseTime.Add(sessionComposerCommandContentCacheTTL + time.Second)
+	service.contents[".claude/commands/review.md"] = "Second version"
+	expired := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/session-composer/slash-commands/details?agent_type=claude_code&name=review&repository_id=%s", repoID), nil)
+	expired = expired.WithContext(middleware.WithOrgID(expired.Context(), orgID))
+	expiredW := httptest.NewRecorder()
+	handler.GetSlashCommandDetail(expiredW, expired)
+	require.Equal(t, http.StatusOK, expiredW.Code)
+	require.Equal(t, 2, service.contentCalls, "expired entries should refresh from upstream")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRankSlashCommandsSkipsEmptyCatalogEntries(t *testing.T) {
+	t.Parallel()
+
+	catalog := []models.SlashCommand{
+		{Name: ""},
+		{Name: "review", Description: "Review pending changes"},
+	}
+	out := rankSlashCommands("", catalog, func(cmd models.SlashCommand) models.SessionInputCommand {
+		return models.SessionInputCommand{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: cmd.Name, Token: "/" + cmd.Name, Display: "/" + cmd.Name}
+	})
+	require.Len(t, out, 1, "blank-named entries should be filtered before ranking")
+	require.Equal(t, "review", out[0].Name)
+}
+
+func TestRankAndLimitSlashCommandCandidatesEnforcesLimit(t *testing.T) {
+	t.Parallel()
+
+	candidates := make([]slashCommandCandidate, sessionComposerSlashCommandLimit+5)
+	for i := range candidates {
+		name := fmt.Sprintf("cmd%03d", i)
+		candidates[i] = slashCommandCandidate{
+			command:   models.SessionInputCommand{Kind: "command", AgentType: models.AgentTypeClaudeCode, Name: name, Token: "/" + name, Display: "/" + name},
+			matchBits: []bool{true},
+			length:    len(name),
+		}
+	}
+	out := rankAndLimitSlashCommandCandidates(candidates)
+	require.Len(t, out, sessionComposerSlashCommandLimit, "rank limiter should cap results at sessionComposerSlashCommandLimit")
+}
+
+func TestProjectCommandPathFromName(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "review.md", projectCommandPathFromName("review", "md"))
+	require.Equal(t, "auth/setup.md", projectCommandPathFromName("auth:setup", "md"))
+	require.Equal(t, "review", projectCommandPathFromName("review", ""), "empty extension returns the name verbatim")
 }
 
 func TestExtractCommandDescription(t *testing.T) {

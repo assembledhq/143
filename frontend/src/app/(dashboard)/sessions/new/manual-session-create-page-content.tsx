@@ -63,6 +63,10 @@ import {
 import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputCommand, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const triggerPickerIconClassName = "h-4 w-4 shrink-0";
+const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
+const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
+const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
 
 type DictationResult = {
   transcript: string;
@@ -85,7 +89,7 @@ type BrowserSpeechRecognition = {
 
 type SpeechRecognitionCtor = new () => BrowserSpeechRecognition;
 
-type MentionPickerPosition = TriggerPickerPosition;
+type ComposerPickerPosition = TriggerPickerPosition;
 
 export function ManualSessionCreatePageContent() {
   const { user } = useAuth();
@@ -119,9 +123,9 @@ export function ManualSessionCreatePageContent() {
   const [branchByRepoId, setBranchByRepoId] = useState<Record<string, string>>({});
   const [creationError, setCreationError] = useState<string | null>(null);
   const [caretPosition, setCaretPosition] = useState(0);
-  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
-  const [mentionDismissed, setMentionDismissed] = useState(false);
-  const [mentionPickerPosition, setMentionPickerPosition] = useState<MentionPickerPosition | null>(null);
+  const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
+  const [triggerDismissed, setTriggerDismissed] = useState(false);
+  const [pickerPosition, setPickerPosition] = useState<ComposerPickerPosition | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const [dragMessage, setDragMessage] = useState<string | null>(null);
   // Gates the persist effect until after hydration so we never overwrite a
@@ -302,7 +306,7 @@ export function ManualSessionCreatePageContent() {
   const { data: fileMentionsResponse, isFetching: fileMentionsLoading } = useQuery<ListResponse<SessionInputReference>>({
     queryKey: queryKeys.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
     queryFn: () => api.sessionComposer.files(selectedRepoId, selectedBranch, deferredMentionQuery),
-    enabled: !!selectedRepoId && activeMention !== null && !mentionDismissed,
+    enabled: !!selectedRepoId && activeMention !== null && !triggerDismissed,
     staleTime: 30 * 1000,
   });
   const fileMentions = useMemo(() => fileMentionsResponse?.data ?? [], [fileMentionsResponse]);
@@ -343,15 +347,15 @@ export function ManualSessionCreatePageContent() {
     query: deferredCommandQuery,
     repositoryId: selectedRepoId || undefined,
     branch: selectedBranch || undefined,
-    enabled: activeCommand !== null && !mentionDismissed,
+    enabled: activeCommand !== null && !triggerDismissed,
   });
   const slashCommandGroups = useMemo(() => slashCommandsQuery.data?.groups ?? [], [slashCommandsQuery.data]);
   const slashCommandItems = useMemo(
     () => slashCommandGroups.flatMap((group) => group.items),
     [slashCommandGroups],
   );
-  const showMentionPicker = !!selectedRepoId && activeMention !== null && !mentionDismissed;
-  const showCommandPicker = activeCommand !== null && !mentionDismissed;
+  const showMentionPicker = !!selectedRepoId && activeMention !== null && !triggerDismissed;
+  const showCommandPicker = activeCommand !== null && !triggerDismissed;
 
   const pickerGroups = useMemo<TriggerPickerGroup[]>(() => {
     if (showMentionPicker) {
@@ -362,9 +366,7 @@ export function ManualSessionCreatePageContent() {
           items: fileMentions.map((reference) => ({
             id: `${reference.kind}:${reference.path ?? reference.id ?? reference.display}`,
             primary: reference.display,
-            icon: reference.kind === "directory"
-              ? <FolderTree className="h-4 w-4 shrink-0" />
-              : <FileCode2 className="h-4 w-4 shrink-0" />,
+            icon: reference.kind === "directory" ? directoryTriggerIcon : fileTriggerIcon,
           })),
         },
       ];
@@ -377,7 +379,7 @@ export function ManualSessionCreatePageContent() {
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: <Slash className="h-4 w-4 shrink-0" />,
+          icon: slashTriggerIcon,
         })),
       }));
     }
@@ -476,8 +478,8 @@ export function ManualSessionCreatePageContent() {
   }, [message]);
 
   useEffect(() => {
-    setMentionDismissed(false);
-    setSelectedMentionIndex(0);
+    setTriggerDismissed(false);
+    setSelectedTriggerIndex(0);
   }, [triggerQueryKey]);
 
   useEffect(() => {
@@ -500,11 +502,11 @@ export function ManualSessionCreatePageContent() {
 
   useEffect(() => {
     if (!pickerOpen) {
-      setMentionPickerPosition(null);
+      setPickerPosition(null);
       return;
     }
 
-    function updateMentionPickerPosition() {
+    function updatePickerPosition() {
       const composerCard = composerCardRef.current;
       if (!composerCard) {
         return;
@@ -521,7 +523,7 @@ export function ManualSessionCreatePageContent() {
         ? Math.max(spacing, rect.top - Math.min(320, availableHeight) - spacing)
         : Math.min(viewportHeight - spacing - Math.min(320, availableHeight), rect.bottom + spacing);
 
-      setMentionPickerPosition({
+      setPickerPosition({
         left: rect.left,
         top,
         width: rect.width,
@@ -530,14 +532,14 @@ export function ManualSessionCreatePageContent() {
       });
     }
 
-    updateMentionPickerPosition();
-    window.addEventListener("resize", updateMentionPickerPosition);
-    window.addEventListener("scroll", updateMentionPickerPosition, true);
+    updatePickerPosition();
+    window.addEventListener("resize", updatePickerPosition);
+    window.addEventListener("scroll", updatePickerPosition, true);
 
     const composerCard = composerCardRef.current;
     const resizeObserver = composerCard && typeof ResizeObserver !== "undefined"
       ? new ResizeObserver(() => {
-        updateMentionPickerPosition();
+        updatePickerPosition();
       })
       : null;
     if (composerCard && resizeObserver) {
@@ -545,8 +547,8 @@ export function ManualSessionCreatePageContent() {
     }
 
     return () => {
-      window.removeEventListener("resize", updateMentionPickerPosition);
-      window.removeEventListener("scroll", updateMentionPickerPosition, true);
+      window.removeEventListener("resize", updatePickerPosition);
+      window.removeEventListener("scroll", updatePickerPosition, true);
       resizeObserver?.disconnect();
     };
   }, [pickerOpen, fileMentions.length, fileMentionsLoading, slashCommandItems.length]);
@@ -573,7 +575,7 @@ export function ManualSessionCreatePageContent() {
       return syncReferencesWithMessage(inserted.text, [...previous, reference]);
     });
     setCaretPosition(inserted.caret);
-    setMentionDismissed(false);
+    setTriggerDismissed(false);
 
     requestAnimationFrame(() => {
       if (!messageInputRef.current) {
@@ -598,7 +600,7 @@ export function ManualSessionCreatePageContent() {
       return syncCommandsWithMessage(inserted.text, [...previous, command]);
     });
     setCaretPosition(inserted.caret);
-    setMentionDismissed(false);
+    setTriggerDismissed(false);
 
     requestAnimationFrame(() => {
       if (!messageInputRef.current) {
@@ -882,12 +884,12 @@ export function ManualSessionCreatePageContent() {
             <div className="relative mx-auto w-full max-w-3xl">
           <SessionComposerTriggerPicker
             open={pickerOpen}
-            position={mentionPickerPosition}
+            position={pickerPosition}
             groups={pickerGroups}
             loading={pickerLoading}
             emptyLabel={pickerEmptyLabel}
-            selectedIndex={selectedMentionIndex}
-            onSelectedIndexChange={setSelectedMentionIndex}
+            selectedIndex={selectedTriggerIndex}
+            onSelectedIndexChange={setSelectedTriggerIndex}
             onSelect={(_item, group) => {
               const flatIndex = flattenedPickerItems.findIndex((entry) => entry.group.id === group.id && entry.item.id === _item.id);
               if (flatIndex < 0) return;
@@ -926,29 +928,29 @@ export function ManualSessionCreatePageContent() {
                   if (pickerOpen && flattenedPickerItems.length > 0) {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
-                      setSelectedMentionIndex((previous) => (previous + 1) % flattenedPickerItems.length);
+                      setSelectedTriggerIndex((previous) => (previous + 1) % flattenedPickerItems.length);
                       return;
                     }
                     if (event.key === "ArrowUp") {
                       event.preventDefault();
-                      setSelectedMentionIndex((previous) => (previous - 1 + flattenedPickerItems.length) % flattenedPickerItems.length);
+                      setSelectedTriggerIndex((previous) => (previous - 1 + flattenedPickerItems.length) % flattenedPickerItems.length);
                       return;
                     }
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
-                      const selection = flattenedPickerItems[selectedMentionIndex];
+                      const selection = flattenedPickerItems[selectedTriggerIndex];
                       if (!selection) return;
                       if (showMentionPicker) {
-                        applyMention(fileMentions[selectedMentionIndex]);
+                        applyMention(fileMentions[selectedTriggerIndex]);
                       } else if (showCommandPicker) {
-                        applyCommand(slashCommandItems[selectedMentionIndex]);
+                        applyCommand(slashCommandItems[selectedTriggerIndex]);
                       }
                       return;
                     }
                   }
                   if (pickerOpen && event.key === "Escape") {
                     event.preventDefault();
-                    setMentionDismissed(true);
+                    setTriggerDismissed(true);
                     return;
                   }
                   if (event.key === "Enter" && !event.shiftKey) {

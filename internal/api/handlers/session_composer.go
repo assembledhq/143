@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 // slashCommandNamePattern restricts the user-supplied `name` query param to
@@ -98,6 +100,7 @@ func (h *SessionComposerHandler) ListFileMentions(w http.ResponseWriter, r *http
 
 	parts := strings.SplitN(repo.FullName, "/", 2)
 	if len(parts) != 2 {
+		logInvalidRepoFullName(r, repo.ID, repo.FullName)
 		writeError(w, r, http.StatusInternalServerError, "INVALID_REPOSITORY", "invalid repository full name")
 		return
 	}
@@ -367,6 +370,7 @@ func (h *SessionComposerHandler) GetSlashCommandDetail(w http.ResponseWriter, r 
 	}
 	parts := strings.SplitN(repo.FullName, "/", 2)
 	if len(parts) != 2 {
+		logInvalidRepoFullName(r, repo.ID, repo.FullName)
 		writeError(w, r, http.StatusInternalServerError, "INVALID_REPOSITORY", "invalid repository full name")
 		return
 	}
@@ -429,7 +433,10 @@ func (h *SessionComposerHandler) buildProjectSlashCommandGroup(r *http.Request, 
 
 	parts := strings.SplitN(repo.FullName, "/", 2)
 	if len(parts) != 2 {
-		return nil, errInvalidRepoFullName
+		return nil, invalidRepoFullNameError{
+			repositoryID: repo.ID,
+			fullName:     repo.FullName,
+		}
 	}
 
 	branch := branchRaw
@@ -608,9 +615,11 @@ func (h *SessionComposerHandler) pruneExpiredCommandContentCacheLocked(now time.
 }
 
 // extractCommandDescription pulls a one-line description from a project
-// command file. It first looks for a YAML frontmatter `description:` field
-// (Claude Code convention); failing that, it returns the first non-empty
-// non-frontmatter line of the file body. Returns "" if neither is present.
+// command file. It first looks for the simplest YAML frontmatter
+// `description: value` scalar shape (Claude Code convention); complex YAML
+// forms such as block scalars or heavily escaped quoted strings are not
+// parsed and will fall back to the body's first non-empty non-frontmatter
+// line instead. Returns "" if neither is present.
 func extractCommandDescription(content string) string {
 	if content == "" {
 		return ""
@@ -669,6 +678,26 @@ var (
 	errInvalidRepoFullName = fmt.Errorf("invalid repository full name")
 )
 
+type invalidRepoFullNameError struct {
+	repositoryID uuid.UUID
+	fullName     string
+}
+
+func (e invalidRepoFullNameError) Error() string {
+	return errInvalidRepoFullName.Error()
+}
+
+func (e invalidRepoFullNameError) Unwrap() error {
+	return errInvalidRepoFullName
+}
+
+func logInvalidRepoFullName(r *http.Request, repoID uuid.UUID, fullName string) {
+	zerolog.Ctx(r.Context()).Error().
+		Str("repository_id", repoID.String()).
+		Str("repository_full_name", fullName).
+		Msg("invalid repository full name")
+}
+
 func (h *SessionComposerHandler) writeRepoLookupError(w http.ResponseWriter, r *http.Request, err error) {
 	switch err {
 	case errRepoDisconnected:
@@ -681,16 +710,20 @@ func (h *SessionComposerHandler) writeRepoLookupError(w http.ResponseWriter, r *
 }
 
 func (h *SessionComposerHandler) writeRepoTreeError(w http.ResponseWriter, r *http.Request, err error) {
-	switch err {
-	case errInvalidRepoID:
+	switch {
+	case errors.Is(err, errInvalidRepoID):
 		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
-	case errGitHubUnconfigured:
+	case errors.Is(err, errGitHubUnconfigured):
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub App is not configured")
-	case errInvalidRepoFullName:
+	case errors.Is(err, errInvalidRepoFullName):
+		var invalidRepoErr invalidRepoFullNameError
+		if errors.As(err, &invalidRepoErr) {
+			logInvalidRepoFullName(r, invalidRepoErr.repositoryID, invalidRepoErr.fullName)
+		}
 		writeError(w, r, http.StatusInternalServerError, "INVALID_REPOSITORY", "invalid repository full name")
-	case errRepoDisconnected:
+	case errors.Is(err, errRepoDisconnected):
 		writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to load commands")
-	case errRepoStoreUnconfigured:
+	case errors.Is(err, errRepoStoreUnconfigured):
 		writeError(w, r, http.StatusInternalServerError, "REPO_STORE_UNCONFIGURED", "repository lookup not configured")
 	default:
 		if strings.Contains(err.Error(), "not found") {

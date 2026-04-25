@@ -36,6 +36,25 @@ const mocks = vi.hoisted(() => ({
     data: { id: "new-sess" },
   }),
   sessionComposerFilesMock: vi.fn().mockResolvedValue({ data: [] }),
+  sessionComposerSlashCommandsMock: vi.fn().mockResolvedValue({
+    groups: [
+      {
+        source: "builtin",
+        label: "Codex commands",
+        items: [
+          {
+            kind: "command",
+            agent_type: "codex",
+            name: "review",
+            token: "/review",
+            display: "/review",
+            description: "Review pending changes",
+            source: "builtin",
+          },
+        ],
+      },
+    ],
+  }),
   uploadMock: vi.fn().mockResolvedValue({
     url: "https://example.com/uploaded-shot.png",
     file_name: "uploaded-shot.png",
@@ -69,6 +88,7 @@ vi.mock("@/lib/api", () => ({
     },
     sessionComposer: {
       files: mocks.sessionComposerFilesMock,
+      slashCommands: mocks.sessionComposerSlashCommandsMock,
     },
     uploads: {
       upload: mocks.uploadMock,
@@ -241,6 +261,19 @@ describe("ManualSessionCreatePageContent", () => {
       expect(mocks.uploadMock).toHaveBeenCalledWith(file);
     });
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
+  it("shows slash command suggestions when the user types a slash trigger", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await user.type(textarea, "/rev");
+
+    expect(await screen.findByText("/review")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mocks.sessionComposerSlashCommandsMock).toHaveBeenCalled();
+    });
   });
 
   it("returns focus to the prompt after a dropped image finishes uploading", async () => {

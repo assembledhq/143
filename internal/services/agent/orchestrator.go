@@ -1700,19 +1700,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if session.AgentSessionID != nil {
 			resumeSessionID = *session.AgentSessionID
 		}
+		commands := canonicalCommands(latestMsg, session.AgentType)
 		// UserMessage carries the user's textarea content verbatim, including
-		// any visible /command tokens. This branch builds the prompt directly
-		// rather than calling adapter.PreparePrompt, so input.Commands and the
-		// EnsureSlashCommandsInPrompt safety net are NOT threaded through. That
-		// is correct today because slash commands always appear in the textarea
-		// (see frontend insertCommandAtCaret + the design's "textarea is the
-		// source of truth" principle), but a future codepath that populates
-		// Commands without echoing them in UserMessage would silently drop them
-		// here. See docs/design/implemented/64-session-composer-slash-commands.md.
+		// any visible /command tokens. Run it through the same slash-command
+		// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
+		// continuation turns cannot silently drop stored commands when the
+		// textarea and commands[] payload disagree.
 		prompt = &AgentPrompt{
 			Continuation:    true,
 			ResumeSessionID: resumeSessionID,
-			UserMessage:     userMessage,
+			UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
 			MaxTokens:       tokenLimitForMode(session.TokenMode),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {

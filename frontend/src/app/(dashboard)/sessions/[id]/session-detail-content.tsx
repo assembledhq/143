@@ -139,6 +139,11 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
   return `${days}d ${hours % 24}h`;
 }
 
+const triggerPickerIconClassName = "h-4 w-4 shrink-0";
+const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
+const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
+const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
+
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
   { key: "correctness_check", label: "Correctness check" },
@@ -702,9 +707,7 @@ function SessionComposer({
           items: fileMentions.map((reference) => ({
             id: `${reference.kind}:${reference.path ?? reference.id ?? reference.display}`,
             primary: reference.display,
-            icon: reference.kind === "directory"
-              ? <FolderTree className="h-4 w-4 shrink-0" />
-              : <FileCode2 className="h-4 w-4 shrink-0" />,
+            icon: reference.kind === "directory" ? directoryTriggerIcon : fileTriggerIcon,
           })),
         },
       ];
@@ -717,7 +720,7 @@ function SessionComposer({
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: <Slash className="h-4 w-4 shrink-0" />,
+          icon: slashTriggerIcon,
         })),
       }));
     }
