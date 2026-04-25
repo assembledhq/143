@@ -23,9 +23,10 @@ func TestSessionAuditSnapshot(t *testing.T) {
 	modelOverride := "gpt-5.2-codex"
 	targetBranch := "main"
 	title := "Fix login bug"
+	issueID := uuid.New()
 	session := &models.Session{
 		ID:                uuid.New(),
-		IssueID:           uuid.New(),
+		PrimaryIssueID:    &issueID,
 		OrgID:             uuid.New(),
 		AgentType:         models.AgentTypeCodex,
 		Status:            "pending",
@@ -43,7 +44,7 @@ func TestSessionAuditSnapshot(t *testing.T) {
 		CreatedAt:         time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC),
 	}
 	issue := &models.Issue{
-		ID:           session.IssueID,
+		ID:           issueID,
 		Source:       models.IssueSourceManual,
 		RepositoryID: &repoID,
 		Title:        "Manual issue",
@@ -56,7 +57,7 @@ func TestSessionAuditSnapshot(t *testing.T) {
 
 	require.Equal(t, session.ID.String(), details["session_id"], "snapshot should include the session ID")
 	require.Equal(t, title, details["title"], "snapshot should include the resolved session title")
-	require.Equal(t, session.IssueID.String(), details["issue_id"], "snapshot should include the source issue ID")
+	require.Equal(t, issueID.String(), details["issue_id"], "snapshot should include the source issue ID")
 	require.Equal(t, "manual", details["issue_source"], "snapshot should include the source issue type")
 	require.Equal(t, "codex", details["agent_type"], "snapshot should include the selected agent type")
 	require.Equal(t, "pending", details["status"], "snapshot should include the initial status")
@@ -79,14 +80,15 @@ func TestSessionArchiveAuditDetails(t *testing.T) {
 
 	userID := uuid.New()
 	title := "Investigate billing timeout"
+	issueID := uuid.New()
 	session := &models.Session{
-		ID:            uuid.New(),
-		IssueID:       uuid.New(),
-		AgentType:     models.AgentTypeClaudeCode,
-		Status:        "completed",
-		AutonomyLevel: "supervised",
-		TokenMode:     "low",
-		Title:         &title,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		AgentType:      models.AgentTypeClaudeCode,
+		Status:         "completed",
+		AutonomyLevel:  "supervised",
+		TokenMode:      "low",
+		Title:          &title,
 	}
 
 	tests := []struct {
@@ -134,7 +136,7 @@ func TestSessionArchiveAuditDetails(t *testing.T) {
 			require.NoError(t, json.Unmarshal(raw, &details), "archive details should be valid JSON")
 			require.Equal(t, title, details["title"], "archive details should include the session title")
 			require.Equal(t, session.ID.String(), details["session_id"], "archive details should include the session ID")
-			require.Equal(t, session.IssueID.String(), details["issue_id"], "archive details should include the issue ID")
+			require.Equal(t, issueID.String(), details["issue_id"], "archive details should include the issue ID")
 			require.Equal(t, string(session.AgentType), details["agent_type"], "archive details should include agent type")
 			require.Equal(t, "completed", details["status"], "archive details should include status")
 			require.Equal(t, tt.expected, details["changes"], "archive details should include the expected archive diff")

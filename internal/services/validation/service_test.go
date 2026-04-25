@@ -301,10 +301,10 @@ func TestServiceValidate_FailedValidationRetriagesIssue(t *testing.T) {
 	issueID := uuid.New()
 	diff := "diff --git a/main.go b/main.go\n"
 	err := service.Validate(context.Background(), &models.Session{
-		ID:      uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
-		IssueID: issueID,
+		ID:             uuid.New(),
+		OrgID:          uuid.New(),
+		Diff:           &diff,
+		PrimaryIssueID: &issueID,
 	}, &models.Issue{
 		ID:    issueID,
 		Title: "Fix checkout timeout",
@@ -510,13 +510,14 @@ func TestValidate_AllPass_EnqueuesPR(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -548,13 +549,14 @@ func TestValidate_SecurityFails_FailFast(t *testing.T) {
  package config
 +const awsKey = "AKIAIOSFODNN7EXAMPLE"
 `
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -581,13 +583,14 @@ func TestValidate_SkippedChecksRecorded(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -608,13 +611,14 @@ func TestValidate_DiffTooLarge_Fails(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
 	diff := generateDiff(400, 150)
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -636,13 +640,14 @@ func TestValidate_NilDiff_PassesSecurity(t *testing.T) {
 	stores := newMockStores()
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, nil, provider, zerolog.Nop())
 
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    nil,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           nil,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -793,13 +798,14 @@ func TestValidate_LLMChecksRunBeforeDeterministic(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)
@@ -824,13 +830,14 @@ func TestValidate_DirectionCheckFails_FailFast(t *testing.T) {
 	svc := NewService(stores.validations, stores.issues, stores.orgs, stores.jobs, llm, provider, zerolog.Nop())
 
 	diff := generateDiff(5, 3)
+	issueID := uuid.New()
 	agentRun := &models.Session{
-		ID:      uuid.New(),
-		IssueID: uuid.New(),
-		OrgID:   uuid.New(),
-		Diff:    &diff,
+		ID:             uuid.New(),
+		PrimaryIssueID: &issueID,
+		OrgID:          uuid.New(),
+		Diff:           &diff,
 	}
-	issue := &models.Issue{ID: agentRun.IssueID, OrgID: agentRun.OrgID, Title: "Test issue"}
+	issue := &models.Issue{ID: issueID, OrgID: agentRun.OrgID, Title: "Test issue"}
 	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace"}
 
 	err := svc.Validate(context.Background(), agentRun, issue, sandbox)

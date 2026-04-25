@@ -714,7 +714,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectExec("INSERT INTO session_issue_links").
@@ -826,9 +826,12 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 				SessionID: &parentSessionID,
 			}
 			parentSession := models.Session{
-				ID:            parentSessionID,
-				OrgID:         pr.OrgID,
-				IssueID:       uuid.New(),
+				ID:    parentSessionID,
+				OrgID: pr.OrgID,
+				PrimaryIssueID: func() *uuid.UUID {
+					id := uuid.New()
+					return &id
+				}(),
 				AgentType:     "claude_code",
 				Status:        string(models.SessionStatusCompleted),
 				AutonomyLevel: "semi",
@@ -1339,7 +1342,7 @@ var prRepairRunTestColumns = []string{
 }
 
 var prHealthSessionColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -1357,7 +1360,7 @@ var prHealthSessionColumns = []string{
 func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status string) []any {
 	issueID := uuid.New()
 	return []any{
-		sessionID, issueID, orgID, models.SessionOriginIssueTrigger, models.SessionInteractionModeSingleRun, models.SessionValidationPolicyOnTurnComplete, "claude_code", status, "semi", "low",
+		sessionID, &issueID, orgID, models.SessionOriginIssueTrigger, models.SessionInteractionModeSingleRun, models.SessionValidationPolicyOnTurnComplete, "claude_code", status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &now, nil, nil,
 		nil, nil, nil, false,

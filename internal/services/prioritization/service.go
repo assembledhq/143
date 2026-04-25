@@ -330,13 +330,14 @@ func (s *Service) CheckAutoTrigger(ctx context.Context, orgID uuid.UUID, score *
 		agentType = models.DefaultDefaultAgentType
 	}
 	run := &models.Session{
-		IssueID:        issue.ID,
+		PrimaryIssueID: &issue.ID,
 		OrgID:          orgID,
 		AgentType:      agentType,
 		Status:         "pending",
 		AutonomyLevel:  settings.AutonomyLevel,
 		TokenMode:      "low",
 		ComplexityTier: &estimate.Tier,
+		RepositoryID:   issue.RepositoryID,
 	}
 	if err := s.sessions.Create(ctx, run); err != nil {
 		return fmt.Errorf("create agent run: %w", err)

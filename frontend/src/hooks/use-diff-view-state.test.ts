@@ -6,7 +6,7 @@ import type { Session } from "@/lib/types";
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: "session-1",
-    issue_id: "issue-1",
+    primary_issue_id: "issue-1",
     org_id: "org-1",
     agent_type: "coding",
     status: "completed",

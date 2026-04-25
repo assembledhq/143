@@ -39,11 +39,12 @@ func TestSessionListItem_MarshalJSON_PreservesEnrichment(t *testing.T) {
 
 	now := time.Now().UTC().Round(time.Second)
 	repositoryID := uuid.New()
+	primaryIssueID := uuid.New()
 	prNumber := 42
 	item := SessionListItem{
 		Session: Session{
 			ID:               uuid.New(),
-			IssueID:          uuid.New(),
+			PrimaryIssueID:   &primaryIssueID,
 			OrgID:            uuid.New(),
 			Origin:           SessionOriginIssueTrigger,
 			InteractionMode:  SessionInteractionModeSingleRun,
@@ -77,52 +78,46 @@ func TestSessionListItem_MarshalJSON_PreservesEnrichment(t *testing.T) {
 func TestSessionPrimaryIssueHelpers(t *testing.T) {
 	t.Parallel()
 
-	explicitPrimary := uuid.New()
-	legacyIssue := uuid.New()
+	primaryIssueID := uuid.New()
 
 	tests := []struct {
 		name               string
 		session            Session
-		wantPrimary        *uuid.UUID
 		wantHasPrimary     bool
 		wantInteractive    bool
 		wantValidateOnTurn bool
 		wantValidateOnEnd  bool
 	}{
 		{
-			name: "prefers explicit primary issue",
+			name: "with primary issue linked",
 			session: Session{
-				IssueID:          legacyIssue,
-				PrimaryIssueID:   &explicitPrimary,
+				PrimaryIssueID:   &primaryIssueID,
 				InteractionMode:  SessionInteractionModeSingleRun,
 				ValidationPolicy: SessionValidationPolicyOnTurnComplete,
 			},
-			wantPrimary:        &explicitPrimary,
 			wantHasPrimary:     true,
 			wantInteractive:    false,
 			wantValidateOnTurn: true,
 			wantValidateOnEnd:  false,
 		},
 		{
-			name: "falls back to legacy issue id",
+			name: "interactive session end validation",
 			session: Session{
-				IssueID:          legacyIssue,
+				PrimaryIssueID:   &primaryIssueID,
 				InteractionMode:  SessionInteractionModeInteractive,
 				ValidationPolicy: SessionValidationPolicyOnSessionEnd,
 			},
-			wantPrimary:        &legacyIssue,
 			wantHasPrimary:     true,
 			wantInteractive:    true,
 			wantValidateOnTurn: false,
 			wantValidateOnEnd:  true,
 		},
 		{
-			name: "returns nil when no issue is attached",
+			name: "zero-issue session is a first-class path",
 			session: Session{
 				InteractionMode:  SessionInteractionModeSingleRun,
 				ValidationPolicy: SessionValidationPolicySkip,
 			},
-			wantPrimary:        nil,
 			wantHasPrimary:     false,
 			wantInteractive:    false,
 			wantValidateOnTurn: false,
@@ -135,9 +130,7 @@ func TestSessionPrimaryIssueHelpers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			gotPrimary := tt.session.EffectivePrimaryIssueID()
-			require.Equal(t, tt.wantPrimary, gotPrimary, "EffectivePrimaryIssueID should resolve the expected primary issue")
-			require.Equal(t, tt.wantHasPrimary, tt.session.HasPrimaryIssue(), "HasPrimaryIssue should match the resolved primary issue state")
+			require.Equal(t, tt.wantHasPrimary, tt.session.HasPrimaryIssue(), "HasPrimaryIssue should match the primary issue state")
 			require.Equal(t, tt.wantInteractive, tt.session.IsInteractive(), "IsInteractive should reflect the interaction mode")
 			require.Equal(t, tt.wantValidateOnTurn, tt.session.ShouldValidateOnTurnComplete(), "ShouldValidateOnTurnComplete should reflect the validation policy")
 			require.Equal(t, tt.wantValidateOnEnd, tt.session.ShouldValidateOnSessionEnd(), "ShouldValidateOnSessionEnd should reflect the validation policy")
@@ -145,29 +138,48 @@ func TestSessionPrimaryIssueHelpers(t *testing.T) {
 	}
 }
 
-func TestSession_UnmarshalJSON_BackfillsPrimaryIssueID(t *testing.T) {
+func TestSession_UnmarshalJSON_FallsBackToLegacyIssueID(t *testing.T) {
 	t.Parallel()
 
-	issueID := uuid.New()
-	raw := []byte(`{"id":"` + uuid.New().String() + `","issue_id":"` + issueID.String() + `"}`)
+	primaryID := uuid.New()
+	legacyID := uuid.New()
 
-	var session Session
-	err := json.Unmarshal(raw, &session)
-	require.NoError(t, err, "UnmarshalJSON should decode session payloads")
-	require.Equal(t, issueID, session.IssueID, "UnmarshalJSON should decode the legacy issue_id field")
-	require.NotNil(t, session.PrimaryIssueID, "UnmarshalJSON should backfill PrimaryIssueID from issue_id")
-	require.Equal(t, issueID, *session.PrimaryIssueID, "UnmarshalJSON should preserve the primary issue identity")
+	t.Run("primary_issue_id wins when present", func(t *testing.T) {
+		t.Parallel()
+		raw := []byte(`{"id":"` + uuid.New().String() + `","primary_issue_id":"` + primaryID.String() + `","issue_id":"` + legacyID.String() + `"}`)
+		var s Session
+		require.NoError(t, json.Unmarshal(raw, &s), "decoder should accept canonical Phase 2 payloads")
+		require.NotNil(t, s.PrimaryIssueID, "PrimaryIssueID should be populated from primary_issue_id")
+		require.Equal(t, primaryID, *s.PrimaryIssueID, "primary_issue_id must take precedence over legacy issue_id")
+	})
+
+	t.Run("legacy issue_id backfills when primary_issue_id missing", func(t *testing.T) {
+		t.Parallel()
+		raw := []byte(`{"id":"` + uuid.New().String() + `","issue_id":"` + legacyID.String() + `"}`)
+		var s Session
+		require.NoError(t, json.Unmarshal(raw, &s), "decoder should accept legacy Phase 1 payloads")
+		require.NotNil(t, s.PrimaryIssueID, "PrimaryIssueID should be backfilled from legacy issue_id")
+		require.Equal(t, legacyID, *s.PrimaryIssueID, "decoder should preserve the legacy issue identity")
+	})
+
+	t.Run("legacy uuid.Nil does not backfill", func(t *testing.T) {
+		t.Parallel()
+		raw := []byte(`{"id":"` + uuid.New().String() + `","issue_id":"00000000-0000-0000-0000-000000000000"}`)
+		var s Session
+		require.NoError(t, json.Unmarshal(raw, &s), "decoder should accept zero-uuid legacy issue_id")
+		require.Nil(t, s.PrimaryIssueID, "zero-uuid legacy issue_id should not backfill PrimaryIssueID")
+	})
 }
 
 func TestSessionDetail_MarshalJSON_PreservesThreads(t *testing.T) {
 	t.Parallel()
 
 	threadID := uuid.New()
+	primaryIssueID := uuid.New()
 	session := SessionDetail{
 		Session: Session{
 			ID:               uuid.New(),
-			IssueID:          uuid.New(),
-			PrimaryIssueID:   func() *uuid.UUID { id := uuid.New(); return &id }(),
+			PrimaryIssueID:   &primaryIssueID,
 			OrgID:            uuid.New(),
 			Origin:           SessionOriginIssueTrigger,
 			InteractionMode:  SessionInteractionModeSingleRun,
@@ -185,7 +197,8 @@ func TestSessionDetail_MarshalJSON_PreservesThreads(t *testing.T) {
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(raw, &decoded), "marshaled SessionDetail should decode into a map")
 	require.Contains(t, decoded, "threads", "SessionDetail JSON should preserve the wrapper threads field")
-	require.Contains(t, decoded, "issue_id", "SessionDetail JSON should preserve the effective issue_id field")
+	require.Contains(t, decoded, "primary_issue_id", "SessionDetail JSON should expose the primary_issue_id field")
+	require.NotContains(t, decoded, "issue_id", "SessionDetail JSON should not expose the legacy issue_id alias")
 }
 
 func TestSessionJSONHelpers_SurfaceEncodingErrors(t *testing.T) {
@@ -202,12 +215,4 @@ func TestSessionJSONHelpers_SurfaceEncodingErrors(t *testing.T) {
 
 	_, err = json.Marshal(SessionListItem{Session: session})
 	require.Error(t, err, "SessionListItem MarshalJSON should propagate session JSON encoding failures")
-}
-
-func TestSession_UnmarshalJSON_InvalidPayload(t *testing.T) {
-	t.Parallel()
-
-	var session Session
-	err := json.Unmarshal([]byte(`{bad-json`), &session)
-	require.Error(t, err, "UnmarshalJSON should reject invalid JSON payloads")
 }

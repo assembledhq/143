@@ -124,7 +124,7 @@ describe("CommandPalette", () => {
         if (url.searchParams.get("search")) {
           return HttpResponse.json({
             data: [
-              { id: "sess-1", title: "Fix login bug", status: "completed", created_at: "2026-01-01T00:00:00Z", current_turn: 0, sandbox_state: "none", org_id: "org-1", issue_id: "00000000-0000-0000-0000-000000000000", agent_type: "codex", autonomy_level: "semi", token_mode: "normal" },
+              { id: "sess-1", title: "Fix login bug", status: "completed", created_at: "2026-01-01T00:00:00Z", current_turn: 0, sandbox_state: "none", org_id: "org-1", primary_issue_id: null, agent_type: "codex", autonomy_level: "semi", token_mode: "normal" },
             ],
             meta: {},
           });
@@ -154,7 +154,7 @@ describe("CommandPalette", () => {
         if (url.searchParams.get("search") === "Fix login") {
           return HttpResponse.json({
             data: [
-              { id: "sess-1", title: "Fix login bug", status: "completed", created_at: "2026-01-01T00:00:00Z", current_turn: 0, sandbox_state: "none", org_id: "org-1", issue_id: "00000000-0000-0000-0000-000000000000", agent_type: "codex", autonomy_level: "semi", token_mode: "normal", repository_id: "repo-1" },
+              { id: "sess-1", title: "Fix login bug", status: "completed", created_at: "2026-01-01T00:00:00Z", current_turn: 0, sandbox_state: "none", org_id: "org-1", primary_issue_id: null, agent_type: "codex", autonomy_level: "semi", token_mode: "normal", repository_id: "repo-1" },
             ],
             meta: {},
           });

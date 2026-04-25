@@ -54,7 +54,7 @@ vi.mock('@/contexts/optimistic-sessions', () => ({
 function makeSession(overrides: Partial<SessionListItem> = {}): SessionListItem {
   return {
     id: 'sess-1',
-    issue_id: 'issue-1',
+    primary_issue_id: 'issue-1',
     org_id: 'org-1',
     agent_type: 'claude_code',
     status: 'completed',

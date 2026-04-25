@@ -43,7 +43,7 @@ export const mockIssues: Issue[] = [
 export const mockSessions: Session[] = [
   {
     id: 'session-abcdef12-3456-7890',
-    issue_id: 'issue-1',
+    primary_issue_id: 'issue-1',
     org_id: 'org-1',
     agent_type: 'claude_code',
     status: 'completed',
@@ -62,7 +62,7 @@ export const mockSessions: Session[] = [
   },
   {
     id: 'session-98765432-abcd-ef01',
-    issue_id: 'issue-2',
+    primary_issue_id: 'issue-2',
     org_id: 'org-1',
     agent_type: 'codex',
     status: 'failed',

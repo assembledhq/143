@@ -161,7 +161,7 @@ func TestServiceGatherContext(t *testing.T) {
 		name             string
 		orgStore         orgStore
 		issueStore       issueStore
-		sessionStore    sessionStore
+		sessionStore     sessionStore
 		pullRequests     prStore
 		decisionLog      decisionLogStore
 		expectErr        string
@@ -172,18 +172,18 @@ func TestServiceGatherContext(t *testing.T) {
 		expectedDecision int
 	}{
 		{
-			name:      "returns wrapped error when organization lookup fails",
-			orgStore:  &gatherOrgStoreMock{err: fmt.Errorf("org missing")},
-			issueStore: &gatherIssueStoreMock{},
+			name:         "returns wrapped error when organization lookup fails",
+			orgStore:     &gatherOrgStoreMock{err: fmt.Errorf("org missing")},
+			issueStore:   &gatherIssueStoreMock{},
 			sessionStore: &gatherSessionStoreMock{},
-			expectErr: "org missing",
+			expectErr:    "org missing",
 		},
 		{
-			name: "returns wrapped error when issue lookup fails",
-			orgStore: &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
-			issueStore: &gatherIssueStoreMock{errByKey: map[string]error{"open": fmt.Errorf("issues unavailable")}},
+			name:         "returns wrapped error when issue lookup fails",
+			orgStore:     &gatherOrgStoreMock{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+			issueStore:   &gatherIssueStoreMock{errByKey: map[string]error{"open": fmt.Errorf("issues unavailable")}},
 			sessionStore: &gatherSessionStoreMock{},
-			expectErr: "issues unavailable",
+			expectErr:    "issues unavailable",
 		},
 		{
 			name:     "builds full context with issues runs prs and decisions",
@@ -220,15 +220,15 @@ func TestServiceGatherContext(t *testing.T) {
 			sessionStore: &gatherSessionStoreMock{
 				byStatus: map[string][]models.Session{
 					"pending": {
-						{ID: pendingRunID, IssueID: issueID, Status: "pending", StartedAt: &now},
+						{ID: pendingRunID, PrimaryIssueID: &issueID, Status: "pending", StartedAt: &now},
 					},
 					"running": {
-						{ID: uuid.New(), IssueID: secondIssueID, Status: "running", StartedAt: &now},
+						{ID: uuid.New(), PrimaryIssueID: &secondIssueID, Status: "running", StartedAt: &now},
 					},
 				},
 				recent: []models.Session{{
 					ID:                 recentRunID,
-					IssueID:            issueID,
+					PrimaryIssueID:     &issueID,
 					Status:             "completed",
 					ConfidenceScore:    &confidence,
 					FailureCategory:    &failureCategory,
@@ -239,7 +239,7 @@ func TestServiceGatherContext(t *testing.T) {
 			},
 			pullRequests: &gatherPRStoreMock{prs: []models.PullRequest{{
 				ID:           prID,
-				SessionID:   &pendingRunID,
+				SessionID:    &pendingRunID,
 				Title:        "Fix payment panic",
 				Status:       "open",
 				ReviewStatus: "pending",
@@ -268,7 +268,7 @@ func TestServiceGatherContext(t *testing.T) {
 
 			svc := &Service{
 				issues:       tt.issueStore,
-				sessions:    tt.sessionStore,
+				sessions:     tt.sessionStore,
 				pullRequests: tt.pullRequests,
 				orgs:         tt.orgStore,
 				decisionLog:  tt.decisionLog,

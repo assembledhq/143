@@ -58,12 +58,12 @@ func TestSessionHandler_EnrichSessionLinks(t *testing.T) {
 				),
 			)
 
-		session := models.Session{ID: sessionID, IssueID: issueID}
+		session := models.Session{ID: sessionID, PrimaryIssueID: &issueID}
 		handler.enrichSessionLinks(context.Background(), orgID, &session)
 
 		require.Len(t, session.LinkedIssues, 1, "enrichSessionLinks should attach the session's linked issues")
-		require.NotNil(t, session.PrimaryIssueID, "enrichSessionLinks should preserve the effective primary issue id")
-		require.Equal(t, issueID, *session.PrimaryIssueID, "enrichSessionLinks should backfill PrimaryIssueID from legacy issue_id")
+		require.NotNil(t, session.PrimaryIssueID, "enrichSessionLinks should preserve the primary issue id")
+		require.Equal(t, issueID, *session.PrimaryIssueID, "enrichSessionLinks should preserve the primary issue id unchanged")
 		require.NotNil(t, handler.issueSnapshots, "SetIssueSnapshotStore should store the provided snapshot store")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})

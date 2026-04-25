@@ -63,9 +63,9 @@ func (m *mockProjectStore) UpdateStatus(_ context.Context, _, id uuid.UUID, stat
 }
 
 type mockProjectTaskStore struct {
-	tasks      []*models.ProjectTask
-	created    []*models.ProjectTask
-	maxBatch   int
+	tasks         []*models.ProjectTask
+	created       []*models.ProjectTask
+	maxBatch      int
 	countByStatus map[string]int
 }
 
@@ -134,7 +134,7 @@ func (m *mockProjectCycleStore) ListByProject(_ context.Context, _, _ uuid.UUID,
 
 func newTestProjectService(ps *mockProjectStore, pts *mockProjectTaskStore, pcs *mockProjectCycleStore) *Service {
 	svc := &Service{
-		sessions:     &mockSessionStore{},
+		sessions:      &mockSessionStore{},
 		jobs:          &mockJobStore{},
 		projects:      ps,
 		projectTasks:  pts,
@@ -177,23 +177,6 @@ func TestGenerateProjectBranchName(t *testing.T) {
 	projectID := uuid.MustParse("12345678-abcd-efab-cdef-1234567890ab")
 	got := generateProjectBranchName(projectID, 2, 3, "Fix auth bug")
 	require.Equal(t, "143/project-12345678/2-3-fix-auth-bug", got)
-}
-
-func TestPlaceholderIssueID(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil issue ID returns uuid.Nil", func(t *testing.T) {
-		t.Parallel()
-		task := &models.ProjectTask{}
-		require.Equal(t, uuid.Nil, placeholderIssueID(task))
-	})
-
-	t.Run("non-nil issue ID returns it", func(t *testing.T) {
-		t.Parallel()
-		id := uuid.New()
-		task := &models.ProjectTask{IssueID: &id}
-		require.Equal(t, id, placeholderIssueID(task))
-	})
 }
 
 func TestTokenModeFromTaskComplexity(t *testing.T) {
@@ -470,9 +453,9 @@ func TestExecuteProjectPlan_UpdatesCurrentPhase(t *testing.T) {
 	svc := newTestProjectService(ps, pts, pcs)
 
 	pp := &ProjectPlan{
-		ProjectID:    projectID,
+		ProjectID:     projectID,
 		CycleAnalysis: "Phase update",
-		CurrentPhase: "implementation",
+		CurrentPhase:  "implementation",
 	}
 
 	settings := models.OrgSettings{AutonomyLevel: "manual"}

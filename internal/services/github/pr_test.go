@@ -2409,10 +2409,10 @@ func TestSyncSessionTitle_UsesEditedSessionTitleForLinearIssue(t *testing.T) {
 	}
 
 	err = svc.SyncSessionTitle(context.Background(), &models.Session{
-		ID:      sessionID,
-		OrgID:   orgID,
-		IssueID: issueID,
-		Title:   &updatedTitle,
+		ID:             sessionID,
+		OrgID:          orgID,
+		PrimaryIssueID: &issueID,
+		Title:          &updatedTitle,
 	})
 	require.NoError(t, err, "syncing the session title should succeed for Linear issues")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -2527,10 +2527,10 @@ func TestSyncSessionTitle_NoOpAndErrorPaths(t *testing.T) {
 		}
 
 		err = svc.SyncSessionTitle(context.Background(), &models.Session{
-			ID:      sessionID,
-			OrgID:   orgID,
-			IssueID: issueID,
-			Title:   &emptyTitle,
+			ID:             sessionID,
+			OrgID:          orgID,
+			PrimaryIssueID: &issueID,
+			Title:          &emptyTitle,
 		})
 		require.NoError(t, err, "empty formatted title should skip the sync")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -2636,10 +2636,10 @@ func TestSyncSessionTitle_NoOpAndErrorPaths(t *testing.T) {
 		}
 
 		err = svc.SyncSessionTitle(context.Background(), &models.Session{
-			ID:      sessionID,
-			OrgID:   orgID,
-			IssueID: issueID,
-			Title:   &title,
+			ID:             sessionID,
+			OrgID:          orgID,
+			PrimaryIssueID: &issueID,
+			Title:          &title,
 		})
 		require.NoError(t, err, "issue lookup failures should only warn and continue")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -3520,8 +3520,8 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "issue_id", "created_at", "last_activity_at"}).
-				AddRow(runID, orgID, issueID, now, now),
+			pgxmock.NewRows([]string{"id", "org_id", "primary_issue_id", "created_at", "last_activity_at"}).
+				AddRow(runID, orgID, &issueID, now, now),
 		)
 	mock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3570,7 +3570,8 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	run := &models.Session{
 		ID:                runID,
 		OrgID:             orgID,
-		IssueID:           issueID,
+		PrimaryIssueID:    &issueID,
+		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		SnapshotKey:       &snapshotKey,
 		ResultSummary:     func() *string { s := "Implemented the fix"; return &s }(),

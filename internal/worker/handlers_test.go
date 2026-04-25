@@ -27,7 +27,7 @@ import (
 )
 
 var workerSessionColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -300,8 +300,13 @@ func (s *orchestratorServiceStub) ResolveAbsoluteRuntimeCeiling(ctx context.Cont
 
 func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, currentTurn int, agentSessionID, snapshotKey *string) []any {
 	now := time.Now()
+	var primaryIssueID any
+	if issueID != uuid.Nil {
+		issueIDCopy := issueID
+		primaryIssueID = &issueIDCopy
+	}
 	return workerSessionTestRow(
-		sessionID, issueID, orgID, "claude_code", status, "semi", "low",
+		sessionID, primaryIssueID, orgID, "claude_code", status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, nil, nil, nil,
 		nil, nil, nil, false,
@@ -775,7 +780,7 @@ func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger mo
 
 func newWorkerSessionRow(sessionID, orgID uuid.UUID, now time.Time, snapshotKey *string) []any {
 	return workerSessionTestRow(
-		sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+		sessionID, nil, orgID, "claude_code", "completed", "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &now, &now, nil,
 		nil, nil, nil, false,
@@ -1420,7 +1425,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// 4. Create the session. The 20th arg is automation_run_id — asserting
+	// 4. Create the session. The 19th arg is automation_run_id — asserting
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
 	// on sessions.automation_run_id would silently miss every row).
@@ -1430,7 +1435,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
 	mock.ExpectCommit()
 
@@ -2516,7 +2521,7 @@ func TestValidateHandler_IssueSnapshotErrors(t *testing.T) {
 		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
 
 		runRow := workerSessionTestRow(
-			sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+			sessionID, nil, orgID, "claude_code", "completed", "semi", "low",
 			nil, nil, nil, nil,
 			nil, nil, false, &now, &now, nil,
 			nil, nil, nil, false,
@@ -2615,7 +2620,6 @@ func TestOpenPRHandler_UsesSnapshotPrimaryIssueFromPayload(t *testing.T) {
 	services := &Services{
 		PR: &stubPRService{
 			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
-				require.Equal(t, primaryIssueID, run.IssueID, "open_pr should replace the session's legacy issue id with the snapshot primary issue")
 				require.NotNil(t, run.PrimaryIssueID, "open_pr should backfill PrimaryIssueID from the snapshot")
 				require.Equal(t, primaryIssueID, *run.PrimaryIssueID, "open_pr should preserve the snapshot primary issue id")
 				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
@@ -2702,7 +2706,7 @@ func TestOpenPRHandler_IssueSnapshotErrors(t *testing.T) {
 		stores.IssueSnapshots = db.NewSessionTurnIssueSnapshotStore(mock)
 
 		runRow := workerSessionTestRow(
-			sessionID, uuid.Nil, orgID, "claude_code", "completed", "semi", "low",
+			sessionID, nil, orgID, "claude_code", "completed", "semi", "low",
 			nil, nil, nil, nil,
 			nil, nil, false, &now, &now, nil,
 			nil, nil, nil, false,
@@ -2732,7 +2736,8 @@ func TestOpenPRHandler_IssueSnapshotErrors(t *testing.T) {
 		handler := newOpenPRHandler(stores, &Services{
 			PR: &stubPRService{
 				createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
-					require.Equal(t, primaryIssueID, run.IssueID, "open_pr should resolve the primary issue from the current turn snapshot")
+					require.NotNil(t, run.PrimaryIssueID, "open_pr should resolve the primary issue from the current turn snapshot")
+					require.Equal(t, primaryIssueID, *run.PrimaryIssueID, "open_pr should resolve the primary issue from the current turn snapshot")
 					return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
 				},
 			},

@@ -201,7 +201,6 @@ func (h *InternalIssueHandler) dispatchSession(r *http.Request, orgID uuid.UUID,
 	title := issue.Title
 
 	session := &models.Session{
-		IssueID:          issue.ID,
 		PrimaryIssueID:   &issue.ID,
 		OrgID:            orgID,
 		Origin:           models.SessionOriginIssueTrigger,

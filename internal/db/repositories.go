@@ -283,18 +283,16 @@ func (s *RepositoryStore) GetSummary(ctx context.Context, orgID uuid.UUID) ([]Re
 			s.id,
 			s.org_id,
 			s.status,
-			COALESCE(s.repository_id, legacy_issue.repository_id) AS resolved_repository_id
+			s.repository_id AS resolved_repository_id
 		FROM sessions s
-		LEFT JOIN issues legacy_issue ON legacy_issue.id = s.issue_id AND legacy_issue.org_id = s.org_id
 		WHERE s.deleted_at IS NULL
 	) session_repo ON session_repo.org_id = r.org_id AND session_repo.resolved_repository_id = r.id
 	LEFT JOIN projects p ON p.repository_id = r.id AND p.org_id = r.org_id
 	LEFT JOIN LATERAL (
 		SELECT s2.status FROM sessions s2
-		LEFT JOIN issues legacy_issue2 ON legacy_issue2.id = s2.issue_id AND legacy_issue2.org_id = s2.org_id
 		WHERE s2.org_id = r.org_id
 		  AND s2.deleted_at IS NULL
-		  AND COALESCE(s2.repository_id, legacy_issue2.repository_id) = r.id
+		  AND s2.repository_id = r.id
 		ORDER BY s2.created_at DESC LIMIT 1
 	) latest_s ON true
 		WHERE r.org_id = @org_id AND r.status = 'active'
