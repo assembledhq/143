@@ -502,6 +502,7 @@ type SessionMessage struct {
 	Content     string                 `db:"content" json:"content"`
 	Attachments []string               `db:"attachments" json:"attachments,omitempty"`
 	References  SessionInputReferences `db:"references" json:"references,omitempty"`
+	Commands    SessionInputCommands   `db:"commands" json:"commands,omitempty"`
 	TokenUsage  json.RawMessage        `db:"token_usage" json:"token_usage,omitempty"`
 	CreatedAt   time.Time              `db:"created_at" json:"created_at"`
 }

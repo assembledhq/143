@@ -1,6 +1,6 @@
 # Design: Session Composer Slash Commands
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-25
+> **Status:** Implemented | **Last reviewed:** 2026-04-25
 >
 > **Depends on:** [../overall.md](../overall.md), [../03-frontend.md](../03-frontend.md), [53-session-composer-mentions.md](53-session-composer-mentions.md)
 

@@ -24,7 +24,7 @@ import (
 )
 
 var sessionReviewHandlerSessionColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -40,9 +40,9 @@ var sessionReviewHandlerSessionColumns = []string{
 }
 
 func newSessionReviewHandlerSessionRow(sessionID, orgID uuid.UUID, status string, sandboxState string, snapshotKey *string, diff *string, now time.Time) []any {
-	issueID := uuid.New()
+	primaryIssueID := uuid.New()
 	return []any{
-		sessionID, issueID, orgID, models.SessionOriginManual, models.SessionInteractionModeInteractive, models.SessionValidationPolicyOnTurnComplete, models.AgentTypeClaudeCode, status, "semi", "low",
+		sessionID, &primaryIssueID, orgID, models.SessionOriginManual, models.SessionInteractionModeInteractive, models.SessionValidationPolicyOnTurnComplete, models.AgentTypeClaudeCode, status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &now, nil, nil,
 		nil, nil, nil, false,
@@ -386,7 +386,7 @@ func TestSessionReviewHandler_Start(t *testing.T) {
 					mock.ExpectQuery("INSERT INTO session_messages").
 						WithArgs(
 							pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-							pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+							pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						).
 						WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 					mock.ExpectQuery("INSERT INTO jobs").

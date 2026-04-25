@@ -268,6 +268,7 @@ export interface SessionMessage {
   content: string;
   attachments?: string[];
   references?: SessionInputReference[];
+  commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
   created_at: string;
 }
@@ -280,6 +281,35 @@ export interface SessionInputReference {
   path?: string;
   id?: string;
   display: string;
+}
+
+export type SessionComposerAgentType = "claude_code" | "codex" | "gemini_cli" | "amp" | "pi";
+
+export type SessionInputCommandSource = "builtin" | "project";
+
+export interface SessionInputCommand {
+  kind: "command";
+  agent_type: SessionComposerAgentType;
+  name: string;
+  token: string;
+  display: string;
+  description?: string;
+  arguments?: string;
+  source?: SessionInputCommandSource;
+}
+
+export interface SlashCommandGroup {
+  source: SessionInputCommandSource;
+  label: string;
+  items: SessionInputCommand[];
+}
+
+export interface SlashCommandListResponse {
+  groups: SlashCommandGroup[];
+}
+
+export interface SlashCommandDetailResponse {
+  command: SessionInputCommand;
 }
 
 export interface SessionQuestion {

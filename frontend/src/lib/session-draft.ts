@@ -9,15 +9,18 @@
 // mismatch silently discards the old draft rather than hydrating junk.
 
 import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
-import type { SessionInputReference } from "@/lib/types";
+import type { SessionInputCommand, SessionInputReference } from "@/lib/types";
 
 const STORAGE_KEY = "143:new-session-draft";
-const SCHEMA_VERSION = 1;
+// Bumped to 2 when commands[] was added — drafts from v1 are silently
+// discarded by the schema check in loadDraft.
+const SCHEMA_VERSION = 2;
 
 export type SessionDraft = {
   message: string;
   attachments: string[];
   references: SessionInputReference[];
+  commands: SessionInputCommand[];
   selectedModel: string;
   reasoningOverride: CodingAgentReasoningEffort;
   userSelectedRepoId: string | null;
@@ -64,6 +67,9 @@ export function loadDraft(): SessionDraft | null {
     references: Array.isArray(parsed.references)
       ? parsed.references.filter(isValidReference)
       : [],
+    commands: Array.isArray(parsed.commands)
+      ? parsed.commands.filter(isValidCommand)
+      : [],
     selectedModel: typeof parsed.selectedModel === "string" ? parsed.selectedModel : "",
     // Sanitize via the canonical coercer: unknown/invalid values collapse to "".
     reasoningOverride: toCodingAgentReasoningEffort(
@@ -106,6 +112,7 @@ function isEmptyDraft(draft: SessionDraft): boolean {
     draft.message.length === 0
     && draft.attachments.length === 0
     && draft.references.length === 0
+    && draft.commands.length === 0
     && draft.selectedModel === ""
     && draft.reasoningOverride === ""
     && draft.userSelectedRepoId === null
@@ -124,6 +131,18 @@ function isValidReference(value: unknown): value is SessionInputReference {
     && (ref.token === undefined || typeof ref.token === "string")
     && (ref.path === undefined || typeof ref.path === "string")
     && (ref.id === undefined || typeof ref.id === "string")
+  );
+}
+
+function isValidCommand(value: unknown): value is SessionInputCommand {
+  if (!value || typeof value !== "object") return false;
+  const cmd = value as Record<string, unknown>;
+  return (
+    cmd.kind === "command"
+    && typeof cmd.agent_type === "string"
+    && typeof cmd.name === "string"
+    && typeof cmd.token === "string"
+    && typeof cmd.display === "string"
   );
 }
 
