@@ -247,17 +247,9 @@ func main() {
 	}
 
 	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
+	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		metadata := map[string]any{
-			"build_sha": version.BuildSHA,
-		}
-		if cfg.PreviewInternalBaseURL != "" {
-			metadata["preview_internal_base_url"] = cfg.PreviewInternalBaseURL
-		}
-		if (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil {
-			metadata["preview_capable"] = true
-		}
-		return metadata
+		return buildBaseMetadata(previewCapable, cfg.PreviewInternalBaseURL)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -370,6 +362,8 @@ func main() {
 			retentionCfg,
 			jobNotifier,
 			nodeManager,
+			previewCapable,
+			cfg.PreviewInternalBaseURL,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
@@ -527,6 +521,8 @@ func startProcessWorkers(
 	retentionCfg worker.DataRetentionConfig,
 	jobNotifier *cache.JobNotifier,
 	nodeManager *cluster.NodeManager,
+	previewCapable bool,
+	previewInternalBaseURL string,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -543,19 +539,40 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(func() map[string]any {
-		return map[string]any{
-			"build_sha":              version.BuildSHA,
-			"active_job_count":       totalActiveJobs(workers),
-			"active_run_agent_count": totalActiveRunAgentJobs(workers),
-		}
-	})
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL))
 
 	for i, w := range workers {
 		go w.Start(ctx)
 		logger.Info().Int("worker_index", i).Msg("worker started with registered handlers")
 	}
 	return workers
+}
+
+// buildBaseMetadata returns the node metadata fields that must appear on every
+// heartbeat. SetMetadataProvider replaces the previous provider entirely, so
+// any provider installed later (e.g. by startProcessWorkers) must continue to
+// emit these fields or the next heartbeat will wipe preview_capable from the
+// node row and break preview routing.
+func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[string]any {
+	metadata := map[string]any{
+		"build_sha": version.BuildSHA,
+	}
+	if previewCapable {
+		metadata["preview_capable"] = true
+	}
+	if previewInternalBaseURL != "" {
+		metadata["preview_internal_base_url"] = previewInternalBaseURL
+	}
+	return metadata
+}
+
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string) func() map[string]any {
+	return func() map[string]any {
+		metadata := buildBaseMetadata(previewCapable, previewInternalBaseURL)
+		metadata["active_job_count"] = totalActiveJobs(workers)
+		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
+		return metadata
+	}
 }
 
 func totalActiveJobs(workers []*worker.Worker) int {
