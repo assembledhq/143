@@ -227,7 +227,7 @@ func runGitBootstrap(args []string, stderr io.Writer) int {
 // too, but the existing-trailer check prevents duplicates.
 func installCoAuthorHook(workdir, trailer string) error {
 	hooksDir := filepath.Join(workdir, ".git", "hooks")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
 		return err
 	}
 	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
@@ -277,7 +277,7 @@ func installGHWrapper() error {
 		return err
 	}
 	binDir := filepath.Join(homeDir, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
 		return err
 	}
 	wrapperPath := filepath.Join(binDir, "gh")
@@ -316,7 +316,7 @@ func callHost(action Action) (*Response, error) {
 // to the caller's stderr so config errors (e.g. invalid value) are visible.
 func runGit(workdir string, args ...string) error {
 	full := append([]string{"-C", workdir}, args...)
-	cmd := exec.Command("git", full...)
+	cmd := exec.Command("git", full...) // #nosec G204 -- exec.Command does not invoke a shell; args come from fixed internal callsites
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

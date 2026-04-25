@@ -194,6 +194,25 @@ func TestServer_ListenAfterClose_ReusesSessionDir(t *testing.T) {
 	require.Equal(t, "tok", resp.Token)
 }
 
+func TestServer_ListenCreatesSocketWithOwnerOnlyPerms(t *testing.T) {
+	t.Parallel()
+
+	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
+	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
+
+	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
+		models.OrgSettings{},
+	)
+	require.NoError(t, err, "Listen should create the per-session auth socket")
+	defer closeFn()
+
+	info, err := os.Stat(sock)
+	require.NoError(t, err, "Listen should leave a socket inode on disk")
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "sandbox auth socket should be owner-only")
+}
+
 // TestServer_ListenRejectsLooseDirPerms is the deploy-regression net: if
 // provision.sh ever drifts and creates the socket dir with world-readable
 // or world-executable bits, Listen must refuse rather than silently expose

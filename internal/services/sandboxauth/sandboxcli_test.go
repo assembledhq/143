@@ -280,6 +280,35 @@ func TestRunGitBootstrap_NoHookWhenCoAuthorEmpty(t *testing.T) {
 	require.NoError(t, err, "gh wrapper should still be installed when no co-author hook is needed")
 }
 
+func TestInstallCoAuthorHook_CreatesHooksDirWithStrictPerms(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo for hook installation")
+
+	hooksDir := filepath.Join(workdir, ".git", "hooks")
+	require.NoError(t, os.RemoveAll(hooksDir), "test should remove the default hooks dir so installCoAuthorHook recreates it")
+
+	err := installCoAuthorHook(workdir, "Co-authored-by: Alice <alice@example.com>")
+	require.NoError(t, err, "installCoAuthorHook should succeed")
+
+	info, err := os.Stat(hooksDir)
+	require.NoError(t, err, "installCoAuthorHook should recreate the hooks directory")
+	require.Equal(t, os.FileMode(0o750), info.Mode().Perm(), "hooks directory should be created with 0750 permissions")
+}
+
+func TestInstallGHWrapper_CreatesBinDirWithStrictPerms(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	err := installGHWrapper()
+	require.NoError(t, err, "installGHWrapper should succeed")
+
+	info, err := os.Stat(filepath.Join(homeDir, ".local", "bin"))
+	require.NoError(t, err, "installGHWrapper should create ~/.local/bin")
+	require.Equal(t, os.FileMode(0o750), info.Mode().Perm(), "gh wrapper bin directory should be created with 0750 permissions")
+}
+
 func TestRunGitBootstrap_RejectsMissingWorkdir(t *testing.T) {
 	t.Parallel()
 	var stderr bytes.Buffer

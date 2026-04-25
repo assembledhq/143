@@ -131,17 +131,12 @@ func (s *Server) Listen(
 	if err != nil {
 		return "", nil, fmt.Errorf("sandboxauth: listen on %s: %w", sockPath, err)
 	}
-	// 0666 on the socket. Cross-tenant isolation lives at two layers
-	// outside this chmod: (a) the per-session socket directory tree is
-	// 0750 (asserted above) so only the orchestrator user / docker daemon
-	// group can list or open paths inside it, and (b) the bind-mount is
-	// unique to this session's container (no other container has a path
-	// to this socket). Loosening from 0660 to 0666 sidesteps a UID/GID
-	// mismatch between the orchestrator process and the in-container
-	// agent user — without it, a sandbox image whose entrypoint runs as a
-	// non-matching UID would hit EACCES on every git push and silently
-	// fall through the credential helper.
-	if err := os.Chmod(sockPath, 0o666); err != nil {
+	// Keep the socket owner-only. The orchestrator process creates it as
+	// the same numeric uid the sandbox image runs as (`useradd sandbox`
+	// becomes uid 1000 in the image, matching the deploy user on the host),
+	// so the bind-mounted socket remains reachable inside the container
+	// without granting group/world access.
+	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
 		return "", nil, fmt.Errorf("sandboxauth: chmod %s: %w", sockPath, err)
@@ -294,9 +289,7 @@ func (s *Server) writeError(conn net.Conn, msg string) {
 // assertParentDirPerms verifies that the socket directory is mode 0750 or
 // stricter (no world-readable bit, no world-executable bit). This is the
 // gate that decides which host processes can even see the per-session
-// subdirs and the socket inodes inside them — the in-socket chmod 0666 is
-// safe only because callers can't reach the inode without traversing this
-// dir.
+// subdirs and the socket inodes inside them.
 //
 // If the dir doesn't exist yet (first boot before MkdirAll), the caller
 // has already MkdirAll'd it with 0750, so this assertion is layered on
