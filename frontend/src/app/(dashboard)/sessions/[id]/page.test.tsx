@@ -25,6 +25,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({
     push: routerPush,
   }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 // Mock EventSource (not available in jsdom)

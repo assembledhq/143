@@ -52,8 +52,13 @@ vi.mock("lucide-react", () => {
     Check: icon("Check"),
     ChevronsUpDown: icon("ChevronsUpDown"),
     SearchIcon: icon("SearchIcon"),
+    ChevronLeft: icon("ChevronLeft"),
   };
 });
+
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 describe("ProjectDetailContent", () => {
   beforeEach(() => {
