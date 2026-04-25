@@ -383,7 +383,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(prHealthSessionColumns).AddRow(
-				sessionID, issueID, orgID, "", "", "", "codex", "completed", "full", "low",
+				sessionID, &issueID, orgID, "", "", "", "codex", "completed", "full", "low",
 				nil, nil, nil, nil,
 				nil, nil, false, nil, nil, nil,
 				nil, nil, nil, false,

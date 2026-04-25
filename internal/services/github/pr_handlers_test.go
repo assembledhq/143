@@ -714,7 +714,7 @@ func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T)
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionColumns).AddRow(
-							sessionID, issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
+							sessionID, &issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
 							nil, nil, nil, nil,
 							nil, nil, false, nil, nil, nil,
 							nil, nil, nil, false,

@@ -774,9 +774,9 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 		} else {
 			snapshotKey = run.SnapshotKey
 			if s.issues != nil {
-				if primaryIssueID := run.EffectivePrimaryIssueID(); primaryIssueID != nil {
-					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *primaryIssueID, "fixed"); err != nil {
-						s.logger.Warn().Err(err).Str("issue_id", primaryIssueID.String()).Msg("failed to update issue status to fixed")
+				if run.PrimaryIssueID != nil {
+					if err := s.issues.UpdateStatus(ctx, pr.OrgID, *run.PrimaryIssueID, "fixed"); err != nil {
+						s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status to fixed")
 					}
 				}
 			}
