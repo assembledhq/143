@@ -1299,9 +1299,10 @@ func TestSessionStore_ArchiveSystem(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		err = store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
+		archived, err := store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
+		require.NoError(t, err, "ArchiveSystem should not return an error when archiving succeeds")
+		require.True(t, archived, "ArchiveSystem should report that it archived the session")
+		require.NoError(t, mock.ExpectationsWereMet(), "ArchiveSystem should execute the archive update")
 	})
 
 	t.Run("is a no-op when the session is already archived", func(t *testing.T) {
@@ -1316,9 +1317,10 @@ func TestSessionStore_ArchiveSystem(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-		err = store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
+		archived, err := store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
 		require.NoError(t, err, "already-archived sessions should not produce an error")
-		require.NoError(t, mock.ExpectationsWereMet())
+		require.False(t, archived, "ArchiveSystem should report that no archive transition happened")
+		require.NoError(t, mock.ExpectationsWereMet(), "ArchiveSystem should still issue the idempotent archive update")
 	})
 }
 

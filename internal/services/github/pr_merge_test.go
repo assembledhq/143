@@ -181,8 +181,6 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	issueID := uuid.New()
 	repoID := uuid.New()
 	integrationID := uuid.New()
-	prPreviewStateID := uuid.New()
-	previewInstanceID := uuid.New()
 	now := time.Now().UTC()
 	summaryJSON := json.RawMessage(`{"merge_state":"clean","has_conflicts":false,"failing_test_count":0,"needs_agent_action":false,"checks":[]}`)
 	headSHA := "head-merge"
@@ -214,16 +212,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	require.NoError(t, err, "should create job mock")
 	defer jobMock.Close()
 
-	orgMock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create organization mock")
-	defer orgMock.Close()
-
-	previewMock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create preview mock")
-	defer previewMock.Close()
-
 	snapshotStore := &prTestSnapshotStore{}
-	stopper := &recordingPreviewStopper{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -251,9 +240,14 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	issueStore := db.NewIssueStore(issueMock)
 	deployStore := db.NewDeployStore(deployMock)
 	jobStore := db.NewJobStore(jobMock)
-	orgStore := db.NewOrganizationStore(orgMock)
-	previewStore := db.NewPreviewStore(previewMock)
 
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			prID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -331,6 +325,11 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
 			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
 		))
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
 	prMock.ExpectExec("UPDATE pull_requests SET status = @status, merged_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": "merged"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -359,11 +358,11 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 				"idle", (*string)(nil), nil, nil, nil, now,
 			),
 		)
-	issueMock.ExpectExec("UPDATE issues SET status")
-	WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).
+	issueMock.ExpectExec("UPDATE issues SET status").
+		WithArgs(pgx.NamedArgs{"id": issueID, "org_id": orgID, "status": "fixed"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	sessionMock.ExpectExec("UPDATE sessions\n\t\tSET snapshot_key = NULL, sandbox_state = 'destroyed'")
-	WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+	sessionMock.ExpectExec("UPDATE sessions\n\t\tSET snapshot_key = NULL, sandbox_state = 'destroyed'").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
@@ -385,28 +384,73 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
-		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
-			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
-		))
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{
+			123: {Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
+		pullRequests: prStore,
+		repos:        repoStore,
+		sessions:     sessionStore,
+		issues:       issueStore,
+		deploys:      deployStore,
+		jobs:         jobStore,
+		snapshots:    snapshotStore,
+		logger:       zerolog.New(io.Discard),
+		baseURL:      server.URL,
+		httpClient:   server.Client(),
+	}
 
-	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "pr_number": 42}).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
-				"last_preview_instance_id", "last_screenshot_blob_path",
-				"last_visual_diff_blob_path", "base_snapshot_key", "status",
-				"created_at", "updated_at",
-			}).AddRow(
-				prPreviewStateID, orgID, repoID, 42, nil,
-				&previewInstanceID, "", "", "", "running", now, now,
-			),
-		)
-	previewMock.ExpectExec("UPDATE pr_preview_state SET status").
-		WithArgs(models.PRPreviewStatusMerged, pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	resp, err := service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
+	require.NoError(t, err, "MergePullRequest should succeed")
+	require.True(t, resp.Merged, "MergePullRequest should report merged=true")
+	require.Equal(t, models.PullRequestMergeMethodSquash, resp.MergeMethod, "MergePullRequest should report the selected merge method")
+	require.Equal(t, []string{"snap-merge"}, snapshotStore.deleted, "MergePullRequest should clean up the session snapshot")
+	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
+	require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "job expectations should be met")
+}
+
+func TestMaybeAutoArchiveSessionOnPRCloseEmitsArchiveAuditOnce(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	sessionMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create session mock")
+	defer sessionMock.Close()
+
+	orgMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create organization mock")
+	defer orgMock.Close()
+
+	auditMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create audit mock")
+	defer auditMock.Close()
+
+	sessionStore := db.NewSessionStore(sessionMock)
+	orgStore := db.NewOrganizationStore(orgMock)
+	auditEmitter := db.NewAuditEmitter(db.NewAuditLogStore(auditMock), zerolog.Nop())
+
+	service := &PRService{
+		sessions: sessionStore,
+		orgs:     orgStore,
+		audit:    auditEmitter,
+		logger:   zerolog.New(io.Discard),
+	}
+
+	pr := models.PullRequest{
+		ID:             prID,
+		SessionID:      &sessionID,
+		OrgID:          orgID,
+		GitHubPRNumber: 42,
+		GitHubRepo:     "assembledhq/143",
+	}
 
 	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
 		WithArgs(pgx.NamedArgs{"id": orgID}).
@@ -417,38 +461,29 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	sessionMock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL").
 		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	auditMock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 
-	service := &PRService{
-		tokenProvider: &Service{cache: map[int64]*cachedToken{
-			123: {Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)},
-		}},
-		pullRequests:   prStore,
-		repos:          repoStore,
-		sessions:       sessionStore,
-		issues:         issueStore,
-		deploys:        deployStore,
-		jobs:           jobStore,
-		orgs:           orgStore,
-		previews:       previewStore,
-		previewStopper: stopper,
-		snapshots:      snapshotStore,
-		logger:         zerolog.New(io.Discard),
-		baseURL:        server.URL,
-		httpClient:     server.Client(),
-	}
+	orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
+		WithArgs(pgx.NamedArgs{"id": orgID}).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).
+				AddRow(orgID, "Acme", []byte(`{"auto_archive_on_pr_close":true}`), now, now),
+		)
+	sessionMock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL AND archived_at IS NULL").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
-	resp, err := service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
-	require.NoError(t, err, "MergePullRequest should succeed")
-	require.True(t, resp.Merged, "MergePullRequest should report merged=true")
-	require.Equal(t, models.PullRequestMergeMethodSquash, resp.MergeMethod, "MergePullRequest should report the selected merge method")
-	require.Equal(t, []string{"snap-merge"}, snapshotStore.deleted, "MergePullRequest should clean up the session snapshot")
-	require.Equal(t, 1, stopper.calls, "MergePullRequest should stop any active PR preview")
-	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
-	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
-	require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
-	require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
-	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
-	require.NoError(t, jobMock.ExpectationsWereMet(), "job expectations should be met")
+	service.maybeAutoArchiveSessionOnPRClose(context.Background(), pr, nil, true)
+	service.maybeAutoArchiveSessionOnPRClose(context.Background(), pr, nil, true)
+
+	require.NoError(t, sessionMock.ExpectationsWereMet(), "session archive expectations should be met")
 	require.NoError(t, orgMock.ExpectationsWereMet(), "organization expectations should be met")
-	require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+	require.NoError(t, auditMock.ExpectationsWereMet(), "auto-archive should emit one audit row even if invoked twice")
 }

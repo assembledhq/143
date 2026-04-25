@@ -39,6 +39,7 @@ describe("PRHealthBanner", () => {
         health={baseHealth}
         pendingAction={null}
         repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
@@ -55,6 +56,7 @@ describe("PRHealthBanner", () => {
         health={baseHealth}
         pendingAction={null}
         repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
@@ -71,6 +73,7 @@ describe("PRHealthBanner", () => {
         health={{ ...baseHealth, can_merge: true }}
         pendingAction={null}
         repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={onMerge}
@@ -89,6 +92,7 @@ describe("PRHealthBanner", () => {
         health={{ ...baseHealth, can_merge: true }}
         pendingAction="merge"
         repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
@@ -105,6 +109,7 @@ describe("PRHealthBanner", () => {
         health={{ ...baseHealth, can_merge: true, can_fix_tests: true }}
         pendingAction="fix_tests"
         repairError={null}
+        mergeAuthRequired={false}
         onFixTests={vi.fn()}
         onResolveConflicts={vi.fn()}
         onMerge={vi.fn()}
@@ -112,5 +117,21 @@ describe("PRHealthBanner", () => {
     );
 
     expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
+  });
+
+  it("shows a reconnect hint when merge requires GitHub user auth", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, can_merge: true }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Connect your GitHub account to merge this pull request as yourself.")).toBeInTheDocument();
   });
 });

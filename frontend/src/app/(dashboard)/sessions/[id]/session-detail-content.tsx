@@ -2415,9 +2415,10 @@ export function SessionDetailContent({ id }: { id: string }) {
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
-                health={{ ...prHealth, can_merge: prHealth.can_merge && !ghBlocked }}
+                health={prHealth}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
+                mergeAuthRequired={ghBlocked}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
                 onMerge={handleMergeAction}
@@ -2722,7 +2723,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           if (!open) setPRAuthPrompt(null);
         }}
       >
-        <AlertDialogContent>
+          <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
               {prAuthPrompt?.purpose === "merge_pr"

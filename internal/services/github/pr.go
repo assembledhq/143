@@ -840,7 +840,8 @@ func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr mod
 		return
 	}
 
-	if err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID); err != nil {
+	archived, err := s.sessions.ArchiveSystem(ctx, pr.OrgID, *pr.SessionID)
+	if err != nil {
 		s.logger.Warn().Err(err).
 			Str("session_id", pr.SessionID.String()).
 			Str("pr_id", pr.ID.String()).
@@ -860,6 +861,10 @@ func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr mod
 		if err := storage.CleanupSessionSnapshot(ctx, s.snapshots, s.sessions, pr.OrgID, *pr.SessionID, snapshotKey); err != nil {
 			s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to clean up snapshot on auto-archive")
 		}
+	}
+
+	if !archived {
+		return
 	}
 
 	if s.audit != nil {

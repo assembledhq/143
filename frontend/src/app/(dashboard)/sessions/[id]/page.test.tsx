@@ -1118,7 +1118,7 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
   });
 
-  it('hides the Merge button when the org requires GitHub user auth and the user is disconnected', async () => {
+  it('shows a Merge button that opens GitHub auth when the org requires GitHub user auth and the user is disconnected', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
@@ -1138,7 +1138,12 @@ describe('SessionDetailPage', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await screen.findByText('PR health');
-    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /^Merge$/ }));
+
+    expect(await screen.findByText('Merge this pull request as yourself?')).toBeInTheDocument();
+    expect(screen.getByText('Connect your GitHub account to merge this pull request as yourself.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
   });
 
   it('toasts the API error message when the merge call fails', async () => {

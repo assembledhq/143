@@ -18,6 +18,7 @@ type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
   pendingAction: PRBannerAction;
   repairError?: string | null;
+  mergeAuthRequired?: boolean;
   onFixTests: () => void;
   onResolveConflicts: () => void;
   onMerge: () => void;
@@ -27,6 +28,7 @@ export function PRHealthBanner({
   health,
   pendingAction,
   repairError,
+  mergeAuthRequired = false,
   onFixTests,
   onResolveConflicts,
   onMerge,
@@ -137,6 +139,11 @@ export function PRHealthBanner({
                 {health.can_resolve_conflicts && health.can_fix_tests && (
                   <p className="text-xs text-muted-foreground">
                     Resolve conflicts first. CI may need to rerun afterward.
+                  </p>
+                )}
+                {mergeAuthRequired && health.can_merge && (
+                  <p className="text-xs text-muted-foreground">
+                    Connect your GitHub account to merge this pull request as yourself.
                   </p>
                 )}
               </div>
