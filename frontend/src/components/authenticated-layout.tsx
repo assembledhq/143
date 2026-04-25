@@ -50,12 +50,20 @@ import { CommandPalette } from "@/components/command-palette/command-palette";
 import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 import { CreateSessionDialog } from "@/components/create-session-dialog";
 
-type SidebarUser = {
-  email?: string;
-  name?: string;
-  role?: string;
-  avatar_url?: string;
-};
+type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
+
+// Skip drawer-close side effects when the user opens a link in a new tab/window
+// (modifier or middle click). The current page hasn't changed for them, so the
+// drawer should stay where it is.
+function isPlainNavClick(e: React.MouseEvent): boolean {
+  return (
+    e.button === 0 &&
+    !e.metaKey &&
+    !e.ctrlKey &&
+    !e.shiftKey &&
+    !e.altKey
+  );
+}
 
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
@@ -211,7 +219,7 @@ function SidebarBody({
             <Link
               key={item.href}
               href={item.href}
-              onClick={onNavigate}
+              onClick={onNavigate ? (e) => { if (isPlainNavClick(e)) onNavigate(); } : undefined}
               aria-current={isActive ? "page" : undefined}
               className={cn(
                 "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-150 active:bg-sidebar-accent",
@@ -306,14 +314,13 @@ function MobileTopBar({
   menuOpen,
 }: MobileTopBarProps) {
   return (
-    <header className="md:hidden sticky top-0 z-30 flex h-14 items-center gap-1 border-b border-border/50 bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+    <header className="md:hidden flex h-14 shrink-0 items-center gap-1 border-b border-border/50 bg-background px-2">
       <Button
         variant="ghost"
         size="icon"
         onClick={onOpenMenu}
         aria-label="Open navigation menu"
         aria-expanded={menuOpen}
-        aria-controls="mobile-nav-drawer"
         className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
       >
         <Menu className="h-5 w-5" />
@@ -379,6 +386,14 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     return () => document.removeEventListener("keydown", handler);
   }, []);
 
+  // Sync the drawer to the URL: any pathname change closes it. Direct nav-link
+  // taps already call onNavigate for instant feedback, but indirect navigation
+  // (org switcher, repo switcher, programmatic router.push) wouldn't otherwise
+  // dismiss the drawer. The effect runs after a confirmed external (URL) state
+  // change, which is the canonical use case the lint rule exempts.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setMobileMenuOpen(false); }, [pathname]);
+
   const handlePaletteOpen = useCallback(() => {
     setPaletteOpen(true);
     setMobileMenuOpen(false);
@@ -411,7 +426,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       <div
         role="alert"
         aria-live="polite"
-        className="flex h-screen items-center justify-center bg-background px-6"
+        className="flex h-dvh items-center justify-center bg-background px-6"
       >
         <div className="max-w-sm text-center space-y-4">
           <h2 className="text-base font-semibold text-foreground">
@@ -438,7 +453,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <div className="flex h-screen">
+      <div className="flex h-dvh">
         <aside
           className={cn(
             APP_SIDEBAR_WIDTH_CLASS,
@@ -493,7 +508,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   }
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-dvh">
       {/* Desktop sidebar (md and up) */}
       <aside
         className={cn(
@@ -515,10 +530,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       {/* Mobile drawer (below md) */}
       <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
         <SheetContent
-          id="mobile-nav-drawer"
           side="left"
           hideCloseButton
-          className="w-[280px] p-0 bg-sidebar border-r border-border/50 flex flex-col gap-0 sm:max-w-[320px]"
+          aria-describedby={undefined}
+          className="w-[min(85vw,320px)] p-0 bg-sidebar border-r border-border/50 flex flex-col gap-0"
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <SidebarBody

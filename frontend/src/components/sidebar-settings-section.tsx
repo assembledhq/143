@@ -165,7 +165,24 @@ export function SidebarSettingsSection({
                       <Link
                         key={item.href}
                         href={item.href}
-                        onClick={onNavigate}
+                        onClick={
+                          onNavigate
+                            ? (e) => {
+                                // Skip on modifier/middle clicks — the user is
+                                // opening in a new tab and the current page
+                                // hasn't changed for them.
+                                if (
+                                  e.button === 0 &&
+                                  !e.metaKey &&
+                                  !e.ctrlKey &&
+                                  !e.shiftKey &&
+                                  !e.altKey
+                                ) {
+                                  onNavigate();
+                                }
+                              }
+                            : undefined
+                        }
                         className={cn(
                           "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
                           active
