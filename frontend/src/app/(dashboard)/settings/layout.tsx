@@ -21,6 +21,7 @@ const VIEWER_BLOCKED_PATHS = new Set([
   "/settings/team",
   "/settings/integrations",
   "/settings/agent",
+  "/settings/evals",
 ]);
 
 function isAdminOnlyPath(pathname: string): boolean {

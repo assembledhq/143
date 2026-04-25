@@ -104,6 +104,33 @@ describe('SettingsLayout', () => {
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
   });
 
+  it('redirects viewers from /settings/evals', async () => {
+    useAuthMock.mockReturnValue({ user: { role: 'viewer' }, isLoading: false });
+    pathnameMock.value = '/settings/evals';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>evals content</div>
+      </SettingsLayout>
+    );
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
+  });
+
+  it('lets members view /settings/evals', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
+    pathnameMock.value = '/settings/evals';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>evals content</div>
+      </SettingsLayout>
+    );
+
+    expect(screen.getByText('evals content')).toBeInTheDocument();
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
   it('redirects non-admins from /settings (General) root path', async () => {
     useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
     pathnameMock.value = '/settings';

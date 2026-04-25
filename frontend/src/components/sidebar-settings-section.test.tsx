@@ -50,19 +50,19 @@ describe('SidebarSettingsSection', () => {
     }
   });
 
-  it('hides everything except Account and Evals for viewers', () => {
+  it('shows only Account for viewers', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings/account" userRole="viewer" />
     );
 
     expect(screen.getByText('Account')).toBeInTheDocument();
-    expect(screen.getByText('Evals')).toBeInTheDocument();
 
     for (const hidden of [
       'Integrations',
       'Coding agents',
       'LLM',
       'Autopilot',
+      'Evals',
       'General',
       'Team',
       'Usage',

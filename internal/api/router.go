@@ -659,14 +659,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/pm/document-set-pins", pmDocumentHandler.ListDocumentSetPins)
 				r.Get("/api/v1/pm/document-set-pins/{pinId}", pmDocumentHandler.GetDocumentSetPin)
 
-				// Eval read-only routes
-				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
-				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
-				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
-				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
-				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
-				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
-				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 			})
 
 			// Write routes (admin and member only)
@@ -690,6 +682,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				})
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
+
+				// Eval reads — admin+member only so viewers cannot enumerate eval
+				// tasks or runs. Eval writes are gated even more tightly (admin-only)
+				// further down.
+				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
+				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
+				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
+				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
+				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
