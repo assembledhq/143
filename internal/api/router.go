@@ -659,14 +659,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/pm/document-set-pins", pmDocumentHandler.ListDocumentSetPins)
 				r.Get("/api/v1/pm/document-set-pins/{pinId}", pmDocumentHandler.GetDocumentSetPin)
 
-				// Eval read-only routes
-				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
-				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
-				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
-				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
-				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
-				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
-				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 			})
 
 			// Write routes (admin and member only)
@@ -677,28 +669,31 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
 				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
-				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
-				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
-				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
-				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
-				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
-				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
-				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
-				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
-				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
-				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
-				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
-				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
-				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
-				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
-				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
-				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
-				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
-				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
-				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
-				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+
+				// Team roster read — sits in the admin+member group (not the
+				// all-roles read group) so viewers cannot enumerate org members.
+				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+
+				// Coding-agents config reads. Members can view what's configured
+				// (so /settings/agent renders read-only); mutations stay admin-only.
+				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
+				r.Get("/api/v1/settings/coding-auths/legacy-status", func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "legacy coding auth migration unavailable on this branch", http.StatusNotImplemented)
+				})
+				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
+				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
+
+				// Eval reads — admin+member only so viewers cannot enumerate eval
+				// tasks or runs. Eval writes are gated even more tightly (admin-only)
+				// further down.
+				r.Get("/api/v1/evals/tasks", evalHandler.ListTasks)
+				r.Get("/api/v1/evals/tasks/{id}", evalHandler.GetTask)
+				r.Get("/api/v1/evals/tasks/{id}/runs", evalHandler.ListRuns)
+				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
+				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
+				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
+				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
+
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
@@ -777,14 +772,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/documents/{docId}/restore", pmDocumentHandler.RestoreVersion)
 				r.Post("/api/v1/pm/document-set-pins", pmDocumentHandler.CreateDocumentSetPin)
 
-				// Eval write routes
-				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
-				r.Patch("/api/v1/evals/tasks/{id}", evalHandler.UpdateTask)
-				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
-				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
-				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
-				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
-				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 			})
 
 			// Admin-only routes
@@ -809,13 +796,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 				r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)
 
-				// Org credential management
+				// Org credential management. Reads (List/legacy-status) live in the
+				// admin+member group above so members can view the coding-agents
+				// settings page in read-only mode; mutations stay admin-only here.
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
-				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
-				r.Get("/api/v1/settings/coding-auths/legacy-status", legacyCodingAuthUnavailable)
 				r.Post("/api/v1/settings/coding-auths/migrate-legacy", legacyCodingAuthUnavailable)
 				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
 				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
@@ -825,20 +812,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
 				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
 
-				// Codex (ChatGPT) OAuth device code auth
+				// Codex (ChatGPT) OAuth device code auth. Subscription List is
+				// registered in the admin+member group so members can see which
+				// subscriptions are configured; everything else is admin-only.
 				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
-				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
 
 				// Claude Code (Anthropic subscription) OAuth — PKCE authorization-code
 				// flow: initiate returns an authorize URL, user pastes back
-				// `<code>#<state>` which /complete exchanges for tokens.
+				// `<code>#<state>` which /complete exchanges for tokens. Subscription
+				// List sits in the admin+member group; everything else stays
+				// admin-only.
 				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
 				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
 				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
-				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
 
 				// Usage timeseries, breakdown, and export (admin-only)
@@ -850,8 +839,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
 
-				// Team management
-				r.Get("/api/v1/team/members", teamHandler.ListMembers)
+				// Team management. The roster read (GET /team/members) is registered
+				// in the admin+member group above; mutations and invite flows stay
+				// admin-only here.
 				r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 				r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
 				r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
@@ -859,6 +849,41 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 				r.Get("/api/v1/team/github/status", teamHandler.GitHubInviteStatus)
 				r.Get("/api/v1/team/github/users", teamHandler.SearchGitHubUsers)
+
+				// Integration management (OAuth flows + connect/disconnect/sync).
+				// Connecting an integration is an org-wide trust decision, so members
+				// shouldn't be able to wire prod Slack/GitHub/Linear/Sentry/Notion.
+				r.Get("/api/v1/integrations/linear/login", integrationHandler.StartLinearOAuth)
+				r.Get("/api/v1/integrations/linear/callback", integrationHandler.HandleLinearOAuthCallback)
+				r.Post("/api/v1/integrations/linear/connect", integrationHandler.ConnectLinear)
+				r.Get("/api/v1/integrations/sentry/login", integrationHandler.StartSentryOAuth)
+				r.Get("/api/v1/integrations/sentry/callback", integrationHandler.HandleSentryOAuthCallback)
+				r.Post("/api/v1/integrations/sentry/connect", integrationHandler.ConnectSentry)
+				r.Get("/api/v1/integrations/github/login", integrationHandler.StartGitHubOAuth)
+				r.Get("/api/v1/integrations/github/callback", integrationHandler.HandleGitHubOAuthCallback)
+				r.Get("/api/v1/integrations/github/installed", integrationHandler.HandleGitHubAppInstalled)
+				r.Post("/api/v1/integrations/github/connect", integrationHandler.ConnectGitHub)
+				r.Post("/api/v1/integrations/github/sync", integrationHandler.SyncGitHubRepos)
+				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
+				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
+				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
+				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
+				r.Delete("/api/v1/integrations/slack/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/notion/connect", integrationHandler.ConnectNotion)
+				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
+
+				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
+				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
+				r.Patch("/api/v1/evals/tasks/{id}", evalHandler.UpdateTask)
+				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
+				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
+				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
+				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
 			})
 		})
 	})
