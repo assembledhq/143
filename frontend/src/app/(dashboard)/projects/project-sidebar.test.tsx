@@ -217,4 +217,40 @@ describe('ProjectSidebar', () => {
     // At least 2: the top "+ New project" link + the ghost entry
     expect(newProjectTexts.length).toBeGreaterThanOrEqual(2);
   });
+
+  it('preserves the user/status/repo filters in project detail links', async () => {
+    renderWithProviders(<ProjectSidebar />, {
+      searchParams: { user: 'all', status: 'active', repo: 'repo-1' },
+    });
+
+    const link = (await screen.findByText('Test Project')).closest('a');
+    expect(link?.getAttribute('href')).toMatch(
+      /^\/projects\/[^?]+\?user=all&status=active&repo=repo-1$/,
+    );
+  });
+
+  it('preserves a member-id user filter (not just "all")', async () => {
+    renderWithProviders(<ProjectSidebar />, {
+      searchParams: { user: 'user-2' },
+    });
+
+    const link = (await screen.findByText('Test Project')).closest('a');
+    expect(link?.getAttribute('href')).toMatch(/^\/projects\/[^?]+\?user=user-2$/);
+  });
+
+  it('only serializes the filters that are actually set', async () => {
+    renderWithProviders(<ProjectSidebar />, {
+      searchParams: { status: 'active' },
+    });
+
+    const link = (await screen.findByText('Test Project')).closest('a');
+    expect(link?.getAttribute('href')).toMatch(/^\/projects\/[^?]+\?status=active$/);
+  });
+
+  it('omits the query suffix on project detail links when no filters are active', async () => {
+    renderWithProviders(<ProjectSidebar />);
+
+    const link = (await screen.findByText('Test Project')).closest('a');
+    expect(link?.getAttribute('href')).toMatch(/^\/projects\/[^?]+$/);
+  });
 });

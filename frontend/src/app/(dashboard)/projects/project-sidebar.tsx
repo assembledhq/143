@@ -14,6 +14,7 @@ import { StatusDot } from "@/components/status-dot";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { useProjectUserFilter } from "@/hooks/use-project-user-filter";
+import { useFilterSuffix } from "@/hooks/use-owner-scope-filter";
 import { projectStatusConfig, projectStatusDotColor } from "@/lib/types";
 import type { Project } from "@/lib/types";
 const filterTabs = [
@@ -70,6 +71,10 @@ export function ProjectSidebar() {
         p.goal.toLowerCase().includes(q),
     );
   }, [filteredProjects, search]);
+
+  // Carry the sidebar's filters into detail-page links so opening a project
+  // doesn't reset the scope back to "Mine".
+  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo);
 
   const isNewProject = pathname === "/projects/new";
   const showMineEmptyState =
@@ -185,7 +190,7 @@ export function ProjectSidebar() {
           return (
             <Link
               key={project.id}
-              href={`/projects/${project.id}`}
+              href={`/projects/${project.id}${filterSuffix}`}
               className={cn(
                 "block rounded-lg px-3 py-2.5 mb-0.5 transition-all duration-150",
                 isSelected
