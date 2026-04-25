@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,27 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 )
+
+type lockedRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func newLockedRecorder() *lockedRecorder {
+	return &lockedRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *lockedRecorder) Write(b []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(b)
+}
+
+func (r *lockedRecorder) BodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Body.String()
+}
 
 type stubPullRequestHealthService struct {
 	getHealthFunc func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error)
@@ -507,7 +529,7 @@ func TestPullRequestHandler_StreamUpdates(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/pull-requests/stream", nil).WithContext(ctx)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
 	req = req.WithContext(middleware.WithUser(req.Context(), user))
-	rr := httptest.NewRecorder()
+	rr := newLockedRecorder()
 
 	done := make(chan struct{})
 	go func() {
@@ -527,13 +549,13 @@ func TestPullRequestHandler_StreamUpdates(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(rr.Body.String(), "pull_request.updated")
+		return strings.Contains(rr.BodyString(), "pull_request.updated")
 	}, 2*time.Second, 20*time.Millisecond, "StreamUpdates should write published pull request update events to the SSE response")
 
 	cancel()
 	<-done
 
-	require.Contains(t, rr.Body.String(), event.PullRequestID.String(), "StreamUpdates should serialize the published pull request ID")
+	require.Contains(t, rr.BodyString(), event.PullRequestID.String(), "StreamUpdates should serialize the published pull request ID")
 }
 
 func newTestPullRequestStreams(t *testing.T) *cache.PullRequestStreams {

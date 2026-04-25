@@ -27,6 +27,18 @@ func TestPullRequestStreams_AvailabilityAndHelpers(t *testing.T) {
 	sub.Close()
 	require.NotEmpty(t, sub.CloseReason(), "closing a subscription should leave a non-empty close reason")
 
+	require.Equal(t, "subscription closed", (*PullRequestSubscription)(nil).CloseReason(), "nil subscription receivers should report the default close reason")
+
+	naturalSub, err := streams.Subscribe(uuid.New())
+	require.NoError(t, err, "subscribe should succeed for the natural-close case")
+	require.NoError(t, naturalSub.pubsub.Close(), "closing pubsub directly should drive the goroutine to its default close path")
+	select {
+	case <-naturalSub.C:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscription goroutine did not exit after pubsub close")
+	}
+	require.Equal(t, "subscription closed", naturalSub.CloseReason(), "natural pubsub closure should record the default close reason")
+
 	require.Equal(t, "143:stream:{org:00000000-0000-0000-0000-000000000000}:pull_requests", pullRequestStreamChannel(uuid.Nil), "channel helper should scope pull request streams by org")
 }
 
