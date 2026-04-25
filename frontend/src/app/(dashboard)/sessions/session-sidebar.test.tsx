@@ -526,4 +526,65 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-sm');
   });
 
+  // -----------------------------------------------------------------------
+  // Filter preservation in detail links
+  // -----------------------------------------------------------------------
+
+  it('preserves the user/status/repo filters in session detail links', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Linked session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { user: 'all', status: 'active', repo: 'repo-1' },
+    });
+    await screen.findByText('Linked session');
+
+    const link = screen.getByText('Linked session').closest('a');
+    expect(link).toHaveAttribute(
+      'href',
+      '/sessions/s1?user=all&status=active&repo=repo-1',
+    );
+  });
+
+  it('preserves a member-id user filter (not just "all")', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Member-scoped session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { user: 'user-2' },
+    });
+    await screen.findByText('Member-scoped session');
+
+    const link = screen.getByText('Member-scoped session').closest('a');
+    expect(link).toHaveAttribute('href', '/sessions/s1?user=user-2');
+  });
+
+  it('only serializes the filters that are actually set', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Status-only session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { status: 'archived' },
+    });
+    await screen.findByText('Status-only session');
+
+    const link = screen.getByText('Status-only session').closest('a');
+    expect(link).toHaveAttribute('href', '/sessions/s1?status=archived');
+  });
+
+  it('omits the query suffix when no filters are active', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Plain session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Plain session');
+
+    const link = screen.getByText('Plain session').closest('a');
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+  });
+
 });
