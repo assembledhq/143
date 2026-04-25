@@ -1322,6 +1322,25 @@ func TestSessionStore_ArchiveSystem(t *testing.T) {
 		require.False(t, archived, "ArchiveSystem should report that no archive transition happened")
 		require.NoError(t, mock.ExpectationsWereMet(), "ArchiveSystem should still issue the idempotent archive update")
 	})
+
+	t.Run("returns database errors", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		store := NewSessionStore(mock)
+
+		mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("write failed"))
+
+		archived, err := store.ArchiveSystem(context.Background(), uuid.New(), uuid.New())
+		require.Error(t, err, "ArchiveSystem should return database errors")
+		require.False(t, archived, "ArchiveSystem should not report an archive transition when the update fails")
+		require.Contains(t, err.Error(), "write failed", "ArchiveSystem should preserve the underlying database error")
+		require.NoError(t, mock.ExpectationsWereMet(), "ArchiveSystem should execute the archive update even on failure")
+	})
 }
 
 func TestSessionStore_Unarchive(t *testing.T) {

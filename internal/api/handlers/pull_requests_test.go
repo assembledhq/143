@@ -433,6 +433,24 @@ func TestPullRequestHandler_Merge(t *testing.T) {
 		require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "Merge should return the user-auth-required code")
 	})
 
+	t.Run("returns 409 when GitHub user auth cannot access the repo", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrGitHubUserAuthRepoAccessDenied
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusConflict, rr.Code, "Merge should return 409 when the user's GitHub account lacks repo access")
+		require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REPO_ACCESS_DENIED", "Merge should return the repo-access-denied code")
+	})
+
 	t.Run("returns 500 on unknown failures", func(t *testing.T) {
 		t.Parallel()
 
@@ -450,6 +468,77 @@ func TestPullRequestHandler_Merge(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, rr.Code, "Merge should return 500 on unknown failures")
 		require.Contains(t, rr.Body.String(), "PULL_REQUEST_MERGE_FAILED")
 	})
+
+	for _, tt := range []struct {
+		name           string
+		err            error
+		expectedCode   int
+		expectedBody   string
+		expectedErrMsg string
+	}{
+		{
+			name: "returns 409 when GitHub disallows the merge method",
+			err: &ghservice.GitHubAPIError{
+				StatusCode: http.StatusMethodNotAllowed,
+				Body:       []byte(`{"message":"Merge commits are disabled for this repository."}`),
+			},
+			expectedCode:   http.StatusConflict,
+			expectedBody:   "PULL_REQUEST_MERGE_REJECTED",
+			expectedErrMsg: "Merge commits are disabled for this repository.",
+		},
+		{
+			name: "returns 409 when GitHub reports a merge conflict",
+			err: &ghservice.GitHubAPIError{
+				StatusCode: http.StatusConflict,
+				Body:       []byte(`{"message":"Head branch was modified."}`),
+			},
+			expectedCode:   http.StatusConflict,
+			expectedBody:   "PULL_REQUEST_MERGE_REJECTED",
+			expectedErrMsg: "Head branch was modified.",
+		},
+		{
+			name: "returns 422 when GitHub rejects the merge payload",
+			err: &ghservice.GitHubAPIError{
+				StatusCode: http.StatusUnprocessableEntity,
+				Body:       []byte(`{"message":"Validation Failed"}`),
+			},
+			expectedCode:   http.StatusUnprocessableEntity,
+			expectedBody:   "PULL_REQUEST_MERGE_REJECTED",
+			expectedErrMsg: "Validation Failed",
+		},
+		{
+			name: "returns 500 for unclassified GitHub API errors",
+			err: &ghservice.GitHubAPIError{
+				StatusCode: http.StatusInternalServerError,
+				Body:       []byte(`{"message":"Upstream failed"}`),
+			},
+			expectedCode:   http.StatusInternalServerError,
+			expectedBody:   "PULL_REQUEST_MERGE_FAILED",
+			expectedErrMsg: "",
+		},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &stubPullRequestHealthService{
+				mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+					return nil, tt.err
+				},
+			}
+
+			handler := NewPullRequestHandler(svc)
+			req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+			rr := httptest.NewRecorder()
+			handler.Merge(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "Merge should return the expected status for classified GitHub API errors")
+			require.Contains(t, rr.Body.String(), tt.expectedBody, "Merge should serialize the expected error code")
+			if tt.expectedErrMsg != "" {
+				require.Contains(t, rr.Body.String(), tt.expectedErrMsg, "Merge should bubble up GitHub's actionable error message")
+			}
+		})
+	}
 
 	t.Run("returns 401 when user missing", func(t *testing.T) {
 		t.Parallel()

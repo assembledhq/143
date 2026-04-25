@@ -48,6 +48,26 @@ func TestFetchRepoMergeSettings(t *testing.T) {
 	require.False(t, *settings.AllowRebaseMerge, "rebase should be disallowed")
 }
 
+func TestFetchRepoMergeSettingsRejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143", r.URL.Path, "fetchRepoMergeSettings should call the repository endpoint")
+		_, _ = w.Write([]byte(`{"allow_squash_merge":`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	_, err := service.fetchRepoMergeSettings(context.Background(), "install-token", "assembledhq", "143")
+	require.Error(t, err, "fetchRepoMergeSettings should reject malformed GitHub JSON")
+	require.Contains(t, err.Error(), "decode GitHub repo merge settings", "fetchRepoMergeSettings should wrap decode failures")
+}
+
 // TestMergePullRequestOnGitHubSuccess covers the happy path: GitHub returns 200
 // with merged=true and we forward the response intact.
 func TestMergePullRequestOnGitHubSuccess(t *testing.T) {
@@ -104,6 +124,26 @@ func TestMergePullRequestOnGitHubHeadSHAMismatch(t *testing.T) {
 	require.True(t, errors.As(err, &apiErr), "GitHub conflicts should be wrapped as GitHubAPIError")
 	require.Equal(t, http.StatusConflict, apiErr.StatusCode)
 	require.Contains(t, apiErr.Message(), "Head branch was modified")
+}
+
+func TestMergePullRequestOnGitHubRejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143/pulls/42/merge", r.URL.Path, "mergePullRequestOnGitHub should call the merge endpoint")
+		_, _ = w.Write([]byte(`{"sha":`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	_, err := service.mergePullRequestOnGitHub(context.Background(), "install-token", "assembledhq", "143", 42, gitHubMergeRequest{})
+	require.Error(t, err, "mergePullRequestOnGitHub should reject malformed GitHub JSON")
+	require.Contains(t, err.Error(), "decode GitHub merge response", "mergePullRequestOnGitHub should wrap decode failures")
 }
 
 // TestGitHubAPIErrorMessage covers the Message() helper, which the HTTP
@@ -411,6 +451,75 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
 	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "job expectations should be met")
+}
+
+func TestPRServiceMergePullRequestRejectsNonOpenPullRequests(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+
+	prMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pull request mock")
+	defer prMock.Close()
+
+	row := newPRTestRow(prID, nil, orgID, "assembledhq/143", now, nil)
+	row[8] = "closed"
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	_, err = service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
+	require.ErrorIs(t, err, ErrPullRequestNotMergeable, "MergePullRequest should reject pull requests that are not open")
+	require.Contains(t, err.Error(), `pull request status is "closed"`, "MergePullRequest should explain why the pull request is not mergeable")
+	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+}
+
+func TestPRServiceMergePullRequestReturnsRefreshFailureWhenSyncFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now().UTC()
+
+	prMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pull request mock")
+	defer prMock.Close()
+
+	repoMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create repository mock")
+	defer repoMock.Close()
+
+	openRow := newPRTestRow(prID, nil, orgID, "assembledhq/143", now, nil)
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(openRow...))
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(openRow...))
+
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnError(errors.New("repo lookup failed"))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		repos:        db.NewRepositoryStore(repoMock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	_, err = service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
+	require.ErrorIs(t, err, ErrMergeStateRefreshFailed, "MergePullRequest should surface sync failures as ErrMergeStateRefreshFailed")
+	require.Contains(t, err.Error(), "repo lookup failed", "MergePullRequest should preserve the underlying sync failure")
+	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
 }
 
 func TestMaybeAutoArchiveSessionOnPRCloseEmitsArchiveAuditOnce(t *testing.T) {
