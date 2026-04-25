@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -21,10 +22,18 @@ type PullRequestStreams struct {
 type PullRequestSubscription struct {
 	C <-chan models.PullRequestUpdatedEvent
 
-	ch          chan models.PullRequestUpdatedEvent
-	cancel      context.CancelFunc
-	pubsub      *redis.PubSub
+	ch     chan models.PullRequestUpdatedEvent
+	cancel context.CancelFunc
+	pubsub *redis.PubSub
+
+	mu          sync.Mutex
 	closeReason string
+}
+
+func (s *PullRequestSubscription) setCloseReason(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeReason = reason
 }
 
 func NewPullRequestStreams(client *Client, logger zerolog.Logger) *PullRequestStreams {
@@ -97,16 +106,16 @@ func (s *PullRequestStreams) Subscribe(orgID uuid.UUID) (*PullRequestSubscriptio
 			select {
 			case sub.ch <- event:
 			case <-ctx.Done():
-				sub.closeReason = ctx.Err().Error()
+				sub.setCloseReason(ctx.Err().Error())
 				return
 			}
 		}
 
 		if err := ctx.Err(); err != nil {
-			sub.closeReason = err.Error()
+			sub.setCloseReason(err.Error())
 			return
 		}
-		sub.closeReason = "subscription closed"
+		sub.setCloseReason("subscription closed")
 	}()
 
 	return sub, nil
@@ -125,7 +134,12 @@ func (s *PullRequestSubscription) Close() {
 }
 
 func (s *PullRequestSubscription) CloseReason() string {
-	if s == nil || s.closeReason == "" {
+	if s == nil {
+		return "subscription closed"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closeReason == "" {
 		return "subscription closed"
 	}
 	return s.closeReason
