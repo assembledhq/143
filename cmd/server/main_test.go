@@ -5,6 +5,8 @@ import (
 )
 
 func TestBuildBaseMetadata(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                   string
 		previewCapable         bool
@@ -37,6 +39,8 @@ func TestBuildBaseMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL)
 
 			if _, ok := metadata["build_sha"]; !ok {
@@ -69,6 +73,8 @@ func TestBuildBaseMetadata(t *testing.T) {
 // initial provider without re-emitting preview-routing fields, causing the
 // next heartbeat to wipe preview_capable and break Start Preview routing.
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
+	t.Parallel()
+
 	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080")
 
 	metadata := provider()
@@ -88,6 +94,8 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 }
 
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
+	t.Parallel()
+
 	provider := buildWorkerMetadataProvider(nil, false, "")
 
 	metadata := provider()
