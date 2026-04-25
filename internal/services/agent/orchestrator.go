@@ -2085,14 +2085,6 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 	return references
 }
 
-func resolvedInputReferences(message *models.SessionMessage, issue *models.Issue) []models.SessionInputReference {
-	references := canonicalReferences(message)
-	if len(references) > 0 {
-		return references
-	}
-	return manualSessionReferences(issue)
-}
-
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {
 	switch status {
 	case "completed":
