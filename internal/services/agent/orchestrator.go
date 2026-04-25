@@ -91,6 +91,10 @@ type SessionStore interface {
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
+	// UpdateRevisionContext rewrites sessions.revision_context. The orchestrator
+	// uses it to clear ReviewContext after consumption so a subsequent user
+	// message isn't silently swapped for /review again.
+	UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	// AcquireTurnHold flips turn_holding_container=TRUE and publishes the
 	// turn's proposed container_id via COALESCE. The returned
@@ -1350,10 +1354,37 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			"User's request:\n" + originalMessage
 	}
 	_ = planMode // used by adapters that support explicit plan mode
-	if revisionContext, revErr := ParseRevisionContext(session.RevisionContext); revErr != nil {
+	revisionContext, revErr := ParseRevisionContext(session.RevisionContext)
+	if revErr != nil {
 		log.Warn().Err(revErr).Msg("failed to parse session revision context during continue_session")
-	} else if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
-		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+		revisionContext = nil
+	}
+	// Review turns route through the adapter's native review surface (e.g.
+	// Claude Code's /review skill). Appending the formatted revision context
+	// here would either pollute the slash-command line or hand-roll a fake
+	// review prompt — both are explicitly out of scope per doc 63. Skip the
+	// formatter for review turns; the adapter reads ReviewContext directly
+	// off AgentPrompt.RevisionContext.
+	if revisionContext != nil && revisionContext.ReviewContext == nil {
+		if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
+			userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+		}
+	}
+	// ReviewContext is one-shot: clear it from the persisted row before the
+	// agent runs so the next user message ("now actually fix the issue you
+	// found") doesn't get silently swapped for /review again. Done before
+	// Execute on purpose — even if the turn fails or is retried, the user
+	// will retry by clicking the button again, not by re-firing the same
+	// stale directive against an unrelated message. Other RevisionContext
+	// fields (RepairAction, RepairContext, ...) are preserved so PR-repair
+	// behavior is unchanged.
+	if revisionContext != nil && revisionContext.ReviewContext != nil {
+		cleared, marshalErr := MarshalRevisionContextWithoutReview(revisionContext)
+		if marshalErr != nil {
+			log.Warn().Err(marshalErr).Msg("failed to re-encode revision context after review consumption")
+		} else if updateErr := o.sessions.UpdateRevisionContext(ctx, session.OrgID, session.ID, cleared); updateErr != nil {
+			log.Warn().Err(updateErr).Msg("failed to clear consumed review context; subsequent turns may double-fire /review")
+		}
 	}
 
 	turnNumber := session.CurrentTurn + 1
@@ -1650,6 +1681,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}
 				return *session.ReasoningEffort
 			}(),
+			RevisionContext: revisionContext,
 		}
 
 		if reusedExisting {
@@ -1683,7 +1715,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}
 				return *session.ReasoningEffort
 			}(),
-			TokenMode: session.TokenMode,
+			TokenMode:       session.TokenMode,
+			RevisionContext: revisionContext,
 		}
 		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
 		if o.memory != nil && repoFullName != "" {
@@ -1707,6 +1740,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Override UserPrompt with resume context (conversation history + diff).
 		basePrompt.UserPrompt = o.buildResumeContext(session, &issue, messages, userMessage)
 		basePrompt.Continuation = false
+		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
 	}
 

@@ -39,6 +39,7 @@ const (
 	AuditActionSessionReviewCommentCreated AuditAction = "session.review_comment.created"
 	AuditActionSessionReviewCommentUpdated AuditAction = "session.review_comment.updated"
 	AuditActionSessionReviewCommentDeleted AuditAction = "session.review_comment.deleted"
+	AuditActionSessionReviewRequested      AuditAction = "session.review.requested"
 	AuditActionSessionPRRequested          AuditAction = "session.pr_requested"
 	AuditActionSessionRetried              AuditAction = "session.retried"
 	AuditActionSessionArchived             AuditAction = "session.archived"
@@ -120,6 +121,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionFailed, AuditActionSessionCancelled, AuditActionSessionStatusChanged,
 		AuditActionSessionQuestionCreated, AuditActionSessionQuestionAnswered, AuditActionSessionResumedLocally,
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
+		AuditActionSessionReviewRequested,
 		AuditActionSessionPRRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,

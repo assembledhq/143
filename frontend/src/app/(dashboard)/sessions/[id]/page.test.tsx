@@ -103,6 +103,51 @@ describe('SessionDetailPage', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
+  it('shows the native Review button for review-capable sessions', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/review-capabilities', () => {
+        return HttpResponse.json({
+          data: {
+            can_review: true,
+            modes: ['default', 'security'],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeInTheDocument();
+  });
+
+  it('hides the native Review button for viewers even when the session is review-capable', async () => {
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'viewer',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id/review-capabilities', () => {
+        return HttpResponse.json({
+          data: {
+            can_review: true,
+            modes: ['default', 'security'],
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    });
+  });
+
   it('renders the session header title at text-sm size', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { useEffect } from 'react';
 import { renderWithProviders, screen, waitFor } from '@/test/test-utils';
 import SettingsLayout from './layout';
 
@@ -21,6 +22,14 @@ beforeEach(() => {
 });
 
 describe('SettingsLayout', () => {
+  function EffectChild({ onMount }: { onMount: () => void }) {
+    useEffect(() => {
+      onMount();
+    }, [onMount]);
+
+    return <div>child content</div>;
+  }
+
   it('renders children for admins on any settings page', () => {
     useAuthMock.mockReturnValue({ user: { role: 'admin' }, isLoading: false });
     pathnameMock.value = '/settings/integrations';
@@ -171,9 +180,25 @@ describe('SettingsLayout', () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it('does not redirect while auth is still loading', () => {
+  it('does not mount children for access-controlled pages while auth is still loading', () => {
     useAuthMock.mockReturnValue({ user: null, isLoading: true });
-    pathnameMock.value = '/settings/integrations';
+    pathnameMock.value = '/settings/team';
+    const onMount = vi.fn();
+
+    renderWithProviders(
+      <SettingsLayout>
+        <EffectChild onMount={onMount} />
+      </SettingsLayout>
+    );
+
+    expect(replaceMock).not.toHaveBeenCalled();
+    expect(onMount).not.toHaveBeenCalled();
+    expect(screen.queryByText('child content')).not.toBeInTheDocument();
+  });
+
+  it('still renders unrestricted pages while auth is still loading', () => {
+    useAuthMock.mockReturnValue({ user: null, isLoading: true });
+    pathnameMock.value = '/settings/account';
 
     renderWithProviders(
       <SettingsLayout>
@@ -181,6 +206,7 @@ describe('SettingsLayout', () => {
       </SettingsLayout>
     );
 
+    expect(screen.getByText('child content')).toBeInTheDocument();
     expect(replaceMock).not.toHaveBeenCalled();
   });
 

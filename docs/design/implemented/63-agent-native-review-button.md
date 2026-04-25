@@ -1,8 +1,8 @@
 # Design: Agent-Native Review Button
 
-> **Status:** Not Started | **Last reviewed:** 2026-04-25
+> **Status:** Implemented | **Last reviewed:** 2026-04-25
 >
-> **Related docs:** [../11-review-feedback-loop.md](../11-review-feedback-loop.md), [../36-code-review-display.md](../36-code-review-display.md), [../implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md), [53-session-composer-mentions.md](53-session-composer-mentions.md)
+> **Related docs:** [../11-review-feedback-loop.md](../11-review-feedback-loop.md), [../36-code-review-display.md](../36-code-review-display.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../future/53-session-composer-mentions.md](../future/53-session-composer-mentions.md)
 
 ## Summary
 
@@ -207,6 +207,16 @@ No frontend changes. No migrations. No new endpoints.
 
 ## Phasing
 
-1. **Phase 1** — Backend: add `SessionReviewMode`, session-scoped endpoint/service, and `RevisionContext.ReviewContext`. Update Claude Code adapter to invoke its native review affordances when review context is present.
-2. **Phase 2** — Frontend: add the button + spinner state in the session detail header, gated on capability check.
-3. **Phase 3** — Per-agent rollout: Codex, Amp, then any future agents. Each is independent and lands in its own PR.
+1. **Phase 1** — Backend: add `SessionReviewMode`, session-scoped endpoint/service, and `RevisionContext.ReviewContext`. Update Claude Code adapter to invoke its native review affordances when review context is present. ✅ shipped
+2. **Phase 2** — Frontend: add the button + spinner state in the session detail header, gated on capability check. ✅ shipped
+3. **Phase 3** — Per-agent rollout: Codex, Amp, then any future agents. Each is independent and lands in its own PR. ⏳ deferred — Codex / Amp do not yet ship a curated CLI review surface; the button correctly hides for those sessions until upstream lands one.
+
+## What shipped
+
+- `models.SessionReviewMode` (`default`, `security`) and `SessionReviewCapabilities` API shape (`internal/models/session_review.go`).
+- `agent.RevisionContext.ReviewContext` + `SessionReviewContext`, plus `agent.ReviewCapableAdapter`, `agent.AdapterReviewModes`, `agent.ReviewModeProvider`, and `AgentPrompt.RevisionContext` so adapters can branch in `Execute` without re-running `PreparePrompt` (`internal/services/agent/adapter.go`).
+- `sessionreview.Service` owning validation + claim/enqueue, decoupled from PR repair (`internal/services/sessionreview/service.go`).
+- `POST /api/v1/sessions/{id}/review` and `GET /api/v1/sessions/{id}/review-capabilities` (`internal/api/handlers/session_review.go`).
+- `ClaudeCodeAdapter.ReviewModes()` + `claudeCodeReviewSlashCommand` so review turns route to `/review` and `/security-review`.
+- `<ReviewButton>` in the session detail header, single-mode button or 2+ mode dropdown, spinner mirroring PR health repair affordances (`frontend/src/components/review-button.tsx`, `session-detail-content.tsx`).
+- Audit action `session.review.requested` recorded on every successful start.
