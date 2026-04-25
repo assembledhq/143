@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { AuthenticatedLayout } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
@@ -84,7 +84,7 @@ describe("AuthenticatedLayout", () => {
     expect(sidebar).toHaveClass("w-[236px]");
   });
 
-  it("uses a full-width content area with generous padding", () => {
+  it("uses a full-width content area with responsive padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -93,8 +93,12 @@ describe("AuthenticatedLayout", () => {
 
     const contentWrapper = container.querySelector("main > div:last-child");
     expect(contentWrapper).toHaveClass("max-w-none");
-    expect(contentWrapper).toHaveClass("px-8");
-    expect(contentWrapper).toHaveClass("py-6");
+    // Mobile-first: tight padding by default, wider on larger breakpoints.
+    expect(contentWrapper).toHaveClass("px-4");
+    expect(contentWrapper).toHaveClass("sm:px-6");
+    expect(contentWrapper).toHaveClass("lg:px-10");
+    expect(contentWrapper).toHaveClass("py-5");
+    expect(contentWrapper).toHaveClass("sm:py-6");
   });
 
   it("content wrapper supports full-height children via flex-1 and min-h-0", () => {
@@ -263,7 +267,8 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+    // Rendered in both the desktop sidebar and the mobile top bar.
+    expect(screen.getAllByRole("button", { name: "Search" }).length).toBeGreaterThan(0);
   });
 
   it("has a new session button", () => {
@@ -273,7 +278,7 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New session" }).length).toBeGreaterThan(0);
   });
 
   it("opens create session dialog when new session button is clicked", async () => {
@@ -285,7 +290,9 @@ describe("AuthenticatedLayout", () => {
       </AuthenticatedLayout>
     );
 
-    await user.click(screen.getByRole("button", { name: "New session" }));
+    // Click the first "New session" trigger (desktop sidebar); both triggers
+    // wire up to the same handler.
+    await user.click(screen.getAllByRole("button", { name: "New session" })[0]);
 
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -304,6 +311,96 @@ describe("AuthenticatedLayout", () => {
       const trigger = screen.getByTestId("org-switcher");
       expect(trigger).toHaveTextContent("Test Org");
       expect(trigger.getAttribute("aria-haspopup")).not.toBeNull();
+    });
+  });
+
+  describe("mobile navigation drawer", () => {
+    it("hamburger opens the drawer and reflects state via aria-expanded", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      const hamburger = screen.getByRole("button", { name: "Open navigation menu" });
+      expect(hamburger).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+      await user.click(hamburger);
+
+      const drawer = await screen.findByRole("dialog");
+      expect(drawer).toBeInTheDocument();
+      expect(hamburger).toHaveAttribute("aria-expanded", "true");
+      // The drawer exposes an accessible name for screen readers.
+      expect(within(drawer).getByText("Navigation")).toBeInTheDocument();
+    });
+
+    it("closes the drawer when a primary nav link is tapped", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open navigation menu" }));
+      const drawer = await screen.findByRole("dialog");
+
+      // Click a nav link inside the drawer (scope with `within` to avoid
+      // matching the desktop sidebar's duplicate link).
+      await user.click(within(drawer).getByRole("link", { name: "Sessions" }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+    });
+
+    it("closes the drawer when a Settings sub-link is tapped", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open navigation menu" }));
+      const drawer = await screen.findByRole("dialog");
+
+      // Expand the Settings group inside the drawer, then tap a sub-link.
+      // This verifies onNavigate threads through SidebarSettingsSection.
+      await user.click(within(drawer).getByRole("button", { name: /Settings/ }));
+      await user.click(within(drawer).getByRole("link", { name: "Account" }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+    });
+
+    it("does not close the drawer on modifier-clicks (cmd/ctrl/middle)", async () => {
+      const user = userEvent.setup();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await user.click(screen.getByRole("button", { name: "Open navigation menu" }));
+      const drawer = await screen.findByRole("dialog");
+
+      // Cmd/Ctrl click opens the link in a new tab — current page is unchanged
+      // for the user, so the drawer should stay put.
+      await user.keyboard("{Meta>}");
+      await user.click(within(drawer).getByRole("link", { name: "Sessions" }));
+      await user.keyboard("{/Meta}");
+
+      // Drawer is still in the DOM after a deliberate wait.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(screen.queryByRole("dialog")).toBeInTheDocument();
     });
   });
 });
