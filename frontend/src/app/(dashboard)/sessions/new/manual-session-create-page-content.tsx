@@ -718,11 +718,7 @@ export function ManualSessionCreatePageContent() {
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
       return;
     }
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) {
-      setIsDragActive(false);
-      setDragMessage(null);
-    }
+    resetDragState();
   }
 
   async function handleDrop(event: React.DragEvent<HTMLDivElement>) {

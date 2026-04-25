@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FolderKanban, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { OwnerScopeToggle } from "@/components/owner-scope-toggle";
 import { Button } from "@/components/ui/button";
@@ -38,9 +38,24 @@ export function ProjectSidebar() {
   const pathname = usePathname();
   const selectedId = params?.id as string | undefined;
   const { currentUserFilter, createdByUserId, isResolved, setUserFilter } = useProjectUserFilter();
-  const [search, setSearch] = useState("");
+  const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
+  const [search, setSearch] = useState(searchParam ?? "");
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
+  useEffect(() => {
+    const nextSearch = searchParam ?? "";
+    // Sync the local input from the URL when navigation/back/forward changes
+    // the search param outside this component.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSearch((current) => (current === nextSearch ? current : nextSearch));
+  }, [searchParam]);
+  useEffect(() => {
+    const currentParam = searchParam ?? "";
+    if (search === currentParam) {
+      return;
+    }
+    void setSearchParam(search || null);
+  }, [search, searchParam, setSearchParam]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["projects", activeFilter, repo, currentUserFilter, createdByUserId],
@@ -74,7 +89,7 @@ export function ProjectSidebar() {
 
   // Carry the sidebar's filters into detail-page links so opening a project
   // doesn't reset the scope back to "Mine".
-  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo);
+  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo, search || null);
 
   const isNewProject = pathname === "/projects/new";
   const showMineEmptyState =
@@ -90,12 +105,12 @@ export function ProjectSidebar() {
         <div className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
-          <Input
-            placeholder="Search projects..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-8 pl-8 text-xs"
-          />
+            <Input
+              placeholder="Search projects..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-8 pl-8 text-xs"
+            />
         </div>
           <OwnerScopeToggle
             currentUserFilter={currentUserFilter}

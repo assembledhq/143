@@ -243,6 +243,43 @@ describe("ManualSessionCreatePageContent", () => {
     expect(dropzone).toHaveAttribute("data-drag-active", "true");
   });
 
+  it("clears the dropzone after nested drag-enter events once the drag leaves the hero", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const dropzone = await screen.findByTestId("manual-session-dropzone");
+    const addButton = screen.getByRole("button", { name: "Add files or photos" });
+    const file = new File(["image-bytes"], "design-shot.png", { type: "image/png" });
+
+    fireEvent.dragEnter(dropzone, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+    fireEvent.dragEnter(addButton, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    expect(dropzone).toHaveAttribute("data-drag-active", "true");
+
+    fireEvent.dragLeave(dropzone, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(dropzone).toHaveAttribute("data-drag-active", "false");
+    });
+  });
+
   it("uploads an image dropped onto the hero area and shows it in the attachment strip", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
