@@ -94,17 +94,22 @@ type SessionCountsFilters struct {
 // slice scan of the (org_id, created_at) range — keep both in place.
 const sessionCountsCap = 100
 
+// sessionPrimaryIssueIDColumn derives primary_issue_id from the canonical
+// session_issue_links join table. It is the only source of truth for the
+// primary issue on a session — the legacy sessions.issue_id column was dropped
+// in migration 000097.
+//
+// No ORDER BY is needed: the partial unique index
+// idx_session_issue_links_primary enforces at most one row per session_id
+// where role = 'primary', so the subquery is deterministic by construction.
+const sessionPrimaryIssueIDColumn = `(SELECT sil.issue_id
+		FROM session_issue_links sil
+		WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
+		LIMIT 1) AS primary_issue_id`
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id,
-	COALESCE(
-		(SELECT sil.issue_id
-		 FROM session_issue_links sil
-		 WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
-		 ORDER BY sil.created_at ASC
-		 LIMIT 1),
-		issue_id,
-		'00000000-0000-0000-0000-000000000000'::uuid
-	) AS issue_id,
+	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
@@ -122,15 +127,7 @@ const sessionSelectColumns = `id,
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
 const sessionListColumns = `id,
-	COALESCE(
-		(SELECT sil.issue_id
-		 FROM session_issue_links sil
-		 WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary'
-		 ORDER BY sil.created_at ASC
-		 LIMIT 1),
-		issue_id,
-		'00000000-0000-0000-0000-000000000000'::uuid
-	) AS issue_id,
+	` + sessionPrimaryIssueIDColumn + `,
 	org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode,
 	complexity_tier, confidence_score, confidence_reasoning, risk_factors,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
@@ -232,9 +229,6 @@ func hydrateSessionPolicy(session *models.Session) {
 		} else {
 			session.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 		}
-	}
-	if session.PrimaryIssueID == nil && session.IssueID != uuid.Nil {
-		session.PrimaryIssueID = &session.IssueID
 	}
 }
 
@@ -396,13 +390,6 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	if run.ValidationPolicy == "" {
 		run.ValidationPolicy = models.SessionValidationPolicyOnTurnComplete
 	}
-	if run.PrimaryIssueID == nil && run.IssueID != uuid.Nil {
-		id := run.IssueID
-		run.PrimaryIssueID = &id
-	}
-	if run.IssueID == uuid.Nil && run.PrimaryIssueID != nil {
-		run.IssueID = *run.PrimaryIssueID
-	}
 
 	tx, err := s.Begin(ctx)
 	if err != nil {
@@ -412,26 +399,20 @@ func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 
 	query := `
 		INSERT INTO sessions (
-			issue_id, org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
+			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id,
 			origin, interaction_mode, validation_policy
 		)
 		VALUES (
-			@issue_id, @org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
+			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
 			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
 			@origin, @interaction_mode, @validation_policy
 		)
 		RETURNING id, created_at, last_activity_at`
 
-	var issueID interface{} = run.IssueID
-	if run.IssueID == uuid.Nil {
-		issueID = nil
-	}
-
 	args := pgx.NamedArgs{
-		"issue_id":             issueID,
 		"org_id":               run.OrgID,
 		"agent_type":           run.AgentType,
 		"status":               run.Status,
@@ -1009,15 +990,11 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE (
-			org_id = @org_id AND issue_id = @issue_id AND deleted_at IS NULL
-		  ) OR (
-			org_id = @org_id AND deleted_at IS NULL AND EXISTS (
-				SELECT 1
-				FROM session_issue_links sil
-				WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.issue_id = @issue_id
-			)
-		  )
+		WHERE org_id = @org_id AND deleted_at IS NULL AND EXISTS (
+			SELECT 1
+			FROM session_issue_links sil
+			WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.issue_id = @issue_id
+		)
 		ORDER BY created_at DESC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{

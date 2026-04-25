@@ -589,7 +589,7 @@ func (s *PRService) createRepairRevisionSession(ctx context.Context, pr models.P
 	txPRs := db.NewPullRequestStore(tx)
 
 	session := &models.Session{
-		IssueID:           parentSession.IssueID,
+		PrimaryIssueID:    parentSession.PrimaryIssueID,
 		OrgID:             parentSession.OrgID,
 		AgentType:         parentSession.AgentType,
 		Status:            "pending",

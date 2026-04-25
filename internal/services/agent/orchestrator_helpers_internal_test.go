@@ -89,55 +89,45 @@ func TestHydrateSessionPolicyForExecution(t *testing.T) {
 	hydrateSessionPolicyForExecution(nil, nil)
 
 	tests := []struct {
-		name               string
-		session            *models.Session
-		issue              *models.Issue
-		wantOrigin         models.SessionOrigin
-		wantInteraction    models.SessionInteractionMode
-		wantValidation     models.SessionValidationPolicy
-		wantPrimaryIssueID bool
+		name            string
+		session         *models.Session
+		wantOrigin      models.SessionOrigin
+		wantInteraction models.SessionInteractionMode
+		wantValidation  models.SessionValidationPolicy
 	}{
-		{
-			name: "manual issue source becomes interactive session-end validation",
-			session: &models.Session{
-				IssueID: uuid.New(),
-			},
-			issue:              &models.Issue{Source: models.IssueSourceManual},
-			wantOrigin:         models.SessionOriginManual,
-			wantInteraction:    models.SessionInteractionModeInteractive,
-			wantValidation:     models.SessionValidationPolicyOnSessionEnd,
-			wantPrimaryIssueID: true,
-		},
 		{
 			name: "automation sessions become single-run turn validation",
 			session: &models.Session{
-				IssueID:         uuid.New(),
 				AutomationRunID: func() *uuid.UUID { id := uuid.New(); return &id }(),
 			},
-			wantOrigin:         models.SessionOriginAutomation,
-			wantInteraction:    models.SessionInteractionModeSingleRun,
-			wantValidation:     models.SessionValidationPolicyOnTurnComplete,
-			wantPrimaryIssueID: true,
+			wantOrigin:      models.SessionOriginAutomation,
+			wantInteraction: models.SessionInteractionModeSingleRun,
+			wantValidation:  models.SessionValidationPolicyOnTurnComplete,
 		},
 		{
-			name: "triggered by user without issue becomes manual",
+			name: "triggered by user becomes manual",
 			session: &models.Session{
 				TriggeredByUserID: func() *uuid.UUID { id := uuid.New(); return &id }(),
 			},
-			wantOrigin:         models.SessionOriginManual,
-			wantInteraction:    models.SessionInteractionModeInteractive,
-			wantValidation:     models.SessionValidationPolicyOnSessionEnd,
-			wantPrimaryIssueID: false,
+			wantOrigin:      models.SessionOriginManual,
+			wantInteraction: models.SessionInteractionModeInteractive,
+			wantValidation:  models.SessionValidationPolicyOnSessionEnd,
 		},
 		{
 			name: "revision sessions derive origin from parent session",
 			session: &models.Session{
 				ParentSessionID: func() *uuid.UUID { id := uuid.New(); return &id }(),
 			},
-			wantOrigin:         models.SessionOriginRevision,
-			wantInteraction:    models.SessionInteractionModeSingleRun,
-			wantValidation:     models.SessionValidationPolicyOnTurnComplete,
-			wantPrimaryIssueID: false,
+			wantOrigin:      models.SessionOriginRevision,
+			wantInteraction: models.SessionInteractionModeSingleRun,
+			wantValidation:  models.SessionValidationPolicyOnTurnComplete,
+		},
+		{
+			name:            "empty session defaults to issue_trigger single-run",
+			session:         &models.Session{},
+			wantOrigin:      models.SessionOriginIssueTrigger,
+			wantInteraction: models.SessionInteractionModeSingleRun,
+			wantValidation:  models.SessionValidationPolicyOnTurnComplete,
 		},
 	}
 
@@ -146,14 +136,29 @@ func TestHydrateSessionPolicyForExecution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			hydrateSessionPolicyForExecution(tt.session, tt.issue)
+			hydrateSessionPolicyForExecution(tt.session, nil)
 
 			require.Equal(t, tt.wantOrigin, tt.session.Origin, "hydrateSessionPolicyForExecution should set the session origin")
 			require.Equal(t, tt.wantInteraction, tt.session.InteractionMode, "hydrateSessionPolicyForExecution should set the interaction mode")
 			require.Equal(t, tt.wantValidation, tt.session.ValidationPolicy, "hydrateSessionPolicyForExecution should set the validation policy")
-			require.Equal(t, tt.wantPrimaryIssueID, tt.session.PrimaryIssueID != nil, "hydrateSessionPolicyForExecution should backfill PrimaryIssueID from IssueID")
 		})
 	}
+
+	t.Run("legacy synthetic manual issue overrides migrated defaults", func(t *testing.T) {
+		t.Parallel()
+
+		session := &models.Session{
+			Origin:           models.SessionOriginIssueTrigger,
+			InteractionMode:  models.SessionInteractionModeSingleRun,
+			ValidationPolicy: models.SessionValidationPolicyOnTurnComplete,
+		}
+
+		hydrateSessionPolicyForExecution(session, &models.Issue{Source: models.IssueSourceManual})
+
+		require.Equal(t, models.SessionOriginManual, session.Origin, "legacy synthetic manual sessions should retain manual origin semantics")
+		require.Equal(t, models.SessionInteractionModeInteractive, session.InteractionMode, "legacy synthetic manual sessions should remain interactive")
+		require.Equal(t, models.SessionValidationPolicyOnSessionEnd, session.ValidationPolicy, "legacy synthetic manual sessions should validate on session end")
+	})
 }
 
 func TestCreateIssueSnapshotForTurn(t *testing.T) {
@@ -353,7 +358,6 @@ func TestResolvePromptSeed_FallsBackToPrimaryIssueStore(t *testing.T) {
 	}
 	session := &models.Session{
 		OrgID:          orgID,
-		IssueID:        primaryIssueID,
 		PrimaryIssueID: &primaryIssueID,
 	}
 
@@ -390,7 +394,6 @@ func TestResolvePromptSeed_EarlyReturnAndErrors(t *testing.T) {
 		}
 		session := &models.Session{
 			OrgID:          uuid.New(),
-			IssueID:        primaryIssueID,
 			PrimaryIssueID: &primaryIssueID,
 		}
 

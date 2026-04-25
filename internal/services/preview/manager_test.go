@@ -143,7 +143,7 @@ var previewAccessSessionTestCols = []string{
 }
 
 var sessionTestCols = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
 	"failure_explanation", "failure_category", "failure_next_steps", "failure_retry_advised",
@@ -192,7 +192,7 @@ func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash strin
 func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Time) []any {
 	issueID := uuid.New()
 	return previewManagerSessionRow(
-		sessionID, issueID, orgID, "claude-code", "running", "supervised", "low",
+		sessionID, &issueID, orgID, "claude-code", "running", "supervised", "low",
 		nil, nil, nil, nil,
 		containerID, nil, false, &now, nil, nil,
 		nil, nil, nil, false,

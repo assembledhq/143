@@ -86,9 +86,6 @@ func (h *SessionHandler) enrichSessionLinks(ctx context.Context, orgID uuid.UUID
 		return
 	}
 	session.LinkedIssues = links
-	if primary := session.EffectivePrimaryIssueID(); primary != nil {
-		session.PrimaryIssueID = primary
-	}
 }
 
 // SetAuditEmitter injects the audit emitter for logging session events.
@@ -548,7 +545,6 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	run := &models.Session{
-		IssueID:           issueID,
 		PrimaryIssueID:    &issueID,
 		OrgID:             orgID,
 		Origin:            models.SessionOriginIssueTrigger,

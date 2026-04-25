@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 )
 
 var sessionTestColumns = []string{
-	"id", "issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
+	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy",
 	"agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
 	"container_id", "worker_node_id", "turn_holding_container", "started_at", "completed_at", "token_usage",
@@ -45,8 +46,13 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 	startedAt := now.Add(-time.Hour)     // middle
 	lastActivityAt := now                // newest
 	completedAt := now.Add(-5 * time.Minute)
+	var primaryIssueID any
+	if issueID != uuid.Nil {
+		issueIDCopy := issueID
+		primaryIssueID = &issueIDCopy
+	}
 	return []interface{}{
-		sessionID, issueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
+		sessionID, primaryIssueID, orgID, "issue_trigger", "single_run", "on_turn_complete",
 		"claude-code", "completed", "supervised", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, &startedAt, &completedAt, nil,
@@ -178,6 +184,42 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestSessionStore_InsertColumnsExcludePrimaryIssueID guards against a phantom-
+// column regression: models.Session has `db:"primary_issue_id"` because the
+// SELECT subquery aliases the value, but no such column exists on the table.
+// If a future refactor lists primary_issue_id (or the legacy issue_id) in the
+// INSERT column list, postgres will fail at runtime. This test fails earlier,
+// at unit-test time, so the breakage is obvious in CI.
+func TestSessionStore_InsertColumnsExcludePrimaryIssueID(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("session_store.go")
+	require.NoError(t, err, "should be able to read session_store.go")
+
+	src := string(source)
+
+	// Locate every `INSERT INTO sessions (` block (there is one today, but be
+	// defensive in case future writes add more) and assert neither column
+	// appears in the column list of any of them. We bound the scan to the
+	// block's closing paren so we don't accidentally match later code.
+	const marker = "INSERT INTO sessions ("
+	for idx := 0; ; {
+		hit := strings.Index(src[idx:], marker)
+		if hit < 0 {
+			break
+		}
+		start := idx + hit
+		end := strings.Index(src[start:], ")")
+		require.Greater(t, end, 0, "INSERT INTO sessions block at offset %d must have a closing paren", start)
+		columnList := src[start : start+end]
+
+		require.NotContains(t, columnList, "primary_issue_id", "INSERT INTO sessions must not list primary_issue_id — it is a SELECT alias only, not a real column")
+		require.NotContains(t, columnList, "issue_id", "INSERT INTO sessions must not list issue_id — the column was dropped in migration 000097")
+
+		idx = start + end
 	}
 }
 

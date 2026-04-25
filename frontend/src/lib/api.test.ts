@@ -101,7 +101,7 @@ describe('api client', () => {
         data: [
           {
             id: 'session-1',
-            issue_id: 'issue-1',
+            primary_issue_id: 'issue-1',
             org_id: 'org-1',
             agent_type: 'claude_code',
             status: 'completed',
@@ -122,6 +122,7 @@ describe('api client', () => {
       const result = await api.sessions.list();
       expect(result.data).toHaveLength(1);
       expect(result.data[0].id).toBe('session-1');
+      expect(result.data[0].primary_issue_id).toBe('issue-1');
       expect(result.data[0].status).toBe('completed');
     });
 
@@ -146,7 +147,7 @@ describe('api client', () => {
       const mockSession = {
         data: {
           id: 'session-abc',
-          issue_id: 'issue-1',
+          primary_issue_id: 'issue-1',
           org_id: 'org-1',
           agent_type: 'claude_code',
           status: 'running',
