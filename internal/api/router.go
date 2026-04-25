@@ -682,6 +682,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// all-roles read group) so viewers cannot enumerate org members.
 				r.Get("/api/v1/team/members", teamHandler.ListMembers)
 
+				// Coding-agents config reads. Members can view what's configured
+				// (so /settings/agent renders read-only); mutations stay admin-only.
+				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
+				r.Get("/api/v1/settings/coding-auths/legacy-status", func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "legacy coding auth migration unavailable on this branch", http.StatusNotImplemented)
+				})
+				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
+				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
+
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
 				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
@@ -784,13 +793,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 				r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)
 
-				// Org credential management
+				// Org credential management. Reads (List/legacy-status) live in the
+				// admin+member group above so members can view the coding-agents
+				// settings page in read-only mode; mutations stay admin-only here.
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
-				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
 				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
-				r.Get("/api/v1/settings/coding-auths/legacy-status", legacyCodingAuthUnavailable)
 				r.Post("/api/v1/settings/coding-auths/migrate-legacy", legacyCodingAuthUnavailable)
 				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
 				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
@@ -800,20 +809,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
 				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
 
-				// Codex (ChatGPT) OAuth device code auth
+				// Codex (ChatGPT) OAuth device code auth. Subscription List is
+				// registered in the admin+member group so members can see which
+				// subscriptions are configured; everything else is admin-only.
 				r.Post("/api/v1/settings/codex-auth/initiate", codexAuthHandler.Initiate)
 				r.Get("/api/v1/settings/codex-auth/status", codexAuthHandler.Status)
 				r.Post("/api/v1/settings/codex-auth/disconnect", codexAuthHandler.DisconnectAll) // legacy compat
-				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Delete("/api/v1/settings/codex-auth/subscriptions/{id}", codexAuthHandler.DisconnectByPath)
 
 				// Claude Code (Anthropic subscription) OAuth — PKCE authorization-code
 				// flow: initiate returns an authorize URL, user pastes back
-				// `<code>#<state>` which /complete exchanges for tokens.
+				// `<code>#<state>` which /complete exchanges for tokens. Subscription
+				// List sits in the admin+member group; everything else stays
+				// admin-only.
 				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
 				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
 				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
-				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
 
 				// Usage timeseries, breakdown, and export (admin-only)

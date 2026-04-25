@@ -9,16 +9,19 @@ import { useAuth } from "@/hooks/use-auth";
 // or pasted URLs so a member doesn't land on a page that 403s every query.
 const ADMIN_ONLY_PATHS = new Set([
   "/settings",
-  "/settings/integrations",
-  "/settings/agent",
   "/settings/llm",
   "/settings/autopilot",
   "/settings/usage",
   "/settings/audit-log",
 ]);
 
-// Pages a viewer can't usefully load (the underlying API is admin+member only).
-const VIEWER_BLOCKED_PATHS = new Set(["/settings/team"]);
+// Pages a viewer can't usefully load (the underlying APIs are admin+member only).
+// Members can view these pages in read-only mode; viewers get redirected.
+const VIEWER_BLOCKED_PATHS = new Set([
+  "/settings/team",
+  "/settings/integrations",
+  "/settings/agent",
+]);
 
 function isAdminOnlyPath(pathname: string): boolean {
   if (ADMIN_ONLY_PATHS.has(pathname)) return true;

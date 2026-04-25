@@ -56,7 +56,16 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   onConnectNotion: () => void;
 };
 
-type AllIntegrationCardsProps = SourceControlIntegrationCardProps & AdditionalIntegrationCardsProps;
+// readOnly hides connect/disconnect buttons on every card and the per-repo
+// disconnect/reconnect chips. Used to render the integrations page for
+// non-admins, who can see what's connected but cannot change it.
+type ReadOnlyProps = { readOnly?: boolean };
+
+type AllIntegrationCardsProps =
+  SourceControlIntegrationCardProps & AdditionalIntegrationCardsPropsWithReadOnly;
+
+type AdditionalIntegrationCardsPropsWithReadOnly =
+  AdditionalIntegrationCardsProps & ReadOnlyProps;
 
 // ActiveRepoChip renders one active repo with a trailing × button that opens a
 // confirmation dialog before disconnecting. The × is only shown when a handler
@@ -220,6 +229,7 @@ function IntegrationAction({
   disconnecting,
   disconnectError,
   loading,
+  readOnly,
 }: {
   connected: boolean;
   integrationKey: IntegrationKey;
@@ -229,8 +239,17 @@ function IntegrationAction({
   disconnecting?: boolean;
   disconnectError?: string | null;
   loading?: boolean;
+  readOnly?: boolean;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  if (readOnly) {
+    return (
+      <Badge variant={connected ? "secondary" : "outline"} className="text-xs">
+        {connected ? "Connected" : "Not connected"}
+      </Badge>
+    );
+  }
 
   if (connected && onDisconnect) {
     return (
@@ -369,7 +388,8 @@ export function AdditionalIntegrationCards({
   disconnectingProvider,
   disconnectErrorProvider,
   disconnectError,
-}: AdditionalIntegrationCardsProps) {
+  readOnly,
+}: AdditionalIntegrationCardsPropsWithReadOnly) {
   const sentry = getIntegrationByKey("sentry");
   const linear = getIntegrationByKey("linear");
   const slack = getIntegrationByKey("slack");
@@ -393,6 +413,7 @@ export function AdditionalIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "sentry"}
               disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
+              readOnly={readOnly}
             />
           ),
         },
@@ -412,6 +433,7 @@ export function AdditionalIntegrationCards({
               disconnecting={disconnectingProvider === "linear"}
               disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
+              readOnly={readOnly}
             />
           ),
         },
@@ -430,6 +452,7 @@ export function AdditionalIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "slack"}
               disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
+              readOnly={readOnly}
             />
           ),
         },
@@ -449,6 +472,7 @@ export function AdditionalIntegrationCards({
               disconnecting={disconnectingProvider === "notion"}
               disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
               loading={notionLoading}
+              readOnly={readOnly}
             />
           ),
         },
@@ -478,6 +502,7 @@ export function AllIntegrationCards({
   onDisconnectRepo,
   onReconnectRepo,
   pendingRepoID,
+  readOnly,
 }: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const sentry = getIntegrationByKey("sentry");
@@ -497,8 +522,8 @@ export function AllIntegrationCards({
           extra: githubConnected ? (
             <ConnectedReposList
               repos={githubRepos}
-              onDisconnectRepo={onDisconnectRepo}
-              onReconnectRepo={onReconnectRepo}
+              onDisconnectRepo={readOnly ? undefined : onDisconnectRepo}
+              onReconnectRepo={readOnly ? undefined : onReconnectRepo}
               pendingRepoID={pendingRepoID}
             />
           ) : undefined,
@@ -511,6 +536,7 @@ export function AllIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "github"}
               disconnectError={disconnectErrorProvider === "github" ? disconnectError : null}
+              readOnly={readOnly}
             />
           ),
         },
@@ -529,6 +555,7 @@ export function AllIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "sentry"}
               disconnectError={disconnectErrorProvider === "sentry" ? disconnectError : null}
+              readOnly={readOnly}
             />
           ),
         },
@@ -548,6 +575,7 @@ export function AllIntegrationCards({
               disconnecting={disconnectingProvider === "linear"}
               disconnectError={disconnectErrorProvider === "linear" ? disconnectError : null}
               loading={linearLoading}
+              readOnly={readOnly}
             />
           ),
         },
@@ -566,6 +594,7 @@ export function AllIntegrationCards({
               onDisconnect={onDisconnect}
               disconnecting={disconnectingProvider === "slack"}
               disconnectError={disconnectErrorProvider === "slack" ? disconnectError : null}
+              readOnly={readOnly}
             />
           ),
         },
@@ -585,6 +614,7 @@ export function AllIntegrationCards({
               disconnecting={disconnectingProvider === "notion"}
               disconnectError={disconnectErrorProvider === "notion" ? disconnectError : null}
               loading={notionLoading}
+              readOnly={readOnly}
             />
           ),
         },

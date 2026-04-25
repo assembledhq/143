@@ -27,6 +27,7 @@ import {
   useDisconnectRepository,
   useReconnectRepository,
 } from "@/hooks/use-repository-connection";
+import { useAuth } from "@/hooks/use-auth";
 
 type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
@@ -126,6 +127,8 @@ function SlackChannelPicker() {
 
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
@@ -194,6 +197,11 @@ export default function IntegrationsPage() {
           title="Integrations"
           description="Connect external services to your organization."
         />
+      {!isAdmin && (
+        <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+          Only admins can connect or disconnect integrations.
+        </div>
+      )}
       <AllIntegrationCards
         githubConnected={githubConnected}
         githubRepos={githubRepos}
@@ -219,8 +227,9 @@ export default function IntegrationsPage() {
         disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
         disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
+        readOnly={!isAdmin}
       />
-      {slackIntegration && <SlackChannelPicker />}
+      {slackIntegration && isAdmin && <SlackChannelPicker />}
       </div>
 
       <AlertDialog open={notionDialogOpen} onOpenChange={setNotionDialogOpen}>

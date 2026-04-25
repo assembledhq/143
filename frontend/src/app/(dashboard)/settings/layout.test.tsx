@@ -49,9 +49,9 @@ describe('SettingsLayout', () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it('redirects non-admins away from admin-only pages', async () => {
+  it('redirects members away from admin-only pages (LLM, General, Usage, etc.)', async () => {
     useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
-    pathnameMock.value = '/settings/integrations';
+    pathnameMock.value = '/settings/llm';
 
     renderWithProviders(
       <SettingsLayout>
@@ -61,6 +61,47 @@ describe('SettingsLayout', () => {
 
     await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
     expect(screen.queryByText('secret admin content')).not.toBeInTheDocument();
+  });
+
+  it('lets members view /settings/integrations (read-only access)', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
+    pathnameMock.value = '/settings/integrations';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>integrations content</div>
+      </SettingsLayout>
+    );
+
+    expect(screen.getByText('integrations content')).toBeInTheDocument();
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it('lets members view /settings/agent (read-only access)', () => {
+    useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
+    pathnameMock.value = '/settings/agent';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>agent content</div>
+      </SettingsLayout>
+    );
+
+    expect(screen.getByText('agent content')).toBeInTheDocument();
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it('redirects viewers from /settings/integrations and /settings/agent', async () => {
+    useAuthMock.mockReturnValue({ user: { role: 'viewer' }, isLoading: false });
+    pathnameMock.value = '/settings/integrations';
+
+    renderWithProviders(
+      <SettingsLayout>
+        <div>integrations content</div>
+      </SettingsLayout>
+    );
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
   });
 
   it('redirects non-admins from /settings (General) root path', async () => {

@@ -12,6 +12,7 @@ import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_47 } fro
 import { queryKeys } from "@/lib/query-keys";
 import type { CodingAuth, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
+import { AGENTS_BY_KEY } from "@/lib/agents";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -126,7 +127,6 @@ export default function AgentPage() {
   const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
     queryKey: ["coding-auths"],
     queryFn: () => api.codingAuths.list(),
-    enabled: isAdmin,
   });
   const { data: legacyStatusResponse } = useQuery({
     queryKey: ["coding-auths", "legacy-status"],
@@ -140,7 +140,6 @@ export default function AgentPage() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
-    enabled: isAdmin,
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
@@ -311,18 +310,85 @@ export default function AgentPage() {
   }
 
   if (!isAdmin) {
+    const sessionMinutes = Math.round(
+      (settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
+    );
+    const maxConcurrent = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+    const defaultAgentLabel = settings.default_agent_type
+      ? (AGENTS_BY_KEY[settings.default_agent_type as keyof typeof AGENTS_BY_KEY]?.label ?? settings.default_agent_type)
+      : "Not set";
+
     return (
       <PageContainer>
-        <PageHeader
-          title="Coding agents"
-          description="Organization coding auths are managed by admins."
-        />
-        <Card>
-          <CardContent className="flex items-center gap-3 py-6 text-sm text-muted-foreground">
-            <ShieldAlert className="h-4 w-4" />
-            You need admin access to manage organization coding auths.
-          </CardContent>
-        </Card>
+        <div className="space-y-6 pt-2">
+          <PageHeader
+            title="Coding agents"
+            description="View the org's coding-agent stack and execution limits. Only admins can change these."
+          />
+          <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
+            Read-only view. Only admins can add, edit, or reorder coding auths.
+          </div>
+
+          <section className="space-y-3">
+            <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
+            {rows.length === 0 ? (
+              <Card>
+                <CardContent className="py-6 text-sm text-muted-foreground">
+                  No coding auths configured.
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent className="p-0">
+                  <div className="divide-y divide-border/50">
+                    {rows.map((row, index) => (
+                      <div
+                        key={row.id}
+                        className="grid gap-2 px-4 py-3 md:grid-cols-[60px_minmax(0,1fr)_minmax(0,1fr)_140px] md:items-center"
+                      >
+                        <div className="text-xs font-semibold text-muted-foreground">
+                          #{index + 1}
+                        </div>
+                        <div className="text-xs font-medium">
+                          {AGENTS_BY_KEY[row.agent]?.label ?? row.agent}
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {row.label}
+                        </div>
+                        <div>
+                          <Badge variant="outline" className="text-xs">
+                            {capitalizeWord(row.status.replace(/_/g, " "))}
+                          </Badge>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="text-xs font-medium text-foreground">Execution limits</h2>
+            <Card>
+              <CardContent className="space-y-3 py-4 text-xs">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-muted-foreground">Default agent</span>
+                  <span className="font-medium">{defaultAgentLabel}</span>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-muted-foreground">Max concurrent runs</span>
+                  <span className="font-medium">{maxConcurrent}</span>
+                </div>
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-muted-foreground">Max session duration</span>
+                  <span className="font-medium">{sessionMinutes} min</span>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+        </div>
       </PageContainer>
     );
   }

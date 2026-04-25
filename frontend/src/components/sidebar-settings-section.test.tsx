@@ -24,18 +24,22 @@ describe('SidebarSettingsSection', () => {
     }
   });
 
-  it('hides admin-only entries for members', () => {
+  it('shows view-only pages for members and hides admin-only pages', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings/account" userRole="member" />
     );
 
-    expect(screen.getByText('Account')).toBeInTheDocument();
-    expect(screen.getByText('Evals')).toBeInTheDocument();
-    expect(screen.getByText('Team')).toBeInTheDocument();
-
-    for (const hidden of [
+    for (const visible of [
+      'Account',
+      'Evals',
+      'Team',
       'Integrations',
       'Coding agents',
+    ]) {
+      expect(screen.getByText(visible)).toBeInTheDocument();
+    }
+
+    for (const hidden of [
       'LLM',
       'Autopilot',
       'General',
@@ -46,7 +50,7 @@ describe('SidebarSettingsSection', () => {
     }
   });
 
-  it('hides admin-only entries and Team for viewers (Team is admin+member-only on the backend)', () => {
+  it('hides everything except Account and Evals for viewers', () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings/account" userRole="viewer" />
     );

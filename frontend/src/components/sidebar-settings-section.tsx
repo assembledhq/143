@@ -48,8 +48,8 @@ const settingsGroups: SettingsGroup[] = [
   {
     label: "PLATFORM",
     items: [
-      { label: "Integrations", icon: Plug, href: "/settings/integrations", adminOnly: true },
-      { label: "Coding agents", icon: Bot, href: "/settings/agent", adminOnly: true },
+      { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForViewers: true },
+      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForViewers: true },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals" },
