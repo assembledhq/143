@@ -127,6 +127,11 @@ describe("ManualSessionCreatePageContent", () => {
     await waitFor(() => {
       expect(mocks.repositoriesListMock).toHaveBeenCalled();
     });
+
+    expect(
+      screen.getByText("Start a manual session with text, files, photos, dictation, or a screenshot anywhere here."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Drop a screenshot anywhere here, or use +")).not.toBeInTheDocument();
   });
 
   it("shows repository selection", async () => {
