@@ -1,23 +1,35 @@
 // Command 143-tools provides CLI access to integration tools (Sentry, Linear,
-// Notion, Slack) for coding agents running inside sandboxes.
+// Notion, Slack) and to sandbox-internal helpers (git credential helper, gh
+// token wrapper, post-clone bootstrap) for coding agents running inside
+// sandboxes.
 //
-// Unlike the MCP server, this binary is invoked directly by the agent as a
-// shell command — no JSON-RPC handshake, no schema overhead. The agent
-// already knows how to use CLI flags from its training data.
-//
-// Usage:
+// Usage (integration tools):
 //
 //	SENTRY_AUTH_TOKEN=... LINEAR_ACCESS_TOKEN=... 143-tools <tool> [--flag value ...]
 //	143-tools sentry_list_errors --severity high --limit 10
-//	143-tools linear_create_task --title "Fix auth" --team_key ENG
 //	143-tools --help
 //
-// Credentials are read from environment variables. Output is JSON to stdout.
-// Errors go to stderr.
+// Usage (sandbox infrastructure — invoked by git/gh/orchestrator, not the agent):
+//
+//	143-tools git-credential               # git credential.helper
+//	143-tools auth-token [--action push|api]
+//	143-tools git-bootstrap --workdir=/path/to/repo
 package main
 
-import "github.com/assembledhq/143/internal/services/mcp"
+import (
+	"os"
+
+	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
+)
 
 func main() {
+	// Sandbox-side subcommands are dispatched first so they don't get
+	// confused with integration tool names. They have no overlap with the
+	// tool registry (tool names are snake_case like `sentry_list_errors`),
+	// but explicit dispatch is clearer than relying on naming convention.
+	if handled, code := sandboxauth.HandleSubcommand(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	mcp.MainCLI()
 }

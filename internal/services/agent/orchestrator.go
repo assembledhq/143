@@ -18,8 +18,10 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -74,6 +76,22 @@ type UserCredentialProvider interface {
 	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 }
 
+// UserLookup fetches a user record. Used by the orchestrator to materialize
+// the triggering user for the Co-authored-by trailer when the resolver
+// returns the App-token fallback. Defined as an interface so the
+// orchestrator stays a step removed from db package import constraints.
+type UserLookup interface {
+	GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
+}
+
+// SandboxAuthServer is the host-side socket server that issues fresh GitHub
+// credentials to the in-sandbox 143-tools helper. Defined as an interface
+// so tests can stub it without spinning real Unix sockets.
+type SandboxAuthServer interface {
+	Listen(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, closeFn func(), err error)
+	Close(sessionID uuid.UUID)
+}
+
 // SessionStore defines the agent run DB operations needed by the orchestrator.
 type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status string) error
@@ -89,6 +107,9 @@ type SessionStore interface {
 	UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state string) error
 	UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error
 	UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID uuid.UUID, baseCommitSHA string) error
+	// SetGitIdentity records which credential authority issued the session's
+	// git pushes (user OAuth vs App installation token). Persisted for audit.
+	SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
 	// UpdateRevisionContext rewrites sessions.revision_context. The orchestrator
@@ -237,6 +258,9 @@ type Orchestrator struct {
 	snapshots         storage.SnapshotStore  // can be nil — multi-turn disabled if nil
 	usageTracker      UsageRecorder          // can be nil — billing tracking disabled if nil
 	env               *AgentEnv              // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver  *identity.Resolver     // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth       SandboxAuthServer      // can be nil — paired with identityResolver
+	users             UserLookup             // can be nil — needed for App-token Co-authored-by trailer
 	logger            zerolog.Logger
 	maxConcurrent     int
 	cancels           *CancelRegistry
@@ -284,11 +308,29 @@ type OrchestratorConfig struct {
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
 	// existing call sites (notably tests) don't have to change.
-	Env           *AgentEnv
+	Env *AgentEnv
+	// IdentityResolver picks a fresh GitHub token for each session (user
+	// OAuth → App installation token fallback). Optional — when nil, the
+	// orchestrator falls back to the legacy GITHUB_TOKEN env-var injection
+	// path with no credential-helper. Pair with SandboxAuth and Users.
+	IdentityResolver *identity.Resolver
+	// SandboxAuth is the host-side socket server that the in-sandbox
+	// 143-tools helper dials for fresh credentials. Required when
+	// IdentityResolver is set.
+	SandboxAuth SandboxAuthServer
+	// Users looks up the triggering user record for the App-token
+	// Co-authored-by trailer. Required when IdentityResolver is set and
+	// the org has any user-triggered sessions.
+	Users         UserLookup
 	NodeID        string
 	IsDraining    func() bool
 	Logger        zerolog.Logger
 	MaxConcurrent int
+}
+
+type sandboxGitHubAuthState struct {
+	source string
+	userID *uuid.UUID
 }
 
 // NewOrchestrator creates an Orchestrator with the given dependencies.
@@ -337,11 +379,162 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		snapshots:         cfg.Snapshots,
 		usageTracker:      cfg.UsageTracker,
 		env:               env,
+		identityResolver:  cfg.IdentityResolver,
+		sandboxAuth:       cfg.SandboxAuth,
+		users:             cfg.Users,
 		cancels:           cfg.Cancels,
 		logger:            cfg.Logger,
 		maxConcurrent:     maxConcurrent,
 		nodeID:            cfg.NodeID,
 		isDraining:        cfg.IsDraining,
+	}
+}
+
+func defaultSandboxPATH() string {
+	return "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+}
+
+func prependSandboxBinDir(env map[string]string, homeDir string) {
+	if env == nil || homeDir == "" {
+		return
+	}
+	// Use path (not path/filepath) intentionally: this builds an in-container
+	// Linux path, and the orchestrator may run on a darwin host where
+	// path/filepath would emit OS-native separators.
+	binDir := path.Join(homeDir, ".local", "bin")
+	current := env["PATH"]
+	if current == "" {
+		env["PATH"] = binDir + ":" + defaultSandboxPATH()
+		return
+	}
+	for _, segment := range strings.Split(current, ":") {
+		if segment == binDir {
+			return
+		}
+	}
+	env["PATH"] = binDir + ":" + current
+}
+
+// sandboxAuthOrgSettings loads the org's PR-authorship policy for the
+// resolver. We surface lookup/parse errors rather than silently defaulting
+// to UserPreferred: an org configured for app_only or user_required would
+// otherwise issue a token under the wrong policy on a transient DB blip,
+// which can leak the wrong identity onto a commit. With no orgs store
+// wired (a few test paths) we still default — there's no source of truth
+// to consult.
+func (o *Orchestrator) sandboxAuthOrgSettings(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if o.orgs == nil {
+		return settings, nil
+	}
+	org, err := o.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return settings, fmt.Errorf("load org settings for sandbox auth: %w", err)
+	}
+	parsed, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return settings, fmt.Errorf("parse org settings for sandbox auth: %w", err)
+	}
+	return parsed, nil
+}
+
+func (o *Orchestrator) prepareSandboxGitHubAuth(
+	ctx context.Context,
+	run *models.Session,
+	repo *models.Repository,
+	integrationSkills string,
+	fallbackToken string,
+	sandboxCfg *SandboxConfig,
+	log zerolog.Logger,
+) (*sandboxGitHubAuthState, error) {
+	if repo == nil || integrationSkills == "" || sandboxCfg == nil {
+		return nil, nil
+	}
+	if repo.FullName != "" {
+		parts := strings.SplitN(repo.FullName, "/", 2)
+		if len(parts) == 2 {
+			sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
+			sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
+		}
+	}
+	if o.identityResolver == nil || o.sandboxAuth == nil {
+		if fallbackToken != "" {
+			sandboxCfg.Env["GITHUB_TOKEN"] = fallbackToken
+		}
+		return nil, nil
+	}
+
+	// We Resolve once here to capture the bootstrap-time commit identity
+	// (used to populate user.name/user.email and the Co-authored-by env)
+	// and to stamp the audit row with which authority issued the *initial*
+	// token. The host socket re-runs Resolve on every credential request,
+	// so the per-push token may legitimately differ from this snapshot if
+	// the user's OAuth grant or repo access changes mid-turn — that's
+	// fine for security (each push gets fresh state) but means git author
+	// metadata committed inside the sandbox can lag a mid-turn identity
+	// flip until the next bootstrap.
+	orgSettings, err := o.sandboxAuthOrgSettings(ctx, run.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	resolveCtx, resolveCancel := context.WithTimeout(ctx, 30*time.Second)
+	res, err := o.identityResolver.Resolve(resolveCtx, run, repo, orgSettings, "")
+	resolveCancel()
+	if err != nil {
+		return nil, fmt.Errorf("resolve github identity: %w", err)
+	}
+	// Ignore the per-call closeFn here: the Server tracks the listener in
+	// its session-keyed map, and the orchestrator's deferred cleanup goes
+	// through Server.Close(sessionID). Keeping a single close path means
+	// the listener is owned by the Server (not by every caller of Listen)
+	// and avoids divergence between an orchestrator-held closer and the
+	// Server's internal map across error paths.
+	socketPath, _, err := o.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings)
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
+	}
+	sandboxCfg.AuthSocketPath = socketPath
+	name, email := identity.CommitIdentity(res)
+	sandboxCfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath
+	sandboxCfg.Env[sandboxauth.GitNameEnvVar] = name
+	sandboxCfg.Env[sandboxauth.GitEmailEnvVar] = email
+	prependSandboxBinDir(sandboxCfg.Env, sandboxCfg.HomeDir)
+	if !res.IsUserToken() && run.TriggeredByUserID != nil && o.users != nil {
+		if user, userErr := o.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				sandboxCfg.Env[sandboxauth.CoAuthorEnvVar] = trailer
+			}
+		} else {
+			log.Warn().Err(userErr).Str("user_id", run.TriggeredByUserID.String()).Msg("failed to load triggering user for co-author trailer")
+		}
+	}
+	authState := &sandboxGitHubAuthState{source: res.AuthoredBy()}
+	if res.IsUserToken() && run.TriggeredByUserID != nil {
+		authState.userID = run.TriggeredByUserID
+	}
+	return authState, nil
+}
+
+func (o *Orchestrator) closeSandboxAuth(sessionID uuid.UUID, log zerolog.Logger) {
+	if o.sandboxAuth == nil {
+		return
+	}
+	o.sandboxAuth.Close(sessionID)
+	log.Debug().Msg("closed sandbox auth socket")
+}
+
+func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+	if sandbox == nil || workDir == "" {
+		return
+	}
+	bootstrapCmd := fmt.Sprintf("143-tools git-bootstrap --workdir=%s", shellEscapeSingleQuote(workDir))
+	var bootOut, bootErr bytes.Buffer
+	if code, err := o.provider.Exec(ctx, sandbox, bootstrapCmd, &bootOut, &bootErr); err != nil || code != 0 {
+		log.Warn().
+			Err(err).
+			Int("exit_code", code).
+			Str("stderr", bootErr.String()).
+			Msg("git-bootstrap failed; agent will lack github push credentials")
 	}
 }
 
@@ -783,9 +976,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// canonical source of truth — session creation copies issue.repository_id
 	// into it up front, so execution never needs to re-derive repo from the
 	// primary issue.
-	var repoURL, branch, token, repoFullName string
+	var resolvedRepoID *uuid.UUID
 	if run.RepositoryID != nil {
-		repo, err := o.repositories.GetByID(ctx, run.OrgID, *run.RepositoryID)
+		resolvedRepoID = run.RepositoryID
+	} else if issue != nil && issue.RepositoryID != nil {
+		resolvedRepoID = issue.RepositoryID
+	}
+
+	var (
+		repoURL, branch, token, repoFullName string
+		authRepo                             *models.Repository
+	)
+	if resolvedRepoID != nil {
+		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("fetch repository: %s", err))
 			return fmt.Errorf("fetch repository: %w", err)
@@ -806,6 +1009,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("get installation token: %w", err)
 		}
 		token = ghToken
+		repoCopy := repo
+		authRepo = &repoCopy
 	}
 
 	// 5. Get the adapter for this agent type.
@@ -927,24 +1132,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
-	// Inject GitHub token and repo info for 143-tools CLI only when the agent
-	// has integration skills (i.e. the prompt references CLI tools). This avoids
-	// giving every agent session GitHub write access unnecessarily.
-	if input.IntegrationSkills != "" && token != "" {
-		sandboxCfg.Env["GITHUB_TOKEN"] = token
-		if repoFullName != "" {
-			parts := strings.SplitN(repoFullName, "/", 2)
-			if len(parts) == 2 {
-				sandboxCfg.Env["GITHUB_REPO_OWNER"] = parts[0]
-				sandboxCfg.Env["GITHUB_REPO_NAME"] = parts[1]
-			}
-		}
+	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, input.IntegrationSkills, token, &sandboxCfg, log)
+	if authErr != nil {
+		o.failRun(ctx, run, authErr.Error())
+		return authErr
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
 	sandbox, err := o.provider.Create(ctx, sandboxCfg)
 	if err != nil {
+		if sandboxCfg.AuthSocketPath != "" {
+			o.closeSandboxAuth(run.ID, log)
+		}
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
@@ -967,6 +1167,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
 		}
+		if sandboxCfg.AuthSocketPath != "" {
+			o.closeSandboxAuth(run.ID, log)
+		}
 		o.failRun(ctx, run, fmt.Sprintf("acquire turn hold: %s", holdErr))
 		return fmt.Errorf("acquire turn hold: %w", holdErr)
 	}
@@ -974,6 +1177,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		destroyCtx := context.Background()
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
+		}
+		if sandboxCfg.AuthSocketPath != "" {
+			o.closeSandboxAuth(run.ID, log)
 		}
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
@@ -1025,6 +1231,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
+		}
+		if sandboxCfg.AuthSocketPath != "" {
+			o.closeSandboxAuth(run.ID, log)
 		}
 	}()
 	if o.nodeID != "" {
@@ -1078,6 +1287,22 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			run.WorkingBranch = &workingBranch
 			if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
 				log.Warn().Err(dbErr).Str("branch", workingBranch).Msg("failed to persist working branch")
+			}
+		}
+
+		// 8c. Wire git/gh inside the sandbox up to the per-session credential
+		// helper. Runs *after* CloneRepo and the working-branch checkout so
+		// the .git directory exists; idempotent so it's safe to re-run on
+		// session resume. Skipped when the auth socket isn't bound (legacy
+		// or non-integration path).
+		if sandboxCfg.AuthSocketPath != "" {
+			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		}
+		// 8d. Stamp git identity on the session row for audit. Best-effort —
+		// a failure here only affects post-hoc reporting, not the run.
+		if authState != nil && authState.source != "" {
+			if dbErr := o.sessions.SetGitIdentity(ctx, run.OrgID, run.ID, authState.source, authState.userID); dbErr != nil {
+				log.Warn().Err(dbErr).Str("source", authState.source).Msg("failed to persist git identity audit")
 			}
 		}
 	}
@@ -1493,6 +1718,89 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
+	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
+	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
+	var authState *sandboxGitHubAuthState
+	var authErr error
+
+	// Wire the per-session GitHub credential helper for both fresh and
+	// reused containers. For reused containers (preview is holding the
+	// previously-created container alive across turns), we still need to
+	// (re)open the host listener: an orchestrator restart between turns
+	// would have killed the original listener while leaving the container
+	// running, so the agent's next push would dial a dead socket. The
+	// directory bind-mount (see providers.docker.go) means a fresh listener
+	// at the deterministic per-session path is always reachable from the
+	// alive container, so the recreate is transparent to the agent.
+	//
+	// For fresh containers we additionally need an installation token to
+	// pass into the legacy GITHUB_TOKEN env path that prepareSandboxGitHubAuth
+	// falls back to when the resolver isn't wired. Reused containers don't
+	// need it: their env was set at create time, prepareSandboxGitHubAuth's
+	// env mutations are wasted (but harmless), and we never reach the
+	// legacy path with a still-running container anyway.
+	repoID := session.RepositoryID
+	if repoID == nil && promptIssue != nil {
+		repoID = promptIssue.RepositoryID
+	}
+	if repoID != nil && integrationSkills != "" {
+		repo, repoErr := o.repositories.GetByID(ctx, session.OrgID, *repoID)
+		if repoErr != nil {
+			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring repo lookup failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring repo lookup failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", repoErr),
+				"sandbox github auth",
+			)
+			return fmt.Errorf("fetch repository for auth: %w", repoErr)
+		}
+		var fallbackToken string
+		if !reusedExisting {
+			token, tokenErr := o.github.GetInstallationToken(ctx, repo.InstallationID)
+			if tokenErr != nil {
+				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring token failure")
+				}
+				if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+					log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring token failure")
+				}
+				o.registerSandboxFailureMessage(
+					ctx,
+					session,
+					fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", tokenErr),
+					"sandbox github auth",
+				)
+				return fmt.Errorf("get installation token for auth: %w", tokenErr)
+			}
+			fallbackToken = token
+		}
+		repoCopy := repo
+		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, integrationSkills, fallbackToken, &sandboxCfg, log)
+		if authErr != nil {
+			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
+			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
+				log.Error().Err(revertErr).Msg("failed to revert session to idle after auth wiring failure")
+			}
+			if revertErr := o.sessions.UpdateSandboxState(ctx, session.OrgID, session.ID, string(models.SandboxStateSnapshotted)); revertErr != nil {
+				log.Warn().Err(revertErr).Msg("failed to revert sandbox state after auth wiring failure")
+			}
+			o.registerSandboxFailureMessage(
+				ctx,
+				session,
+				fmt.Sprintf("Failed to prepare GitHub access for the sandbox: %s\n\nPlease try again in a moment.", authErr),
+				"sandbox github auth",
+			)
+			return fmt.Errorf("prepare sandbox github auth: %w", authErr)
+		}
+	}
 
 	// Determine sandbox strategy:
 	//   - Reuse: a preview already hydrated the container; attach to it by ID
@@ -1501,7 +1809,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	//     snapshot via the shared HydrateSandboxFromSnapshot helper.
 	//   - Fresh: no snapshot; create a clean container and clone fresh below.
 	var sandbox *Sandbox
-	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 	switch {
 	case reusedExisting:
 		sandbox = &Sandbox{
@@ -1517,6 +1824,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	case hasSnapshot:
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
 		if err != nil {
+			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after hydrate failure")
@@ -1535,6 +1843,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	default:
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
 		if err != nil {
+			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
 			if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox failure")
@@ -1568,6 +1877,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				log.Error().Err(destroyErr).Str("container_id", sandbox.ID).Msg("failed to destroy sandbox after turn hold DB error")
 			}
 		}
+		// Close the listener regardless of reuse: we opened it during this
+		// turn's auth wiring, so it's our responsibility to release it.
+		// Server.Close is idempotent and a no-op when no listener exists.
+		o.closeSandboxAuth(session.ID, log)
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, string(models.SessionStatusIdle)); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after turn hold DB error")
 		}
@@ -1592,6 +1905,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				log.Error().Err(destroyErr).Str("losing_container_id", sandbox.ID).Msg("failed to destroy sandbox after losing hydrate race")
 			}
 		}
+		// Close the listener regardless of reuse: we opened it during this
+		// turn's auth wiring, so it's our responsibility to release it.
+		o.closeSandboxAuth(session.ID, log)
 		log.Warn().
 			Str("winning_container_id", actualContainerID).
 			Str("losing_container_id", sandbox.ID).
@@ -1651,6 +1967,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
 			log.Error().Err(destroyErr).Msg("failed to destroy sandbox")
 		}
+		o.closeSandboxAuth(session.ID, log)
 	}()
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
@@ -1695,6 +2012,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return err
 			}
 		}
+		if !reusedExisting && sandboxCfg.AuthSocketPath != "" {
+			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		}
 
 		var resumeSessionID string
 		if session.AgentSessionID != nil {
@@ -1736,6 +2056,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
+		if sandboxCfg.AuthSocketPath != "" {
+			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
@@ -1761,7 +2084,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			TokenMode:       session.TokenMode,
 			RevisionContext: revisionContext,
 		}
-		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
+		input.IntegrationSkills = integrationSkills
 		if o.memory != nil && repoFullName != "" {
 			memResult, memErr := o.memory.GetContextMemories(ctx, MemoryContextRequest{
 				OrgID: session.OrgID,
@@ -1785,6 +2108,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		basePrompt.Continuation = false
 		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
+	}
+	if authState != nil && authState.source != "" {
+		if dbErr := o.sessions.SetGitIdentity(ctx, session.OrgID, session.ID, authState.source, authState.userID); dbErr != nil {
+			log.Warn().Err(dbErr).Str("source", authState.source).Msg("failed to persist git identity audit during continue_session")
+		}
 	}
 
 	// 6. Execute agent with log streaming.

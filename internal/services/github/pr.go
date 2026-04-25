@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -223,151 +224,50 @@ var ErrSnapshotExpired = errors.New("session snapshot expired")
 // This typically means the diff was reverted or the session produced no edits.
 var ErrNoChanges = errors.New("no changes to push")
 
-// tokenResolution holds the resolved token and metadata about how it was resolved.
-type tokenResolution struct {
-	Token       string
-	IsUserToken bool
-	User        *models.User // set when IsUserToken is true
+// identityResolver builds a fresh resolver from the currently wired
+// dependencies. Constructed per-call rather than cached so a future Set*
+// wirer can't desynchronize the resolver from the service's state — this
+// runs at most a few times per request and the cost is negligible
+// compared to the GitHub round-trip the resolver performs.
+func (s *PRService) identityResolver() *identity.Resolver {
+	r := identity.NewResolver(s.tokenProvider, s.logger)
+	if s.appUserAuth != nil {
+		r.SetAppUserAuth(s.appUserAuth)
+	}
+	if s.users != nil {
+		r.SetUsers(s.users)
+	}
+	if s.integrations != nil {
+		r.SetIntegrations(s.integrations)
+	}
+	// Reuse the PRService's HTTP client / base URL so test overrides flow
+	// through to repo-access probes without re-configuring the resolver.
+	if s.httpClient != nil {
+		r.SetHTTPClient(s.httpClient)
+	}
+	if s.baseURL != "" {
+		r.SetAPIBaseURL(s.baseURL)
+	}
+	return r
 }
 
-func shouldRetryWithOrgInstallation(err error) bool {
-	var apiErr *githubAPIError
-	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
-}
-
-func integrationInstallationID(integration *models.Integration) (int64, error) {
-	if integration == nil || len(integration.Config) == 0 {
-		return 0, fmt.Errorf("github integration config missing installation_id")
-	}
-
-	var cfg struct {
-		InstallationID int64 `json:"installation_id"`
-	}
-	if err := json.Unmarshal(integration.Config, &cfg); err != nil {
-		return 0, fmt.Errorf("parse github integration config: %w", err)
-	}
-	if cfg.InstallationID <= 0 {
-		return 0, fmt.Errorf("github integration config missing installation_id")
-	}
-	return cfg.InstallationID, nil
-}
-
+// getInstallationTokenForRepo is a thin compatibility wrapper around the
+// identity resolver, kept so the in-package callers (pr_health_service.go,
+// SyncSessionTitle) don't need to change. New call sites should use the
+// resolver directly.
 func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
-	tryInstallation := func(installationID int64) (string, error) {
-		if installationID <= 0 {
-			return "", fmt.Errorf("repository %s has no github installation_id", repo.FullName)
-		}
-		token, err := s.tokenProvider.GetInstallationToken(ctx, installationID)
-		if err != nil {
-			return "", fmt.Errorf("get installation token for installation %d: %w", installationID, err)
-		}
-		return token, nil
-	}
-
-	var primaryErr error
-	if repo.InstallationID > 0 {
-		token, err := tryInstallation(repo.InstallationID)
-		if err == nil {
-			return token, nil
-		}
-		primaryErr = err
-		if !shouldRetryWithOrgInstallation(err) {
-			return "", err
-		}
-	} else {
-		primaryErr = fmt.Errorf("repository %s has no github installation_id", repo.FullName)
-	}
-
-	if s.integrations == nil || repo.IntegrationID == uuid.Nil {
-		return "", primaryErr
-	}
-
-	integration, err := s.integrations.GetByID(ctx, repo.IntegrationID)
-	if err != nil {
-		return "", primaryErr
-	}
-
-	fallbackInstallationID, err := integrationInstallationID(&integration)
-	if err != nil {
-		return "", primaryErr
-	}
-	if fallbackInstallationID == repo.InstallationID {
-		return "", primaryErr
-	}
-
-	token, err := tryInstallation(fallbackInstallationID)
+	res, err := s.identityResolver().InstallationTokenForRepo(ctx, orgID, repo, nil)
 	if err != nil {
 		return "", err
 	}
-
-	s.logger.Warn().
-		Str("org_id", orgID.String()).
-		Str("repo", repo.FullName).
-		Str("integration_id", repo.IntegrationID.String()).
-		Int64("repo_installation_id", repo.InstallationID).
-		Int64("fallback_installation_id", fallbackInstallationID).
-		Msg("using GitHub integration installation fallback for PR creation")
-
-	return token, nil
+	return res.Token, nil
 }
 
-// resolveToken determines which GitHub token to use for PR creation.
-// Order: user's GitHub App user token → GitHub App installation token.
-func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings, authorMode string) (*tokenResolution, error) {
-	if authorMode == "app" {
-		token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
-		if err != nil {
-			return nil, fmt.Errorf("get installation token: %w", err)
-		}
-		return &tokenResolution{Token: token, IsUserToken: false}, nil
-	}
-	// If org is set to app_only, skip user token lookup.
-	if orgSettings.PRAuthorship == models.PRAuthorshipAppOnly {
-		token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
-		if err != nil {
-			return nil, fmt.Errorf("get installation token: %w", err)
-		}
-		return &tokenResolution{Token: token, IsUserToken: false}, nil
-	}
-
-	// Try user token if user triggered the session and we have the auth service.
-	if run.TriggeredByUserID != nil && s.appUserAuth != nil {
-		cfg, err := s.appUserAuth.GetValidCredential(ctx, run.OrgID, *run.TriggeredByUserID)
-		if err == nil && cfg != nil && cfg.AccessToken != "" {
-			canAccessRepo, accessErr := s.userTokenCanAccessRepo(ctx, cfg.AccessToken, repo.FullName)
-			if accessErr != nil {
-				return nil, fmt.Errorf("check user github access: %w", accessErr)
-			}
-			if !canAccessRepo {
-				if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == "user" {
-					return nil, fmt.Errorf("user GitHub auth cannot access repo %s", repo.FullName)
-				}
-			} else {
-				resolution := &tokenResolution{
-					Token:       cfg.AccessToken,
-					IsUserToken: true,
-				}
-				if s.users != nil {
-					if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
-						resolution.User = &user
-					}
-				}
-				return resolution, nil
-			}
-		}
-	}
-
-	// If org requires user auth and we couldn't get a user token, block.
-	if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || authorMode == "user" {
-		return nil, fmt.Errorf("org requires user GitHub auth for PR creation, but no valid user token found")
-	}
-
-	// Fall back to app installation token.
-	token, err := s.getInstallationTokenForRepo(ctx, run.OrgID, repo)
-	if err != nil {
-		return nil, fmt.Errorf("get installation token: %w", err)
-	}
-	return &tokenResolution{Token: token, IsUserToken: false}, nil
+// resolveToken delegates to the shared identity resolver. Kept as a method
+// so existing tests that call svc.resolveToken continue to exercise the
+// in-package wiring (not just the resolver in isolation).
+func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings, authorMode string) (*identity.Resolution, error) {
+	return s.identityResolver().Resolve(ctx, run, repo, orgSettings, authorMode)
 }
 
 // validateUserToken checks if a user's GitHub token is still valid by calling GET /user.
@@ -375,22 +275,6 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
 	_, err := s.doGitHubRequest(ctx, token, http.MethodGet, "/user", nil)
 	return err == nil
-}
-
-func (s *PRService) userTokenCanAccessRepo(ctx context.Context, token, fullName string) (bool, error) {
-	owner, repo := splitRepo(fullName)
-	if owner == "" || repo == "" {
-		return false, fmt.Errorf("invalid repo full name %q", fullName)
-	}
-	_, err := s.doGitHubRequest(ctx, token, http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, repo), nil)
-	if err == nil {
-		return true, nil
-	}
-	var apiErr *githubAPIError
-	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
-		return false, nil
-	}
-	return false, err
 }
 
 // SetBaseURL overrides the GitHub API base URL (for testing).
@@ -495,12 +379,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 
 	branchName := formatBranchName(run, issue)
 	commitMsg := formatCommitMessage(run, issue)
-	authorName, authorEmail := commitIdentity(resolution)
-	if !resolution.IsUserToken && run.TriggeredByUserID != nil && s.users != nil {
+	authorName, authorEmail := identity.CommitIdentity(resolution)
+	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
 		// App token: attribute the change via a Co-authored-by trailer so the
 		// GitHub UI surfaces the human who kicked off the run.
 		if user, userErr := s.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
-			commitMsg += fmt.Sprintf("\n\nCo-authored-by: %s <%s>", user.Name, user.Email)
+			if trailer := identity.CoAuthorTrailer(&user); trailer != "" {
+				commitMsg += "\n\n" + trailer
+			}
 		}
 	}
 
@@ -550,10 +436,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	authoredBy := "app"
-	if resolution.IsUserToken {
-		authoredBy = "user"
-	}
+	authoredBy := resolution.AuthoredBy()
 	pr := &models.PullRequest{
 		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
@@ -786,16 +669,6 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 // an escaped quote, and reopening: foo'bar -> 'foo'\”bar'.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// commitIdentity returns the name and email to set as the local git author
-// for the push. Prefers the authenticated user's identity when a user token
-// was resolved; otherwise falls back to the 143 bot identity.
-func commitIdentity(resolution *tokenResolution) (name, email string) {
-	if resolution != nil && resolution.IsUserToken && resolution.User != nil {
-		return resolution.User.Name, resolution.User.Email
-	}
-	return "143 Agent", "noreply@143.dev"
 }
 
 // PullRequestEvent represents a GitHub pull_request webhook event.
@@ -1222,6 +1095,18 @@ type githubAPIError struct {
 
 func (e *githubAPIError) Error() string {
 	return fmt.Sprintf("GitHub API %s %s returned %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// HTTPStatus exposes the underlying HTTP status code for callers that only
+// care about classifying the response (e.g. retry-on-404). Defined as a
+// method (not just the StatusCode field) so that downstream packages can
+// detect the status structurally with errors.As against a small interface
+// without taking a build-time dependency on this concrete type.
+func (e *githubAPIError) HTTPStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
 }
 
 // IsNoCommitsBetween reports whether this 422 indicates the pushed branch

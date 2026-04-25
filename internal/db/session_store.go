@@ -122,7 +122,7 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, git_identity_source, git_identity_user_id, created_at`
 
 // sessionListColumns excludes large JSONB blobs (diff_history) from list queries
 // to avoid returning multi-megabyte payloads when listing many sessions.
@@ -140,7 +140,7 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, created_at`
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, diff_collected_at, latest_diff_snapshot_id, deleted_at, git_identity_source, git_identity_user_id, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -1200,6 +1200,27 @@ func (s *SessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID
 		"id":              sessionID,
 		"org_id":          orgID,
 		"base_commit_sha": baseCommitSHA,
+	})
+	return err
+}
+
+// SetGitIdentity records which GitHub identity (user vs app) the orchestrator
+// resolved for this session's git pushes. Stamped at session-start; nil
+// userID is fine for the app-token path (the session was triggered without
+// a user OAuth token, so attribution lives in the Co-authored-by trailer
+// on each commit instead). Idempotent: re-running with the same values is
+// a no-op write.
+func (s *SessionStore) SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error {
+	query := `
+		UPDATE sessions
+		SET git_identity_source = @source,
+		    git_identity_user_id = @user_id
+		WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":      sessionID,
+		"org_id":  orgID,
+		"source":  source,
+		"user_id": userID,
 	})
 	return err
 }

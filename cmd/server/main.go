@@ -32,12 +32,14 @@ import (
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/telemetry"
@@ -718,6 +720,25 @@ func buildServices(
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
+
+	// Identity resolver + per-session credential socket server. Wired
+	// together so an agent's `git push` / `gh pr comment` can reach a fresh
+	// GitHub token without the host ever planting a long-lived secret in the
+	// container's env. Both are optional: when SandboxAuthSocketDir is empty
+	// (e.g. local dev that hasn't provisioned the directory) sessions fall
+	// back to the legacy GITHUB_TOKEN env path.
+	userStore := db.NewUserStore(pool)
+	identityResolver := identity.NewResolver(ghSvc, logger)
+	if appUserAuthSvc != nil {
+		identityResolver.SetAppUserAuth(appUserAuthSvc)
+	}
+	identityResolver.SetUsers(userStore)
+	identityResolver.SetIntegrations(integrationStore)
+	var sandboxAuthServer *sandboxauth.Server
+	if cfg.SandboxAuthSocketDir != "" {
+		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+	}
+
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,
@@ -742,6 +763,9 @@ func buildServices(
 		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
 		OrgSettingsCache: orgSettingsCache,
+		IdentityResolver: identityResolver,
+		SandboxAuth:      sandboxAuthServer,
+		Users:            userStore,
 		NodeID:           cfg.NodeID,
 		Logger:           logger,
 	})
@@ -752,7 +776,6 @@ func buildServices(
 	)
 
 	// PR service.
-	userStore := db.NewUserStore(pool)
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	prService := ghservice.NewPRService(
 		ghSvc, pullRequestStore, sessionStore, issueStore,

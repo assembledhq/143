@@ -40,7 +40,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 const (
@@ -55,6 +55,14 @@ const (
 	workerLegacyBaseCommitIndex       = 44
 	workerLegacyDiffCollectedIndex    = 54
 	workerLegacyLatestDiffIndex       = 55
+
+	// workerSessionPreIdentityColumnsLen is the column count before
+	// git_identity_source / git_identity_user_id were appended. The
+	// dispatch logic in workerSessionTestRowDispatch is calibrated to
+	// produce rows of this length; padWorkerIdentityNils fills in the
+	// missing 2 nils at the end so each test fixture doesn't need to
+	// know about the new columns.
+	workerSessionPreIdentityColumnsLen = 76
 )
 
 func workerSessionNeedsPolicyDefaults(values []any) bool {
@@ -153,25 +161,49 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 }
 
 func workerSessionTestRow(values ...any) []any {
+	return padWorkerIdentityNils(workerSessionTestRowDispatch(values...))
+}
+
+// padWorkerIdentityNils retrofits a session row built by the legacy
+// workerSessionTestRowDispatch with nil values for the new
+// git_identity_source / git_identity_user_id columns. Inserts the nils
+// immediately before created_at so existing fixtures (which were written
+// against the pre-identity column count) keep working without touching
+// every call site.
+func padWorkerIdentityNils(row []any) []any {
+	if len(row) >= len(workerSessionColumns) {
+		return row
+	}
+	if len(row) != len(workerSessionColumns)-2 {
+		return row
+	}
+	padded := make([]any, 0, len(workerSessionColumns))
+	padded = append(padded, row[:len(row)-1]...)
+	padded = append(padded, nil, nil)
+	padded = append(padded, row[len(row)-1])
+	return padded
+}
+
+func workerSessionTestRowDispatch(values ...any) []any {
 	if workerSessionNeedsPolicyDefaults(values) {
 		switch len(values) {
-		case len(workerSessionColumns) - 3:
+		case workerSessionPreIdentityColumnsLen - 3:
 			return workerSessionWithPolicyDefaults(values)
-		case len(workerSessionColumns) - 4:
+		case workerSessionPreIdentityColumnsLen - 4:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false)
-		case len(workerSessionColumns) - 5:
+		case workerSessionPreIdentityColumnsLen - 5:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false)
-		case len(workerSessionColumns) - 6:
+		case workerSessionPreIdentityColumnsLen - 6:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true)
-		case len(workerSessionColumns) - 7:
+		case workerSessionPreIdentityColumnsLen - 7:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true)
-		case len(workerSessionColumns) - 8:
+		case workerSessionPreIdentityColumnsLen - 8:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true)
 		case workerLegacySessionColumnsLen - 3:
 			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
@@ -195,7 +227,7 @@ func workerSessionTestRow(values ...any) []any {
 	}
 
 	switch len(values) {
-	case len(workerSessionColumns):
+	case workerSessionPreIdentityColumnsLen:
 		return values
 	case workerLegacySessionColumnsLen:
 		return expandLegacyWorkerSessionRow(values)
@@ -215,21 +247,21 @@ func workerSessionTestRow(values ...any) []any {
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, true))
 	case workerLegacySessionColumnsLen - 5:
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, true))
-	case len(workerSessionColumns) - 1:
+	case workerSessionPreIdentityColumnsLen - 1:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, false)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, false)
-	case len(workerSessionColumns) - 2:
+	case workerSessionPreIdentityColumnsLen - 2:
 		return workerSessionCurrentOptionalDefaults(values, true, true, false)
-	case len(workerSessionColumns) - 3:
+	case workerSessionPreIdentityColumnsLen - 3:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, true)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, true)
-	case len(workerSessionColumns) - 4:
+	case workerSessionPreIdentityColumnsLen - 4:
 		return workerSessionCurrentOptionalDefaults(values, false, false, true)
-	case len(workerSessionColumns) - 5:
+	case workerSessionPreIdentityColumnsLen - 5:
 		return workerSessionCurrentOptionalDefaults(values, true, true, true)
 	}
 	return values

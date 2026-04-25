@@ -430,6 +430,14 @@ type SandboxConfig struct {
 	// "pm_bootstrap", "preview"). Included in provider logs to disambiguate
 	// sandboxes that aren't attached to a single session (e.g. PM bootstrap).
 	Purpose string
+	// AuthSocketPath is the host-side path of a per-session AF_UNIX socket
+	// the provider should make reachable inside the container. The provider
+	// bind-mounts the socket's parent directory (not the file itself) onto
+	// SandboxSocketDir so the in-container path stays valid across host-side
+	// recreate cycles. Empty means the agent has no GitHub credential helper
+	// wired (preview sandboxes, PM bootstrap, anything not triggered as part
+	// of an agent_run).
+	AuthSocketPath string
 }
 
 // DefaultSandboxConfig returns a SandboxConfig populated with sensible defaults.

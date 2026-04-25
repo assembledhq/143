@@ -174,13 +174,13 @@ func mockSessionRow(sessionID, userID, orgID uuid.UUID, lastOrgID *uuid.UUID, to
 func mockUserRow(userID, orgID uuid.UUID, role string, now time.Time) []any {
 	return []any{
 		userID, orgID, "test@example.com", "Test User", role,
-		nil, nil, nil, nil, nil, now,
+		nil, nil, nil, nil, nil, nil, now,
 	}
 }
 
 var (
 	sessionCols = []string{"id", "user_id", "org_id", "last_org_id", "token", "expires_at", "created_at"}
-	userCols    = []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userCols    = []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	memberCols  = []string{"user_id", "org_id", "role", "created_at"}
 )
 
