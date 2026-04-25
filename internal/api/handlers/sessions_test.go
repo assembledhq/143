@@ -1972,7 +1972,7 @@ func TestSessionHandler_GetTimeline_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(messageColumns).
-				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, nil, now),
+				AddRow(int64(1), sessionID, orgID, nil, nil, 1, "assistant", "Done fixing", nil, nil, nil, nil, now),
 		)
 	mock.ExpectQuery("SELECT .+ FROM session_logs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -2967,7 +2967,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				// Mock concurrency check
@@ -2992,6 +2992,26 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			expectedBody: "INVALID_REFERENCES",
 		},
 		{
+			name:         "returns bad request for malformed command",
+			body:         `{"message":"/review","commands":[{"kind":"command","agent_type":"claude_code","name":"review","display":"/review"}]}`,
+			setupMock:    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_COMMANDS",
+		},
+		{
+			name: "rejects commands targeting a different agent than the session",
+			body: `{"message":"/diff","agent_type":"claude_code","commands":[{"kind":"command","agent_type":"codex","name":"diff","token":"/diff","display":"/diff"}]}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+						AddRow(orgID, "test-org", nil, now, now))
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "COMMAND_AGENT_MISMATCH",
+		},
+		{
 			name: "uses org default agent type when not specified",
 			body: `{"message":"Fix the login bug"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
@@ -3012,7 +3032,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				// Mock concurrency check
@@ -3100,7 +3120,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
@@ -3135,7 +3155,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				mock.ExpectQuery("INSERT INTO session_messages").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
@@ -3565,7 +3585,7 @@ func TestIsValidGitRef(t *testing.T) {
 
 // messageColumns is the standard column set for session_messages queries.
 var messageColumns = []string{
-	"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "token_usage", "created_at",
+	"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "created_at",
 }
 
 func TestSessionHandler_ListMessages(t *testing.T) {
@@ -3615,8 +3635,8 @@ func TestSessionHandler_ListMessages(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(messageColumns).
-							AddRow(int64(1), sessionID, orgID, nil, &userID, 1, "user", "Hello", nil, nil, nil, now).
-							AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Hi there", nil, nil, nil, now),
+							AddRow(int64(1), sessionID, orgID, nil, &userID, 1, "user", "Hello", nil, nil, nil, nil, now).
+							AddRow(int64(2), sessionID, orgID, nil, nil, 1, "assistant", "Hi there", nil, nil, nil, nil, now),
 					)
 			},
 			expectedCode: http.StatusOK,
@@ -3770,7 +3790,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				// Create message.
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				// Enqueue job.
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -3816,7 +3836,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				// Create message — no ClaimIdle, no ClaimForResume, no Enqueue.
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 			},
 			expectedCode: http.StatusCreated,
@@ -3829,6 +3849,86 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "MISSING_MESSAGE",
+		},
+		{
+			name: "persists references and commands on follow-up to running session",
+			body: `{"message":"/review","references":[{"kind":"file","token":"@cmd/server/main.go","path":"cmd/server/main.go","display":"main.go"}],"commands":[{"kind":"command","agent_type":"claude_code","name":"review","token":"/review","display":"/review"}]}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "running", nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							now,
+						),
+					)
+				// Running session — the message gets created in-place; the
+				// references and commands columns receive the persisted JSON.
+				// Running session — message gets persisted in-place with the
+				// references and commands JSON columns populated. Exact JSON
+				// shape is covered by the model unit tests; here we only
+				// confirm the handler routes both fields to the store.
+				mock.ExpectQuery("INSERT INTO session_messages").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: "/review",
+		},
+		{
+			name: "rejects command targeting another agent",
+			body: `{"message":"/diff","commands":[{"kind":"command","agent_type":"codex","name":"diff","token":"/diff","display":"/diff"}]}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+				now := time.Now()
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						addSessionRow(pgxmock.NewRows(sessionColumns),
+							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
+							nil, nil, nil, nil,
+							nil, false, &now, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil,
+							nil, nil,
+							nil,
+							nil, 2, now, "running", nil,
+							nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
+						),
+					)
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "COMMAND_AGENT_MISMATCH",
+		},
+		{
+			name: "rejects malformed command in send message",
+			body: `{"message":"/review","commands":[{"kind":"command","agent_type":"claude_code","name":"review","display":"/review"}]}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID, userID uuid.UUID) {
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_COMMANDS",
 		},
 		{
 			name: "rejects when session is not idle or resumable",
@@ -4082,7 +4182,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				// Create message.
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				// Enqueue job.
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -4146,7 +4246,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("insert failed"))
 				mock.ExpectRollback()
 			},
@@ -4210,7 +4310,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("UPDATE session_questions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4290,7 +4390,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("UPDATE session_questions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4356,7 +4456,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4422,7 +4522,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("UPDATE session_questions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4523,7 +4623,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4586,7 +4686,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 						),
 					)
 				mock.ExpectQuery("INSERT INTO session_messages").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

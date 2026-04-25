@@ -1844,6 +1844,73 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
 }
 
+func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-abc"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	missingCommand := models.SessionInputCommand{
+		Kind:      "command",
+		AgentType: models.AgentTypeClaudeCode,
+		Name:      "review",
+		Token:     "/review",
+		Display:   "/review",
+		Arguments: "security",
+		Source:    models.SessionInputCommandSourceBuiltin,
+	}
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+			Commands:   models.SessionInputCommands{missingCommand},
+		},
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called on the reuse path")
+		return nil, nil
+	}
+	d.provider.RestoreFn = func(context.Context, *agent.Sandbox, io.Reader) error {
+		t.Fatalf("provider.Restore must not be called on the reuse path")
+		return nil
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(
+			t,
+			agent.EnsureSlashCommandsInPrompt("follow-up", []models.SessionInputCommand{missingCommand}),
+			prompt.UserMessage,
+			"ContinueSession should repair slash commands before executing a reused session",
+		)
+		return &agent.AgentResult{
+			Summary:             "done",
+			ConfidenceScore:     0.9,
+			ConfidenceReasoning: "ok",
+			ExitCode:            0,
+		}, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.NoError(t, err, "ContinueSession should succeed on the reuse path when slash commands need repair")
+}
+
 func TestRunAgent_LogStreamingWithQuestion(t *testing.T) {
 	t.Parallel()
 

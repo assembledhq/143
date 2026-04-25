@@ -30,6 +30,8 @@ export const queryKeys = {
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,
+    slashCommands: (agentType: string, repositoryId: string, branch: string, query: string) =>
+      ["session-composer", "slash-commands", agentType, repositoryId, branch, query] as const,
   },
   projects: {
     all: ["projects"] as const,

@@ -727,6 +727,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -775,6 +776,7 @@ func TestPRServiceCreateRepairRevisionSessionAndResumeRepairSession(t *testing.T
 					WithArgs(
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 						pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+						pgxmock.AnyArg(),
 					).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
 				mock.ExpectQuery("INSERT INTO jobs").

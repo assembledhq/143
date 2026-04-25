@@ -7,6 +7,7 @@ const emptyDraft: SessionDraft = {
   message: "",
   attachments: [],
   references: [],
+  commands: [],
   selectedModel: "",
   reasoningOverride: "",
   userSelectedRepoId: null,
@@ -31,6 +32,9 @@ describe("session-draft storage", () => {
       references: [
         { kind: "file", display: "auth.go", path: "internal/auth/auth.go", token: "@auth.go" },
       ],
+      commands: [
+        { kind: "command", agent_type: "claude_code", name: "review", token: "/review", display: "/review" },
+      ],
       selectedModel: "claude-sonnet-4-6",
       reasoningOverride: "xhigh",
       userSelectedRepoId: "repo-abc",
@@ -45,7 +49,7 @@ describe("session-draft storage", () => {
   it("drops a reasoning override that isn't a known value", () => {
     window.sessionStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ __v: 1, reasoningOverride: "bogus" }),
+      JSON.stringify({ __v: 2, reasoningOverride: "bogus" }),
     );
     expect(loadDraft()?.reasoningOverride).toBe("");
   });
@@ -87,12 +91,16 @@ describe("session-draft storage", () => {
     window.sessionStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        __v: 1,
+        __v: 2,
         message: 42,
         attachments: ["ok", 7, null],
         references: [
           { kind: "file", display: "ok.go" },
           { nope: true },
+        ],
+        commands: [
+          { kind: "command", agent_type: "claude_code", name: "review", token: "/review", display: "/review" },
+          { kind: "wrong", agent_type: "claude_code", name: "review", token: "/review", display: "/review" },
         ],
         selectedModel: null,
         userSelectedRepoId: 0,
@@ -106,6 +114,9 @@ describe("session-draft storage", () => {
       message: "",
       attachments: ["ok"],
       references: [{ kind: "file", display: "ok.go" }],
+      commands: [
+        { kind: "command", agent_type: "claude_code", name: "review", token: "/review", display: "/review" },
+      ],
       selectedModel: "",
       reasoningOverride: "",
       userSelectedRepoId: null,
