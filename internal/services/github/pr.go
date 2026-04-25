@@ -1685,6 +1685,33 @@ func (s *PRService) fetchPRTemplate(ctx context.Context, token, owner, repo, ref
 	return "", ""
 }
 
+// GetFileContent retrieves a single file's decoded content from GitHub. It is
+// the exported counterpart of fetchFileContent and surfaces an explicit error
+// (rather than the (string, bool) shape) so callers outside this package can
+// distinguish "missing file" from "GitHub returned an error".
+func (s *PRService) GetFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, error) {
+	url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("get file contents: %w", err)
+	}
+	var content struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(body, &content); err != nil {
+		return "", fmt.Errorf("decode file contents: %w", err)
+	}
+	if content.Encoding != "base64" || content.Content == "" {
+		return "", nil
+	}
+	decoded, err := decodeBase64Content(content.Content)
+	if err != nil {
+		return "", fmt.Errorf("decode base64 content: %w", err)
+	}
+	return decoded, nil
+}
+
 // fetchFileContent retrieves a single file's decoded content from GitHub.
 func (s *PRService) fetchFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, bool) {
 	url := fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, ref)

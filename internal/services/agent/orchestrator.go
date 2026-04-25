@@ -439,6 +439,29 @@ func isLegacySyntheticManualSession(session *models.Session, issue *models.Issue
 	return session.Origin == "" || session.Origin == models.SessionOriginIssueTrigger
 }
 
+// canonicalCommands filters a message's commands[] to those that pass
+// validation and that target the session's agent. Commands targeting another
+// agent are silently dropped here: the API layer rejects them at submit time,
+// so the only way they reach this code path is a stale row in storage where
+// the user later switched the session's agent — surfacing the orphan to the
+// adapter would only confuse the prompt.
+func canonicalCommands(message *models.SessionMessage, agentType models.AgentType) []models.SessionInputCommand {
+	if message == nil || len(message.Commands) == 0 {
+		return nil
+	}
+	commands := make([]models.SessionInputCommand, 0, len(message.Commands))
+	for _, command := range message.Commands {
+		if err := command.Validate(); err != nil {
+			continue
+		}
+		if agentType != "" && command.AgentType != agentType {
+			continue
+		}
+		commands = append(commands, command)
+	}
+	return commands
+}
+
 func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Issue) {
 	if session == nil {
 		return
@@ -815,7 +838,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}(),
 		RepoURL:    repoURL,
 		RepoBranch: branch,
-		References: resolvedInputReferences(latestUserMessage(messages), issue),
+		References: func() []models.SessionInputReference {
+			refs := canonicalReferences(latestUserMessage(messages))
+			if len(refs) > 0 {
+				return refs
+			}
+			return manualSessionReferences(issue)
+		}(),
+		Commands: canonicalCommands(latestUserMessage(messages), run.AgentType),
 		ReasoningEffort: func() models.ReasoningEffort {
 			if run.ReasoningEffort == nil {
 				return ""
@@ -1670,10 +1700,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if session.AgentSessionID != nil {
 			resumeSessionID = *session.AgentSessionID
 		}
+		commands := canonicalCommands(latestMsg, session.AgentType)
+		// UserMessage carries the user's textarea content verbatim, including
+		// any visible /command tokens. Run it through the same slash-command
+		// repair helper used by adapter.PreparePrompt so reused/snapshot-backed
+		// continuation turns cannot silently drop stored commands when the
+		// textarea and commands[] payload disagree.
 		prompt = &AgentPrompt{
 			Continuation:    true,
 			ResumeSessionID: resumeSessionID,
-			UserMessage:     userMessage,
+			UserMessage:     EnsureSlashCommandsInPrompt(userMessage, commands),
 			MaxTokens:       tokenLimitForMode(session.TokenMode),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {
@@ -1708,7 +1744,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
 			UserMessage:  latestMsg.Content,
-			References:   resolvedInputReferences(latestMsg, &issue),
+			References: func() []models.SessionInputReference {
+				refs := canonicalReferences(latestMsg)
+				if len(refs) > 0 {
+					return refs
+				}
+				return manualSessionReferences(&issue)
+			}(),
+			Commands: canonicalCommands(latestMsg, session.AgentType),
 			ReasoningEffort: func() models.ReasoningEffort {
 				if session.ReasoningEffort == nil {
 					return ""
@@ -2040,14 +2083,6 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 		references = append(references, reference)
 	}
 	return references
-}
-
-func resolvedInputReferences(message *models.SessionMessage, issue *models.Issue) []models.SessionInputReference {
-	references := canonicalReferences(message)
-	if len(references) > 0 {
-		return references
-	}
-	return manualSessionReferences(issue)
 }
 
 func outcomeFromRunStatus(status string) models.PMDecisionOutcome {

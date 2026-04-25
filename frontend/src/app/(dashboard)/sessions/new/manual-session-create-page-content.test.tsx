@@ -36,6 +36,25 @@ const mocks = vi.hoisted(() => ({
     data: { id: "new-sess" },
   }),
   sessionComposerFilesMock: vi.fn().mockResolvedValue({ data: [] }),
+  sessionComposerSlashCommandsMock: vi.fn().mockResolvedValue({
+    groups: [
+      {
+        source: "builtin",
+        label: "Codex commands",
+        items: [
+          {
+            kind: "command",
+            agent_type: "codex",
+            name: "review",
+            token: "/review",
+            display: "/review",
+            description: "Review pending changes",
+            source: "builtin",
+          },
+        ],
+      },
+    ],
+  }),
   uploadMock: vi.fn().mockResolvedValue({
     url: "https://example.com/uploaded-shot.png",
     file_name: "uploaded-shot.png",
@@ -54,6 +73,7 @@ const mocks = vi.hoisted(() => ({
       created_at: "2026-01-01T00:00:00Z",
     },
   }),
+  searchParamGetMock: vi.fn<(key: string) => string | null>().mockImplementation(() => null),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -68,6 +88,7 @@ vi.mock("@/lib/api", () => ({
     },
     sessionComposer: {
       files: mocks.sessionComposerFilesMock,
+      slashCommands: mocks.sessionComposerSlashCommandsMock,
     },
     uploads: {
       upload: mocks.uploadMock,
@@ -98,7 +119,7 @@ vi.mock("next/navigation", () => ({
     prefetch: vi.fn(),
   }),
   useSearchParams: () => ({
-    get: () => null,
+    get: mocks.searchParamGetMock,
   }),
 }));
 
@@ -118,6 +139,7 @@ vi.mock("@/contexts/optimistic-sessions", () => ({
 describe("ManualSessionCreatePageContent", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((m) => m.mockClear());
+    mocks.searchParamGetMock.mockImplementation(() => null);
     window.sessionStorage.clear();
   });
 
@@ -239,6 +261,19 @@ describe("ManualSessionCreatePageContent", () => {
       expect(mocks.uploadMock).toHaveBeenCalledWith(file);
     });
     expect(await screen.findByRole("button", { name: "Preview uploaded-shot.png" })).toBeInTheDocument();
+  });
+
+  it("shows slash command suggestions when the user types a slash trigger", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
+    await user.type(textarea, "/rev");
+
+    expect(await screen.findByText("/review")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mocks.sessionComposerSlashCommandsMock).toHaveBeenCalled();
+    });
   });
 
   it("returns focus to the prompt after a dropped image finishes uploading", async () => {
@@ -399,10 +434,11 @@ describe("ManualSessionCreatePageContent", () => {
       window.sessionStorage.setItem(
         DRAFT_STORAGE_KEY,
         JSON.stringify({
-          __v: 1,
+          __v: 2,
           message: "Previously typed prompt",
           attachments: [],
           references: [],
+          commands: [],
           selectedModel: "",
           userSelectedRepoId: null,
           branchByRepoId: {},
@@ -433,7 +469,7 @@ describe("ManualSessionCreatePageContent", () => {
         const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
         expect(stored).not.toBeNull();
         expect(JSON.parse(stored!)).toMatchObject({
-          __v: 1,
+          __v: 2,
           message: "draft in progress",
         });
       });
@@ -474,10 +510,11 @@ describe("ManualSessionCreatePageContent", () => {
       window.sessionStorage.setItem(
         DRAFT_STORAGE_KEY,
         JSON.stringify({
-          __v: 1,
+          __v: 2,
           message: "tune this",
           attachments: [],
           references: [],
+          commands: [],
           selectedModel: "",
           reasoningOverride: "high",
           userSelectedRepoId: null,
@@ -513,10 +550,11 @@ describe("ManualSessionCreatePageContent", () => {
       window.sessionStorage.setItem(
         DRAFT_STORAGE_KEY,
         JSON.stringify({
-          __v: 1,
+          __v: 2,
           message: "still typing",
           attachments: [],
           references: [],
+          commands: [],
           selectedModel: "",
           // Not present in repositoriesListMock, which only returns repo-1.
           userSelectedRepoId: "repo-deleted",
@@ -541,6 +579,82 @@ describe("ManualSessionCreatePageContent", () => {
         const stored = JSON.parse(raw!);
         expect(stored.userSelectedRepoId).toBeNull();
         expect(stored.message).toBe("still typing");
+      });
+    });
+
+    it("drops project commands when a repo query param conflicts with the saved draft", async () => {
+      mocks.searchParamGetMock.mockImplementation((key: string) => (key === "repo" ? "repo-2" : null));
+      mocks.repositoriesListMock.mockResolvedValueOnce({
+        data: [
+          {
+            id: "repo-1",
+            name: "repo-one",
+            full_name: "org/repo-one",
+            default_branch: "main",
+            integration_id: "int-1",
+          },
+          {
+            id: "repo-2",
+            name: "repo-two",
+            full_name: "org/repo-two",
+            default_branch: "main",
+            integration_id: "int-2",
+          },
+        ],
+      });
+      window.sessionStorage.setItem(
+        DRAFT_STORAGE_KEY,
+        JSON.stringify({
+          __v: 2,
+          message: "/repo-review\n\ncheck this repo",
+          attachments: [],
+          references: [],
+          commands: [
+            {
+              kind: "command",
+              agent_type: "codex",
+              name: "repo-review",
+              token: "/repo-review",
+              display: "/repo-review",
+              source: "project",
+            },
+            {
+              kind: "command",
+              agent_type: "codex",
+              name: "diff",
+              token: "/diff",
+              display: "/diff",
+              source: "builtin",
+            },
+          ],
+          selectedModel: "",
+          userSelectedRepoId: "repo-1",
+          branchByRepoId: { "repo-1": "main", "repo-2": "main" },
+          showImageInput: false,
+          imageURL: "",
+        }),
+      );
+
+      renderWithProviders(<ManualSessionCreatePageContent />);
+
+      const textarea = await screen.findByPlaceholderText<HTMLTextAreaElement>("Tell the agent what to do...");
+      await waitFor(() => {
+        expect(textarea.value).toBe("check this repo");
+      });
+      expect(screen.queryByText("/repo-review")).not.toBeInTheDocument();
+      expect(await screen.findByText("/diff")).toBeInTheDocument();
+
+      await waitFor(() => {
+        const raw = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+        expect(raw).not.toBeNull();
+        const stored = JSON.parse(raw!);
+        expect(stored.message).toBe("check this repo");
+        expect(stored.commands).toEqual([
+          expect.objectContaining({
+            token: "/diff",
+            source: "builtin",
+          }),
+        ]);
       });
     });
   });

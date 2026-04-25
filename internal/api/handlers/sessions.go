@@ -1314,9 +1314,11 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Message  string   `json:"message"`
-		Images   []string `json:"images"`
-		PlanMode bool     `json:"plan_mode"`
+		Message    string                         `json:"message"`
+		Images     []string                       `json:"images"`
+		References []models.SessionInputReference `json:"references"`
+		Commands   []models.SessionInputCommand   `json:"commands"`
+		PlanMode   bool                           `json:"plan_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1326,6 +1328,18 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if body.Message == "" && len(body.Images) == 0 {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message or images are required")
 		return
+	}
+	for _, reference := range body.References {
+		if err := reference.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REFERENCES", err.Error())
+			return
+		}
+	}
+	for _, command := range body.Commands {
+		if err := command.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_COMMANDS", err.Error())
+			return
+		}
 	}
 
 	// When plan mode is requested, prefix the message so the orchestrator
@@ -1339,6 +1353,14 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
+	}
+
+	for _, command := range body.Commands {
+		if command.AgentType != session.AgentType {
+			writeError(w, r, http.StatusBadRequest, "COMMAND_AGENT_MISMATCH",
+				fmt.Sprintf("command %q targets agent %q but session uses agent %q", command.Token, command.AgentType, session.AgentType))
+			return
+		}
 	}
 
 	// Reject early if the session's sandbox snapshot has been destroyed
@@ -1368,6 +1390,12 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body.Images) > 0 {
 		msg.Attachments = body.Images
+	}
+	if len(body.References) > 0 {
+		msg.References = body.References
+	}
+	if len(body.Commands) > 0 {
+		msg.Commands = body.Commands
 	}
 
 	// If the session is already running, just save the message — the coding
@@ -1680,6 +1708,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		Message         string                         `json:"message"`
 		Images          []string                       `json:"images"`
 		References      []models.SessionInputReference `json:"references"`
+		Commands        []models.SessionInputCommand   `json:"commands"`
 		AgentType       string                         `json:"agent_type"`
 		Model           string                         `json:"model"`
 		ReasoningEffort string                         `json:"reasoning_effort"`
@@ -1701,6 +1730,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	for _, reference := range body.References {
 		if err := reference.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_REFERENCES", err.Error())
+			return
+		}
+	}
+	for _, command := range body.Commands {
+		if err := command.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_COMMANDS", err.Error())
 			return
 		}
 	}
@@ -1758,6 +1793,14 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if err := agentType.Validate(); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
 		return
+	}
+
+	for _, command := range body.Commands {
+		if command.AgentType != agentType {
+			writeError(w, r, http.StatusBadRequest, "COMMAND_AGENT_MISMATCH",
+				fmt.Sprintf("command %q targets agent %q but session uses agent %q", command.Token, command.AgentType, agentType))
+			return
+		}
 	}
 
 	var modelOverride *string
@@ -1851,6 +1894,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(body.References) > 0 {
 			initMsg.References = body.References
+		}
+		if len(body.Commands) > 0 {
+			initMsg.Commands = body.Commands
 		}
 		if err := h.messageStore.Create(r.Context(), initMsg); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to create initial session message — continuing without it")

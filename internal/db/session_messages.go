@@ -18,12 +18,12 @@ func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 	return &SessionMessageStore{db: db}
 }
 
-const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", token_usage, created_at`
+const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, created_at`
 
 func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
 	query := `
-		INSERT INTO session_messages (session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", token_usage)
-		VALUES (@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @token_usage)
+		INSERT INTO session_messages (session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage)
+		VALUES (@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @commands, @token_usage)
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
@@ -36,6 +36,7 @@ func (s *SessionMessageStore) Create(ctx context.Context, msg *models.SessionMes
 		"content":         msg.Content,
 		"attachments":     msg.Attachments,
 		"references_data": msg.References,
+		"commands":        msg.Commands,
 		"token_usage":     msg.TokenUsage,
 	}
 
