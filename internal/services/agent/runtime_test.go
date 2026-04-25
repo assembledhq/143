@@ -113,6 +113,10 @@ func (s *runtimeTestSessionStore) UpdateTitle(context.Context, uuid.UUID, uuid.U
 	return nil
 }
 
+func (s *runtimeTestSessionStore) UpdateRevisionContext(context.Context, uuid.UUID, uuid.UUID, []byte) error {
+	return nil
+}
+
 func (s *runtimeTestSessionStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
 	return models.Session{}, nil
 }
