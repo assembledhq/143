@@ -80,6 +80,7 @@ export default function TeamSettingsPage() {
   const { data: invitationsData } = useQuery<ListResponse<InvitationResponse>>({
     queryKey: ["team-invitations"],
     queryFn: () => api.team.listInvitations(),
+    enabled: canManageTeam,
   });
 
   const { data: ghStatusData } = useQuery<SingleResponse<GitHubInviteStatus>>({

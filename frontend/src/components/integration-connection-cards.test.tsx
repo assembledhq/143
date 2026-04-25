@@ -290,4 +290,32 @@ describe("integration connection cards", () => {
 
     expect(screen.getByText("Failed to disconnect.")).toBeInTheDocument();
   });
+
+  it("readOnly hides connect/disconnect buttons and per-repo controls; shows status badges instead", () => {
+    renderWithProviders(
+      <AllIntegrationCards
+        githubConnected
+        githubRepos={[{ id: "r1", full_name: "acme/api", status: "active" }]}
+        sentryConnected={false}
+        linearConnected
+        linearLoading={false}
+        slackConnected={false}
+        notionConnected
+        onConnectGitHub={vi.fn()}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+        onDisconnect={vi.fn()}
+        onDisconnectRepo={vi.fn()}
+        readOnly
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: /Connect/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Disconnect/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Disconnect acme\/api/ })).not.toBeInTheDocument();
+    expect(screen.getAllByText("Connected").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Not connected").length).toBeGreaterThan(0);
+  });
 });
