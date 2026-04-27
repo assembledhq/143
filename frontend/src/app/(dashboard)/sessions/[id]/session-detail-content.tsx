@@ -753,19 +753,12 @@ function SessionComposer({
       const rect = card.getBoundingClientRect();
       const spacing = 8;
       const viewportHeight = window.innerHeight;
-      const spaceAbove = rect.top - spacing;
-      const spaceBelow = viewportHeight - rect.bottom - spacing;
-      const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
-      const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
-      const top = side === "top"
-        ? Math.max(spacing, rect.top - Math.min(280, availableHeight) - spacing)
-        : Math.min(viewportHeight - spacing - Math.min(280, availableHeight), rect.bottom + spacing);
+      const availableHeight = Math.max(rect.top - spacing, 120);
       setPickerPosition({
         left: rect.left,
-        top,
+        bottom: viewportHeight - rect.top + spacing,
         width: rect.width,
         maxHeight: Math.min(280, availableHeight),
-        side,
       });
     }
     update();
