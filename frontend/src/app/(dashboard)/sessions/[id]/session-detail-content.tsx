@@ -757,12 +757,13 @@ function SessionComposer({
       const spaceBelow = viewportHeight - rect.bottom - spacing;
       const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
       const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
-      const top = side === "top"
-        ? Math.max(spacing, rect.top - Math.min(280, availableHeight) - spacing)
-        : Math.min(viewportHeight - spacing - Math.min(280, availableHeight), rect.bottom + spacing);
+      // For drop-up (side === "top"), pin the dropdown's bottom edge to the
+      // top of the composer card (with spacing) so the panel grows upward as
+      // items are added. For drop-down, anchor the top edge below the input.
       setPickerPosition({
         left: rect.left,
-        top,
+        top: rect.bottom + spacing,
+        bottom: viewportHeight - rect.top + spacing,
         width: rect.width,
         maxHeight: Math.min(280, availableHeight),
         side,
