@@ -50,20 +50,6 @@ function installHandlers() {
         },
       }),
     ),
-    http.get("/api/v1/settings/coding-auths/legacy-status", () =>
-      HttpResponse.json({
-        data: {
-          has_legacy_amp_secret: false,
-          amp_masked_key: "",
-          has_amp_credential: false,
-          has_legacy_pi_secret: false,
-          pi_masked_key: "",
-          has_legacy_pi_defaults: false,
-          has_pi_credential: false,
-          pi_requires_manual_auth: false,
-        },
-      }),
-    ),
   );
 }
 
@@ -139,50 +125,6 @@ describe("Agent settings page", () => {
     expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
     expect(within(dialog).getByPlaceholderText("pi_...")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Save auth" })).toBeDisabled();
-  });
-
-  it("shows legacy migration guidance and triggers the backfill flow", async () => {
-    const user = userEvent.setup();
-    let migrateCalled = false;
-
-    installHandlers();
-    server.use(
-      http.get("/api/v1/settings/coding-auths/legacy-status", () =>
-        HttpResponse.json({
-          data: {
-            has_legacy_amp_secret: true,
-            amp_masked_key: "amp_12...cdef",
-            has_amp_credential: false,
-            has_legacy_pi_secret: false,
-            pi_masked_key: "",
-            has_legacy_pi_defaults: true,
-            has_pi_credential: false,
-            pi_requires_manual_auth: true,
-          },
-        }),
-      ),
-      http.post("/api/v1/settings/coding-auths/migrate-legacy", () => {
-        migrateCalled = true;
-        return HttpResponse.json({
-          data: {
-            migrated_amp: true,
-            migrated_pi: false,
-            removed_legacy_secrets: true,
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(<AgentPage />);
-
-    expect(await screen.findByText(/Legacy Amp auth is still stored in org settings/)).toBeInTheDocument();
-    expect(screen.getByText(/Pi defaults are configured, but Pi still needs its own API key/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Migrate legacy auth" }));
-
-    await waitFor(() => {
-      expect(migrateCalled).toBe(true);
-    });
   });
 
   it("creates Amp auth and defaults in a single coding-auth request", async () => {
