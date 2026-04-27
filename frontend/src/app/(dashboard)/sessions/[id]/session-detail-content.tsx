@@ -180,9 +180,14 @@ type PRAuthInterceptDetails = {
   can_fallback_to_app: boolean;
 };
 
-type PRAuthPromptState = PRAuthInterceptDetails & {
-  purpose: "create_pr" | "merge_pr";
-};
+// PRAuthPromptState is a discriminated union so merge prompts don't carry
+// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
+// create_pr prompts come from the backend's auth interception payload; merge
+// prompts are always synthesized client-side and connect via the hardcoded
+// /github/connect endpoint with no resume token and no fallback.
+type PRAuthPromptState =
+  | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | { purpose: "merge_pr" };
 
 type PRActionErrorState = {
   code?: string;
@@ -2289,12 +2294,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   function handleMergeAction() {
     if (ghBlocked) {
-      setPRAuthPrompt({
-        connect_url: "/api/v1/users/me/github/connect",
-        resume_token: "",
-        can_fallback_to_app: false,
-        purpose: "merge_pr",
-      });
+      setPRAuthPrompt({ purpose: "merge_pr" });
       return;
     }
     mergeMutation.mutate();
@@ -2737,7 +2737,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            {prAuthPrompt?.can_fallback_to_app ? (
+            {prAuthPrompt?.purpose === "create_pr" && prAuthPrompt.can_fallback_to_app ? (
               <AlertDialogCancel
                 onClick={(event) => {
                   event.preventDefault();
@@ -2752,7 +2752,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
-                api.githubStatus.connect(prAuthPrompt.resume_token || undefined);
+                const resumeToken =
+                  prAuthPrompt.purpose === "create_pr" ? prAuthPrompt.resume_token : undefined;
+                api.githubStatus.connect(resumeToken || undefined);
               }}
             >
               Continue with GitHub

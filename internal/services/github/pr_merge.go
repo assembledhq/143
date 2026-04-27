@@ -168,11 +168,21 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	}
 
 	// Eagerly persist merged status so the UI flips immediately. The GitHub
-	// pull_request closed webhook will idempotently confirm.
+	// `pull_request closed` webhook will arrive shortly and re-run
+	// runMergedPullRequestFollowUps; every sub-step there is idempotent
+	// (deploys ON CONFLICT, set-to-merged status, set-to-fixed issue,
+	// dedupe-keyed evaluate_experiment job, snapshot cleanup, audit gated on
+	// archived=true), so the duplicate execution is intentional and safe.
 	if err := s.pullRequests.UpdateStatus(ctx, orgID, pullRequestID, "merged"); err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to persist merged status after successful merge")
 	}
 	s.runMergedPullRequestFollowUps(ctx, pr, mergeResp.SHA)
+
+	// Match every other state-mutating PR path (HandlePullRequestEvent,
+	// repair completions) by enqueuing a state sync so other clients
+	// subscribed to this PR's SSE stream see the merged state without having
+	// to wait for the webhook round-trip.
+	s.enqueuePullRequestStateSync(ctx, pr)
 
 	if current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID); err == nil {
 		s.publishPullRequestUpdated(ctx, pr, current)
