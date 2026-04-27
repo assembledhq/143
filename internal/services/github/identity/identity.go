@@ -29,6 +29,17 @@ import (
 
 const defaultAPIBaseURL = "https://api.github.com"
 
+// ErrUserAuthRequired signals that org policy (or an explicit "user" mode)
+// requires a GitHub user token, but the triggering user is not connected or
+// has no valid credential. Callers translate this into an actionable error
+// for the UI ("connect your GitHub account").
+var ErrUserAuthRequired = errors.New("github user auth required")
+
+// ErrUserAuthRepoAccessDenied signals that the triggering user has a valid
+// GitHub credential, but it cannot access the target repository — typically a
+// private repo the user has not been granted on.
+var ErrUserAuthRepoAccessDenied = errors.New("github user auth cannot access repository")
+
 // Source identifies which authority issued the resolved token.
 type Source string
 
@@ -188,13 +199,13 @@ func (r *Resolver) Resolve(ctx context.Context, run *models.Session, repo *model
 				return resolution, nil
 			}
 			if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || mode == "user" {
-				return nil, fmt.Errorf("user GitHub auth cannot access repo %s", repo.FullName)
+				return nil, fmt.Errorf("%w: user GitHub auth cannot access repo %s", ErrUserAuthRepoAccessDenied, repo.FullName)
 			}
 		}
 	}
 
 	if orgSettings.PRAuthorship == models.PRAuthorshipUserRequired || mode == "user" {
-		return nil, fmt.Errorf("org requires user GitHub auth, but no valid user token found")
+		return nil, fmt.Errorf("%w: org requires user GitHub auth, but no valid user token found", ErrUserAuthRequired)
 	}
 
 	return r.installationTokenResolution(ctx, run.OrgID, repo, true)

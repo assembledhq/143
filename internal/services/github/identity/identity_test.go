@@ -64,7 +64,7 @@ func (s *stubIntegrationStore) GetByID(_ context.Context, _ uuid.UUID) (models.I
 
 // statusError exposes an HTTP status code via the structural HTTPStatus
 // interface that the resolver uses to detect retry-able 404s — mirrors the
-// shape of *github.githubAPIError without importing the github package.
+// shape of *github.GitHubAPIError without importing the github package.
 type statusError struct {
 	code int
 }

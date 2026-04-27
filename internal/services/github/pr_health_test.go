@@ -374,6 +374,179 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 	}
 }
 
+func TestDerivePullRequestRepairActions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		input                  models.PullRequestHealthResponse
+		expectCanResolveConfli bool
+		expectCanFixTests      bool
+		expectCanMerge         bool
+	}{
+		{
+			name: "clean open PR with no checks is mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateClean,
+			},
+			expectCanMerge: true,
+		},
+		{
+			name: "clean PR with a failing check is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateClean,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "lint", Category: models.PullRequestCheckCategoryLint},
+				},
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "clean PR with failing tests is not mergeable and offers fix tests",
+			input: models.PullRequestHealthResponse{
+				Status:           "open",
+				MergeState:       models.PullRequestMergeStateClean,
+				FailingTestCount: 2,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "vitest", Category: models.PullRequestCheckCategoryTest},
+				},
+			},
+			expectCanFixTests: true,
+			expectCanMerge:    false,
+		},
+		{
+			name: "conflicted PR offers resolve conflicts and is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:       "open",
+				MergeState:   models.PullRequestMergeStateConflicted,
+				HasConflicts: true,
+			},
+			expectCanResolveConfli: true,
+			expectCanMerge:         false,
+		},
+		{
+			name: "behind base PR is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateBehind,
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "unknown merge state is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateUnknown,
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "closed PR is not mergeable even if otherwise clean",
+			input: models.PullRequestHealthResponse{
+				Status:     "closed",
+				MergeState: models.PullRequestMergeStateClean,
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "merged PR is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "merged",
+				MergeState: models.PullRequestMergeStateClean,
+			},
+			expectCanMerge: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resp := tt.input
+			derivePullRequestRepairActions(&resp)
+			require.Equal(t, tt.expectCanResolveConfli, resp.CanResolveConflicts, "CanResolveConflicts should match")
+			require.Equal(t, tt.expectCanFixTests, resp.CanFixTests, "CanFixTests should match")
+			require.Equal(t, tt.expectCanMerge, resp.CanMerge, "CanMerge should match")
+		})
+	}
+}
+
+func TestSelectMergeMethod(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		settings        *gitHubRepoMergeSettings
+		expectedMethod  models.PullRequestMergeMethod
+		expectedAllowed bool
+	}{
+		{
+			name:            "nil settings falls back to merge",
+			settings:        nil,
+			expectedMethod:  models.PullRequestMergeMethodMerge,
+			expectedAllowed: true,
+		},
+		{
+			name:            "all flags nil falls back to merge",
+			settings:        &gitHubRepoMergeSettings{},
+			expectedMethod:  models.PullRequestMergeMethodMerge,
+			expectedAllowed: true,
+		},
+		{
+			name: "squash allowed picks squash",
+			settings: &gitHubRepoMergeSettings{
+				AllowSquashMerge: boolPtr(true),
+				AllowMergeCommit: boolPtr(true),
+				AllowRebaseMerge: boolPtr(true),
+			},
+			expectedMethod:  models.PullRequestMergeMethodSquash,
+			expectedAllowed: true,
+		},
+		{
+			name: "only merge allowed picks merge",
+			settings: &gitHubRepoMergeSettings{
+				AllowSquashMerge: boolPtr(false),
+				AllowMergeCommit: boolPtr(true),
+				AllowRebaseMerge: boolPtr(false),
+			},
+			expectedMethod:  models.PullRequestMergeMethodMerge,
+			expectedAllowed: true,
+		},
+		{
+			name: "only rebase allowed picks rebase",
+			settings: &gitHubRepoMergeSettings{
+				AllowSquashMerge: boolPtr(false),
+				AllowMergeCommit: boolPtr(false),
+				AllowRebaseMerge: boolPtr(true),
+			},
+			expectedMethod:  models.PullRequestMergeMethodRebase,
+			expectedAllowed: true,
+		},
+		{
+			name: "all disallowed returns not allowed",
+			settings: &gitHubRepoMergeSettings{
+				AllowSquashMerge: boolPtr(false),
+				AllowMergeCommit: boolPtr(false),
+				AllowRebaseMerge: boolPtr(false),
+			},
+			expectedMethod:  "",
+			expectedAllowed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			method, ok := selectMergeMethod(tt.settings)
+			require.Equal(t, tt.expectedAllowed, ok, "allowed flag should match")
+			require.Equal(t, tt.expectedMethod, method, "selected method should match")
+		})
+	}
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }
