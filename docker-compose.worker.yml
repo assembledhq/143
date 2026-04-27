@@ -65,6 +65,14 @@ services:
       - ${DOCKER_GID:-988}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Per-session GitHub credential sockets. Bind-mounted into this
+      # container so the orchestrator (running as appuser uid 1000) can
+      # create per-session unix sockets here, AND so the host docker
+      # daemon — which resolves bind sources against the host filesystem
+      # when wiring those sockets into sandbox containers — sees the same
+      # path. The host directory is provisioned 0750 and owned 1000:1000
+      # via systemd-tmpfiles in deploy/scripts/provision.sh.
+      - /var/run/143/sandbox-auth:/var/run/143/sandbox-auth
       - .env.production.enc:/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]

@@ -108,6 +108,16 @@ COPY --from=go-builder /bin/143-tools /usr/local/bin/143-tools
 
 # Non-root user for sandbox execution. No sudo is provisioned — see the
 # comment on the apt-get block above.
-RUN useradd -m -s /bin/bash sandbox
+#
+# UID 1000 is pinned to match the worker server image's `appuser` (which
+# creates the per-session credential socket at mode 0600). The bind-mounted
+# socket file's owner UID is preserved across the mount, so both processes
+# must agree on the same numeric UID for the in-sandbox client to open it.
+#
+# ubuntu:24.04 ships a default `ubuntu` user pre-claiming UID 1000, which
+# collides with our useradd. Remove it first; `|| true` keeps the build
+# working if a future base image drops the user.
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && useradd --uid 1000 --create-home --user-group --shell /bin/bash sandbox
 USER sandbox
 WORKDIR /workspace

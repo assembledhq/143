@@ -286,14 +286,26 @@ options edns0 trust-ad ndots:0
 RESOLV
       chmod 644 /etc/143/sandbox-resolv.conf
       # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
-      # credential sockets. The orchestrator opens one Unix-domain socket
-      # per session here and bind-mounts it into the container; in-sandbox
-      # 143-tools dials the socket whenever git/gh need a fresh token.
-      # Owned by the docker daemon group (or wide-open under tmpfs perms)
-      # so the daemon can read the socket file when wiring up the bind
-      # mount. SANDBOX_AUTH_SOCKET_DIR points the server at this path.
-      mkdir -p /var/run/143/sandbox-auth
-      chmod 0750 /var/run/143/sandbox-auth
+      # credential sockets. The worker container bind-mounts this path
+      # in (see docker-compose.worker.yml); the orchestrator running as
+      # appuser uid 1000 opens one Unix-domain socket per session here,
+      # and the docker daemon bind-mounts the per-session subdir into
+      # the sandbox container at /run/143-auth/. SANDBOX_AUTH_SOCKET_DIR
+      # points the server at this path.
+      #
+      # /run is tmpfs on systemd hosts (and /var/run is a symlink to it),
+      # so the directory disappears on every reboot. We register it with
+      # systemd-tmpfiles so it's recreated at boot — and via --create
+      # below, immediately on first provision. Mode 0750 satisfies the
+      # orchestrator's startup assertion (assertParentDirPerms in
+      # internal/services/sandboxauth/server.go); owner 1000:1000 matches
+      # the worker container's appuser so MkdirAll on per-session subdirs
+      # succeeds.
+      cat > /etc/tmpfiles.d/143-sandbox-auth.conf <<'TMPFILES'
+d /var/run/143 0755 root root -
+d /var/run/143/sandbox-auth 0750 1000 1000 -
+TMPFILES
+      systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
 PULL_WORKER
     ;;
   db|logging|redis)
