@@ -110,6 +110,19 @@ func TestRunGitCredential_GetReturnsCreds(t *testing.T) {
 	require.Equal(t, "username=x-access-token\npassword=tok\n", stdout.String())
 }
 
+func TestRunGitCredential_DefaultsUsernameWhenHostOmitsIt(t *testing.T) {
+	sock := startSocketServer(t, func(conn net.Conn) {
+		defer conn.Close()
+		require.NoError(t, json.NewEncoder(conn).Encode(&Response{Token: "tok"}), "host should encode a response")
+	})
+	t.Setenv(SocketEnvVar, sock)
+
+	var stdout, stderr bytes.Buffer
+	code := runGitCredential([]string{"get"}, strings.NewReader("\n"), &stdout, &stderr)
+	require.Equal(t, 0, code, "stderr: %s", stderr.String())
+	require.Equal(t, "username="+DefaultUsername+"\npassword=tok\n", stdout.String(), "git-credential should fall back to the canonical GitHub token username")
+}
+
 func TestRunGitCredential_StoreAndEraseAreNoOps(t *testing.T) {
 	t.Parallel()
 	for _, verb := range []string{"store", "erase"} {
@@ -142,6 +155,16 @@ func TestRunGitCredential_HostError(t *testing.T) {
 	require.Contains(t, stderr.String(), "token revoked")
 }
 
+func TestRunGitCredential_RejectsUnknownVerb(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	code := runGitCredential([]string{"approve"}, strings.NewReader("protocol=https\n\n"), &stdout, &stderr)
+	require.Equal(t, 2, code, "unknown credential verbs should fail with the git helper convention exit code")
+	require.Empty(t, stdout.String(), "unknown credential verbs should not print credentials")
+	require.Contains(t, stderr.String(), `unknown verb "approve"`, "git-credential should explain the invalid verb")
+}
+
 func TestRunAuthToken_PrintsToken(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
 		defer conn.Close()
@@ -155,6 +178,54 @@ func TestRunAuthToken_PrintsToken(t *testing.T) {
 	code := runAuthToken(nil, &stdout, &stderr)
 	require.Equal(t, 0, code, "stderr: %s", stderr.String())
 	require.Equal(t, "abcd1234\n", stdout.String())
+}
+
+func TestRunAuthToken_ErrorPaths(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		socketPath string
+		handler    func(conn net.Conn)
+		wantCode   int
+		wantErr    string
+	}{
+		{
+			name:     "flag parse error",
+			args:     []string{"--nope"},
+			wantCode: 2,
+			wantErr:  "flag provided but not defined",
+		},
+		{
+			name:     "host socket missing",
+			wantCode: 1,
+			wantErr:  SocketEnvVar + " is not set",
+		},
+		{
+			name: "host returns structured error",
+			handler: func(conn net.Conn) {
+				defer conn.Close()
+				require.NoError(t, json.NewEncoder(conn).Encode(&Response{Error: "revoked"}), "host should encode an error response")
+			},
+			wantCode: 1,
+			wantErr:  "host: revoked",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.handler != nil {
+				tt.socketPath = startSocketServer(t, tt.handler)
+				t.Setenv(SocketEnvVar, tt.socketPath)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runAuthToken(tt.args, &stdout, &stderr)
+			require.Equal(t, tt.wantCode, code, "runAuthToken should return the expected exit code")
+			require.Empty(t, stdout.String(), "runAuthToken should not print a token on failure")
+			require.Contains(t, stderr.String(), tt.wantErr, "runAuthToken should explain the failure")
+		})
+	}
 }
 
 func TestRunGitBootstrap_AppliesConfigAndHook(t *testing.T) {
@@ -317,6 +388,25 @@ func TestRunGitBootstrap_RejectsMissingWorkdir(t *testing.T) {
 	require.Contains(t, stderr.String(), "--workdir is required")
 }
 
+func TestRunGitBootstrap_RejectsUnknownFlag(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--unknown"}, &stderr)
+	require.Equal(t, 2, code, "invalid bootstrap flags should use the standard flag parser exit code")
+	require.Contains(t, stderr.String(), "flag provided but not defined", "git-bootstrap should report the invalid flag")
+}
+
+func TestRunGitBootstrap_RejectsNonGitDirectory(t *testing.T) {
+	t.Setenv(GitNameEnvVar, "Alice")
+	t.Setenv(GitEmailEnvVar, "alice@example.com")
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--workdir=" + t.TempDir()}, &stderr)
+	require.Equal(t, 1, code, "git-bootstrap should reject directories that are not git repos")
+	require.Contains(t, stderr.String(), "is not a git repo", "git-bootstrap should explain why bootstrap failed")
+}
+
 func TestRunGitBootstrap_RejectsMissingIdentity(t *testing.T) {
 	if !gitAvailable() {
 		t.Skip("git not available on this runner")
@@ -332,6 +422,56 @@ func TestRunGitBootstrap_RejectsMissingIdentity(t *testing.T) {
 	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
 	require.NotEqual(t, 0, code)
 	require.Contains(t, stderr.String(), GitNameEnvVar)
+}
+
+func TestInstallCoAuthorHook_ErrorsWhenHooksPathIsNotDirectory(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo")
+
+	hooksPath := filepath.Join(workdir, ".git", "hooks")
+	require.NoError(t, os.RemoveAll(hooksPath), "test should remove the default hooks directory")
+	require.NoError(t, os.WriteFile(hooksPath, []byte("not-a-dir"), 0o600), "test should replace hooks with a file")
+
+	err := installCoAuthorHook(workdir, "Co-authored-by: Alice <alice@example.com>")
+	require.Error(t, err, "installCoAuthorHook should fail when the hooks path is blocked by a file")
+}
+
+func TestInstallGHWrapper_ErrorsWhenBinPathCannotBeCreated(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".local"), []byte("not-a-dir"), 0o600), "test should block ~/.local/bin creation with a file")
+
+	err := installGHWrapper()
+	require.Error(t, err, "installGHWrapper should fail when ~/.local/bin cannot be created")
+}
+
+func TestCallHost_RequiresSocketEnv(t *testing.T) {
+	t.Parallel()
+
+	resp, err := callHost(ActionPush)
+	require.Nil(t, resp, "callHost should not return a response without a socket path")
+	require.Error(t, err, "callHost should fail when the socket env var is missing")
+	require.Contains(t, err.Error(), SocketEnvVar, "callHost should mention the missing env var")
+}
+
+func TestRunGit_ReturnsCommandError(t *testing.T) {
+	t.Parallel()
+
+	err := runGit(filepath.Join(t.TempDir(), "missing"), "status")
+	require.Error(t, err, "runGit should surface git execution failures")
+	require.Contains(t, err.Error(), "git -C", "runGit should include the failing git invocation in the error")
+}
+
+func TestHandleSubcommand_GitBootstrapDispatches(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	handled, code := HandleSubcommand([]string{"git-bootstrap"}, nil, io.Discard, &stderr)
+	require.True(t, handled, "git-bootstrap should be handled by the sandboxauth subcommand dispatcher")
+	require.Equal(t, 2, code, "git-bootstrap without a workdir should return the validation exit code")
+	require.Contains(t, stderr.String(), "--workdir is required", "dispatcher should surface git-bootstrap validation errors")
 }
 
 func TestHandleSubcommand_FallthroughForUnknown(t *testing.T) {

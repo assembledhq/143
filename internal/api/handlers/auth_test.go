@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -568,6 +569,114 @@ func TestAuthHandler_Callback(t *testing.T) {
 			handler.Callback(w, req)
 			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
 			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected error code")
+		})
+	}
+}
+
+func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
+	// No t.Parallel: this test rewrites http.DefaultTransport so the hardcoded
+	// GitHub OAuth/API URLs resolve to a local httptest server.
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, now time.Time)
+	}{
+		{
+			name: "existing github user updates and signs in",
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time) {
+				userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+				userID := uuid.New()
+				orgID := uuid.New()
+				githubID := int64(42)
+				oldLogin := "alice-old"
+				oldNoreply := "42+alice-old@users.noreply.github.com"
+
+				mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+					WithArgs(githubID).
+					WillReturnRows(pgxmock.NewRows(userColumns).
+						AddRow(userID, orgID, "old@example.com", "Old Alice", "member", &githubID, &oldLogin, &oldNoreply, (*string)(nil), (*string)(nil), (*string)(nil), now))
+
+				mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+
+				expectUserLastOrgLookup(mock, userID, nil)
+				mock.ExpectQuery("INSERT INTO auth_sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+			},
+		},
+		{
+			name: "email link path links github account and signs in",
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time) {
+				userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+				userID := uuid.New()
+				orgID := uuid.New()
+
+				mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+					WithArgs(int64(42)).
+					WillReturnRows(pgxmock.NewRows(userColumns))
+
+				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\) = LOWER\\(@email\\)").
+					WithArgs("42+alicehub@users.noreply.github.com").
+					WillReturnRows(pgxmock.NewRows(userColumns).
+						AddRow(userID, orgID, "alice@example.com", "Alice", "member", (*int64)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*string)(nil), now))
+
+				mock.ExpectExec("UPDATE users\\s+SET github_id = @github_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+				expectUserLastOrgLookup(mock, userID, nil)
+				mock.ExpectQuery("INSERT INTO auth_sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
+
+			now := time.Now()
+			tt.setupMock(mock, now)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/login/oauth/access_token":
+					_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+				case "/user":
+					_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"","avatar_url":"https://example.com/avatar.png"}`))
+				case "/user/emails":
+					_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			restoreTransport := rewriteGitHubTransport(t, server.URL)
+			defer restoreTransport()
+
+			handler := NewAuthHandler(
+				&config.Config{FrontendURL: "http://frontend.test"},
+				mock,
+				db.NewUserStore(mock),
+				db.NewAuthSessionStore(mock),
+				nil,
+				nil,
+			)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+			req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+			w := httptest.NewRecorder()
+
+			handler.Callback(w, req)
+			require.Equal(t, http.StatusTemporaryRedirect, w.Code, "Callback should redirect after successful OAuth login")
+			require.Equal(t, "http://frontend.test", w.Header().Get("Location"), "Callback should redirect to the configured frontend")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }
@@ -3226,4 +3335,70 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
 	})
+
+	t.Run("falls back when request construction fails", func(t *testing.T) {
+		t.Parallel()
+
+		got := fetchGitHubNoreplyEmailFrom("://bad", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "invalid email probe URLs should fall back to the canonical synthesized address")
+	})
+
+	t.Run("falls back when transport fails", func(t *testing.T) {
+		t.Parallel()
+
+		got := fetchGitHubNoreplyEmailFrom("http://127.0.0.1:1/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "transport failures should fall back to the canonical synthesized address")
+	})
+
+	t.Run("falls back when response JSON is malformed", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "decode failures should fall back to the canonical synthesized address")
+	})
+}
+
+func TestFetchGitHubNoreplyEmail_DefaultEndpointWrapper(t *testing.T) {
+	// No t.Parallel: this test rewrites http.DefaultTransport so the hardcoded
+	// GitHub API hostname resolves to a local httptest server.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/user/emails", r.URL.Path, "wrapper should probe the default GitHub /user/emails endpoint")
+		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+	}))
+	defer server.Close()
+
+	restoreTransport := rewriteGitHubTransport(t, server.URL)
+	defer restoreTransport()
+
+	got := fetchGitHubNoreplyEmail("ghu_token", 42, "alicehub")
+	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "wrapper should delegate to the default /user/emails endpoint and return the discovered noreply email")
+}
+
+func rewriteGitHubTransport(t *testing.T, target string) func() {
+	t.Helper()
+
+	parsed, err := url.Parse(target)
+	require.NoError(t, err, "test server URL should parse")
+
+	base := http.DefaultTransport
+	http.DefaultTransport = gitHubRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		clone.URL.Scheme = parsed.Scheme
+		clone.URL.Host = parsed.Host
+		return base.RoundTrip(clone)
+	})
+	return func() {
+		http.DefaultTransport = base
+	}
+}
+
+type gitHubRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f gitHubRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

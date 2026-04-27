@@ -44,6 +44,24 @@ func (s *stubAppUserAuth) GetValidCredential(_ context.Context, _, _ uuid.UUID) 
 	return s.cfg, s.err
 }
 
+type stubUserStore struct {
+	user models.User
+	err  error
+}
+
+func (s *stubUserStore) GetByID(_ context.Context, _, _ uuid.UUID) (models.User, error) {
+	return s.user, s.err
+}
+
+type stubIntegrationStore struct {
+	integration models.Integration
+	err         error
+}
+
+func (s *stubIntegrationStore) GetByID(_ context.Context, _ uuid.UUID) (models.Integration, error) {
+	return s.integration, s.err
+}
+
 // statusError exposes an HTTP status code via the structural HTTPStatus
 // interface that the resolver uses to detect retry-able 404s — mirrors the
 // shape of *github.githubAPIError without importing the github package.
@@ -68,6 +86,16 @@ func TestResolve_AppOnly(t *testing.T) {
 	require.Equal(t, "app-token-123", res.Token)
 	require.False(t, res.IsUserToken())
 	require.Equal(t, "app", res.AuthoredBy())
+}
+
+func TestResolver_HasAppUserAuth(t *testing.T) {
+	t.Parallel()
+
+	r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+	require.False(t, r.HasAppUserAuth(), "resolver should report false before app-user auth is wired")
+
+	r.SetAppUserAuth(&stubAppUserAuth{})
+	require.True(t, r.HasAppUserAuth(), "resolver should report true after app-user auth is wired")
 }
 
 func TestResolve_UserPreferred_NoUser(t *testing.T) {
@@ -226,6 +254,31 @@ func TestResolve_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing.T) {
 	require.Contains(t, err.Error(), "cannot access repo")
 }
 
+func TestResolve_UserAccessCheckFailureReturnsError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+	r.SetAppUserAuth(&stubAppUserAuth{
+		cfg: &models.GitHubAppUserConfig{
+			AccessToken: "ghu_user_token",
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	})
+	r.SetAPIBaseURL("://bad")
+
+	_, err := r.Resolve(context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID},
+		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
+		models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred},
+		"",
+	)
+	require.Error(t, err, "Resolve should fail when the repo-access probe request cannot be built")
+	require.Contains(t, err.Error(), "check user github access", "Resolve should wrap the repo-access probe failure")
+}
+
 func TestResolve_UserResolutionAttachesUser(t *testing.T) {
 	t.Parallel()
 
@@ -269,6 +322,39 @@ func TestResolve_UserResolutionAttachesUser(t *testing.T) {
 	require.NotNil(t, res.User.GitHubNoreplyEmail)
 	require.Equal(t, "123+alicehub@users.noreply.github.com", *res.User.GitHubNoreplyEmail)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestResolve_UserLookupFailureStillReturnsUserToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"full_name":"owner/repo"}`))
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+	r.SetAppUserAuth(&stubAppUserAuth{
+		cfg: &models.GitHubAppUserConfig{
+			AccessToken: "ghu_user_token",
+			ExpiresAt:   time.Now().Add(time.Hour),
+		},
+	})
+	r.SetUsers(&stubUserStore{err: errors.New("db down")})
+	r.SetHTTPClient(server.Client())
+	r.SetAPIBaseURL(server.URL)
+
+	res, err := r.Resolve(context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID},
+		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
+		models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred},
+		"",
+	)
+	require.NoError(t, err, "Resolve should keep the usable user token even when user attachment fails")
+	require.True(t, res.IsUserToken(), "Resolve should keep the user token path")
+	require.Nil(t, res.User, "Resolve should omit the attached user when lookup fails")
 }
 
 func TestResolve_FallsBackToIntegrationInstallationWhenRepoInstallationMissing(t *testing.T) {
@@ -327,6 +413,30 @@ func TestResolve_FallsBackToIntegrationInstallationWhenRepoInstallationIsStale(t
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestInstallationTokenForRepo_AttachesTriggeringUser(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	r := NewResolver(&stubInstallationTokens{tokens: map[int64]string{7: "app-token"}}, zerolog.Nop())
+	r.SetUsers(&stubUserStore{user: models.User{ID: userID, OrgID: orgID, Name: "Alice"}})
+
+	res, err := r.InstallationTokenForRepo(context.Background(), orgID, &models.Repository{InstallationID: 7, FullName: "owner/repo"}, &userID)
+	require.NoError(t, err, "InstallationTokenForRepo should succeed with a valid installation token")
+	require.Equal(t, "app-token", res.Token, "InstallationTokenForRepo should return the installation token")
+	require.NotNil(t, res.User, "InstallationTokenForRepo should attach the triggering user when available")
+	require.Equal(t, "Alice", res.User.Name, "InstallationTokenForRepo should attach the expected user")
+}
+
+func TestInstallationTokenForRepo_LeavesWrappedErrorOff(t *testing.T) {
+	t.Parallel()
+
+	r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+	_, err := r.InstallationTokenForRepo(context.Background(), uuid.New(), &models.Repository{FullName: "owner/repo"}, nil)
+	require.Error(t, err, "InstallationTokenForRepo should fail when the repository has no installation id")
+	require.NotContains(t, err.Error(), "get installation token:", "InstallationTokenForRepo should return the bare installation-token error")
+}
+
 func TestResolve_PrimaryNon404ErrorReturnsImmediately(t *testing.T) {
 	t.Parallel()
 
@@ -341,6 +451,84 @@ func TestResolve_PrimaryNon404ErrorReturnsImmediately(t *testing.T) {
 	)
 	require.Error(t, err, "non-404 errors from the primary installation should not retry against the integration")
 	require.Contains(t, err.Error(), "bad credentials")
+}
+
+func TestInstallationToken_FallbackErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	integrationID := uuid.New()
+
+	tests := []struct {
+		name         string
+		repo         *models.Repository
+		integrations IntegrationStore
+		tokens       *stubInstallationTokens
+		wantErr      string
+	}{
+		{
+			name:    "no integration fallback available",
+			repo:    &models.Repository{FullName: "owner/repo"},
+			tokens:  &stubInstallationTokens{},
+			wantErr: "has no github installation_id",
+		},
+		{
+			name: "integration lookup error falls back to primary error",
+			repo: &models.Repository{FullName: "owner/repo", IntegrationID: integrationID},
+			integrations: &stubIntegrationStore{
+				err: errors.New("lookup failed"),
+			},
+			tokens:  &stubInstallationTokens{},
+			wantErr: "has no github installation_id",
+		},
+		{
+			name: "invalid integration config falls back to primary error",
+			repo: &models.Repository{FullName: "owner/repo", IntegrationID: integrationID},
+			integrations: &stubIntegrationStore{
+				integration: models.Integration{Config: []byte(`{`)},
+			},
+			tokens:  &stubInstallationTokens{},
+			wantErr: "has no github installation_id",
+		},
+		{
+			name: "same fallback installation id returns primary error",
+			repo: &models.Repository{FullName: "owner/repo", InstallationID: 5, IntegrationID: integrationID},
+			integrations: &stubIntegrationStore{
+				integration: models.Integration{Config: []byte(`{"installation_id":5}`)},
+			},
+			tokens: &stubInstallationTokens{
+				errs: map[int64]error{5: &statusError{code: http.StatusNotFound}},
+			},
+			wantErr: "installation 5",
+		},
+		{
+			name: "fallback token error is returned",
+			repo: &models.Repository{FullName: "owner/repo", InstallationID: 5, IntegrationID: integrationID},
+			integrations: &stubIntegrationStore{
+				integration: models.Integration{Config: []byte(`{"installation_id":9}`)},
+			},
+			tokens: &stubInstallationTokens{
+				errs: map[int64]error{
+					5: &statusError{code: http.StatusNotFound},
+					9: errors.New("fallback bad credentials"),
+				},
+			},
+			wantErr: "installation 9",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewResolver(tt.tokens, zerolog.Nop())
+			r.SetIntegrations(tt.integrations)
+
+			_, err := r.installationToken(context.Background(), uuid.New(), tt.repo)
+			require.Error(t, err, "installationToken should fail for %s", tt.name)
+			require.Contains(t, err.Error(), tt.wantErr, "installationToken should return the expected error for %s", tt.name)
+		})
+	}
 }
 
 func TestUserTokenCanAccessRepo_ErrorPaths(t *testing.T) {
@@ -368,6 +556,32 @@ func TestUserTokenCanAccessRepo_ErrorPaths(t *testing.T) {
 		ok, err := r.userTokenCanAccessRepo(context.Background(), "token", "owner/repo")
 		require.False(t, ok)
 		require.Error(t, err)
+	})
+
+	t.Run("invalid api base url", func(t *testing.T) {
+		t.Parallel()
+
+		r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+		r.SetAPIBaseURL("://bad")
+		ok, err := r.userTokenCanAccessRepo(context.Background(), "token", "owner/repo")
+		require.False(t, ok, "invalid API base URLs should fail before any request is sent")
+		require.Error(t, err, "userTokenCanAccessRepo should surface request construction failures")
+		require.Contains(t, err.Error(), "build repo access request", "error should identify the request-build stage")
+	})
+
+	t.Run("transport error", func(t *testing.T) {
+		t.Parallel()
+
+		r := NewResolver(&stubInstallationTokens{}, zerolog.Nop())
+		r.SetHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("network down")
+			}),
+		})
+		ok, err := r.userTokenCanAccessRepo(context.Background(), "token", "owner/repo")
+		require.False(t, ok, "transport failures should not be treated as repo inaccessibility")
+		require.Error(t, err, "userTokenCanAccessRepo should surface transport failures")
+		require.Contains(t, err.Error(), "repo access request", "error should identify the failing request stage")
 	})
 }
 
@@ -459,6 +673,26 @@ func TestCoAuthorTrailer(t *testing.T) {
 
 	gotPlain := CoAuthorTrailer(&models.User{Name: "Bob", Email: "bob@example.com"})
 	require.Equal(t, "Co-authored-by: Bob <bob@example.com>", gotPlain)
+}
+
+func TestSplitRepoAndGitEmailHelpers(t *testing.T) {
+	t.Parallel()
+
+	owner, repo := splitRepo("owner/repo")
+	require.Equal(t, "owner", owner, "splitRepo should return the owner from a valid full name")
+	require.Equal(t, "repo", repo, "splitRepo should return the repo from a valid full name")
+
+	owner, repo = splitRepo("invalid")
+	require.Empty(t, owner, "splitRepo should return an empty owner for malformed names")
+	require.Empty(t, repo, "splitRepo should return an empty repo for malformed names")
+
+	require.Equal(t, "", GitEmail(nil), "GitEmail should be empty when no user is attached")
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // TestRefreshTokenExpiredFallsBackToCredentialMissing exercises the

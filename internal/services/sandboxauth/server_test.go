@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -34,6 +35,14 @@ func (s *stubResolver) Resolve(_ context.Context, _ *models.Session, _ *models.R
 	}
 	return s.resolution, nil
 }
+
+type errListener struct {
+	err error
+}
+
+func (l *errListener) Accept() (net.Conn, error) { return nil, l.err }
+func (l *errListener) Close() error              { return nil }
+func (l *errListener) Addr() net.Addr            { return &net.UnixAddr{Name: "test.sock", Net: "unix"} }
 
 // shortSocketDir returns a short host directory for AF_UNIX sockets. macOS
 // limits AF_UNIX paths to ~104 bytes (108 on Linux); the default
@@ -213,6 +222,36 @@ func TestServer_ListenCreatesSocketWithOwnerOnlyPerms(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "sandbox auth socket should be owner-only")
 }
 
+func TestServer_ListenRejectsMissingSocketDirConfig(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(&stubResolver{}, "", zerolog.Nop())
+	_, _, err := srv.Listen(context.Background(), uuid.New(), &models.Session{}, &models.Repository{}, models.OrgSettings{})
+	require.Error(t, err, "Listen should reject an empty socket directory")
+	require.Contains(t, err.Error(), "socket directory not configured", "Listen should explain the missing configuration")
+}
+
+func TestServer_ListenReplacesExistingSessionListener(t *testing.T) {
+	t.Parallel()
+
+	dir := shortSocketDir(t)
+	sessionID := uuid.New()
+	srv := NewServer(&stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}, dir, zerolog.Nop())
+
+	_, closeFn, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
+	require.NoError(t, err, "first Listen should succeed")
+
+	sock, closeFn2, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
+	require.NoError(t, err, "second Listen on the same session should replace the prior listener")
+	defer closeFn2()
+
+	closeFn()
+
+	resp, err := NewClient(sock).Get(context.Background(), ActionPush)
+	require.NoError(t, err, "replaced listener should still serve credentials")
+	require.Equal(t, "tok", resp.Token, "replacement listener should serve the configured token")
+}
+
 // TestServer_ListenRejectsLooseDirPerms is the deploy-regression net: if
 // provision.sh ever drifts and creates the socket dir with world-readable
 // or world-executable bits, Listen must refuse rather than silently expose
@@ -264,6 +303,36 @@ func TestServer_CloseRemovesSocketAndStopsAccepting(t *testing.T) {
 	// Connections to the now-removed socket should fail.
 	_, err = net.Dial("unix", sock)
 	require.Error(t, err)
+}
+
+func TestServer_CloseUnknownSessionIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(&stubResolver{}, shortSocketDir(t), zerolog.Nop())
+	srv.Close(uuid.New())
+}
+
+func TestServer_CloseLeavesNonEmptySessionDirForInspection(t *testing.T) {
+	t.Parallel()
+
+	dir := shortSocketDir(t)
+	sessionID := uuid.New()
+	srv := NewServer(&stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}, dir, zerolog.Nop())
+
+	sock, closeFn, err := srv.Listen(context.Background(), sessionID,
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
+		models.OrgSettings{},
+	)
+	require.NoError(t, err, "Listen should succeed")
+
+	sessionDir := filepath.Dir(sock)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "still-mounted"), []byte("busy"), 0o600), "test should create a file that blocks session-dir removal")
+
+	closeFn()
+
+	_, err = os.Stat(sessionDir)
+	require.NoError(t, err, "close should leave a non-empty session directory in place for later cleanup")
 }
 
 // TestServer_EndToEnd_HandleSubcommand wires the complete in-sandbox path
@@ -339,4 +408,80 @@ func TestServer_RejectsUnknownOp(t *testing.T) {
 	require.NoError(t, json.NewDecoder(conn).Decode(&resp))
 	require.Empty(t, resp.Token)
 	require.Contains(t, resp.Error, "unsupported op")
+}
+
+func TestServer_AcceptLoop_IgnoresClosedListenerAndReturnsOnOtherErrors(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(&stubResolver{}, shortSocketDir(t), zerolog.Nop())
+	srv.acceptLoop(context.Background(), &errListener{err: net.ErrClosed}, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+	srv.acceptLoop(context.Background(), &errListener{err: errors.New("accept failed")}, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+}
+
+func TestServer_HandleConn_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	t.Run("decode request failure returns structured error", func(t *testing.T) {
+		t.Parallel()
+
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			NewServer(&stubResolver{}, shortSocketDir(t), zerolog.Nop()).
+				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+		}()
+
+		_, err := clientConn.Write([]byte("not-json\n"))
+		require.NoError(t, err, "client should be able to send an invalid payload")
+
+		var resp Response
+		require.NoError(t, json.NewDecoder(clientConn).Decode(&resp), "server should respond with a structured error")
+		require.Contains(t, resp.Error, "decode request", "server should explain the decode failure")
+		<-done
+	})
+
+	t.Run("write response failure is tolerated", func(t *testing.T) {
+		t.Parallel()
+
+		serverConn, clientConn := net.Pipe()
+		resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
+		done := make(chan struct{})
+
+		go func() {
+			defer close(done)
+			NewServer(resolver, shortSocketDir(t), zerolog.Nop()).
+				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+		}()
+
+		require.NoError(t, json.NewEncoder(clientConn).Encode(&Request{Op: OpGet}), "client should send a valid request")
+		require.NoError(t, clientConn.Close(), "client should close its side before the server writes the response")
+		<-done
+		require.Equal(t, 1, resolver.calls, "server should still resolve identity before the write fails")
+	})
+}
+
+func TestAssertParentDirPerms_ErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing path", func(t *testing.T) {
+		t.Parallel()
+
+		err := assertParentDirPerms(filepath.Join(t.TempDir(), "missing"))
+		require.Error(t, err, "assertParentDirPerms should fail for a missing directory")
+		require.Contains(t, err.Error(), "stat socket dir", "error should mention the stat failure")
+	})
+
+	t.Run("path is not a directory", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(path, []byte("file"), 0o600), "test should create a regular file")
+
+		err := assertParentDirPerms(path)
+		require.Error(t, err, "assertParentDirPerms should reject regular files")
+		require.Contains(t, err.Error(), "is not a directory", "error should explain the type mismatch")
+	})
 }
