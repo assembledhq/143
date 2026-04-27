@@ -395,7 +395,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 				nil, "", "", int64(0), nil,
 				"", nil, nil, 0,
 				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-				"idle", (*string)(nil), nil, nil, nil, now,
+				"idle", (*string)(nil), nil, nil, nil, nil, nil, now,
 			),
 		)
 	issueMock.ExpectExec("UPDATE issues SET status").
