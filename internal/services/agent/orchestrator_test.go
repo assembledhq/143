@@ -463,6 +463,7 @@ type mockSessionLogStore struct {
 	mu                   sync.Mutex
 	logs                 []models.SessionLog
 	count                int
+	markedThreadID       *uuid.UUID
 	markedTurnNumber     int
 	markedMessage        string
 	markedOrgID          uuid.UUID
@@ -485,12 +486,16 @@ func (m *mockSessionLogStore) getCount() int {
 	return m.count
 }
 
-func (m *mockSessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error {
+func (m *mockSessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.markDuplicateInvoked = true
 	m.markedOrgID = orgID
 	m.markedSessionID = sessionID
+	if threadID != nil {
+		copied := *threadID
+		m.markedThreadID = &copied
+	}
 	m.markedTurnNumber = turnNumber
 	m.markedMessage = message
 	return m.markDuplicateErr
@@ -2358,6 +2363,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	t.Parallel()
 
 	orgID := testOrg()
+	threadID := uuid.New()
 	issue := testIssue(orgID)
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
@@ -2376,6 +2382,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 			ID:         1,
 			SessionID:  session.ID,
 			OrgID:      orgID,
+			ThreadID:   &threadID,
 			TurnNumber: 2,
 			Role:       models.MessageRoleUser,
 			Content:    "Please add regression coverage too.",
@@ -2392,6 +2399,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 		require.True(t, prompt.Continuation, "continue_session should execute the adapter in continuation mode")
 		require.Equal(t, "Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message")
 		require.Equal(t, models.ReasoningEffortHigh, prompt.ReasoningEffort, "continue_session should preserve the stored reasoning effort on snapshot-backed turns")
+		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: "Added the regression test"}
 		return &agent.AgentResult{
 			Diff:                "--- a/main_test.go\n+++ b/main_test.go",
 			Summary:             "Added the regression test",
@@ -2422,6 +2430,13 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Len(t, messages, 2, "continue_session should append an assistant reply")
 	require.Equal(t, models.MessageRoleAssistant, messages[1].Role, "assistant reply should be stored for the continued turn")
 	require.Equal(t, 2, messages[1].TurnNumber, "assistant reply should use the new turn number")
+	require.NotNil(t, messages[1].ThreadID, "assistant reply should preserve the thread id of the triggering message")
+	require.Equal(t, threadID, *messages[1].ThreadID, "assistant reply should keep the triggering thread id")
+	require.NotEmpty(t, d.logs.logs, "continue_session should persist streamed output logs")
+	require.NotNil(t, d.logs.logs[0].ThreadID, "persisted output logs should preserve the thread id")
+	require.Equal(t, threadID, *d.logs.logs[0].ThreadID, "persisted output logs should keep the triggering thread id")
+	require.NotNil(t, d.logs.markedThreadID, "duplicate marker should preserve the thread id")
+	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
 }
 
 func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {

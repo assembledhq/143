@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -215,6 +217,7 @@ type LogEntry struct {
 	Timestamp time.Time              `json:"timestamp"`
 	Level     string                 `json:"level"` // info, debug, error, tool_use, output, question
 	Message   string                 `json:"message"`
+	ThreadID  *uuid.UUID             `json:"thread_id,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 

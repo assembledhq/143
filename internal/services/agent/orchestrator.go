@@ -1051,7 +1051,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, run.CurrentTurn, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, nil, run.CurrentTurn, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1060,7 +1060,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -1153,7 +1153,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, turnNumber, result); err != nil {
+		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, nil, turnNumber, result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
 
@@ -1308,6 +1308,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.failRun(ctx, session, "no user message found for continue_session")
 		return fmt.Errorf("no user message found")
 	}
+	threadID := latestMsg.ThreadID
 	userMessage := latestMsg.Content
 	var planMode bool
 
@@ -1370,6 +1371,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			errMsg := &models.SessionMessage{
 				SessionID:  session.ID,
 				OrgID:      session.OrgID,
+				ThreadID:   threadID,
 				TurnNumber: session.CurrentTurn + 1,
 				Role:       models.MessageRoleAssistant,
 				Content:    authErr.Error(),
@@ -1699,7 +1701,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, session.ID, session.OrgID, turnNumber, logCh, runtimeTracker)
+		o.streamLogs(ctx, session.ID, session.OrgID, threadID, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1708,7 +1710,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	logWg.Wait()
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.ID, threadID, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
@@ -1751,7 +1753,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 7. Create assistant message with result summary.
-	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, turnNumber, result); err != nil {
+	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, turnNumber, result); err != nil {
 		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 
@@ -2034,7 +2036,7 @@ func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, ex
 
 // streamLogs reads LogEntry values from the channel and persists them to the DB.
 // It also detects question-level log entries and creates SessionQuestion records.
-func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
+func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, threadID *uuid.UUID, turnNumber int, logCh <-chan LogEntry, tracker *runtimeProgressTracker) {
 	for entry := range logCh {
 		if tracker != nil {
 			if progressType, strength, ok := runtimeProgressFromLog(entry); ok {
@@ -2047,9 +2049,15 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 			metadata = nil
 		}
 
+		effectiveThreadID := threadID
+		if effectiveThreadID == nil {
+			effectiveThreadID = entry.ThreadID
+		}
+
 		log := &models.SessionLog{
 			SessionID:  runID,
 			OrgID:      orgID,
+			ThreadID:   effectiveThreadID,
 			Level:      entry.Level,
 			Message:    entry.Message,
 			Metadata:   metadata,
@@ -2637,7 +2645,7 @@ func gracefulStopFailure(reason StopReason, checkpointedThisTurn, hadPriorCheckp
 	}
 }
 
-func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, turnNumber int, result *AgentResult) error {
+func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, orgID uuid.UUID, threadID *uuid.UUID, turnNumber int, result *AgentResult) error {
 	if o.sessionMessages == nil {
 		return nil
 	}
@@ -2645,6 +2653,7 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 	assistantMsg := &models.SessionMessage{
 		SessionID:  sessionID,
 		OrgID:      orgID,
+		ThreadID:   threadID,
 		TurnNumber: turnNumber,
 		Role:       models.MessageRoleAssistant,
 		Content:    result.Summary,
@@ -2660,9 +2669,9 @@ func (o *Orchestrator) createAssistantMessage(ctx context.Context, sessionID, or
 		return err
 	}
 	if marker, ok := o.agentRunLogs.(interface {
-		MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error
+		MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error
 	}); ok && result.Summary != "" {
-		if err := marker.MarkAssistantTranscriptDuplicate(ctx, orgID, sessionID, turnNumber, result.Summary); err != nil {
+		if err := marker.MarkAssistantTranscriptDuplicate(ctx, orgID, sessionID, threadID, turnNumber, result.Summary); err != nil {
 			o.logger.Warn().
 				Err(err).
 				Str("session_id", sessionID.String()).
@@ -2797,6 +2806,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	agentType models.AgentType,
 	orgID uuid.UUID,
 	sessionID uuid.UUID,
+	threadID *uuid.UUID,
 	turnNumber int,
 	sandbox *Sandbox,
 	adapter AgentAdapter,
@@ -2826,7 +2836,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		o.streamLogs(ctx, sessionID, orgID, turnNumber, retryLogCh, nil)
+		o.streamLogs(ctx, sessionID, orgID, threadID, turnNumber, retryLogCh, nil)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
