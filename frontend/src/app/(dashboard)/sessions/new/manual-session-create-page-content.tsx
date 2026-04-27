@@ -516,20 +516,12 @@ export function ManualSessionCreatePageContent() {
       const rect = composerCard.getBoundingClientRect();
       const spacing = 12;
       const viewportHeight = window.innerHeight;
-      const spaceAbove = rect.top - spacing;
-      const spaceBelow = viewportHeight - rect.bottom - spacing;
-      const side: "top" | "bottom" = spaceAbove >= 160 || spaceAbove >= spaceBelow ? "top" : "bottom";
-      const availableHeight = Math.max(side === "top" ? spaceAbove : spaceBelow, 120);
-      // For drop-up (side === "top"), pin the dropdown's bottom edge to the
-      // top of the composer card (with spacing) so the panel grows upward as
-      // items are added. For drop-down, anchor the top edge below the input.
+      const availableHeight = Math.max(rect.top - spacing, 120);
       setPickerPosition({
         left: rect.left,
-        top: rect.bottom + spacing,
         bottom: viewportHeight - rect.top + spacing,
         width: rect.width,
         maxHeight: Math.min(320, availableHeight),
-        side,
       });
     }
 

@@ -21,14 +21,12 @@ export type TriggerPickerGroup = {
 
 export type TriggerPickerPosition = {
   left: number;
-  // `top` is used when `side === "bottom"` (dropdown drops below the input).
-  // `bottom` is used when `side === "top"` (dropdown drops up — bottom edge
-  // pinned to the top of the input so the panel grows upward as items appear).
-  top: number;
+  // Distance from the bottom of the viewport to the dropdown's bottom edge.
+  // The dropdown is always positioned as a drop-up: its bottom edge is pinned
+  // to the top of the composer input so the panel grows upward as items appear.
   bottom: number;
   width: number;
   maxHeight: number;
-  side: "top" | "bottom";
 };
 
 type TriggerPickerProps = {
@@ -83,14 +81,11 @@ export function SessionComposerTriggerPicker({
   return createPortal(
     <Card
       className="fixed z-50 overflow-hidden border-border/70 bg-popover shadow-xl"
-      data-side={position.side}
       data-testid={testId}
       style={{
         left: position.left,
         width: position.width,
-        ...(position.side === "top"
-          ? { bottom: position.bottom }
-          : { top: position.top }),
+        bottom: position.bottom,
       }}
     >
       <CardContent className="p-2">
