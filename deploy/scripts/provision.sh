@@ -301,9 +301,8 @@ RESOLV
       # internal/services/sandboxauth/server.go); owner 1000:1000 matches
       # the worker container's appuser so MkdirAll on per-session subdirs
       # succeeds.
-      install -d -m 0755 /etc/tmpfiles.d
       cat > /etc/tmpfiles.d/143-sandbox-auth.conf <<'TMPFILES'
-d /var/run/143             0755 root root -
+d /var/run/143 0755 root root -
 d /var/run/143/sandbox-auth 0750 1000 1000 -
 TMPFILES
       systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
