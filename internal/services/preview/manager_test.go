@@ -158,7 +158,7 @@ var sessionTestCols = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
-	// Migration 097 — Linear session-linking columns. Migration 100 — git
+	// Migration 102 — Linear session-linking columns. Migration 100 — git
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
@@ -166,7 +166,7 @@ var sessionTestCols = []string{
 }
 
 func previewManagerSessionRow(values ...any) []any {
-	// Tests written before migrations 097 (linear_*) and 100 (git_identity_*)
+	// Tests written before migrations 102 (linear_*) and 100 (git_identity_*)
 	// pass shorter value lists. Inject the policy-defaults (3 values at the
 	// front), four linear_* nils just before deleted_at, and two
 	// git_identity nils between deleted_at and created_at so each fixture
@@ -235,7 +235,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		0,        // recovery_attempt_count
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil,
-		// Migration 097 — Linear session-linking flags. Defaults match a
+		// Migration 102 — Linear session-linking flags. Defaults match a
 		// session created without any Linear ref.
 		false, false, (*string)(nil), "none",
 		nil, now,

@@ -171,7 +171,7 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 		"origin",
 		"interaction_mode",
 		"validation_policy",
-		// Migration 097 — Linear session linking. Locked here so a future
+		// Migration 102 — Linear session linking. Locked here so a future
 		// migration that drops a column from the SELECT lists (or this
 		// test fixture) trips immediately rather than silently corrupting
 		// pgx.RowToStructByName[models.Session].

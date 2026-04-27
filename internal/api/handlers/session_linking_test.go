@@ -23,7 +23,7 @@ var sessionIssueLinkHandlerColumns = []string{
 	"position", "added_by_user_id", "created_at",
 	"issue_title", "issue_source", "external_id", "description",
 	"repository_id", "issue_status",
-	// Migration 097 — Linear workspace slug is left-joined off
+	// Migration 102 — Linear workspace slug is left-joined off
 	// session_issue_link_provider_state for deep-link rendering.
 	"issue_workspace_slug",
 }

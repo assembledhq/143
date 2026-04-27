@@ -866,7 +866,7 @@ var sessionRowColumns = []string{
 }
 
 func previewSessionRow(values ...interface{}) []interface{} {
-	// Fixtures predate migration 097 (linear_*) and migration 100
+	// Fixtures predate migration 102 (linear_*) and migration 100
 	// (git_identity_*) and the policy columns. Pad in 3 policy values at the
 	// front, the four linear_* columns just before deleted_at, and the two
 	// git_identity nils between deleted_at and created_at.
