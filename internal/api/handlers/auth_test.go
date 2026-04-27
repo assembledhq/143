@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,8 +22,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
-
-var gitHubTransportTestMu sync.Mutex
 
 func expectUserLastOrgLookup(mock pgxmock.PgxPoolIface, userID uuid.UUID, lastOrgID *uuid.UUID) {
 	rows := pgxmock.NewRows([]string{"last_org_id"})
@@ -662,11 +658,6 @@ func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
 			}))
 			defer server.Close()
 
-			gitHubTransportTestMu.Lock()
-			defer gitHubTransportTestMu.Unlock()
-			restoreTransport := rewriteGitHubTransport(t, server.URL)
-			defer restoreTransport()
-
 			handler := NewAuthHandler(
 				&config.Config{FrontendURL: "http://frontend.test"},
 				mock,
@@ -675,6 +666,12 @@ func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
 				nil,
 				nil,
 			)
+			// Point the handler at the local httptest server. The same URL
+			// serves /login/oauth/access_token, /user, and /user/emails —
+			// the handler uses gitHubAPIBase() vs gitHubOAuthBase() to
+			// choose the path prefix, but here both bases collapse to the
+			// same httptest server.
+			handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
 
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
 			req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
@@ -3262,7 +3259,7 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
 	})
 
@@ -3273,7 +3270,7 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
 	})
 
@@ -3284,7 +3281,7 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
 	})
 
@@ -3302,7 +3299,7 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got,
 			"the canonical user-id-prefixed form must beat the deprecated login-only noreply")
 	})
@@ -3321,7 +3318,7 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "alicehub@users.noreply.github.com", got)
 	})
 
@@ -3339,21 +3336,25 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
 	})
 
 	t.Run("falls back when request construction fails", func(t *testing.T) {
 		t.Parallel()
 
-		got := fetchGitHubNoreplyEmailFrom("://bad", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, "://bad", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "invalid email probe URLs should fall back to the canonical synthesized address")
 	})
 
 	t.Run("falls back when transport fails", func(t *testing.T) {
 		t.Parallel()
 
-		got := fetchGitHubNoreplyEmailFrom("http://127.0.0.1:1/user/emails", "ghu_token", 42, "alicehub")
+		// nil client → fetchGitHubNoreplyEmailFrom uses its own short-timeout
+		// client. The unrouted target IP triggers a fast connection refusal
+		// which the helper must convert into a fallback rather than a return
+		// error.
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, "http://127.0.0.1:1/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "transport failures should fall back to the canonical synthesized address")
 	})
 
@@ -3365,49 +3366,53 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 		}))
 		defer server.Close()
 
-		got := fetchGitHubNoreplyEmailFrom(server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
 		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "decode failures should fall back to the canonical synthesized address")
+	})
+
+	t.Run("uses default short-timeout client when none is provided", func(t *testing.T) {
+		t.Parallel()
+
+		// Confirms the production wiring: when h.httpClient is nil, the
+		// AuthHandler.fetchGitHubNoreplyEmail wrapper passes nil through
+		// and the inner function still produces a valid response by
+		// constructing its own short-timeout client. We exercise the
+		// nil-client branch directly here.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "nil client should fall back to the helper's short-timeout client and still return the discovered noreply email")
+	})
+
+	t.Run("respects ctx cancellation", func(t *testing.T) {
+		t.Parallel()
+
+		// A cancelled context must short-circuit the request and produce
+		// the fallback. Threading context through ensures a hung GitHub
+		// call can't outlast the OAuth login it's serving.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		got := fetchGitHubNoreplyEmailFrom(ctx, nil, "https://api.github.com/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "cancelled context should produce the fallback rather than the network response")
 	})
 }
 
-func TestFetchGitHubNoreplyEmail_DefaultEndpointWrapper(t *testing.T) {
+func TestAuthHandler_FetchGitHubNoreplyEmail_DelegatesToInjectedURL(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/user/emails", r.URL.Path, "wrapper should probe the default GitHub /user/emails endpoint")
+		require.Equal(t, "/user/emails", r.URL.Path, "AuthHandler should probe the API base + /user/emails")
 		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
 	}))
 	defer server.Close()
 
-	gitHubTransportTestMu.Lock()
-	defer gitHubTransportTestMu.Unlock()
-	restoreTransport := rewriteGitHubTransport(t, server.URL)
-	defer restoreTransport()
+	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+	handler.SetGitHubURLsForTest(server.URL, "", server.Client())
 
-	got := fetchGitHubNoreplyEmail("ghu_token", 42, "alicehub")
-	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "wrapper should delegate to the default /user/emails endpoint and return the discovered noreply email")
-}
-
-func rewriteGitHubTransport(t *testing.T, target string) func() {
-	t.Helper()
-
-	parsed, err := url.Parse(target)
-	require.NoError(t, err, "test server URL should parse")
-
-	base := http.DefaultTransport
-	http.DefaultTransport = gitHubRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		clone := req.Clone(req.Context())
-		clone.URL.Scheme = parsed.Scheme
-		clone.URL.Host = parsed.Host
-		return base.RoundTrip(clone)
-	})
-	return func() {
-		http.DefaultTransport = base
-	}
-}
-
-type gitHubRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f gitHubRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+	got := handler.fetchGitHubNoreplyEmail(context.Background(), "ghu_token", 42, "alicehub")
+	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "AuthHandler.fetchGitHubNoreplyEmail should delegate to the injected GitHub API base + httptest server")
 }

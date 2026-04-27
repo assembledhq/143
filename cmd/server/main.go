@@ -263,7 +263,12 @@ func main() {
 	}
 	go nodeManager.StartHeartbeat(ctx)
 
-	// Start worker if mode includes worker capability
+	// Start worker if mode includes worker capability.
+	// sandboxAuthShutdown is hoisted to function scope so the graceful
+	// shutdown goroutine (declared later) can drain the per-session
+	// credential socket listeners that buildServices spun up. Stays nil
+	// in api-only mode where buildServices never runs.
+	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
 		workerCount := cfg.WorkerProcessCount
@@ -341,6 +346,9 @@ func main() {
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+			if services != nil {
+				sandboxAuthShutdown = services.SandboxAuthShutdown
+			}
 		}
 		// Refuse to start an anemic worker. Without agent services (GitHub App,
 		// Docker, sandbox health), run_agent won't register, but the worker will
@@ -509,6 +517,13 @@ func main() {
 			logger.Error().Err(err).Msg("server shutdown failed")
 		}
 		<-gwDone
+		// Drain per-session GitHub credential socket listeners after the
+		// API and worker have stopped accepting new turns. Doing this last
+		// avoids racing an in-flight turn against socket teardown — by the
+		// time we get here, no orchestrator path can call Listen anymore.
+		if sandboxAuthShutdown != nil {
+			sandboxAuthShutdown()
+		}
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
@@ -843,7 +858,7 @@ func buildServices(
 		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
 	}
 
-	return &worker.Services{
+	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
 		PR:              prService,
@@ -856,6 +871,13 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 	}
+	if sandboxAuthServer != nil {
+		// Capture by value: the closure outlives buildServices, but the
+		// *Server pointer is stable for the process lifetime.
+		s := sandboxAuthServer
+		svc.SandboxAuthShutdown = s.Shutdown
+	}
+	return svc
 }
 
 func wireWorkerPRService(

@@ -87,8 +87,12 @@ type UserLookup interface {
 // SandboxAuthServer is the host-side socket server that issues fresh GitHub
 // credentials to the in-sandbox 143-tools helper. Defined as an interface
 // so tests can stub it without spinning real Unix sockets.
+//
+// Listen returns just the socket path; teardown goes through Close(sessionID).
+// Listen and Close are paired by sessionID so the Server stays the single
+// owner of "what's currently bound" — callers don't keep per-call closers.
 type SandboxAuthServer interface {
-	Listen(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, closeFn func(), err error)
+	Listen(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, err error)
 	Close(sessionID uuid.UUID)
 }
 
@@ -483,13 +487,12 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	if err != nil {
 		return nil, fmt.Errorf("resolve github identity: %w", err)
 	}
-	// Ignore the per-call closeFn here: the Server tracks the listener in
-	// its session-keyed map, and the orchestrator's deferred cleanup goes
-	// through Server.Close(sessionID). Keeping a single close path means
-	// the listener is owned by the Server (not by every caller of Listen)
-	// and avoids divergence between an orchestrator-held closer and the
-	// Server's internal map across error paths.
-	socketPath, _, err := o.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings)
+	// The orchestrator's deferred cleanup goes through Server.Close(sessionID),
+	// which mirrors how the listener is keyed inside the Server. Listen
+	// no longer returns a per-call closer — the single-owner model means
+	// every error path here just runs closeSandboxAuth(run.ID, ...) and
+	// the Server figures out which entry is current.
+	socketPath, err := o.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings)
 	if err != nil {
 		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
 	}

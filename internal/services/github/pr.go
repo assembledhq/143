@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,6 +74,14 @@ type PRService struct {
 	logger          zerolog.Logger
 	baseURL         string
 	httpClient      *http.Client
+
+	// cachedResolverMu guards lazy construction of cachedResolver. The
+	// resolver is built from the currently-wired dependencies on first use
+	// and cached for subsequent calls; any Set* mutator that changes a
+	// resolver-relevant dependency invalidates it via invalidateResolver()
+	// so a late wiring change picks up before the next Resolve call.
+	cachedResolverMu sync.Mutex
+	cachedResolver   *identity.Resolver
 }
 
 func NewPRService(
@@ -109,6 +118,7 @@ func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 // SetIntegrationStore sets the integration store for installation fallback lookups.
 func (s *PRService) SetIntegrationStore(store *db.IntegrationStore) {
 	s.integrations = store
+	s.invalidateResolver()
 }
 
 // IntegrationStore exposes the configured integration store for wiring tests.
@@ -131,6 +141,7 @@ func (s *PRService) SetAppUserAuth(auth interface {
 	GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 }) {
 	s.appUserAuth = auth
+	s.invalidateResolver()
 }
 
 // HasAppUserAuth reports whether the refresh-aware GitHub App user auth
@@ -152,6 +163,7 @@ func (s *PRService) LLMClient() llm.Client {
 // SetUserStore sets the user store for fetching user info during PR creation.
 func (s *PRService) SetUserStore(store *db.UserStore) {
 	s.users = store
+	s.invalidateResolver()
 }
 
 // UserStore exposes the configured user store for wiring tests.
@@ -224,12 +236,19 @@ var ErrSnapshotExpired = errors.New("session snapshot expired")
 // This typically means the diff was reverted or the session produced no edits.
 var ErrNoChanges = errors.New("no changes to push")
 
-// identityResolver builds a fresh resolver from the currently wired
-// dependencies. Constructed per-call rather than cached so a future Set*
-// wirer can't desynchronize the resolver from the service's state — this
-// runs at most a few times per request and the cost is negligible
-// compared to the GitHub round-trip the resolver performs.
+// identityResolver returns a resolver wired with the PRService's current
+// dependencies. Lazily built on first use and cached; any Set* mutator
+// that changes a resolver-relevant field calls invalidateResolver() so
+// the next call rebuilds. We cache because the resolver itself is
+// stateless after construction (all its state is on PRService) and hot
+// paths like validateUserToken would otherwise allocate a new resolver
+// on every call.
 func (s *PRService) identityResolver() *identity.Resolver {
+	s.cachedResolverMu.Lock()
+	defer s.cachedResolverMu.Unlock()
+	if s.cachedResolver != nil {
+		return s.cachedResolver
+	}
 	r := identity.NewResolver(s.tokenProvider, s.logger)
 	if s.appUserAuth != nil {
 		r.SetAppUserAuth(s.appUserAuth)
@@ -248,7 +267,17 @@ func (s *PRService) identityResolver() *identity.Resolver {
 	if s.baseURL != "" {
 		r.SetAPIBaseURL(s.baseURL)
 	}
+	s.cachedResolver = r
 	return r
+}
+
+// invalidateResolver drops the cached resolver. Called from each Set*
+// method that changes a dependency the resolver consumes, so a late
+// wiring change picks up before the next Resolve call.
+func (s *PRService) invalidateResolver() {
+	s.cachedResolverMu.Lock()
+	s.cachedResolver = nil
+	s.cachedResolverMu.Unlock()
 }
 
 // getInstallationTokenForRepo is a thin compatibility wrapper around the
@@ -280,6 +309,7 @@ func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
 // SetBaseURL overrides the GitHub API base URL (for testing).
 func (s *PRService) SetBaseURL(url string) {
 	s.baseURL = url
+	s.invalidateResolver()
 }
 
 // CreatePRParams holds optional parameters for PR creation that come from the

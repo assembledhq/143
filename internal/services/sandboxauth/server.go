@@ -35,7 +35,7 @@ type Resolver interface {
 
 // Server owns the on-disk socket directory and the goroutines for active
 // per-session listeners. Construct with NewServer; call Listen at session
-// start and invoke the returned close func at session end.
+// start and Close(sessionID) at session end.
 type Server struct {
 	resolver  Resolver
 	socketDir string
@@ -71,8 +71,14 @@ func NewServer(resolver Resolver, socketDir string, logger zerolog.Logger) *Serv
 }
 
 // Listen opens a per-session socket and starts an accept loop in a
-// background goroutine. The returned close func stops the loop, removes
-// the socket file, and is safe to call more than once.
+// background goroutine. The returned socketPath is the on-host path the
+// caller should bind-mount into the container; teardown goes through
+// Close(sessionID), not a per-call closer. We chose this single-owner
+// model after early iterations exposed a per-call closeFn alongside
+// Close(sessionID): callers had to decide which to invoke from each
+// error branch, and the two paths could disagree about which entry was
+// active in s.active. Routing all teardown through Close(sessionID) means
+// the Server alone decides what's currently bound to a session.
 //
 // Each session gets its own subdirectory (<socketDir>/<sessionID>/) which
 // is the bind-mount source inside the container. The socket file lives
@@ -95,12 +101,12 @@ func (s *Server) Listen(
 	run *models.Session,
 	repo *models.Repository,
 	orgSettings models.OrgSettings,
-) (socketPath string, closeFn func(), err error) {
+) (string, error) {
 	if s.socketDir == "" {
-		return "", nil, errors.New("sandboxauth: socket directory not configured")
+		return "", errors.New("sandboxauth: socket directory not configured")
 	}
 	if err := os.MkdirAll(s.socketDir, 0o750); err != nil {
-		return "", nil, fmt.Errorf("sandboxauth: ensure socket dir: %w", err)
+		return "", fmt.Errorf("sandboxauth: ensure socket dir: %w", err)
 	}
 	// Defense-in-depth: the parent dir is the gate that decides which host
 	// processes can even reach the socket inodes. Cross-tenant isolation
@@ -109,14 +115,14 @@ func (s *Server) Listen(
 	// fail fast at startup rather than silently expose every session's
 	// socket to local processes.
 	if err := assertParentDirPerms(s.socketDir); err != nil {
-		return "", nil, fmt.Errorf("sandboxauth: %w", err)
+		return "", fmt.Errorf("sandboxauth: %w", err)
 	}
 	if prev := s.detach(sessionID); prev != nil {
 		prev()
 	}
 	sessionDir := filepath.Join(s.socketDir, sessionID.String())
 	if err := os.MkdirAll(sessionDir, 0o750); err != nil {
-		return "", nil, fmt.Errorf("sandboxauth: ensure session dir: %w", err)
+		return "", fmt.Errorf("sandboxauth: ensure session dir: %w", err)
 	}
 	sockPath := filepath.Join(sessionDir, SocketFileName)
 
@@ -129,7 +135,7 @@ func (s *Server) Listen(
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("sandboxauth: listen on %s: %w", sockPath, err)
+		return "", fmt.Errorf("sandboxauth: listen on %s: %w", sockPath, err)
 	}
 	// Keep the socket owner-only. The orchestrator process creates it as
 	// the same numeric uid the sandbox image runs as (`useradd sandbox`
@@ -139,7 +145,7 @@ func (s *Server) Listen(
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
-		return "", nil, fmt.Errorf("sandboxauth: chmod %s: %w", sockPath, err)
+		return "", fmt.Errorf("sandboxauth: chmod %s: %w", sockPath, err)
 	}
 
 	logger := s.logger.With().
@@ -152,7 +158,7 @@ func (s *Server) Listen(
 
 	var closeOnce sync.Once
 	entry := &activeListener{}
-	closeFn = func() {
+	closeFn := func() {
 		closeOnce.Do(func() {
 			cancel()
 			_ = ln.Close()
@@ -179,7 +185,7 @@ func (s *Server) Listen(
 	s.active[sessionID] = entry
 	s.mu.Unlock()
 	logger.Debug().Msg("sandboxauth: listener started")
-	return sockPath, closeFn, nil
+	return sockPath, nil
 }
 
 // Close stops and removes the active listener for sessionID, if any.
@@ -187,6 +193,39 @@ func (s *Server) Listen(
 func (s *Server) Close(sessionID uuid.UUID) {
 	if closeFn := s.detach(sessionID); closeFn != nil {
 		closeFn()
+	}
+}
+
+// Shutdown stops every active listener and removes their sockets. Used at
+// graceful-orchestrator-shutdown time so sockets and per-session subdirs
+// don't outlive the process they're bound to. Tests also call it to drain
+// a Server before asserting cleanup.
+//
+// Idempotent: a second call after the map is drained is a no-op.
+func (s *Server) Shutdown() {
+	for {
+		s.mu.Lock()
+		var (
+			sessionID uuid.UUID
+			closeFn   func()
+		)
+		for id, entry := range s.active {
+			sessionID = id
+			closeFn = entry.close
+			break
+		}
+		s.mu.Unlock()
+		if closeFn == nil {
+			return
+		}
+		// Detach removes the entry from s.active and returns the closer
+		// (may be the same closer we already grabbed; closeOnce makes the
+		// double-call safe).
+		if detached := s.detach(sessionID); detached != nil {
+			detached()
+		} else {
+			closeFn()
+		}
 	}
 }
 

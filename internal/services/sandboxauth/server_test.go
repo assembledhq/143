@@ -74,15 +74,16 @@ func TestServer_ServesResolverResponse(t *testing.T) {
 	}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(
+	sessionID := uuid.New()
+	sock, err := srv.Listen(
 		context.Background(),
-		uuid.New(),
+		sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	resp, err := NewClient(sock).Get(context.Background(), ActionPush)
 	require.NoError(t, err)
@@ -102,13 +103,14 @@ func TestServer_RefreshesPerCall(t *testing.T) {
 	}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+	sessionID := uuid.New()
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	for i := 0; i < 3; i++ {
 		resp, err := NewClient(sock).Get(context.Background(), ActionPush)
@@ -123,13 +125,14 @@ func TestServer_SurfacesResolverErrors(t *testing.T) {
 	resolver := &stubResolver{err: errors.New("token revoked")}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+	sessionID := uuid.New()
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	resp, err := NewClient(sock).Get(context.Background(), ActionPush)
 	require.NoError(t, err, "transport should still succeed even when the host returns an Error payload")
@@ -152,14 +155,14 @@ func TestServer_RemovesStaleSocketOnListen(t *testing.T) {
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
 	srv := NewServer(resolver, dir, zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), sessionID,
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err, "stale socket file must not block Listen")
 	require.Equal(t, stalePath, sock)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	// Verify the listener actually works post-recovery.
 	resp, err := NewClient(sock).Get(context.Background(), ActionPush)
@@ -180,21 +183,21 @@ func TestServer_ListenAfterClose_ReusesSessionDir(t *testing.T) {
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
 	srv := NewServer(resolver, dir, zerolog.Nop())
 
-	sock1, closeFn1, err := srv.Listen(context.Background(), sessionID,
+	sock1, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: sessionID, OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	closeFn1()
+	srv.Close(sessionID)
 
-	sock2, closeFn2, err := srv.Listen(context.Background(), sessionID,
+	sock2, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: sessionID, OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err, "Listen must succeed after a prior close on the same session")
-	defer closeFn2()
+	defer srv.Close(sessionID)
 	require.Equal(t, sock1, sock2, "the per-session socket path must be deterministic so recreates land at the same in-container bind-mount target")
 
 	// Connections to the recreated socket must still work.
@@ -209,13 +212,14 @@ func TestServer_ListenCreatesSocketWithOwnerOnlyPerms(t *testing.T) {
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+	sessionID := uuid.New()
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err, "Listen should create the per-session auth socket")
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	info, err := os.Stat(sock)
 	require.NoError(t, err, "Listen should leave a socket inode on disk")
@@ -226,7 +230,7 @@ func TestServer_ListenRejectsMissingSocketDirConfig(t *testing.T) {
 	t.Parallel()
 
 	srv := NewServer(&stubResolver{}, "", zerolog.Nop())
-	_, _, err := srv.Listen(context.Background(), uuid.New(), &models.Session{}, &models.Repository{}, models.OrgSettings{})
+	_, err := srv.Listen(context.Background(), uuid.New(), &models.Session{}, &models.Repository{}, models.OrgSettings{})
 	require.Error(t, err, "Listen should reject an empty socket directory")
 	require.Contains(t, err.Error(), "socket directory not configured", "Listen should explain the missing configuration")
 }
@@ -238,14 +242,15 @@ func TestServer_ListenReplacesExistingSessionListener(t *testing.T) {
 	sessionID := uuid.New()
 	srv := NewServer(&stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}, dir, zerolog.Nop())
 
-	_, closeFn, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
+	_, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
 	require.NoError(t, err, "first Listen should succeed")
 
-	sock, closeFn2, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
+	// Second Listen on the same sessionID atomically detaches and closes
+	// the prior entry inside the Server, so we don't keep a separate
+	// closeFn for the first one.
+	sock, err := srv.Listen(context.Background(), sessionID, &models.Session{ID: sessionID, OrgID: uuid.New()}, &models.Repository{InstallationID: 1, FullName: "owner/repo"}, models.OrgSettings{})
 	require.NoError(t, err, "second Listen on the same session should replace the prior listener")
-	defer closeFn2()
-
-	closeFn()
+	defer srv.Close(sessionID)
 
 	resp, err := NewClient(sock).Get(context.Background(), ActionPush)
 	require.NoError(t, err, "replaced listener should still serve credentials")
@@ -268,7 +273,7 @@ func TestServer_ListenRejectsLooseDirPerms(t *testing.T) {
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
 	srv := NewServer(resolver, dir, zerolog.Nop())
 
-	_, _, err = srv.Listen(context.Background(), uuid.New(),
+	_, err = srv.Listen(context.Background(), uuid.New(),
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
@@ -282,7 +287,8 @@ func TestServer_CloseRemovesSocketAndStopsAccepting(t *testing.T) {
 	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+	sessionID := uuid.New()
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
@@ -293,12 +299,13 @@ func TestServer_CloseRemovesSocketAndStopsAccepting(t *testing.T) {
 	_, err = os.Stat(sock)
 	require.NoError(t, err)
 
-	closeFn()
+	srv.Close(sessionID)
 	_, err = os.Stat(sock)
 	require.True(t, os.IsNotExist(err), "socket must be removed by close")
 
-	// Idempotency: second call is a no-op, must not panic.
-	closeFn()
+	// Idempotency: second Close on the same sessionID is a no-op (Server
+	// drops it from active map after first close).
+	srv.Close(sessionID)
 
 	// Connections to the now-removed socket should fail.
 	_, err = net.Dial("unix", sock)
@@ -312,6 +319,45 @@ func TestServer_CloseUnknownSessionIsNoOp(t *testing.T) {
 	srv.Close(uuid.New())
 }
 
+// TestServer_ShutdownDrainsAllListeners simulates a graceful orchestrator
+// shutdown with multiple sessions in flight: every socket must be removed
+// and every accept loop must exit, with no leftover listeners in the
+// active map. A second Shutdown call must be a no-op.
+func TestServer_ShutdownDrainsAllListeners(t *testing.T) {
+	t.Parallel()
+
+	dir := shortSocketDir(t)
+	resolver := &stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}
+	srv := NewServer(resolver, dir, zerolog.Nop())
+
+	const sessionCount = 4
+	socks := make([]string, 0, sessionCount)
+	for i := 0; i < sessionCount; i++ {
+		sock, err := srv.Listen(
+			context.Background(),
+			uuid.New(),
+			&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+			&models.Repository{InstallationID: 1, FullName: "owner/repo"},
+			models.OrgSettings{},
+		)
+		require.NoError(t, err, "Listen %d should succeed", i)
+		socks = append(socks, sock)
+	}
+
+	srv.Shutdown()
+
+	for _, sock := range socks {
+		_, err := os.Stat(sock)
+		require.True(t, os.IsNotExist(err), "Shutdown should remove socket %s; got err=%v", sock, err)
+	}
+	srv.mu.Lock()
+	require.Empty(t, srv.active, "Shutdown should drain the active listener map")
+	srv.mu.Unlock()
+
+	// Idempotency: a second Shutdown after the map is drained must be a no-op.
+	require.NotPanics(t, func() { srv.Shutdown() }, "Shutdown should be idempotent")
+}
+
 func TestServer_CloseLeavesNonEmptySessionDirForInspection(t *testing.T) {
 	t.Parallel()
 
@@ -319,7 +365,7 @@ func TestServer_CloseLeavesNonEmptySessionDirForInspection(t *testing.T) {
 	sessionID := uuid.New()
 	srv := NewServer(&stubResolver{resolution: &identity.Resolution{Token: "tok", Source: identity.SourceApp}}, dir, zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), sessionID,
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
@@ -329,7 +375,7 @@ func TestServer_CloseLeavesNonEmptySessionDirForInspection(t *testing.T) {
 	sessionDir := filepath.Dir(sock)
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "still-mounted"), []byte("busy"), 0o600), "test should create a file that blocks session-dir removal")
 
-	closeFn()
+	srv.Close(sessionID)
 
 	_, err = os.Stat(sessionDir)
 	require.NoError(t, err, "close should leave a non-empty session directory in place for later cleanup")
@@ -353,15 +399,16 @@ func TestServer_EndToEnd_HandleSubcommand(t *testing.T) {
 	}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(
+	sessionID := uuid.New()
+	sock, err := srv.Listen(
 		context.Background(),
-		uuid.New(),
+		sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{InstallationID: 1, FullName: "owner/repo"},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	t.Setenv(SocketEnvVar, sock)
 
@@ -390,13 +437,14 @@ func TestServer_RejectsUnknownOp(t *testing.T) {
 	resolver := &stubResolver{}
 	srv := NewServer(resolver, shortSocketDir(t), zerolog.Nop())
 
-	sock, closeFn, err := srv.Listen(context.Background(), uuid.New(),
+	sessionID := uuid.New()
+	sock, err := srv.Listen(context.Background(), sessionID,
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{},
 		models.OrgSettings{},
 	)
 	require.NoError(t, err)
-	defer closeFn()
+	defer srv.Close(sessionID)
 
 	conn, err := net.Dial("unix", sock)
 	require.NoError(t, err)

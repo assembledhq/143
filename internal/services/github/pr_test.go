@@ -428,6 +428,36 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
 }
 
+// TestPRService_IdentityResolverCachedAndInvalidated verifies the lazy-build
+// + invalidate-on-Set* contract: the resolver is built once on first use
+// and reused on subsequent calls, but a Set* mutator that changes a
+// resolver-relevant dependency (e.g. SetUserStore) must invalidate the
+// cache so the next call rebuilds.
+func TestPRService_IdentityResolverCachedAndInvalidated(t *testing.T) {
+	t.Parallel()
+
+	service := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+
+	first := service.identityResolver()
+	require.NotNil(t, first, "identityResolver should build on first use")
+	require.Same(t, first, service.identityResolver(), "identityResolver should reuse the cached resolver across hot-path calls")
+
+	// SetUserStore changes a resolver dependency; the cache must rebuild
+	// on the next call so the new wiring takes effect.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should construct a pgxmock pool")
+	defer mock.Close()
+	service.SetUserStore(db.NewUserStore(mock))
+	rebuilt := service.identityResolver()
+	require.NotSame(t, first, rebuilt, "SetUserStore should invalidate the cached resolver")
+	require.Same(t, rebuilt, service.identityResolver(), "post-rebuild calls should hit the new cache entry")
+
+	// SetBaseURL is the URL override seam used in tests; it must also
+	// invalidate so a test override doesn't leak the production base URL.
+	service.SetBaseURL("https://api.example.com")
+	require.NotSame(t, rebuilt, service.identityResolver(), "SetBaseURL should invalidate the cached resolver")
+}
+
 func TestFormatBranchName(t *testing.T) {
 	t.Parallel()
 

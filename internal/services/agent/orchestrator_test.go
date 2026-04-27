@@ -1402,12 +1402,12 @@ type fakeSandboxAuthServer struct {
 	closeSessionIDs []uuid.UUID
 }
 
-func (f *fakeSandboxAuthServer) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, func(), error) {
+func (f *fakeSandboxAuthServer) Listen(_ context.Context, _ uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
 	f.listenCalls++
 	if f.listenErr != nil {
-		return "", nil, f.listenErr
+		return "", f.listenErr
 	}
-	return "/tmp/fake.sock", func() { f.Close(sessionID) }, nil
+	return "/tmp/fake.sock", nil
 }
 
 func (f *fakeSandboxAuthServer) Close(sessionID uuid.UUID) {
@@ -1475,6 +1475,94 @@ func TestRunAgent_AuthSocketClosedWhenCreateFails(t *testing.T) {
 
 	require.Equal(t, 1, authStub.listenCalls, "sandbox auth socket must be opened before container create")
 	require.Equal(t, 1, authStub.closeCalls, "sandbox auth socket must be closed when container create fails")
+}
+
+// TestRunAgent_AuthSocketClosedOnAcquireHoldError verifies the close fires on
+// the AcquireTurnHold-error branch: the listener was opened by
+// prepareSandboxGitHubAuth before container create, and AcquireTurnHold
+// runs *after* the create succeeds. Without an explicit close on this
+// branch, every AcquireTurnHold failure would leak a per-session
+// listener until the orchestrator process exited.
+func TestRunAgent_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TriggeredByUserID = func() *uuid.UUID { id := uuid.New(); return &id }()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.sessions.acquireHoldErr = errors.New("acquire failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should propagate the acquire-hold failure")
+	require.Contains(t, err.Error(), "acquire turn hold", "RunAgent should surface the acquire-hold failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before container create")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when acquire-hold fails after socket was opened")
+}
+
+// TestRunAgent_AuthSocketClosedOnHydrateRaceLoss verifies the close fires on
+// the losing-hydrate-race branch: AcquireTurnHold succeeds but reports a
+// different container_id (another holder published first), so we destroy
+// our local sandbox. The listener we opened before container create must
+// also be torn down — the winning container is owned by the other holder
+// and has its own listener.
+func TestRunAgent_AuthSocketClosedOnHydrateRaceLoss(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TriggeredByUserID = func() *uuid.UUID { id := uuid.New(); return &id }()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when AcquireTurnHold reports a different container_id")
+	require.Contains(t, err.Error(), "sandbox race", "RunAgent should surface the sandbox-race condition")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before the race is detected")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when the local sandbox is destroyed after losing the hydrate race")
 }
 
 func TestRunAgent_PreviewHeldContainerKeepsSandboxAuthSocketOpen(t *testing.T) {
@@ -3284,6 +3372,119 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 		require.NotContains(t, cmd, "143-tools git-bootstrap",
 			"git-bootstrap must not re-run on reused containers; original RunAgent already wired git config")
 	}
+}
+
+// TestContinueSession_AuthSocketClosedOnAcquireHoldError verifies that
+// ContinueSession closes the per-session credential listener on the
+// AcquireTurnHold-error branch: prepareSandboxGitHubAuth ran before
+// container create, so the listener is live by the time AcquireTurnHold
+// errors. Without an explicit close, the listener (and its socket file)
+// would outlive the failed turn.
+func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// No ContainerID, no SnapshotKey: forces the fresh-Create path that
+	// goes through prepareSandboxGitHubAuth → Listen before AcquireTurnHold.
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	d.sessions.acquireHoldErr = errors.New("db write failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err, "ContinueSession should propagate the acquire-hold failure")
+	require.Contains(t, err.Error(), "acquire turn hold", "ContinueSession should surface the acquire-hold failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before acquire-hold")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when acquire-hold fails after the listener was opened")
+}
+
+// TestContinueSession_AuthSocketClosedOnHydrateFailure verifies that the
+// hydrate-failure branch in ContinueSession also tears down the listener.
+// prepareSandboxGitHubAuth opens the listener before HydrateSandboxFromSnapshot
+// runs, so a hydrate failure must close it explicitly — there's no
+// container yet to attach a deferred close to.
+func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// SnapshotKey forces the hydrate path, which fails when the snapshot
+	// store can't fulfil the restore (the orchestrator's mock provider
+	// returns an error from Restore by default unless we wire one up).
+	snapshotKey := "snap-key"
+	session.SnapshotKey = &snapshotKey
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	hydrateErr := errors.New("hydrate failed")
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, _ io.Reader) error {
+		return hydrateErr
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err, "ContinueSession should propagate the hydrate failure")
+	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before hydrate")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
 }
 
 // TestContinueSession_AcquireHoldErrorFailsTurn covers the branch where
