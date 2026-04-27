@@ -1,0 +1,77 @@
+"use client";
+
+import type { Session } from "@/lib/types";
+
+// LinkedIssueChips renders a compact chip per linked issue in the session
+// header. Primary issue first, related issues after, ordered by position.
+//
+// We render Linear identifiers as clickable badges that deep-link back to
+// Linear via the persisted external_id. Other sources (Sentry/Slack) just
+// show a labeled chip without a deep link in v1.
+//
+// See design 62 §"Session detail view" for the full LinkedIssueCard spec
+// (state name + color, priority, assignee). v1 ships this minimal chip set
+// to surface the linkage immediately; the richer card lives in the right
+// detail panel and follows in a polish pass.
+export function LinkedIssueChips({ session }: { session: Session }) {
+  const links = session.linked_issues ?? [];
+  if (links.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1 ml-2 shrink-0">
+      {links.map((link) => {
+        const isLinear = link.issue_source === "linear";
+        const isPrimary = link.role === "primary";
+        // Linear links must always carry an external_id (the Linear key
+        // like "ACS-1234"). Falling back to a UUID slice would surface a
+        // bug as a confusing chip; render an explicit placeholder instead.
+        if (isLinear && !link.external_id) {
+          // Surface in the console so dogfooding catches the missing key
+          // without the user having to file a ticket.
+          if (typeof console !== "undefined") {
+            console.warn("LinkedIssueChips: linear link missing external_id", link);
+          }
+        }
+        const ident = isLinear
+          ? (link.external_id ?? "Linear (no key)")
+          : (link.external_id ?? link.issue_id.slice(0, 8));
+        const tooltip =
+          (link.issue_title ?? "") +
+          (isPrimary ? " (primary)" : " (related)") +
+          (link.issue_status ? ` · ${link.issue_status}` : "");
+
+        const chipClasses = isPrimary
+          ? "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/30"
+          : "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground border border-border";
+
+        if (isLinear && link.external_id) {
+          // Prefer the workspace-qualified URL when we cached the slug;
+          // it resolves correctly regardless of which workspace the user
+          // last viewed in Linear. Fall back to the universal redirect
+          // for legacy links written before slug caching landed.
+          const url = link.issue_workspace_slug
+            ? `https://linear.app/${link.issue_workspace_slug}/issue/${link.external_id}`
+            : `https://linear.app/issue/${link.external_id}`;
+          return (
+            <a
+              key={link.id}
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={chipClasses}
+              title={tooltip}
+            >
+              {ident}
+            </a>
+          );
+        }
+
+        return (
+          <span key={link.id} className={chipClasses} title={tooltip}>
+            {ident}
+          </span>
+        );
+      })}
+    </div>
+  );
+}

@@ -108,6 +108,32 @@ func (p SessionValidationPolicy) Validate() error {
 	}
 }
 
+// LinearPrepareState gates turn 1 of a session against pre-start Linear
+// resolution. "none" means there is no Linear primary to wait for. "pending"
+// holds the session in a recoverable preparing state. "ready" lets the
+// orchestrator start the agent. "failed" means we could not fetch the
+// promised Linear context — the user can retry; we never start blind.
+type LinearPrepareState string
+
+const (
+	LinearPrepareStateNone    LinearPrepareState = "none"
+	LinearPrepareStatePending LinearPrepareState = "pending"
+	LinearPrepareStateReady   LinearPrepareState = "ready"
+	LinearPrepareStateFailed  LinearPrepareState = "failed"
+)
+
+func (s LinearPrepareState) Validate() error {
+	switch s {
+	case LinearPrepareStateNone,
+		LinearPrepareStatePending,
+		LinearPrepareStateReady,
+		LinearPrepareStateFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid LinearPrepareState: %q", s)
+	}
+}
+
 // SessionIssueLinkRole captures whether a linked issue owns lifecycle
 // transitions for the session or is contextual-only related context.
 type SessionIssueLinkRole string

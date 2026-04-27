@@ -271,7 +271,24 @@ type Session struct {
 	PRCreationError      *string         `db:"pr_creation_error" json:"pr_creation_error,omitempty"`
 	DiffCollectedAt      *time.Time      `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
 	LatestDiffSnapshotID *uuid.UUID      `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
-	DeletedAt            *time.Time      `db:"deleted_at" json:"-"`
+	// LinearPrivate suppresses every Linear write for this session. The agent
+	// still receives Linear context locally; nothing leaves 143. Frozen at
+	// session create — see design 62 §"Composer controls must express distinct
+	// semantics" for why post-hoc backfill would be confusing.
+	LinearPrivate bool `db:"linear_private" json:"linear_private"`
+	// LinearStateSyncDisabled keeps the attachment+rolling comment trail intact
+	// but blocks workflow-state automation. Distinct from LinearPrivate.
+	LinearStateSyncDisabled bool `db:"linear_state_sync_disabled" json:"linear_state_sync_disabled"`
+	// LinearIdentifierHint is the primary Linear key (e.g. "ACS-1234") captured
+	// when detection resolved. Read by the branch-naming logic so the working
+	// branch slug includes the identifier — Linear's GitHub integration matches
+	// branches with the key prefix independently of the PR title prefix.
+	LinearIdentifierHint *string `db:"linear_identifier_hint" json:"linear_identifier_hint,omitempty"`
+	// LinearPrepareState reflects the pre-start preparation step. "ready"
+	// gates turn 1 from starting until the primary Linear context snapshot
+	// has been captured.
+	LinearPrepareState LinearPrepareState `db:"linear_prepare_state" json:"linear_prepare_state"`
+	DeletedAt          *time.Time         `db:"deleted_at" json:"-"`
 	// GitIdentitySource records which token authority the agent used for
 	// git pushes ("user" — the triggering user's GitHub OAuth token; "app"
 	// — the GitHub App installation token). Stamped at session-start by
@@ -305,6 +322,11 @@ type SessionIssueLink struct {
 	Description   *string              `db:"description" json:"description,omitempty"`
 	RepositoryID  *uuid.UUID           `db:"repository_id" json:"repository_id,omitempty"`
 	IssueStatus   *string              `db:"issue_status" json:"issue_status,omitempty"`
+	// IssueWorkspaceSlug is left-joined off Linear's provider_state. The
+	// frontend uses it to render `linear.app/<slug>/issue/<KEY>` deep
+	// links instead of the universal redirect path. Nil for non-Linear
+	// links and Linear links written before workspace caching landed.
+	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
 }
 
 // SessionIssueSnapshotEntry is the immutable execution-time issue context

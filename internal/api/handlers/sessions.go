@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -74,12 +75,46 @@ type SessionHandler struct {
 	prAuthSigningKey []byte
 	frontendURL      string
 	streams          *cache.SessionStreams
+	linearLinker     linearSessionLinker
 	// shutdownCh is closed on SIGTERM; see SetShutdownSignal.
 	shutdownCh <-chan struct{}
 }
 
+// linearSessionLinker is the narrow surface SessionHandler needs from the
+// Linear service. The concrete *linear.Service satisfies this; the
+// interface stays here so CreateManual is testable without dragging in the
+// full Linear stack.
+type linearSessionLinker interface {
+	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
+}
+
+// looksLikeLinearReference is a cheap pre-validation hint: when the user
+// supplied no message text but the references picker carries Linear-shaped
+// content, allow CreateManual to proceed and let the linker hydrate context
+// from the issue alone (design 62 §"Issue-only session start"). Detection
+// runs again inside the linker — we are not relaxing security here, only
+// the message-required check.
+//
+// Defers to linear.MightContainLinearRef so this hint stays in lockstep
+// with the actual detection regexes.
+func looksLikeLinearReference(refs []models.SessionInputReference) bool {
+	for _, r := range refs {
+		if linear.MightContainLinearRef(r.Display) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *SessionHandler) SetIssueLinkStore(store *db.SessionIssueLinkStore) {
 	h.linkStore = store
+}
+
+// SetLinearLinker injects the Linear session-linking service. When unset,
+// CreateManual treats Linear refs as opaque text — same behavior as when
+// the org has no Linear integration. This is the design 62 §"Path C" no-op.
+func (h *SessionHandler) SetLinearLinker(linker linearSessionLinker) {
+	h.linearLinker = linker
 }
 
 func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
@@ -1808,6 +1843,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode       string                         `json:"token_mode"`
 		RepositoryID    string                         `json:"repository_id"`
 		Branch          string                         `json:"branch"`
+		// LinearPrivate suppresses every Linear write; the agent still gets
+		// linked-issue context locally. Frozen at session create.
+		LinearPrivate bool `json:"linear_private,omitempty"`
+		// LinearStateSyncDisabled keeps the attachment + rolling comment
+		// trail intact but blocks workflow-state automation.
+		LinearStateSyncDisabled bool `json:"linear_state_sync_disabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1815,7 +1856,13 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
-	if body.Message == "" {
+	// Empty message is allowed iff the user is starting from a linked
+	// Linear issue. Detection runs after the body validation, so we accept
+	// "looks like a Linear ref somewhere in the inputs" as the relaxation
+	// signal here. Worst case (no Linear integration) the linker is a
+	// no-op and the agent gets an empty user message — which is fine for a
+	// session that came in via the Linear-issue-only fast path.
+	if body.Message == "" && !looksLikeLinearReference(body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message is required")
 		return
 	}
@@ -1947,21 +1994,23 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &models.Session{
-		OrgID:             orgID,
-		Origin:            models.SessionOriginManual,
-		InteractionMode:   models.SessionInteractionModeInteractive,
-		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
-		AgentType:         agentType,
-		Status:            "pending",
-		AutonomyLevel:     autonomyLevel,
-		TokenMode:         tokenMode,
-		ModelOverride:     modelOverride,
-		ReasoningEffort:   reasoningOverride,
-		TriggeredByUserID: manualTriggeredByUserID,
-		Title:             &title,
-		PMApproach:        &title,
-		TargetBranch:      targetBranch,
-		RepositoryID:      repoID,
+		OrgID:                   orgID,
+		Origin:                  models.SessionOriginManual,
+		InteractionMode:         models.SessionInteractionModeInteractive,
+		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
+		AgentType:               agentType,
+		Status:                  "pending",
+		AutonomyLevel:           autonomyLevel,
+		TokenMode:               tokenMode,
+		ModelOverride:           modelOverride,
+		ReasoningEffort:         reasoningOverride,
+		TriggeredByUserID:       manualTriggeredByUserID,
+		Title:                   &title,
+		PMApproach:              &title,
+		TargetBranch:            targetBranch,
+		RepositoryID:            repoID,
+		LinearPrivate:           body.LinearPrivate,
+		LinearStateSyncDisabled: body.LinearStateSyncDisabled,
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
@@ -1992,6 +2041,53 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := h.messageStore.Create(r.Context(), initMsg); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to create initial session message — continuing without it")
+		}
+	}
+
+	// Resolve linked Linear issues before enqueueing the agent run. Per
+	// design 62 §"Pre-start preparation step", turn 1 cannot start until the
+	// primary Linear issue has its context snapshot captured — but the
+	// session-create response should still come back fast. The linker
+	// chooses inline vs queued based on a strict latency budget.
+	if h.linearLinker != nil && body.RepositoryID != "" {
+		userID := manualTriggeredByUserID
+		referenceText := ""
+		if len(body.References) > 0 {
+			var refDisplays []string
+			for _, ref := range body.References {
+				if ref.Display != "" {
+					refDisplays = append(refDisplays, ref.Display)
+				}
+			}
+			referenceText = strings.Join(refDisplays, "\n")
+		}
+		linearResult, linkErr := h.linearLinker.ResolveAndLinkAtCreate(r.Context(), linear.CreateInput{
+			OrgID:         orgID,
+			SessionID:     session.ID,
+			MessageBody:   body.Message,
+			SessionTitle:  title,
+			BranchName:    body.Branch,
+			ReferenceText: referenceText,
+			UserID:        userID,
+		})
+		if linkErr != nil {
+			// Linking is non-fatal: session continues, the prepare worker
+			// can recover. We log so dogfooding can spot it.
+			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; will retry async")
+		}
+		if linearResult.PrimaryIdentifier != "" {
+			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err == nil {
+				session.LinearIdentifierHint = &linearResult.PrimaryIdentifier
+			}
+			// Use the Linear issue title as the session title when the user
+			// gave us nothing useful. Honors design 62 §"Issue-only session
+			// start".
+			if linearResult.PrimaryTitle != "" && shouldOverrideTitleWithLinearIssue(session.Title) {
+				newTitle := linearResult.PrimaryTitle
+				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err == nil {
+					session.Title = &newTitle
+				}
+			}
 		}
 	}
 
@@ -2090,10 +2186,16 @@ func buildManualSessionDescription(message string, images []string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// defaultManualSessionTitle is the placeholder title we apply when a manual
+// session has no message body to derive a title from. The Linear-issue-only
+// fast path overwrites this with the linked issue's title, which means the
+// constant doubles as a sentinel — exposed for that comparison.
+const defaultManualSessionTitle = "Manual Session"
+
 func manualSessionTitle(message string) string {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
-		return "Manual Session"
+		return defaultManualSessionTitle
 	}
 
 	if idx := strings.Index(trimmed, "\n"); idx > 0 {
@@ -2105,6 +2207,21 @@ func manualSessionTitle(message string) string {
 	}
 
 	return strings.TrimSpace(trimmed[:120]) + "..."
+}
+
+// shouldOverrideTitleWithLinearIssue reports whether a Linear primary
+// resolution should overwrite the session title. We replace the title only
+// when the user gave us nothing useful — empty, whitespace, or the
+// default placeholder — never when the user typed a real subject line.
+func shouldOverrideTitleWithLinearIssue(current *string) bool {
+	if current == nil {
+		return true
+	}
+	trimmed := strings.TrimSpace(*current)
+	if trimmed == "" {
+		return true
+	}
+	return trimmed == defaultManualSessionTitle
 }
 
 // ArchiveSession marks a session as archived, hiding it from default list views.

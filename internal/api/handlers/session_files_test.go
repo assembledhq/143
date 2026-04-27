@@ -82,27 +82,32 @@ var sessionColumnsForFiles = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func sessionFileTestRow(values ...interface{}) []interface{} {
-	// Tests written before four column additions pass values whose count
-	// is seven short of the current schema. Inject the missing pieces here
-	// so the fixtures don't have to be rewritten:
-	//   - 3 policy defaults (origin/interaction_mode/validation_policy) at the front
+	// Legacy fixtures predate four batches of column additions. Inject all
+	// of them in their landed positions so callers don't have to update
+	// every row literal:
+	//   - 3 policy defaults (origin/interaction_mode/validation_policy) at positions 3-5
 	//   - 2 nils right after snapshot_key (pending_snapshot_key, pending_snapshot_set_at)
-	//   - 2 trailing identity nils (git_identity_source/git_identity_user_id) just before created_at
-	if len(values) == len(sessionColumnsForFiles)-3-2-2 {
-		row := make([]interface{}, 0, len(values)+7)
+	//   - 4 linear_* defaults just before deleted_at
+	//   - 2 git_identity nils between deleted_at and created_at
+	if len(values) == len(sessionColumnsForFiles)-3-2-4-2 {
+		row := make([]interface{}, 0, len(values)+11)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
 		// Legacy values[3..38] = agent_type through snapshot_key (36 values).
 		row = append(row, values[3:39]...)
 		row = append(row, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
-		// Legacy values[39..len-2] = runtime through deleted_at.
-		row = append(row, values[39:len(values)-1]...)
-		row = append(row, nil, nil) // git_identity_source, git_identity_user_id
-		row = append(row, values[len(values)-1])
+		// Legacy values[39..len-3] = runtime through latest_diff_snapshot_id.
+		row = append(row, values[39:len(values)-2]...)
+		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
+		row = append(row, values[len(values)-2]) // deleted_at
+		row = append(row, nil, nil)              // git_identity_source, git_identity_user_id
+		row = append(row, values[len(values)-1]) // created_at
 		return row
 	}
 	return values

@@ -63,19 +63,20 @@ type PRService struct {
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
-	users           *db.UserStore
-	orgs            *db.OrganizationStore
-	prTemplates     *db.PRTemplateStore
-	previews        *db.PreviewStore
-	previewStopper  PreviewStopper
-	prHealthStreams *cache.PullRequestStreams
-	llmClient       llm.Client
-	audit           *db.AuditEmitter
-	sandboxProvider agent.SandboxProvider // used by the push-based PR flow
-	snapshots       storage.SnapshotStore // used by the push-based PR flow
-	logger          zerolog.Logger
-	baseURL         string
-	httpClient      *http.Client
+	users            *db.UserStore
+	orgs             *db.OrganizationStore
+	prTemplates      *db.PRTemplateStore
+	previews         *db.PreviewStore
+	previewStopper   PreviewStopper
+	prHealthStreams  *cache.PullRequestStreams
+	llmClient        llm.Client
+	audit            *db.AuditEmitter
+	sandboxProvider  agent.SandboxProvider // used by the push-based PR flow
+	snapshots        storage.SnapshotStore // used by the push-based PR flow
+	logger           zerolog.Logger
+	baseURL          string
+	httpClient       *http.Client
+	linearMilestones LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -91,6 +92,18 @@ type PRService struct {
 	// callers don't need to wait — the goroutine self-completes and updates
 	// the session row atomically.
 	postPRSnapshotUploads sync.WaitGroup
+}
+
+// LinearMilestoneEnqueuer is the post-event hook that fires the Linear
+// attachment + comment + state-sync writes after a session reaches a
+// milestone (PR opened / PR merged / etc.). Held as a function so PRService
+// stays decoupled from the Linear package — the function lives in the
+// linker service and packages a worker enqueue + payload.
+type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int)
+
+// SetLinearMilestoneEnqueuer wires the Linear post-event hook.
+func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
+	s.linearMilestones = enq
 }
 
 func NewPRService(
@@ -593,6 +606,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
+	// Fire the Linear PR-opened milestone (attachment subtitle update,
+	// rolling-comment refresh, optional workflow-state move under guards).
+	// nil-safe: when no Linear linker is wired, this is a no-op.
+	if s.linearMilestones != nil {
+		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
+	}
+
 	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
 		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
 	}
@@ -1059,6 +1079,13 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 }
 
 func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models.PullRequest, commitSHA string) {
+	// Fire the Linear PR-merged milestone. Coexistence guards inside the
+	// linker suppress this when Linear's GitHub integration is already
+	// active on the issue (avoiding double cycle/sprint membership).
+	if pr.SessionID != nil && s.linearMilestones != nil {
+		s.linearMilestones(ctx, pr.OrgID, *pr.SessionID, "pr_merged", pr.GitHubPRNumber)
+	}
+
 	var snapshotKey *string
 
 	if pr.SessionID != nil && s.sessions != nil {
@@ -1850,6 +1877,18 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 	if slug == "" {
 		slug = "changes"
 	}
+	// Linear's GitHub integration matches branches with a key prefix
+	// independently of the PR title — see design 62 §"Branch naming hint".
+	// When the session has a primary Linear identifier hint, embed it in
+	// the slug so the integration can claim the branch even if the PR title
+	// path failed.
+	if session != nil && session.LinearIdentifierHint != nil && *session.LinearIdentifierHint != "" {
+		hint := strings.ToLower(*session.LinearIdentifierHint)
+		// Avoid double-embedding when the slug already contains the key.
+		if !strings.Contains(slug, hint) {
+			slug = hint + "-" + slug
+		}
+	}
 	return fmt.Sprintf("143/%s/%s", short, slug)
 }
 
@@ -1861,24 +1900,168 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 			if title == "" {
 				title = issue.Title
 			}
-			prefix := issue.ExternalID + ": "
-			return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+			// Strip "ACS-1234: " preamble baked into the title — we add
+			// [ACS-1234] prefixes ourselves so the two formats don't
+			// double up.
+			title = stripLinearColonPrefix(title)
+			return applyLinearKeyPrefixes(session, title, issue)
 		default:
 			title := bestPRTitleSubject(session, issue.Title)
 			if strings.HasPrefix(strings.ToLower(title), "fix: ") {
-				return truncatePRTitle(title, maxPRTitleLen)
+				return applyLinearKeyPrefixes(session, truncatePRTitle(title, maxPRTitleLen), nil)
 			}
 			if title != "" {
-				return "fix: " + truncatePRTitle(title, maxPRTitleLen-len("fix: "))
+				return applyLinearKeyPrefixes(session, "fix: "+truncatePRTitle(title, maxPRTitleLen-len("fix: ")), nil)
 			}
-			return fmt.Sprintf("fix: Session %s", session.ID.String()[:8])
+			return applyLinearKeyPrefixes(session, fmt.Sprintf("fix: Session %s", session.ID.String()[:8]), nil)
 		}
 	}
 
 	if title := bestPRTitleSubject(session, ""); title != "" {
-		return title
+		return applyLinearKeyPrefixes(session, title, nil)
 	}
-	return fmt.Sprintf("Session %s", session.ID.String()[:8])
+	return applyLinearKeyPrefixes(session, fmt.Sprintf("Session %s", session.ID.String()[:8]), nil)
+}
+
+// stripLinearColonPrefix removes a leading "ACS-1234: " preamble from a
+// title so applyLinearKeyPrefixes can take over without duplicating the key.
+var linearColonPrefixRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-\d+\s*:\s*`)
+
+func stripLinearColonPrefix(s string) string {
+	return linearColonPrefixRE.ReplaceAllString(s, "")
+}
+
+// linearBracketPrefixRE matches a single leading "[KEY-N] " prefix; we use
+// it to strip stale prefixes from a title before re-prefixing on title
+// resync, so resync never double-prefixes (design 62 §"Title resync").
+var linearBracketPrefixRE = regexp.MustCompile(`^\[[A-Z][A-Z0-9_]{0,9}-\d+\]\s+`)
+
+// stripLeadingBracketPrefixes removes every leading "[KEY-N] " from title.
+// Order matters: the loop trims one prefix at a time so a title like
+// "[ACS-1] [ACS-2] feat: x" returns "feat: x", not just "[ACS-2] feat: x".
+//
+// maxStripIterations is a defensive cap. Each iteration strictly shrinks
+// the string when ReplaceAllString matches, so the loop terminates on its
+// own — but a regex change (or a future caller) shouldn't be able to spin
+// us forever. Twenty iterations is well above any reasonable real PR title.
+func stripLeadingBracketPrefixes(s string) string {
+	const maxStripIterations = 20
+	for i := 0; i < maxStripIterations; i++ {
+		stripped := linearBracketPrefixRE.ReplaceAllString(s, "")
+		if stripped == s {
+			return s
+		}
+		s = stripped
+	}
+	return s
+}
+
+// conventionalCommitPrefixRE matches the leading conventional commit prefix
+// like `feat:`, `fix(scope):`, etc., capturing it as group 1 and the rest
+// of the title as group 2. Linear bracket prefixes go *after* this so the
+// PR title reads `feat: [ACS-1234] Add OAuth callback handler`.
+var conventionalCommitPrefixRE = regexp.MustCompile(`^([a-z]+(?:\([^)]*\))?:\s+)(.*)`)
+
+// applyLinearKeyPrefixes inserts one `[KEY-N] ` prefix per linked Linear
+// issue, ordered primary first then related by session-link order. Honors:
+//
+//   - Conventional commit prefix preserved (prefixes go after `feat:`).
+//   - Identifiers already present in the title are not double-prefixed.
+//   - Leading stale `[KEY-N] ` prefixes are stripped before re-prefixing.
+//   - Body truncation, never prefix truncation: if total length would
+//     exceed maxPRTitleLen we only clamp the trailing subject.
+//
+// primaryIssue may be nil — in that case the function reads identifiers
+// solely from session.LinkedIssues. When primaryIssue is non-nil and Linear-
+// sourced, its identifier is used as the primary key in case LinkedIssues
+// hasn't been hydrated yet.
+func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue *models.Issue) string {
+	identifiers := collectLinearIdentifiers(session, primaryIssue)
+	if len(identifiers) == 0 {
+		return truncatePRTitle(title, maxPRTitleLen)
+	}
+
+	// Strip stale `[KEY-N] ` prefixes left over from a prior resync so we
+	// never double-prefix.
+	title = stripLeadingBracketPrefixes(title)
+
+	// Drop identifiers that already appear inside the title — the user
+	// (or a manual edit) embedded them, no need for a duplicate.
+	keep := identifiers[:0]
+	for _, id := range identifiers {
+		if !strings.Contains(title, id) {
+			keep = append(keep, id)
+		}
+	}
+	identifiers = keep
+	if len(identifiers) == 0 {
+		return truncatePRTitle(title, maxPRTitleLen)
+	}
+
+	bracketPrefix := strings.Builder{}
+	for _, id := range identifiers {
+		bracketPrefix.WriteString("[")
+		bracketPrefix.WriteString(id)
+		bracketPrefix.WriteString("] ")
+	}
+
+	// Conventional commit prefix preserved: place Linear prefixes after it.
+	if m := conventionalCommitPrefixRE.FindStringSubmatch(title); len(m) == 3 {
+		conv := m[1]
+		rest := m[2]
+		joined := conv + bracketPrefix.String() + rest
+		if len(joined) <= maxPRTitleLen {
+			return joined
+		}
+		// Trim the rest, never the prefixes.
+		fixed := conv + bracketPrefix.String()
+		return fixed + truncatePRTitle(rest, maxPRTitleLen-len(fixed))
+	}
+
+	joined := bracketPrefix.String() + title
+	if len(joined) <= maxPRTitleLen {
+		return joined
+	}
+	fixed := bracketPrefix.String()
+	return fixed + truncatePRTitle(title, maxPRTitleLen-len(fixed))
+}
+
+// collectLinearIdentifiers returns the deterministically-ordered Linear
+// keys for a session: primary first, then related in session-link order.
+// primaryIssue is a fallback when LinkedIssues isn't populated.
+func collectLinearIdentifiers(session *models.Session, primaryIssue *models.Issue) []string {
+	if session == nil {
+		if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && primaryIssue.ExternalID != "" {
+			return []string{primaryIssue.ExternalID}
+		}
+		return nil
+	}
+	if len(session.LinkedIssues) > 0 {
+		seen := map[string]bool{}
+		out := make([]string, 0, len(session.LinkedIssues))
+		// LinkedIssues comes back ordered (primary first, then position).
+		for _, link := range session.LinkedIssues {
+			if link.IssueSource == nil || *link.IssueSource != models.IssueSourceLinear {
+				continue
+			}
+			if link.ExternalID == nil || *link.ExternalID == "" {
+				continue
+			}
+			id := *link.ExternalID
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && primaryIssue.ExternalID != "" {
+		return []string{primaryIssue.ExternalID}
+	}
+	return nil
 }
 
 func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
@@ -1890,14 +2073,8 @@ func formatSyncedPRTitle(session *models.Session, issue *models.Issue) string {
 				title = issue.Title
 			}
 		}
-
-		prefix := strings.TrimSpace(issue.ExternalID)
-		if prefix == "" {
-			return truncatePRTitle(title, maxPRTitleLen)
-		}
-
-		prefix += ": "
-		return prefix + truncatePRTitle(title, maxPRTitleLen-len(prefix))
+		title = stripLinearColonPrefix(title)
+		return applyLinearKeyPrefixes(session, title, issue)
 	}
 
 	return formatPRTitle(session, issue)

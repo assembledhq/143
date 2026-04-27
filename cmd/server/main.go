@@ -36,6 +36,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -351,6 +352,7 @@ func main() {
 			SessionMessages:     sessionMessageStore,
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -988,6 +990,24 @@ func buildServices(
 		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
 	}
 
+	// Linear session-linking service. Drives prepare_linear_primary,
+	// link_linear_issue, refresh_linear_team_keys workers and handles the
+	// post-link milestones (PR open / PR merged / etc.). Constructed via
+	// the shared Build helper so the API server (router.go) and the worker
+	// (here) wire the service identically.
+	linearService := linear.Build(linear.BuildDeps{
+		Pool:         pool,
+		Logger:       logger,
+		Integrations: integrationStore,
+		Credentials:  credentialStore,
+		Issues:       issueStore,
+		Sessions:     sessionStore,
+		IssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Orgs:         orgStore,
+		Jobs:         jobStore,
+	})
+	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
+
 	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
@@ -1000,6 +1020,7 @@ func buildServices(
 		LLM:             llmClient,
 		GitHub:          ghSvc,
 		TitleService:    titleService,
+		Linear:          linearService,
 	}
 	if sandboxAuthServer != nil {
 		// Capture by value: the closure outlives buildServices, but the

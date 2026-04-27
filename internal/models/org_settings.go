@@ -256,6 +256,87 @@ type OrgSettings struct {
 	MaxSessionDurationSeconds int `json:"max_session_duration_seconds,omitempty"`
 
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
+
+	// LinearAutomation controls how 143 reflects session events back into
+	// Linear. The two write levels are intentionally separate so teams can
+	// adopt visibility (attachment + rolling comment) before they are ready
+	// for state automation. See design 62 §"Per-org configuration UI".
+	LinearAutomation LinearAutomationSettings `json:"linear_automation,omitempty"`
+}
+
+// LinearAutomationSettings captures org-level defaults plus per-team
+// overrides for Linear write-back behavior.
+//
+// Pointer-typed flags distinguish "field absent in JSON" (nil → apply
+// design default) from "explicitly set to false" (non-nil → respect the
+// user). Without pointers we'd be unable to tell a fresh org from one
+// that explicitly turned automation off, and would silently re-enable
+// the writes on every settings reload.
+type LinearAutomationSettings struct {
+	// PostSessionLinks enables attachment + rolling-comment writes. Defaults
+	// to true when nil. Many teams will want this before they enable state
+	// automation.
+	PostSessionLinks *bool `json:"post_session_links,omitempty"`
+	// MoveWorkflowStates enables forward-only state transitions on the
+	// primary linked Linear issue. Defaults to true when nil; teams that
+	// use Linear as a strict daily Kanban with manual moves can disable it.
+	MoveWorkflowStates *bool `json:"move_workflow_states,omitempty"`
+	// ReviewStateNamePreferences lists the workflow state names we'd prefer
+	// to land in when a PR opens, in order. First match in the team's state
+	// set wins. Empty falls back to a sensible default list at the call
+	// site. Stored as raw strings because workspaces customize freely.
+	ReviewStateNamePreferences []string `json:"review_state_name_preferences,omitempty"`
+	// PerTeam overrides keyed by Linear team key. Inherits the org-level
+	// flags when the key is missing.
+	PerTeam map[string]LinearTeamAutomationOverride `json:"per_team,omitempty"`
+}
+
+// EffectivePostSessionLinks resolves the org-level post-session-links flag,
+// applying the design default (true) when the JSON had no explicit value.
+func (s LinearAutomationSettings) EffectivePostSessionLinks() bool {
+	if s.PostSessionLinks == nil {
+		return true
+	}
+	return *s.PostSessionLinks
+}
+
+// EffectiveMoveWorkflowStates resolves the org-level move-workflow-states
+// flag, applying the design default (true) when no explicit value was set.
+func (s LinearAutomationSettings) EffectiveMoveWorkflowStates() bool {
+	if s.MoveWorkflowStates == nil {
+		return true
+	}
+	return *s.MoveWorkflowStates
+}
+
+// LinearTeamAutomationOverride is a per-team override of the org defaults.
+// Pointers are used so we can distinguish "explicitly off" from "inherit".
+type LinearTeamAutomationOverride struct {
+	PostSessionLinks   *bool `json:"post_session_links,omitempty"`
+	MoveWorkflowStates *bool `json:"move_workflow_states,omitempty"`
+}
+
+// PostSessionLinksFor resolves the effective post-session-links flag for the
+// given team key, applying per-team override on top of org defaults.
+func (s LinearAutomationSettings) PostSessionLinksFor(teamKey string) bool {
+	if override, ok := s.PerTeam[teamKey]; ok && override.PostSessionLinks != nil {
+		return *override.PostSessionLinks
+	}
+	return s.EffectivePostSessionLinks()
+}
+
+// MoveWorkflowStatesFor resolves the effective move-workflow-states flag.
+func (s LinearAutomationSettings) MoveWorkflowStatesFor(teamKey string) bool {
+	if override, ok := s.PerTeam[teamKey]; ok && override.MoveWorkflowStates != nil {
+		return *override.MoveWorkflowStates
+	}
+	return s.EffectiveMoveWorkflowStates()
+}
+
+// DefaultLinearReviewStateNames is the fallback list when an org hasn't set
+// its own preferences. The order reflects what most workspaces use.
+var DefaultLinearReviewStateNames = []string{
+	"In Review", "Code Review", "PR Open", "Pull Request Open",
 }
 
 // Agent autonomy mode constants.
@@ -545,6 +626,16 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds < s.MaxSessionDurationSeconds {
 		s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds = s.MaxSessionDurationSeconds
+	}
+
+	// Linear automation defaults: ensure ReviewStateNamePreferences has a
+	// usable list so PR-open transitions resolve when the org never set
+	// preferences. Flag defaults (PostSessionLinks=true,
+	// MoveWorkflowStates=true) are surfaced via Effective*() accessors so
+	// nil pointers stay distinguishable from explicit false at every call
+	// site — see LinearAutomationSettings doc.
+	if len(s.LinearAutomation.ReviewStateNamePreferences) == 0 {
+		s.LinearAutomation.ReviewStateNamePreferences = DefaultLinearReviewStateNames
 	}
 	if s.RuntimeBudgets.MaxAutomaticExtensionSeconds > 0 {
 		maxExtensionByCeiling := s.RuntimeBudgets.AbsoluteRuntimeCeilingSeconds - s.MaxSessionDurationSeconds

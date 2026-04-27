@@ -49,7 +49,9 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 // newMockPool creates a pgxmock pool and returns it with a cleanup.
@@ -197,14 +199,18 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 					nil,      // diff_history
 					nil,      // input_manifest
 					nil, nil, // archived_at, archived_by_user_id
-					nil,            // automation_run_id
-					"idle",         // pr_creation_state
-					(*string)(nil), // pr_creation_error
-					nil,            // diff_collected_at
-					nil,            // latest_diff_snapshot_id
-					nil,            // deleted_at
-					nil,            // git_identity_source
-					nil,            // git_identity_user_id
+					nil,                           // automation_run_id
+					"idle",                        // pr_creation_state
+					(*string)(nil),                // pr_creation_error
+					nil,                           // diff_collected_at
+					nil,                           // latest_diff_snapshot_id
+					false,                         // linear_private
+					false,                         // linear_state_sync_disabled
+					(*string)(nil),                // linear_identifier_hint
+					models.LinearPrepareStateNone, // linear_prepare_state
+					nil,                           // deleted_at
+					nil,                           // git_identity_source
+					nil,                           // git_identity_user_id
 					now),
 		)
 

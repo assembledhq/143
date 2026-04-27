@@ -861,20 +861,24 @@ var sessionRowColumns = []string{
 	"base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func previewSessionRow(values ...interface{}) []interface{} {
-	if len(values) == len(sessionRowColumns)-3 {
-		row := make([]interface{}, 0, len(values)+3)
+	// Fixtures predate migration 097 (linear_*) and migration 100
+	// (git_identity_*) and the policy columns. Pad in 3 policy values at the
+	// front, the four linear_* columns just before deleted_at, and the two
+	// git_identity nils between deleted_at and created_at.
+	if len(values) == len(sessionRowColumns)-3-4-2 {
+		row := make([]interface{}, 0, len(values)+9)
 		row = append(row, values[:3]...)
-		row = append(
-			row,
-			"",
-			"",
-			"",
-		)
-		row = append(row, values[3:]...)
+		row = append(row, "", "", "")
+		row = append(row, values[3:len(values)-2]...)
+		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
+		row = append(row, values[len(values)-2])
+		row = append(row, nil, nil)
+		row = append(row, values[len(values)-1])
 		return row
 	}
 	return values

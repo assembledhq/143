@@ -40,7 +40,9 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 const (
@@ -55,14 +57,6 @@ const (
 	workerLegacyBaseCommitIndex       = 44
 	workerLegacyDiffCollectedIndex    = 54
 	workerLegacyLatestDiffIndex       = 55
-
-	// workerSessionPreIdentityColumnsLen is the column count before
-	// git_identity_source / git_identity_user_id were appended. The
-	// dispatch logic in workerSessionTestRowDispatch is calibrated to
-	// produce rows of this length; padWorkerIdentityNils fills in the
-	// missing 2 nils at the end so each test fixture doesn't need to
-	// know about the new columns.
-	workerSessionPreIdentityColumnsLen = 76
 )
 
 func workerSessionNeedsPolicyDefaults(values []any) bool {
@@ -160,8 +154,48 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 	return row
 }
 
+// preLinearWorkerSessionColumnsLen is len(workerSessionColumns) before
+// migration 097 added the four linear_* fields. Test rows authored before
+// that migration produce dispatch output that's exactly 4 short of the
+// current sessionColumns; we pad after dispatch so the shape matches.
+const preLinearWorkerSessionColumnsLen = 76
+
+func workerLinearSessionDefaults() []any {
+	return []any{
+		false,          // linear_private
+		false,          // linear_state_sync_disabled
+		(*string)(nil), // linear_identifier_hint
+		"none",         // linear_prepare_state
+	}
+}
+
+// padWorkerLinearFields injects the four linear_* defaults at the position
+// right before the trailing deleted_at/created_at columns when a row was
+// built without them.
+func padWorkerLinearFields(values []any) []any {
+	if len(values) >= len(workerSessionColumns) {
+		return values
+	}
+	if len(values) < 2 {
+		return values
+	}
+	insertAt := len(values) - 2 // before deleted_at, created_at
+	row := make([]any, 0, len(values)+4)
+	row = append(row, values[:insertAt]...)
+	row = append(row, workerLinearSessionDefaults()...)
+	row = append(row, values[insertAt:]...)
+	return row
+}
+
 func workerSessionTestRow(values ...any) []any {
-	return padWorkerIdentityNils(workerSessionTestRowDispatch(values...))
+	row := workerSessionTestRowDispatch(values...)
+	// Dispatch produces rows of length preLinearWorkerSessionColumnsLen
+	// (no linear_*, no git_identity_*). Layer the two pad helpers so
+	// fixtures stay oblivious to the column-shaping migrations.
+	if len(row) == len(workerSessionColumns)-2-4 {
+		row = padWorkerLinearFields(row)
+	}
+	return padWorkerIdentityNils(row)
 }
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
@@ -195,23 +229,23 @@ func padWorkerIdentityNils(row []any) []any {
 func workerSessionTestRowDispatch(values ...any) []any {
 	if workerSessionNeedsPolicyDefaults(values) {
 		switch len(values) {
-		case workerSessionPreIdentityColumnsLen - 3:
+		case preLinearWorkerSessionColumnsLen - 3:
 			return workerSessionWithPolicyDefaults(values)
-		case workerSessionPreIdentityColumnsLen - 4:
+		case preLinearWorkerSessionColumnsLen - 4:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, false)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, false)
-		case workerSessionPreIdentityColumnsLen - 5:
+		case preLinearWorkerSessionColumnsLen - 5:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, false)
-		case workerSessionPreIdentityColumnsLen - 6:
+		case preLinearWorkerSessionColumnsLen - 6:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, false, true)
-		case workerSessionPreIdentityColumnsLen - 7:
+		case preLinearWorkerSessionColumnsLen - 7:
 			if workerSessionLikelyOmitsWorkerNode(values) {
 				return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), false, true, true)
 			}
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, false, true)
-		case workerSessionPreIdentityColumnsLen - 8:
+		case preLinearWorkerSessionColumnsLen - 8:
 			return workerSessionCurrentOptionalDefaults(workerSessionWithPolicyDefaults(values), true, true, true)
 		case workerLegacySessionColumnsLen - 3:
 			return expandLegacyWorkerSessionRow(workerSessionWithPolicyDefaults(values))
@@ -235,7 +269,7 @@ func workerSessionTestRowDispatch(values ...any) []any {
 	}
 
 	switch len(values) {
-	case workerSessionPreIdentityColumnsLen:
+	case preLinearWorkerSessionColumnsLen:
 		return values
 	case workerLegacySessionColumnsLen:
 		return expandLegacyWorkerSessionRow(values)
@@ -255,21 +289,21 @@ func workerSessionTestRowDispatch(values ...any) []any {
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, false, true))
 	case workerLegacySessionColumnsLen - 5:
 		return expandLegacyWorkerSessionRow(workerSessionLegacyOptionalDefaults(values, true, true, true))
-	case workerSessionPreIdentityColumnsLen - 1:
+	case preLinearWorkerSessionColumnsLen - 1:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, false)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, false)
-	case workerSessionPreIdentityColumnsLen - 2:
+	case preLinearWorkerSessionColumnsLen - 2:
 		return workerSessionCurrentOptionalDefaults(values, true, true, false)
-	case workerSessionPreIdentityColumnsLen - 3:
+	case preLinearWorkerSessionColumnsLen - 3:
 		if workerSessionLikelyOmitsWorkerNode(values) {
 			return workerSessionCurrentOptionalDefaults(values, false, true, true)
 		}
 		return workerSessionCurrentOptionalDefaults(values, true, false, true)
-	case workerSessionPreIdentityColumnsLen - 4:
+	case preLinearWorkerSessionColumnsLen - 4:
 		return workerSessionCurrentOptionalDefaults(values, false, false, true)
-	case workerSessionPreIdentityColumnsLen - 5:
+	case preLinearWorkerSessionColumnsLen - 5:
 		return workerSessionCurrentOptionalDefaults(values, true, true, true)
 	}
 	return values
@@ -361,6 +395,113 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
 	)
+}
+
+// workerSessionRowWithLinearPrepareState mirrors workerSessionRow but lets
+// callers set the linear_prepare_state column. Used by the prepare-state
+// gate test below. The four linear_* columns are emitted in trailing
+// position so the row matches the post-migration column shape.
+func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID, status string, prepareState string) []any {
+	now := time.Now()
+	row := workerSessionTestRow(
+		sessionID, issueID, orgID, "claude_code", status, "semi", "low",
+		nil, nil, nil, nil,
+		nil, nil, false, nil, nil, nil,
+		nil, nil, nil, false,
+		nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil,
+		nil, nil, nil,
+		(*string)(nil), 0, now, "snapshotted", (*string)(nil),
+		nil, nil, nil, "", "",
+		0, 0, "", nil,
+		nil, "", "", int64(0), nil,
+		"", nil, nil, 0,
+		nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
+	)
+	// Override linear_prepare_state with the test-supplied value. The
+	// dispatcher already padded the four linear_* columns with defaults;
+	// we just swap the last linear_* slot in.
+	idx := len(row) - 3 // linear_prepare_state position (deleted_at is -2, created_at is -1)
+	row[idx] = prepareState
+	return row
+}
+
+// TestRunAgentHandler_LinearPrepareStateGatesTurnOne locks the design 62
+// contract: turn 1 must not start while linear_prepare_state == "pending".
+// The handler should return a RetryableError with a fixed Retry-After so
+// the queue doesn't busy-spin.
+func TestRunAgentHandler_LinearPrepareStateGatesTurnOne(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "pending")...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must defer when linear pre-start preparation is pending")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "the error must be RetryableError so the worker re-enqueues without consuming an attempt")
+	require.Equal(t, 5*time.Second, retryable.RetryAfter, "the gate should use a fixed short wait, not exponential backoff")
+	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run while preparation is pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestRunAgentHandler_LinearPrepareStateFailedDeadLetters locks the
+// "don't start blind" contract: a session whose Linear pre-start fetch
+// failed must surface as a recoverable failure, not silently boot the
+// agent without context.
+func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusPending), "failed")...,
+			),
+		)
+	// The handler best-effort updates the session row with a recoverable
+	// failure. We mock it as an UPDATE ... RETURNING (the actual shape of
+	// UpdateResult), but the handler ignores its error so a strict-match
+	// failure here would still let the test assert FatalError below.
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowWithLinearPrepareState(runID, issueID, orgID, string(models.SessionStatusFailed), "failed")...,
+		))
+
+	orch := &orchestratorServiceStub{}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	require.Error(t, err, "run_agent must surface a fatal error on linear pre-start failure")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "failure to fetch primary Linear context must dead-letter the run")
+	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run after the prepare path failed")
 }
 
 func TestIngestWebhookHandler(t *testing.T) {
@@ -1482,17 +1623,21 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// 4. Create the session. The 19th arg is automation_run_id — asserting
+	// 4. Create the session. automation_run_id is the 19th arg — asserting
 	// that specific value here is what proves the handler actually linked the
 	// session back to the run it's servicing (without it, audit+stats joins
-	// on sessions.automation_run_id would silently miss every row).
+	// on sessions.automation_run_id would silently miss every row). The
+	// trailing four AnyArgs are the linear_* policy columns added by
+	// migration 097.
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
 	mock.ExpectCommit()
 

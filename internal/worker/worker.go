@@ -21,8 +21,14 @@ type JobHandler func(ctx context.Context, jobType string, payload json.RawMessag
 // RetryableError wraps an error to indicate that the job should be retried
 // without consuming an attempt. This is useful for transient conditions like
 // concurrency limits where the job will succeed once a slot opens.
+//
+// RetryAfter, when set, replaces the exponential backoff schedule for this
+// retry only. Use it for transient gates where the wait time is known —
+// e.g. waiting on the Linear pre-start preparation worker — so we don't
+// thrash the queue with `1<<attempts`-second backoffs.
 type RetryableError struct {
-	Err error
+	Err        error
+	RetryAfter time.Duration
 }
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
@@ -214,7 +220,7 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true)
+		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, true, retryable.RetryAfter)
 		return
 	}
 
@@ -307,7 +313,14 @@ func (w *Worker) failJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg
 }
 
 func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool) {
-	backoff := retryBackoff(attempt)
+	w.retryJobWithDelay(ctx, jobID, lockToken, errMsg, attempt, preserveAttempts, 0)
+}
+
+func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override time.Duration) {
+	backoff := override
+	if backoff <= 0 {
+		backoff = retryBackoff(attempt)
+	}
 	runAt := time.Now().Add(backoff)
 
 	var (

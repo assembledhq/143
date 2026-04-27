@@ -17,6 +17,9 @@ var sessionIssueLinkTestColumns = []string{
 	"position", "added_by_user_id", "created_at",
 	"issue_title", "issue_source", "external_id", "description",
 	"repository_id", "issue_status",
+	// Migration 097 — Linear workspace slug is left-joined off
+	// session_issue_link_provider_state for deep-link rendering.
+	"issue_workspace_slug",
 }
 
 func TestSessionIssueLinkStore_Create(t *testing.T) {
@@ -108,6 +111,7 @@ func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 				0, &addedBy, now,
 				&title, &source, &externalID, &description,
 				&repoID, &status,
+				nil, // issue_workspace_slug
 			),
 		)
 
@@ -173,9 +177,9 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil).
-					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil).
-					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil),
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil).
+					AddRow(uuid.New(), orgID, sessionA, uuid.New(), string(models.SessionIssueLinkRoleRelated), 1, nil, now, nil, nil, nil, nil, &repoID, nil, nil).
+					AddRow(uuid.New(), orgID, sessionB, uuid.New(), string(models.SessionIssueLinkRolePrimary), 0, nil, now, nil, nil, nil, nil, &repoID, nil, nil),
 			)
 
 		grouped, err := store.ListBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionA, sessionB})
@@ -216,7 +220,7 @@ func TestSessionIssueLinkStore_ListBySessionIDs(t *testing.T) {
 			WillReturnRows(
 				pgxmock.NewRows(sessionIssueLinkTestColumns).AddRow(
 					"bad-uuid", uuid.New(), uuid.New(), uuid.New(), string(models.SessionIssueLinkRolePrimary),
-					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil,
+					0, nil, time.Now().UTC(), nil, nil, nil, nil, nil, nil, nil,
 				),
 			)
 

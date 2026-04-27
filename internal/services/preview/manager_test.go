@@ -158,19 +158,26 @@ var sessionTestCols = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
+	// Migration 097 — Linear session-linking columns. Migration 100 — git
+	// identity audit columns. Mocks must include both so SessionStore.GetByID's
+	// row decode finds every selected field.
+	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func previewManagerSessionRow(values ...any) []any {
-	// Tests written before the git_identity_source / git_identity_user_id
-	// columns existed pass values whose count is two short of the new
-	// schema. Inject the missing nils right before created_at so each
-	// fixture call site doesn't need to know about the new columns.
-	if len(values) == len(sessionTestCols)-3-2 {
-		row := make([]any, 0, len(values)+5)
+	// Tests written before migrations 097 (linear_*) and 100 (git_identity_*)
+	// pass shorter value lists. Inject the policy-defaults (3 values at the
+	// front), four linear_* nils just before deleted_at, and two
+	// git_identity nils between deleted_at and created_at so each fixture
+	// call site stays oblivious to the new columns.
+	if len(values) == len(sessionTestCols)-3-4-2 {
+		row := make([]any, 0, len(values)+9)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
-		row = append(row, values[3:len(values)-1]...)
+		row = append(row, values[3:len(values)-2]...)
+		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
+		row = append(row, values[len(values)-2])
 		row = append(row, nil, nil)
 		row = append(row, values[len(values)-1])
 		return row
@@ -227,7 +234,11 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		nil,      // recovery_started_at
 		0,        // recovery_attempt_count
 		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil,
+		// Migration 097 — Linear session-linking flags. Defaults match a
+		// session created without any Linear ref.
+		false, false, (*string)(nil), "none",
+		nil, now,
 	)
 }
 

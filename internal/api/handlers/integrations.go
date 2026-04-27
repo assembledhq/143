@@ -159,6 +159,17 @@ type IntegrationHandler struct {
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
 	pmAutoTriggerDocs   pmAutoTriggerDocStore
 	pmAutoTriggerLogger zerolog.Logger
+
+	// Linear post-install hooks (nil-safe).
+	linearJobStore *db.JobStore
+}
+
+// SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an
+// initial refresh_linear_team_keys job. Without this hook, the team-key
+// allowlist stays empty until the next 24h cron, which means bare-identifier
+// detection won't work right after install.
+func (h *IntegrationHandler) SetLinearJobStore(jobs *db.JobStore) {
+	h.linearJobStore = jobs
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -411,6 +422,18 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderLinear); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_LINEAR_FAILED", "failed to connect linear integration", err)
 		return
+	}
+
+	// Trigger an initial team-key refresh so detection's bare-identifier
+	// branch works on the very next session. Without this, the allowlist
+	// stays empty until the 24h cron — bad UX right after install.
+	if h.linearJobStore != nil {
+		dedupe := "refresh_linear_team_keys:" + orgID.String()
+		if _, err := h.linearJobStore.Enqueue(r.Context(), orgID, "linear", "refresh_linear_team_keys", map[string]any{
+			"org_id": orgID.String(),
+		}, 5, &dedupe); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to enqueue refresh_linear_team_keys after install")
+		}
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?linear=connected", http.StatusTemporaryRedirect)

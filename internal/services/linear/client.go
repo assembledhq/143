@@ -1,0 +1,566 @@
+package linear
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// graphQLClient is a small Linear GraphQL client that owns the API surface
+// the linker service needs. We deliberately keep this separate from
+// integration.LinearTaskManager because the linker has different needs:
+// attachmentCreate/Update, single-comment lifecycle, workflow state lookup
+// by type with name preferences, recent-edits introspection, and coexistence
+// detection.
+type graphQLClient struct {
+	httpClient *http.Client
+	apiURL     string
+	token      string
+}
+
+// NewClient builds a Client backed by the production Linear GraphQL API.
+// Suitable for ClientFactory wiring.
+func NewClient(token string) Client {
+	return &graphQLClient{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiURL:     "https://api.linear.app/graphql",
+		token:      token,
+	}
+}
+
+// NewClientWithEndpoint is for tests that want to point at a fake server.
+func NewClientWithEndpoint(token, endpoint string) Client {
+	return &graphQLClient{
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+		apiURL:     endpoint,
+		token:      token,
+	}
+}
+
+// FetchIssue resolves an identifier (e.g. "ACS-1234") to the full Linear
+// issue payload needed by the linker. Returns workspace slug, comments,
+// attachments — everything the prompt builder downstream wants.
+func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*FetchedIssue, error) {
+	query := `query($identifier: String!) {
+		issue(id: $identifier) {
+			id identifier title description url
+			state { id name type }
+			priority
+			assignee { name }
+			team { id key name organization { urlKey } }
+			comments(first: 25) {
+				nodes { body user { name } createdAt }
+			}
+			attachments(first: 10) {
+				nodes { title url metadata sourceType }
+			}
+		}
+	}`
+	var result struct {
+		Data struct {
+			Issue *struct {
+				ID          string `json:"id"`
+				Identifier  string `json:"identifier"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+				State       struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+					Type string `json:"type"`
+				} `json:"state"`
+				Priority int `json:"priority"`
+				Assignee struct {
+					Name string `json:"name"`
+				} `json:"assignee"`
+				Team struct {
+					ID           string `json:"id"`
+					Key          string `json:"key"`
+					Name         string `json:"name"`
+					Organization struct {
+						URLKey string `json:"urlKey"`
+					} `json:"organization"`
+				} `json:"team"`
+				Comments struct {
+					Nodes []struct {
+						Body string `json:"body"`
+						User struct {
+							Name string `json:"name"`
+						} `json:"user"`
+						CreatedAt string `json:"createdAt"`
+					} `json:"nodes"`
+				} `json:"comments"`
+				Attachments struct {
+					Nodes []struct {
+						Title      string         `json:"title"`
+						URL        string         `json:"url"`
+						SourceType string         `json:"sourceType"`
+						Metadata   map[string]any `json:"metadata"`
+					} `json:"nodes"`
+				} `json:"attachments"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"identifier": identifier}, &result); err != nil {
+		return nil, err
+	}
+	if result.Data.Issue == nil {
+		return nil, fmt.Errorf("linear issue %q not found", identifier)
+	}
+	issue := result.Data.Issue
+
+	comments := make([]FetchedComment, 0, len(issue.Comments.Nodes))
+	for _, c := range issue.Comments.Nodes {
+		ts, _ := time.Parse(time.RFC3339, c.CreatedAt)
+		comments = append(comments, FetchedComment{
+			Author:    c.User.Name,
+			Body:      c.Body,
+			CreatedAt: ts,
+		})
+	}
+	attachments := make([]FetchedAttachment, 0, len(issue.Attachments.Nodes))
+	for _, a := range issue.Attachments.Nodes {
+		attachments = append(attachments, FetchedAttachment{
+			Title:  a.Title,
+			URL:    a.URL,
+			Source: a.SourceType,
+		})
+	}
+
+	return &FetchedIssue{
+		ID:            issue.ID,
+		Identifier:    issue.Identifier,
+		Title:         issue.Title,
+		Description:   issue.Description,
+		URL:           issue.URL,
+		StateID:       issue.State.ID,
+		StateName:     issue.State.Name,
+		StateType:     issue.State.Type,
+		Priority:      mapLinearPriorityName(issue.Priority),
+		AssigneeName:  issue.Assignee.Name,
+		TeamID:        issue.Team.ID,
+		TeamKey:       issue.Team.Key,
+		TeamName:      issue.Team.Name,
+		WorkspaceSlug: issue.Team.Organization.URLKey,
+		Comments:      comments,
+		Attachments:   attachments,
+	}, nil
+}
+
+func (c *graphQLClient) ListTeamKeys(ctx context.Context) ([]TeamKeyInfo, error) {
+	query := `query {
+		viewer { organization { id urlKey } }
+		teams { nodes { id key name } }
+	}`
+	var result struct {
+		Data struct {
+			Viewer struct {
+				Organization struct {
+					ID     string `json:"id"`
+					URLKey string `json:"urlKey"`
+				} `json:"organization"`
+			} `json:"viewer"`
+			Teams struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Key  string `json:"key"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, nil, &result); err != nil {
+		return nil, err
+	}
+	out := make([]TeamKeyInfo, 0, len(result.Data.Teams.Nodes))
+	for _, t := range result.Data.Teams.Nodes {
+		out = append(out, TeamKeyInfo{
+			TeamID:      t.ID,
+			Key:         t.Key,
+			Name:        t.Name,
+			WorkspaceID: result.Data.Viewer.Organization.ID,
+		})
+	}
+	return out, nil
+}
+
+// CreateOrUpdateAttachment idempotently writes the durable attachment for a
+// session-issue link. PriorID drives the create-vs-update decision.
+func (c *graphQLClient) CreateOrUpdateAttachment(ctx context.Context, in AttachmentWriteInput) (AttachmentResult, error) {
+	metaJSON, err := json.Marshal(in.Metadata)
+	if err != nil {
+		return AttachmentResult{}, fmt.Errorf("encode attachment metadata: %w", err)
+	}
+
+	if in.PriorID != "" {
+		query := `mutation($id: String!, $input: AttachmentUpdateInput!) {
+			attachmentUpdate(id: $id, input: $input) {
+				success
+				attachment { id url }
+			}
+		}`
+		var result struct {
+			Data struct {
+				AttachmentUpdate struct {
+					Success    bool `json:"success"`
+					Attachment struct {
+						ID  string `json:"id"`
+						URL string `json:"url"`
+					} `json:"attachment"`
+				} `json:"attachmentUpdate"`
+			} `json:"data"`
+		}
+		input := map[string]any{
+			"title":    in.Title,
+			"subtitle": in.Subtitle,
+			"metadata": json.RawMessage(metaJSON),
+		}
+		if err := c.do(ctx, query, map[string]any{"id": in.PriorID, "input": input}, &result); err != nil {
+			return AttachmentResult{}, err
+		}
+		return AttachmentResult{
+			ID:  result.Data.AttachmentUpdate.Attachment.ID,
+			URL: result.Data.AttachmentUpdate.Attachment.URL,
+		}, nil
+	}
+
+	query := `mutation($input: AttachmentCreateInput!) {
+		attachmentCreate(input: $input) {
+			success
+			attachment { id url }
+		}
+	}`
+	var result struct {
+		Data struct {
+			AttachmentCreate struct {
+				Success    bool `json:"success"`
+				Attachment struct {
+					ID  string `json:"id"`
+					URL string `json:"url"`
+				} `json:"attachment"`
+			} `json:"attachmentCreate"`
+		} `json:"data"`
+	}
+	input := map[string]any{
+		"issueId":  in.IssueID,
+		"title":    in.Title,
+		"subtitle": in.Subtitle,
+		"url":      in.URL,
+		"metadata": json.RawMessage(metaJSON),
+	}
+	if in.IconURL != "" {
+		input["iconUrl"] = in.IconURL
+	}
+	if err := c.do(ctx, query, map[string]any{"input": input}, &result); err != nil {
+		return AttachmentResult{}, err
+	}
+	return AttachmentResult{
+		ID:  result.Data.AttachmentCreate.Attachment.ID,
+		URL: result.Data.AttachmentCreate.Attachment.URL,
+	}, nil
+}
+
+func (c *graphQLClient) CreateComment(ctx context.Context, issueID, body string) (string, error) {
+	query := `mutation($input: CommentCreateInput!) {
+		commentCreate(input: $input) {
+			success
+			comment { id }
+		}
+	}`
+	var result struct {
+		Data struct {
+			CommentCreate struct {
+				Success bool `json:"success"`
+				Comment struct {
+					ID string `json:"id"`
+				} `json:"comment"`
+			} `json:"commentCreate"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{
+		"input": map[string]any{"issueId": issueID, "body": body},
+	}, &result); err != nil {
+		return "", err
+	}
+	return result.Data.CommentCreate.Comment.ID, nil
+}
+
+func (c *graphQLClient) UpdateComment(ctx context.Context, commentID, body string) error {
+	query := `mutation($id: String!, $input: CommentUpdateInput!) {
+		commentUpdate(id: $id, input: $input) {
+			success
+		}
+	}`
+	var result struct {
+		Data struct {
+			CommentUpdate struct {
+				Success bool `json:"success"`
+			} `json:"commentUpdate"`
+		} `json:"data"`
+	}
+	return c.do(ctx, query, map[string]any{
+		"id":    commentID,
+		"input": map[string]any{"body": body},
+	}, &result)
+}
+
+// WorkflowStateForType picks the best workflow state for the given type,
+// preferring user-named matches first. The team's own state set is the
+// universe; if none of the preferences match we fall back to any state of
+// the desired type.
+func (c *graphQLClient) WorkflowStateForType(ctx context.Context, teamID string, prefer []string, stateType string) (*WorkflowState, error) {
+	if teamID == "" || stateType == "" {
+		return nil, errors.New("teamID and stateType are required")
+	}
+	query := `query($teamID: String!) {
+		workflowStates(filter: { team: { id: { eq: $teamID } } }, first: 50) {
+			nodes { id name type position }
+		}
+	}`
+	var result struct {
+		Data struct {
+			WorkflowStates struct {
+				Nodes []struct {
+					ID       string  `json:"id"`
+					Name     string  `json:"name"`
+					Type     string  `json:"type"`
+					Position float64 `json:"position"`
+				} `json:"nodes"`
+			} `json:"workflowStates"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"teamID": teamID}, &result); err != nil {
+		return nil, err
+	}
+	preferred := make(map[string]bool, len(prefer))
+	for _, p := range prefer {
+		preferred[strings.ToLower(p)] = true
+	}
+	var fallback *WorkflowState
+	for _, n := range result.Data.WorkflowStates.Nodes {
+		if n.Type != stateType {
+			continue
+		}
+		if preferred[strings.ToLower(n.Name)] {
+			return &WorkflowState{ID: n.ID, Name: n.Name, Type: n.Type}, nil
+		}
+		if fallback == nil {
+			fallback = &WorkflowState{ID: n.ID, Name: n.Name, Type: n.Type}
+		}
+	}
+	return fallback, nil
+}
+
+func (c *graphQLClient) UpdateIssueState(ctx context.Context, issueID, stateID string) error {
+	query := `mutation($id: String!, $input: IssueUpdateInput!) {
+		issueUpdate(id: $id, input: $input) { success }
+	}`
+	var result struct {
+		Data struct {
+			IssueUpdate struct {
+				Success bool `json:"success"`
+			} `json:"issueUpdate"`
+		} `json:"data"`
+	}
+	return c.do(ctx, query, map[string]any{
+		"id":    issueID,
+		"input": map[string]any{"stateId": stateID},
+	}, &result)
+}
+
+// IssueRecentHumanEdits returns true if a human moved the issue's workflow
+// state within the given window. Reads from Linear's issue history; we only
+// count entries that look like state transitions performed by users (not
+// integrations or webhooks).
+func (c *graphQLClient) IssueRecentHumanEdits(ctx context.Context, issueID string, since time.Time) (bool, error) {
+	query := `query($id: String!) {
+		issue(id: $id) {
+			history(first: 10) {
+				nodes {
+					createdAt
+					actor { name displayName }
+					botActor { name }
+					fromState { id }
+					toState { id }
+				}
+			}
+		}
+	}`
+	var result struct {
+		Data struct {
+			Issue *struct {
+				History struct {
+					Nodes []struct {
+						CreatedAt string `json:"createdAt"`
+						Actor     *struct {
+							Name        string `json:"name"`
+							DisplayName string `json:"displayName"`
+						} `json:"actor"`
+						BotActor *struct {
+							Name string `json:"name"`
+						} `json:"botActor"`
+						FromState *struct {
+							ID string `json:"id"`
+						} `json:"fromState"`
+						ToState *struct {
+							ID string `json:"id"`
+						} `json:"toState"`
+					} `json:"nodes"`
+				} `json:"history"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": issueID}, &result); err != nil {
+		return false, err
+	}
+	if result.Data.Issue == nil {
+		return false, nil
+	}
+	for _, h := range result.Data.Issue.History.Nodes {
+		if h.FromState == nil || h.ToState == nil {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339, h.CreatedAt)
+		if ts.Before(since) {
+			continue
+		}
+		// Skip transitions performed by bots/integrations.
+		if h.BotActor != nil && h.BotActor.Name != "" {
+			continue
+		}
+		if h.Actor != nil && h.Actor.Name != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasGitHubIntegrationAttachment checks whether Linear's native GitHub
+// integration has already posted attachments to this issue. When true, we
+// suppress our merge-time writes to avoid double cycle/sprint membership.
+//
+// We explicitly skip attachments whose metadata.service == "143" — those
+// are *our* attachments, possibly with sourceType set by Linear's
+// classifier to something we'd otherwise count. Self-detection would lock
+// us out of writes after the first one.
+func (c *graphQLClient) HasGitHubIntegrationAttachment(ctx context.Context, issueID string) (bool, error) {
+	query := `query($id: String!) {
+		issue(id: $id) {
+			attachments(first: 20) { nodes { sourceType metadata } }
+		}
+	}`
+	var result struct {
+		Data struct {
+			Issue *struct {
+				Attachments struct {
+					Nodes []struct {
+						SourceType string         `json:"sourceType"`
+						Metadata   map[string]any `json:"metadata"`
+					} `json:"nodes"`
+				} `json:"attachments"`
+			} `json:"issue"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": issueID}, &result); err != nil {
+		return false, err
+	}
+	if result.Data.Issue == nil {
+		return false, nil
+	}
+	for _, a := range result.Data.Issue.Attachments.Nodes {
+		// Skip our own attachments first — see metadata schema in
+		// db.LinearAttachmentMetadata.
+		if svc, ok := a.Metadata["service"].(string); ok && svc == "143" {
+			continue
+		}
+		// Linear's GitHub integration uses sourceType "github" for PR
+		// attachments.
+		if strings.EqualFold(a.SourceType, "github") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// do is the GraphQL transport. Handles 200/non-200 + GraphQL errors. Note:
+// retries and rate-limit handling live in the worker layer (RetryableError),
+// not here, so the Client stays a thin transport.
+func (c *graphQLClient) do(ctx context.Context, query string, variables map[string]any, target any) error {
+	body, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return fmt.Errorf("marshal graphql request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := resp.Header.Get("Retry-After")
+		return &RateLimitError{RetryAfter: retryAfter}
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("linear API returned %d", resp.StatusCode)
+	}
+
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return fmt.Errorf("decode linear response: %w", err)
+	}
+	var errCheck struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(raw, &errCheck); err == nil && len(errCheck.Errors) > 0 {
+		return fmt.Errorf("linear graphql error: %s", errCheck.Errors[0].Message)
+	}
+	return json.Unmarshal(raw, target)
+}
+
+// ErrUnauthorized is returned by the client when Linear rejects the access
+// token. The integration health check (every 6h) flags it; doGraphQL
+// callers can choose to refresh and retry once.
+var ErrUnauthorized = errors.New("linear unauthorized")
+
+// RateLimitError indicates a 429 with an optional Retry-After hint. Worker
+// handlers wrap this in their own RetryableError to schedule the retry.
+type RateLimitError struct {
+	RetryAfter string
+}
+
+func (e *RateLimitError) Error() string {
+	if e.RetryAfter != "" {
+		return fmt.Sprintf("linear rate limit exceeded (retry-after=%s)", e.RetryAfter)
+	}
+	return "linear rate limit exceeded"
+}
+
+func mapLinearPriorityName(p int) string {
+	switch p {
+	case 1:
+		return "urgent"
+	case 2:
+		return "high"
+	case 3:
+		return "medium"
+	case 4:
+		return "low"
+	}
+	return "none"
+}
