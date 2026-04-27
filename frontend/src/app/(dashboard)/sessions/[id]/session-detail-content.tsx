@@ -80,7 +80,12 @@ import { api, ApiError } from "@/lib/api";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
-import { SSE_EVENT, addSSEListener } from "@/lib/sse";
+import {
+  SSE_EVENT,
+  addSSEListener,
+  buildPullRequestStreamURL,
+  buildSessionLogsStreamURL,
+} from "@/lib/sse";
 import { buildTimeline, buildTimelineFromResponse } from "@/lib/timeline";
 import { parseDiffStats, type DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
@@ -1154,15 +1159,6 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
 
-function buildPullRequestStreamURL(apiBase: string, activeOrgId: string | null): string {
-  const searchParams = new URLSearchParams();
-  if (activeOrgId) {
-    searchParams.set("org_id", activeOrgId);
-  }
-  const qs = searchParams.toString();
-  return `${apiBase}/api/v1/pull-requests/stream${qs ? `?${qs}` : ""}`;
-}
-
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
 }
@@ -1407,7 +1403,7 @@ function ChatPanel({
       if (cancelled) return;
 
       eventSource = new EventSource(
-        `${apiBase}/api/v1/sessions/${sessionId}/logs/stream`,
+        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId()),
         { withCredentials: true }
       );
 

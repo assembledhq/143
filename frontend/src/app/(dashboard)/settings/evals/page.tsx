@@ -38,7 +38,8 @@ import {
 import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, CheckCircle2, XCircle, Eye, RotateCw } from "lucide-react";
 import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, ListResponse, Repository, SessionLog } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
-import { addSSEListener, SSE_EVENT } from "@/lib/sse";
+import { addSSEListener, SSE_EVENT, buildSessionLogsStreamURL } from "@/lib/sse";
+import { getActiveOrgId } from "@/lib/active-org";
 
 type SourceFilter = "all" | EvalTaskSource | "archived";
 
@@ -460,11 +461,11 @@ function BootstrapDetailSheet({
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function connect() {
+    const connect = () => {
       if (cancelled) return;
 
       eventSource = new EventSource(
-        `${apiBase}/api/v1/sessions/${sessionId}/logs/stream`,
+        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId()),
         { withCredentials: true }
       );
 
@@ -489,7 +490,7 @@ function BootstrapDetailSheet({
           reconnectTimer = setTimeout(connect, delay);
         }
       };
-    }
+    };
 
     connect();
 

@@ -1,6 +1,40 @@
 import type { PullRequestUpdatedEvent, Session, SessionLog } from "./types";
 import { captureError } from "./errors";
 
+// EventSource cannot send custom headers like X-Active-Org-ID. The backend
+// auth middleware then resolves the active org from the session's
+// last_org_id hint, which deliberately is NOT updated when the client uses
+// X-Active-Org-ID (so two tabs on different orgs don't trample each other).
+// For multi-org users that hint commonly differs from the org they're
+// actively viewing, so we have to pass the active org via query string and
+// let the backend membership-check it. Used by all SSE endpoints.
+export function buildSessionLogsStreamURL(
+  apiBase: string,
+  sessionId: string,
+  activeOrgId: string | null,
+): string {
+  const searchParams = new URLSearchParams();
+  if (activeOrgId) {
+    searchParams.set("org_id", activeOrgId);
+  }
+  const qs = searchParams.toString();
+  return `${apiBase}/api/v1/sessions/${sessionId}/logs/stream${qs ? `?${qs}` : ""}`;
+}
+
+// Same X-Active-Org-ID workaround as buildSessionLogsStreamURL — see comment
+// above for the underlying reason.
+export function buildPullRequestStreamURL(
+  apiBase: string,
+  activeOrgId: string | null,
+): string {
+  const searchParams = new URLSearchParams();
+  if (activeOrgId) {
+    searchParams.set("org_id", activeOrgId);
+  }
+  const qs = searchParams.toString();
+  return `${apiBase}/api/v1/pull-requests/stream${qs ? `?${qs}` : ""}`;
+}
+
 /**
  * SSE event types emitted by the session log stream.
  * Must stay in sync with the backend sse.EventType constants.
