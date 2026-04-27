@@ -471,10 +471,6 @@ export const api = {
   codingAuths: {
     list: () =>
       get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
-    legacyStatus: () =>
-      get<import('./types').SingleResponse<import('./types').LegacyCodingAuthStatus>>('/api/v1/settings/coding-auths/legacy-status'),
-    migrateLegacy: () =>
-      post<import('./types').SingleResponse<import('./types').LegacyCodingAuthMigrationResult>>('/api/v1/settings/coding-auths/migrate-legacy'),
     create: (body: {
       agent: string;
       auth_type: string;

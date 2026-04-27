@@ -1109,52 +1109,6 @@ describe('api client', () => {
     });
   });
 
-  describe('codingAuths', () => {
-    it('lists legacy migration status', async () => {
-      server.use(
-        http.get('/api/v1/settings/coding-auths/legacy-status', () => {
-          return HttpResponse.json({
-            data: {
-              has_legacy_amp_secret: true,
-              amp_masked_key: 'amp_12...cdef',
-              has_amp_credential: false,
-              has_legacy_pi_secret: false,
-              pi_masked_key: '',
-              has_legacy_pi_defaults: true,
-              has_pi_credential: false,
-              pi_requires_manual_auth: true,
-            },
-          });
-        }),
-      );
-
-      const result = await api.codingAuths.legacyStatus();
-      expect(result.data.has_legacy_amp_secret).toBe(true);
-      expect(result.data.pi_requires_manual_auth).toBe(true);
-    });
-
-    it('starts legacy migration', async () => {
-      let called = false;
-
-      server.use(
-        http.post('/api/v1/settings/coding-auths/migrate-legacy', () => {
-          called = true;
-          return HttpResponse.json({
-            data: {
-              migrated_amp: true,
-              migrated_pi: false,
-              removed_legacy_secrets: true,
-            },
-          });
-        }),
-      );
-
-      const result = await api.codingAuths.migrateLegacy();
-      expect(called).toBe(true);
-      expect(result.data.migrated_amp).toBe(true);
-    });
-  });
-
   describe('uploads', () => {
     it('sends the active org header on uploads', async () => {
       setActiveOrgId('org-switched');

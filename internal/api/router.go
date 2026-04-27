@@ -703,9 +703,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Coding-agents config reads. Members can view what's configured
 				// (so /settings/agent renders read-only); mutations stay admin-only.
 				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
-				r.Get("/api/v1/settings/coding-auths/legacy-status", func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "legacy coding auth migration unavailable on this branch", http.StatusNotImplemented)
-				})
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
@@ -807,10 +804,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin"))
 
-				legacyCodingAuthUnavailable := func(w http.ResponseWriter, _ *http.Request) {
-					http.Error(w, "legacy coding auth migration unavailable on this branch", http.StatusNotImplemented)
-				}
-
 				r.Delete("/api/v1/repositories/{id}", repoHandler.Delete)
 				r.Post("/api/v1/issues/{id}/reprioritize", priorityHandler.Reprioritize)
 				r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
@@ -824,14 +817,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 				r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)
 
-				// Org credential management. Reads (List/legacy-status) live in the
-				// admin+member group above so members can view the coding-agents
-				// settings page in read-only mode; mutations stay admin-only here.
+				// Org credential management. Reads (List) live in the admin+member
+				// group above so members can view the coding-agents settings page
+				// in read-only mode; mutations stay admin-only here.
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
 				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
-				r.Post("/api/v1/settings/coding-auths/migrate-legacy", legacyCodingAuthUnavailable)
 				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
 				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
 				r.Delete("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Delete)
