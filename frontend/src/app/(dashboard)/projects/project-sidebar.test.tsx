@@ -198,6 +198,20 @@ describe('ProjectSidebar', () => {
     expect(screen.getByPlaceholderText('Search projects...')).toBeInTheDocument();
   });
 
+  it('restores search from the URL and preserves it in project detail links', async () => {
+    renderWithProviders(<ProjectSidebar />, {
+      searchParams: { user: 'all', search: 'Security' },
+    });
+
+    const input = await screen.findByPlaceholderText('Search projects...');
+    expect(input).toHaveValue('Security');
+    expect(screen.queryByText('Test Project')).not.toBeInTheDocument();
+    expect((await screen.findByText('Security Sweep')).closest('a')).toHaveAttribute(
+      'href',
+      expect.stringMatching(/^\/projects\/[^?]+\?user=all&search=Security$/),
+    );
+  });
+
   it('shows mini progress bars for projects with tasks', async () => {
     renderWithProviders(<ProjectSidebar />);
     await screen.findByText('Test Project');
@@ -226,6 +240,17 @@ describe('ProjectSidebar', () => {
     const link = (await screen.findByText('Test Project')).closest('a');
     expect(link?.getAttribute('href')).toMatch(
       /^\/projects\/[^?]+\?user=all&status=active&repo=repo-1$/,
+    );
+  });
+
+  it('preserves search alongside the existing filters in project detail links', async () => {
+    renderWithProviders(<ProjectSidebar />, {
+      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Test' },
+    });
+
+    const link = (await screen.findByText('Test Project')).closest('a');
+    expect(link?.getAttribute('href')).toMatch(
+      /^\/projects\/[^?]+\?user=all&status=active&repo=repo-1&search=Test$/,
     );
   });
 

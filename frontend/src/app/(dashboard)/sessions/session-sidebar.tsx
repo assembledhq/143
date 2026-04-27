@@ -157,7 +157,8 @@ export function SessionSidebar() {
   const queryClient = useQueryClient();
   const { currentUserFilter, triggeredByUserId, isResolved, setUserFilter } = useSessionUserFilter();
   const selectedId = params?.id as string | undefined;
-  const [search, setSearch] = useState("");
+  const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
+  const [search, setSearch] = useState(searchParam ?? "");
   // Debounce the search query so rapid typing doesn't fire a request per
   // keystroke. useDeferredValue only lowers render priority — it does not
   // throttle network calls.
@@ -166,6 +167,20 @@ export function SessionSidebar() {
     const handle = setTimeout(() => setDebouncedSearch(search.trim()), 200);
     return () => clearTimeout(handle);
   }, [search]);
+  useEffect(() => {
+    const nextSearch = searchParam ?? "";
+    // Sync the local input from the URL when navigation/back/forward changes
+    // the search param outside this component.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSearch((current) => (current === nextSearch ? current : nextSearch));
+  }, [searchParam]);
+  useEffect(() => {
+    const currentParam = searchParam ?? "";
+    if (search === currentParam) {
+      return;
+    }
+    void setSearchParam(search || null);
+  }, [search, searchParam, setSearchParam]);
 
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
@@ -295,7 +310,7 @@ export function SessionSidebar() {
 
   // Carry the sidebar's filters into detail-page links so opening a session
   // doesn't reset the scope back to "Mine".
-  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo);
+  const filterSuffix = useFilterSuffix(currentUserFilter, activeFilter, repo, search || null);
 
   const isNewSession = pathname === "/sessions/new";
   const showDefaultEmptyState =

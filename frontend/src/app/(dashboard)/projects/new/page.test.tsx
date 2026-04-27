@@ -11,6 +11,7 @@ vi.mock("next/navigation", () => ({
     push: pushMock,
     replace: vi.fn(),
   }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 describe("NewProjectPage", () => {

@@ -173,6 +173,25 @@ describe('SessionSidebar', () => {
     });
   });
 
+  it('restores search from the URL and preserves it in session detail links', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Alpha fix' }),
+      makeSession({ id: 's2', result_summary: 'Beta update' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { user: 'all', search: 'Beta' },
+    });
+
+    const input = await screen.findByPlaceholderText('Search sessions...');
+    expect(input).toHaveValue('Beta');
+    expect(screen.queryByText('Alpha fix')).not.toBeInTheDocument();
+    expect((await screen.findByText('Beta update')).closest('a')).toHaveAttribute(
+      'href',
+      '/sessions/s2?user=all&search=Beta',
+    );
+  });
+
   // -----------------------------------------------------------------------
   // "No sessions match this filter" vs "No sessions yet"
   // -----------------------------------------------------------------------
@@ -544,6 +563,23 @@ describe('SessionSidebar', () => {
     expect(link).toHaveAttribute(
       'href',
       '/sessions/s1?user=all&status=active&repo=repo-1',
+    );
+  });
+
+  it('preserves search alongside the existing filters in session detail links', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Linked session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />, {
+      searchParams: { user: 'all', status: 'active', repo: 'repo-1', search: 'Linked' },
+    });
+    await screen.findByText('Linked session');
+
+    const link = screen.getByText('Linked session').closest('a');
+    expect(link).toHaveAttribute(
+      'href',
+      '/sessions/s1?user=all&status=active&repo=repo-1&search=Linked',
     );
   });
 
