@@ -1536,8 +1536,7 @@ func TestResolveToken_UserRequired_NoUser(t *testing.T) {
 	run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 
 	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
-	require.Error(t, err, "should fail when user_required but no user token")
-	require.Contains(t, err.Error(), "org requires user GitHub auth")
+	require.ErrorIs(t, err, ErrGitHubUserAuthRequired, "should fail with a typed auth-required error when user auth is required")
 }
 
 func TestPRService_SetAppUserAuth(t *testing.T) {
@@ -2011,6 +2010,7 @@ func TestResolveToken_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing
 
 	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.Error(t, err, "user_required should fail when the user token cannot access the target repo")
+	require.ErrorIs(t, err, ErrGitHubUserAuthRepoAccessDenied, "user_required should surface a typed repo-access-denied sentinel")
 	require.Contains(t, err.Error(), "cannot access repo", "resolveToken should surface repo access failures for user-required auth")
 }
 
@@ -3092,12 +3092,12 @@ func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
 
 	cases := []struct {
 		name string
-		err  *githubAPIError
+		err  *GitHubAPIError
 		want bool
 	}{
 		{
 			name: "matches 422 no-commits",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"No commits between main and feature"}]}`),
 			},
@@ -3105,7 +3105,7 @@ func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
 		},
 		{
 			name: "wrong status",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusNotFound,
 				Body:       []byte(`{"errors":[{"message":"No commits between"}]}`),
 			},
@@ -3113,7 +3113,7 @@ func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
 		},
 		{
 			name: "different 422",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`{"errors":[{"message":"A pull request already exists"}]}`),
 			},
@@ -3121,7 +3121,7 @@ func TestGithubAPIError_IsNoCommitsBetween(t *testing.T) {
 		},
 		{
 			name: "malformed body",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`not json`),
 			},
@@ -3146,12 +3146,12 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 
 	cases := []struct {
 		name string
-		err  *githubAPIError
+		err  *GitHubAPIError
 		want bool
 	}{
 		{
 			name: "matches existing-pr conflict",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for owner:branch."}]}`),
 			},
@@ -3159,7 +3159,7 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 		},
 		{
 			name: "different 422",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`{"errors":[{"message":"No commits between main and feature"}]}`),
 			},
@@ -3167,7 +3167,7 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 		},
 		{
 			name: "wrong status",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusConflict,
 				Body:       []byte(`{"errors":[{"message":"A pull request already exists"}]}`),
 			},
@@ -3175,7 +3175,7 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 		},
 		{
 			name: "malformed body",
-			err: &githubAPIError{
+			err: &GitHubAPIError{
 				StatusCode: http.StatusUnprocessableEntity,
 				Body:       []byte(`not json`),
 			},
@@ -3198,9 +3198,9 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 func TestGithubAPIError_HTTPStatus(t *testing.T) {
 	t.Parallel()
 
-	var nilErr *githubAPIError
+	var nilErr *GitHubAPIError
 	require.Equal(t, 0, nilErr.HTTPStatus(), "HTTPStatus should return 0 for a nil receiver")
-	require.Equal(t, http.StatusConflict, (&githubAPIError{StatusCode: http.StatusConflict}).HTTPStatus(), "HTTPStatus should expose the wrapped status code")
+	require.Equal(t, http.StatusConflict, (&GitHubAPIError{StatusCode: http.StatusConflict}).HTTPStatus(), "HTTPStatus should expose the wrapped status code")
 }
 
 func TestPushSessionBranch(t *testing.T) {

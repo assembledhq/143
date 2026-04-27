@@ -163,6 +163,13 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
 	resp.CanFixTests = resp.FailingTestCount > 0
+	// CanMerge is the green-light counterpart to the repair flags: GitHub has
+	// confirmed the branch is mergeable, no non-success checks remain (the
+	// sync loop excludes success/neutral/skipped, so any entry here is either
+	// failing or still in flight), and the PR is still open.
+	resp.CanMerge = resp.Status == "open" &&
+		resp.MergeState == models.PullRequestMergeStateClean &&
+		len(resp.Checks) == 0
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -703,7 +710,7 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 	path := fmt.Sprintf("/repos/%s/%s/check-runs/%d/annotations?per_page=50", owner, repo, checkRunID)
 	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
 	if err != nil {
-		var apiErr *githubAPIError
+		var apiErr *GitHubAPIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
 			return nil, nil
 		}

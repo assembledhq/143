@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -209,7 +211,12 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// Mock: Create deploy.
+	// Mock: no existing deploy, then create deploy.
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}),
+		)
 	deployMock.ExpectQuery("INSERT INTO deploys").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -279,7 +286,12 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// Mock: Create deploy.
+	// Mock: no existing deploy, then create deploy.
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}),
+		)
 	deployMock.ExpectQuery("INSERT INTO deploys").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -307,6 +319,134 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with nil session_id")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 	require.NoError(t, deployMock.ExpectationsWereMet(), "all deploy store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
+// TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA confirms the webhook
+// path threads the merge commit SHA through to the deploy row and the
+// evaluate_experiment job, matching what the API merge path emits. Without
+// this preference, squash/rebase merges would record the pre-merge head SHA
+// in deploys.commit_sha — a different commit than what's actually on main.
+func TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	mergeCommitSHA := "merge-commit-abc"
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      db.NewDeployStore(deployMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+	// Assert the deploy insert receives the merge commit SHA, not the head.
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID,
+			"org_id":          orgID,
+			"environment":     "production",
+			"commit_sha":      &mergeCommitSHA,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
+
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = true
+	event.PR.Head.SHA = "head-pre-merge"
+	event.PR.MergeCommitSHA = mergeCommitSHA
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy insert should receive the merge commit SHA, not the head SHA")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
+func TestHandlePullRequestEvent_MergedFallsBackToHeadSHAWhenMergeCommitMissing(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	headSHA := "head-fallback-abc"
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      db.NewDeployStore(deployMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID,
+			"org_id":          orgID,
+			"environment":     "production",
+			"commit_sha":      &headSHA,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
+
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = true
+	event.PR.Head.SHA = headSHA
+	event.PR.MergeCommitSHA = ""
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with no merge_commit_sha")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy insert should fall back to the head SHA when merge_commit_sha is empty")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
@@ -349,6 +489,42 @@ func TestHandlePullRequestEvent_ClosedWithoutMergeFlow(t *testing.T) {
 	err := svc.HandlePullRequestEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a closed-without-merge PR")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+}
+
+func TestHandlePullRequestEvent_ClosedWithoutMergeReturnsStatusUpdateError(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	prStore := db.NewPullRequestStore(prMock)
+
+	svc := &PRService{
+		pullRequests: prStore,
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("update failed"))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = false
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.Error(t, err, "HandlePullRequestEvent should return status update failures for closed PRs")
+	require.Contains(t, err.Error(), "update PR status to closed", "HandlePullRequestEvent should wrap the closed-status update error")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
 }
 
 // organizationColumns matches OrganizationStore.GetByID's SELECT list.
@@ -459,6 +635,324 @@ func TestHandlePullRequestEvent_AutoArchiveSkippedWhenDisabled(t *testing.T) {
 	require.NoError(t, prMock.ExpectationsWereMet())
 	require.NoError(t, orgMock.ExpectationsWereMet())
 	require.NoError(t, sessionMock.ExpectationsWereMet(), "no session archive should happen when toggle is off")
+}
+
+func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesOrgAndArchiveFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	pr := models.PullRequest{
+		ID:             prID,
+		OrgID:          orgID,
+		SessionID:      &sessionID,
+		GitHubRepo:     "testorg/testrepo",
+		GitHubPRNumber: 42,
+	}
+
+	tests := []struct {
+		name         string
+		setupOrg     func(mock pgxmock.PgxPoolIface)
+		setupSession func(mock pgxmock.PgxPoolIface)
+	}{
+		{
+			name: "returns when org lookup fails",
+			setupOrg: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnError(errors.New("org lookup failed"))
+			},
+			setupSession: func(pgxmock.PgxPoolIface) {},
+		},
+		{
+			name: "returns when org settings cannot be parsed",
+			setupOrg: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(organizationColumns).
+							AddRow(orgID, "Test Org", []byte(`{"auto_archive_on_pr_close":`), now, now),
+					)
+			},
+			setupSession: func(pgxmock.PgxPoolIface) {},
+		},
+		{
+			name: "returns when archiving the session fails",
+			setupOrg: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(organizationColumns).
+							AddRow(orgID, "Test Org", json.RawMessage(`{"auto_archive_on_pr_close": true}`), now, now),
+					)
+			},
+			setupSession: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("archive failed"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgMock := newMockPool(t)
+			sessionMock := newMockPool(t)
+
+			service := &PRService{
+				orgs:     db.NewOrganizationStore(orgMock),
+				sessions: db.NewSessionStore(sessionMock),
+				logger:   zerolog.Nop(),
+			}
+
+			tt.setupOrg(orgMock)
+			tt.setupSession(sessionMock)
+
+			service.maybeAutoArchiveSessionOnPRClose(context.Background(), pr, nil, false)
+
+			require.NoError(t, orgMock.ExpectationsWereMet(), "organization expectations should be met")
+			require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
+		})
+	}
+}
+
+func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesSnapshotFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	pr := models.PullRequest{
+		ID:             prID,
+		OrgID:          orgID,
+		SessionID:      &sessionID,
+		GitHubRepo:     "testorg/testrepo",
+		GitHubPRNumber: 42,
+	}
+
+	tests := []struct {
+		name         string
+		setupSession func(mock pgxmock.PgxPoolIface)
+		snapshotErr  error
+	}{
+		{
+			name: "logs when reloading the snapshot key fails",
+			setupSession: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("session load failed"))
+			},
+		},
+		{
+			name: "logs when snapshot cleanup fails",
+			setupSession: func(mock pgxmock.PgxPoolIface) {
+				snapshotKey := "snap-key"
+				row := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				row[42] = &snapshotKey
+
+				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(row...))
+			},
+			snapshotErr: errors.New("snapshot delete failed"),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgMock := newMockPool(t)
+			sessionMock := newMockPool(t)
+
+			orgMock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(organizationColumns).
+						AddRow(orgID, "Test Org", json.RawMessage(`{"auto_archive_on_pr_close": true}`), now, now),
+				)
+
+			snapshotStore := &prTestSnapshotStore{deleteErr: tt.snapshotErr}
+			service := &PRService{
+				orgs:      db.NewOrganizationStore(orgMock),
+				sessions:  db.NewSessionStore(sessionMock),
+				snapshots: snapshotStore,
+				logger:    zerolog.Nop(),
+			}
+
+			tt.setupSession(sessionMock)
+			service.maybeAutoArchiveSessionOnPRClose(context.Background(), pr, nil, false)
+
+			require.NoError(t, orgMock.ExpectationsWereMet(), "organization expectations should be met")
+			require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
+		})
+	}
+}
+
+func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	tests := []struct {
+		name         string
+		setupSession func(mock pgxmock.PgxPoolIface)
+		setupIssue   func(mock pgxmock.PgxPoolIface)
+		setupDeploy  func(mock pgxmock.PgxPoolIface)
+		snapshotErr  error
+	}{
+		{
+			name: "continues when session loading fails",
+			setupSession: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("session load failed"))
+			},
+			setupIssue: func(pgxmock.PgxPoolIface) {},
+			setupDeploy: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+				mock.ExpectQuery("INSERT INTO deploys").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
+			},
+		},
+		{
+			name: "continues when issue, snapshot, and deploy creation fail",
+			setupSession: func(mock pgxmock.PgxPoolIface) {
+				issueID := uuid.New()
+				snapshotKey := "snap-key"
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(sessionColumns).AddRow(
+							sessionID, &issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
+							nil, nil, nil, nil,
+							nil, nil, false, nil, nil, nil,
+							nil, nil, nil, false,
+							nil, nil, nil, nil, nil,
+							nil, nil, nil, nil, nil,
+							nil,
+							nil,
+							nil,
+							nil, 0, now, "snapshot", &snapshotKey,
+							nil,
+							nil,
+							nil,
+							"",
+							"",
+							0,
+							0,
+							"",
+							nil,
+							nil,
+							"",
+							"",
+							int64(0),
+							nil,
+							"",
+							nil,
+							nil,
+							0,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							nil, nil,
+							nil,
+							"idle",
+							(*string)(nil),
+							nil,
+							nil,
+							nil,
+							nil,
+							nil,
+							now,
+						),
+					)
+			},
+			setupIssue: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectExec("UPDATE issues SET status").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("issue update failed"))
+			},
+			setupDeploy: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+				mock.ExpectQuery("INSERT INTO deploys").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("deploy create failed"))
+			},
+			snapshotErr: errors.New("snapshot delete failed"),
+		},
+		{
+			name:         "continues when deploy lookup fails",
+			setupSession: func(pgxmock.PgxPoolIface) {},
+			setupIssue:   func(pgxmock.PgxPoolIface) {},
+			setupDeploy: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("deploy lookup failed"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sessionMock := newMockPool(t)
+			issueMock := newMockPool(t)
+			deployMock := newMockPool(t)
+
+			service := &PRService{
+				sessions:  db.NewSessionStore(sessionMock),
+				issues:    db.NewIssueStore(issueMock),
+				deploys:   db.NewDeployStore(deployMock),
+				snapshots: &prTestSnapshotStore{deleteErr: tt.snapshotErr},
+				logger:    zerolog.Nop(),
+			}
+
+			pr := models.PullRequest{
+				ID:         prID,
+				OrgID:      orgID,
+				SessionID:  &sessionID,
+				GitHubRepo: "testorg/testrepo",
+			}
+
+			tt.setupSession(sessionMock)
+			tt.setupIssue(issueMock)
+			tt.setupDeploy(deployMock)
+
+			service.runMergedPullRequestFollowUps(context.Background(), pr, "commit-sha")
+
+			require.NoError(t, sessionMock.ExpectationsWereMet(), "session expectations should be met")
+			require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
+			require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
+		})
+	}
 }
 
 func TestHandlePullRequestEvent_NonClosedAction(t *testing.T) {
@@ -1482,7 +1976,12 @@ func TestHandlePullRequestEvent_MergedStopsPreview(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// 3. Create deploy row.
+	// 3. No existing deploy row, then create deploy.
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}),
+		)
 	deployMock.ExpectQuery("INSERT INTO deploys").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
