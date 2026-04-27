@@ -25,6 +25,15 @@ type transcriptIdentity struct {
 	content    string
 }
 
+func normalizeTranscriptContent(content string) string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t\r")
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
 // Compose merges session messages and logs into a server-owned timeline.
 func Compose(messages []models.SessionMessage, logs []models.SessionLog) []models.SessionTimelineEntry {
 	messages = dedupeAssistantTranscriptMessages(messages)
@@ -228,7 +237,7 @@ func assistantTranscriptIdentity(msg models.SessionMessage) (transcriptIdentity,
 	return transcriptIdentity{
 		threadID:   optionalThreadID(msg.ThreadID),
 		turnNumber: msg.TurnNumber,
-		content:    msg.Content,
+		content:    normalizeTranscriptContent(msg.Content),
 	}, true
 }
 
@@ -239,7 +248,7 @@ func visibleAssistantTranscriptIdentity(log models.SessionLog) (transcriptIdenti
 	return transcriptIdentity{
 		threadID:   optionalThreadID(log.ThreadID),
 		turnNumber: log.TurnNumber,
-		content:    log.Message,
+		content:    normalizeTranscriptContent(log.Message),
 	}, true
 }
 

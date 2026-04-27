@@ -235,22 +235,22 @@ func TestSessionLogStore_MarkAssistantTranscriptDuplicate(t *testing.T) {
 		setupMock func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID)
 		expectErr string
 	}{
-		{
-			name: "success",
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-				mock.ExpectExec("UPDATE session_logs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), 3, "Final answer").
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			{
+				name: "success",
+				setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+					mock.ExpectExec("UPDATE session_logs").
+						WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
+						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				},
 			},
-		},
-		{
-			name: "database error",
-			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-				mock.ExpectExec("UPDATE session_logs").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), 3, "Final answer").
-					WillReturnError(context.DeadlineExceeded)
-			},
-			expectErr: "mark assistant transcript duplicate",
+			{
+				name: "database error",
+				setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+					mock.ExpectExec("UPDATE session_logs").
+						WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
+						WillReturnError(context.DeadlineExceeded)
+				},
+				expectErr: "mark assistant transcript duplicate",
 		},
 	}
 
@@ -268,7 +268,7 @@ func TestSessionLogStore_MarkAssistantTranscriptDuplicate(t *testing.T) {
 			sessionID := uuid.New()
 			tt.setupMock(mock, orgID, sessionID)
 
-			err = store.MarkAssistantTranscriptDuplicate(context.Background(), orgID, sessionID, 3, "Final answer")
+			err = store.MarkAssistantTranscriptDuplicate(context.Background(), orgID, sessionID, nil, 3, "Final answer")
 			if tt.expectErr != "" {
 				require.Error(t, err, "MarkAssistantTranscriptDuplicate should return an error")
 				require.Contains(t, err.Error(), tt.expectErr, "MarkAssistantTranscriptDuplicate should wrap the store error")

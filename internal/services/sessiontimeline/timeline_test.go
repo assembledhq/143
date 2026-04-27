@@ -102,6 +102,41 @@ func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {
 	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "assistant message should win for transcript rendering")
 }
 
+func TestComposeTimeline_SuppressesDuplicateAssistantOutputWithWhitespaceDifferences(t *testing.T) {
+	t.Parallel()
+
+	messages := []models.SessionMessage{
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.Content = "assistant reply\n"
+		}, "2026-01-01T00:00:03Z"),
+	}
+	logs := []models.SessionLog{
+		makeLog(t, nil, "2026-01-01T00:00:02Z", "output", "assistant reply"),
+	}
+
+	result := Compose(messages, logs)
+	require.Len(t, result, 1, "trivial trailing whitespace differences should not duplicate the final assistant output")
+	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "assistant transcript should remain visible after whitespace-normalized dedupe")
+}
+
+func TestComposeTimeline_KeepsAssistantOutputWhenDifferenceIsLeadingIndentation(t *testing.T) {
+	t.Parallel()
+
+	messages := []models.SessionMessage{
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.Content = "  assistant reply"
+		}, "2026-01-01T00:00:03Z"),
+	}
+	logs := []models.SessionLog{
+		makeLog(t, nil, "2026-01-01T00:00:02Z", "output", "assistant reply"),
+	}
+
+	result := Compose(messages, logs)
+	require.Len(t, result, 2, "leading indentation should remain part of transcript identity")
+	require.Equal(t, models.SessionTimelineKindAssistantOutput, result[0].Kind, "output log should remain visible when indentation differs")
+	require.Equal(t, models.SessionTimelineKindMessage, result[1].Kind, "assistant transcript should remain visible when indentation differs")
+}
+
 func TestComposeTimeline_PrefersMarkedDuplicateEvenWithMultipleOutputs(t *testing.T) {
 	t.Parallel()
 

@@ -108,6 +108,35 @@ describe("buildTimeline", () => {
     expect(result[1].kind).toBe("message");
   });
 
+  it("suppresses duplicate output log when the only difference is trailing whitespace", () => {
+    const messages = [
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "Found the issue.\n" }),
+    ];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "Analyzing..." }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "Found the issue." }),
+    ];
+    const result = buildTimeline(messages, logs);
+    expect(result).toHaveLength(2);
+    expect(result[0].kind).toBe("assistant_output");
+    expect(result[1].kind).toBe("message");
+  });
+
+  it("keeps output log when the difference is leading indentation", () => {
+    const messages = [
+      makeMessage({ id: 1, created_at: "2026-01-01T00:00:03Z", content: "  Found the issue." }),
+    ];
+    const logs = [
+      makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "Analyzing..." }),
+      makeLog({ id: 2, created_at: "2026-01-01T00:00:02Z", level: "output", message: "Found the issue." }),
+    ];
+    const result = buildTimeline(messages, logs);
+    expect(result).toHaveLength(3);
+    expect(result[0].kind).toBe("assistant_output");
+    expect(result[1].kind).toBe("assistant_output");
+    expect(result[2].kind).toBe("message");
+  });
+
   it("treats assistant_final output logs as visible output", () => {
     const logs = [
       makeLog({ id: 1, created_at: "2026-01-01T00:00:01Z", level: "output", message: "assistant text", metadata: { type: "assistant_final" } }),
