@@ -57,6 +57,18 @@ func TestCleanupWorker_StartStop(t *testing.T) {
 	}
 }
 
+func TestCleanupWorker_CleanupWithoutManagerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	w := NewCleanupWorker(CleanupWorkerConfig{
+		Logger: zerolog.Nop(),
+	})
+
+	require.NotPanics(t, func() {
+		w.cleanup()
+	}, "cleanup should no-op when the worker has no manager wired")
+}
+
 func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 	t.Parallel()
 
