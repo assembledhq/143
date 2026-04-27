@@ -847,6 +847,11 @@ export const api = {
       if (params.granularity) searchParams.set('granularity', params.granularity);
       if (params.dimension) searchParams.set('dimension', params.dimension);
       if (params.tz) searchParams.set('tz', params.tz);
+      // window.open() can't send X-Active-Org-ID, so for multi-org users the
+      // backend's session-hint org may not match the actively-viewed org.
+      // Pass org_id explicitly; backend membership-checks it.
+      const activeOrgId = getActiveOrgId();
+      if (activeOrgId) searchParams.set('org_id', activeOrgId);
       return `${API_BASE}/api/v1/usage/export?${searchParams.toString()}`;
     },
   },

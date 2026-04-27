@@ -1,15 +1,20 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/assembledhq/143/internal/api/middleware"
-	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/storage"
 )
 
 // maxUploadSize is the maximum allowed file size (10 MB).
@@ -17,26 +22,41 @@ const maxUploadSize = 10 << 20
 
 // allowedImageTypes are the MIME types accepted for upload.
 var allowedUploadTypes = map[string]bool{
-	"image/png":      true,
-	"image/jpeg":     true,
-	"image/gif":      true,
-	"image/webp":     true,
-	"image/svg+xml":  true,
-	"application/pdf": true,
-	"text/plain":      true,
-	"text/markdown":   true,
-	"text/csv":        true,
+	"image/png":        true,
+	"image/jpeg":       true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"image/svg+xml":    true,
+	"application/pdf":  true,
+	"text/plain":       true,
+	"text/markdown":    true,
+	"text/csv":         true,
 	"application/json": true,
+}
+
+// uploadMembershipStore is the subset of OrganizationMembershipStore that
+// ServeUpload needs to authorize file reads. Defined as an interface so tests
+// can stub it without spinning up a real Postgres connection.
+type uploadMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
 
 // UploadHandler handles file uploads to object storage.
 type UploadHandler struct {
-	store storage.UploadStore
+	store       storage.UploadStore
+	memberships uploadMembershipStore
 }
 
 // NewUploadHandler creates an UploadHandler backed by the given store.
 func NewUploadHandler(store storage.UploadStore) *UploadHandler {
 	return &UploadHandler{store: store}
+}
+
+// SetMembershipStore wires the membership store used by ServeUpload to
+// authorize cross-org reads. Required for ServeUpload to authorize requests
+// that arrive without an X-Active-Org-ID header (e.g. <img> tag fetches).
+func (h *UploadHandler) SetMembershipStore(store uploadMembershipStore) {
+	h.memberships = store
 }
 
 // Upload handles POST /api/v1/uploads — accepts a multipart file upload,
@@ -109,6 +129,12 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 // ServeUpload handles GET /api/v1/uploads/files/* — serves uploaded files.
 // Works with both local filesystem and S3 storage backends.
+//
+// Authorization: file URLs are loaded by browser mechanisms (<img>, <a>) that
+// cannot send the X-Active-Org-ID header, so the auth middleware's resolved
+// active-org context may not match the file's owning org for multi-org users.
+// Instead, we parse the org-id from the path itself and verify the requesting
+// user holds a membership in that org. Cross-org access still 403s.
 func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 	// Extract the file key from the URL path after /api/v1/uploads/files/
 	key := strings.TrimPrefix(r.URL.Path, "/api/v1/uploads/files/")
@@ -117,10 +143,34 @@ func (h *UploadHandler) ServeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate that the file belongs to the requesting user's org.
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if !strings.HasPrefix(key, orgID.String()+"/") {
-		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied")
+	// File keys are formatted as `<orgID>/<YYYY-MM>/<uuid>.<ext>` (see Upload).
+	// The first path segment is the owning org's UUID; reject anything else.
+	prefix, _, hasSlash := strings.Cut(key, "/")
+	if !hasSlash {
+		writeError(w, r, http.StatusBadRequest, "INVALID_KEY", "invalid file key")
+		return
+	}
+	pathOrgID, err := uuid.Parse(prefix)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_KEY", "invalid file key")
+		return
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing user")
+		return
+	}
+	if h.memberships == nil {
+		writeError(w, r, http.StatusInternalServerError, "NOT_CONFIGURED", "membership store not configured")
+		return
+	}
+	if _, err := h.memberships.Get(r.Context(), user.ID, pathOrgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to authorize upload", err)
 		return
 	}
 

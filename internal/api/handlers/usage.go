@@ -3,9 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,10 +20,18 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// usageMembershipStore is the subset of OrganizationMembershipStore that
+// ExportCSV needs to authorize an explicit ?org_id= query param when the
+// X-Active-Org-ID header is absent (window.open download has no header API).
+type usageMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+}
+
 // UsageHandler exposes container usage data for billing dashboards.
 type UsageHandler struct {
 	usageStore  *db.ContainerUsageStore
 	rollupStore usageRollupReader
+	memberships usageMembershipStore
 }
 
 type usageRollupReader interface {
@@ -48,6 +58,56 @@ type UsageHandlerOption func(*UsageHandler)
 // WithRollupStore sets the rollup store for timeseries/breakdown/export endpoints.
 func WithRollupStore(rs usageRollupReader) UsageHandlerOption {
 	return func(h *UsageHandler) { h.rollupStore = rs }
+}
+
+// WithMembershipStore wires the membership store used by ExportCSV to
+// authorize an explicit ?org_id= query param. Required for the CSV download
+// to pick the right org for multi-org users (window.open cannot send
+// X-Active-Org-ID).
+func WithMembershipStore(ms usageMembershipStore) UsageHandlerOption {
+	return func(h *UsageHandler) { h.memberships = ms }
+}
+
+var (
+	errUsageExportOrgInvalid   = errors.New("invalid usage export org")
+	errUsageExportOrgForbidden = errors.New("forbidden usage export org")
+	errUsageExportUnauthorized = errors.New("unauthorized usage export request")
+)
+
+// exportOrgID resolves the org for a CSV export, honouring an optional
+// ?org_id= query param when the X-Active-Org-ID header is absent
+// (window.open downloads have no header API). Membership-validated, falls
+// back to the auth middleware's resolved active org. Same shape as
+// pull_requests.streamOrgIDFromRequest and sessions.streamOrgID.
+func (h *UsageHandler) exportOrgID(r *http.Request) (uuid.UUID, error) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	requestedRaw := strings.TrimSpace(r.URL.Query().Get("org_id"))
+	if requestedRaw == "" {
+		return orgID, nil
+	}
+
+	requestedOrgID, err := uuid.Parse(requestedRaw)
+	if err != nil {
+		return uuid.Nil, errUsageExportOrgInvalid
+	}
+	if requestedOrgID == orgID {
+		return requestedOrgID, nil
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return uuid.Nil, errUsageExportUnauthorized
+	}
+	if h.memberships == nil {
+		return uuid.Nil, errors.New("membership store not configured")
+	}
+	if _, err := h.memberships.Get(r.Context(), user.ID, requestedOrgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, errUsageExportOrgForbidden
+		}
+		return uuid.Nil, err
+	}
+	return requestedOrgID, nil
 }
 
 // maxTimeRange is the maximum allowed duration for usage queries.
@@ -298,7 +358,20 @@ func (h *UsageHandler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, err := h.exportOrgID(r)
+	if err != nil {
+		switch {
+		case errors.Is(err, errUsageExportOrgInvalid):
+			writeError(w, r, http.StatusBadRequest, "INVALID_ORG", "invalid org_id")
+		case errors.Is(err, errUsageExportOrgForbidden):
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied")
+		case errors.Is(err, errUsageExportUnauthorized):
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing user")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to authorize export", err)
+		}
+		return
+	}
 	start, end, ok := parseTimeRange(w, r)
 	if !ok {
 		return
