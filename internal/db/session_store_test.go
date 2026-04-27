@@ -34,7 +34,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -93,6 +93,8 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,            // diff_collected_at
 		nil,            // latest_diff_snapshot_id
 		nil,            // deleted_at
+		nil,            // git_identity_source
+		nil,            // git_identity_user_id
 		createdAt,
 	}
 }
@@ -1075,6 +1077,25 @@ func TestSessionStore_UpdateSnapshotInfo(t *testing.T) {
 	err = store.UpdateSnapshotInfo(context.Background(), uuid.New(), uuid.New(), "agent-123", "snap-key")
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet(), "UpdateSnapshotInfo must not write last_activity_at")
+}
+
+func TestSessionStore_SetGitIdentity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	userID := uuid.New()
+
+	mock.ExpectExec(`UPDATE sessions\s+SET git_identity_source = @source,\s+git_identity_user_id = @user_id\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SetGitIdentity(context.Background(), uuid.New(), uuid.New(), "user", &userID)
+	require.NoError(t, err, "SetGitIdentity should persist the resolved git identity metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateSandboxState(t *testing.T) {

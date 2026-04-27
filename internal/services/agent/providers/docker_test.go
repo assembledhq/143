@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
 
 // mockDockerClient implements DockerClient for testing.
@@ -605,6 +607,31 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "/etc/143/sandbox-resolv.conf", m.Source)
 		require.Equal(t, "/etc/resolv.conf", m.Target)
 		require.True(t, m.ReadOnly, "resolv.conf mount must be read-only — sandboxes shouldn't mutate host DNS config")
+	})
+
+	t.Run("bind-mounts the auth socket directory when configured", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedHostConfig *container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedHostConfig = hostConfig
+			return container.CreateResponse{ID: "auth-socket"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.AuthSocketPath = "/var/run/143-auth/sessions/session-123/sock"
+
+		_, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err, "Create should succeed when an auth socket path is configured")
+
+		require.Len(t, capturedHostConfig.Mounts, 1, "only the auth socket directory mount is expected in the default config")
+		m := capturedHostConfig.Mounts[0]
+		require.Equal(t, mount.TypeBind, m.Type, "auth socket should be bind-mounted")
+		require.Equal(t, filepath.Dir(cfg.AuthSocketPath), m.Source, "mount source should be the host directory containing the live socket")
+		require.Equal(t, sandboxauth.SandboxSocketDir, m.Target, "mount target should be the fixed in-sandbox auth directory")
 	})
 
 	t.Run("returns error when container create fails", func(t *testing.T) {

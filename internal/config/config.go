@@ -126,6 +126,14 @@ type Config struct {
 	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
 	// this empty falls back to whatever resolv.conf Docker injects.
 	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
+	// SandboxAuthSocketDir is the on-host directory under which per-session
+	// GitHub credential sockets are created (one Unix-domain socket per
+	// session, bind-mounted into the container). The orchestrator must be
+	// able to mkdir / chmod this path; the directory is provisioned out of
+	// band by deploy/scripts/provision.sh next to the resolv.conf file. If
+	// empty, the credential-helper path is disabled and sessions fall back
+	// to the legacy GITHUB_TOKEN env-var injection.
+	SandboxAuthSocketDir string `env:"SANDBOX_AUTH_SOCKET_DIR" envDefault:"/var/run/143/sandbox-auth"`
 	// Data retention
 	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
 	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`

@@ -158,15 +158,21 @@ var sessionTestCols = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id",
-	"deleted_at", "created_at",
+	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func previewManagerSessionRow(values ...any) []any {
-	if len(values) == len(sessionTestCols)-3 {
-		row := make([]any, 0, len(values)+3)
+	// Tests written before the git_identity_source / git_identity_user_id
+	// columns existed pass values whose count is two short of the new
+	// schema. Inject the missing nils right before created_at so each
+	// fixture call site doesn't need to know about the new columns.
+	if len(values) == len(sessionTestCols)-3-2 {
+		row := make([]any, 0, len(values)+5)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
-		row = append(row, values[3:]...)
+		row = append(row, values[3:len(values)-1]...)
+		row = append(row, nil, nil)
+		row = append(row, values[len(values)-1])
 		return row
 	}
 	return values

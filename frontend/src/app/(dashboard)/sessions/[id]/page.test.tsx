@@ -2582,6 +2582,81 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('does not attach unresolved review comments to a normal follow-up outside review mode', async () => {
+    let postedMessage = '';
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const comments: SessionReviewComment[] = [{
+      id: 'comment-1',
+      session_id: idleSessionWithDiff.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: 2,
+      diff_side: 'new',
+      body: 'Handle the null edge case',
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        postedMessage = body.message;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    await screen.findByText('src/app.ts');
+    expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+    await waitFor(() => {
+      expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
+    });
+
+    await user.type(textarea, 'Hello agent');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(postedMessage).toBe('Hello agent');
+    });
+  });
+
   it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {
     let messageSent = false;
     const idleSession: Session = {
@@ -2632,6 +2707,54 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(messageSent).toBe(true);
       expect(scroller.scrollTop).toBe(900);
+    });
+  });
+
+  it('clears the jump-to-latest affordance when the viewed session changes', async () => {
+    const idleSessionA: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    const idleSessionB: Session = {
+      ...mockSessions[1],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      result_summary: 'Second session title',
+    };
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', ({ params }) => {
+        const session = params.id === idleSessionA.id ? idleSessionA : idleSessionB;
+        return HttpResponse.json({ data: session } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { container, rerender } = renderWithProviders(
+      <SessionDetailContent id="session-abcdef12-3456-7890" />,
+    );
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    const scroller = getChatScroller(container);
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+
+    expect(await screen.findByRole('button', { name: /Jump to latest/i })).toBeInTheDocument();
+
+    rerender(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    await screen.findByRole('heading', { level: 1, name: 'Second session title' });
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Jump to latest/i })).not.toBeInTheDocument();
     });
   });
 
@@ -2959,7 +3082,7 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/doesn't support headless conversation resume/i)).toBeVisible();
   });
 
-  it('shares composer draft state between chat and review mode and keeps review comments visible', async () => {
+  it('shares composer draft state between chat and review mode without keeping comments attached in overview', async () => {
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -3013,8 +3136,8 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: 'Overview' }));
 
     expect(await screen.findByDisplayValue('Please fix this and add tests')).toBeInTheDocument();
-    expect(screen.getByText('1 comment attached')).toBeInTheDocument();
-    expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
+    expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
+    expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
   });
 
   it('shows review file count in Changes tab and file click works', async () => {

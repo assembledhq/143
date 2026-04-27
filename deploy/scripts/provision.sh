@@ -285,6 +285,15 @@ nameserver 8.8.8.8
 options edns0 trust-ad ndots:0
 RESOLV
       chmod 644 /etc/143/sandbox-resolv.conf
+      # Provision /var/run/143/sandbox-auth/ for the per-session GitHub
+      # credential sockets. The orchestrator opens one Unix-domain socket
+      # per session here and bind-mounts it into the container; in-sandbox
+      # 143-tools dials the socket whenever git/gh need a fresh token.
+      # Owned by the docker daemon group (or wide-open under tmpfs perms)
+      # so the daemon can read the socket file when wiring up the bind
+      # mount. SANDBOX_AUTH_SOCKET_DIR points the server at this path.
+      mkdir -p /var/run/143/sandbox-auth
+      chmod 0750 /var/run/143/sandbox-auth
 PULL_WORKER
     ;;
   db|logging|redis)

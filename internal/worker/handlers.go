@@ -149,6 +149,12 @@ type Services struct {
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
+	// SandboxAuthShutdown drains the per-session GitHub credential socket
+	// listeners. nil when no SandboxAuthSocketDir is configured (local
+	// dev). Called from cmd/server graceful shutdown after the API drains
+	// so listener goroutines and on-disk socket files don't outlive the
+	// process.
+	SandboxAuthShutdown func()
 }
 
 type orchestratorService interface {

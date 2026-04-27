@@ -57,7 +57,7 @@ var prTestOrganizationColumns = []string{
 }
 
 var prTestUserColumns = []string{
-	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at",
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at",
 }
 
 var prTestPullRequestColumns = []string{
@@ -426,6 +426,36 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	})
 	require.NoError(t, err, "HandleCheckRunEvent should ignore check runs for unmanaged pull requests")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
+}
+
+// TestPRService_IdentityResolverCachedAndInvalidated verifies the lazy-build
+// + invalidate-on-Set* contract: the resolver is built once on first use
+// and reused on subsequent calls, but a Set* mutator that changes a
+// resolver-relevant dependency (e.g. SetUserStore) must invalidate the
+// cache so the next call rebuilds.
+func TestPRService_IdentityResolverCachedAndInvalidated(t *testing.T) {
+	t.Parallel()
+
+	service := NewPRService(nil, nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+
+	first := service.identityResolver()
+	require.NotNil(t, first, "identityResolver should build on first use")
+	require.Same(t, first, service.identityResolver(), "identityResolver should reuse the cached resolver across hot-path calls")
+
+	// SetUserStore changes a resolver dependency; the cache must rebuild
+	// on the next call so the new wiring takes effect.
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should construct a pgxmock pool")
+	defer mock.Close()
+	service.SetUserStore(db.NewUserStore(mock))
+	rebuilt := service.identityResolver()
+	require.NotSame(t, first, rebuilt, "SetUserStore should invalidate the cached resolver")
+	require.Same(t, rebuilt, service.identityResolver(), "post-rebuild calls should hit the new cache entry")
+
+	// SetBaseURL is the URL override seam used in tests; it must also
+	// invalidate so a test override doesn't leak the production base URL.
+	service.SetBaseURL("https://api.example.com")
+	require.NotSame(t, rebuilt, service.identityResolver(), "SetBaseURL should invalidate the cached resolver")
 }
 
 func TestFormatBranchName(t *testing.T) {
@@ -1469,7 +1499,7 @@ func TestResolveToken_AppOnly(t *testing.T) {
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err)
 	require.Equal(t, "app-token-123", resolution.Token)
-	require.False(t, resolution.IsUserToken)
+	require.False(t, resolution.IsUserToken())
 }
 
 func TestResolveToken_UserPreferred_NoUser(t *testing.T) {
@@ -1493,7 +1523,7 @@ func TestResolveToken_UserPreferred_NoUser(t *testing.T) {
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err)
 	require.Equal(t, "app-token-fallback", resolution.Token)
-	require.False(t, resolution.IsUserToken, "should fall back to app token when no user")
+	require.False(t, resolution.IsUserToken(), "should fall back to app token when no user")
 }
 
 func TestResolveToken_UserRequired_NoUser(t *testing.T) {
@@ -1568,7 +1598,7 @@ func TestResolveToken_AuthorModeAppUsesInstallationToken(t *testing.T) {
 	resolution, err := svc.resolveToken(context.Background(), &models.Session{ID: uuid.New(), OrgID: uuid.New()}, &models.Repository{InstallationID: 1}, models.OrgSettings{}, "app")
 	require.NoError(t, err, "resolveToken should accept explicit app author mode")
 	require.Equal(t, "app-token", resolution.Token, "resolveToken should use the installation token in app mode")
-	require.False(t, resolution.IsUserToken, "app mode should not report a user token")
+	require.False(t, resolution.IsUserToken(), "app mode should not report a user token")
 }
 
 func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationMissing(t *testing.T) {
@@ -1603,7 +1633,7 @@ func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationMiss
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "resolveToken should recover when the repo row is missing installation_id")
 	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should use the repository integration installation token")
-	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.False(t, resolution.IsUserToken(), "fallback installation token should still be treated as an app token")
 	require.NoError(t, mock.ExpectationsWereMet(), "all integration fallback expectations should be met")
 }
 
@@ -1657,66 +1687,8 @@ func TestResolveToken_FallsBackToIntegrationInstallationWhenRepoInstallationIsSt
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "resolveToken should recover when the repo installation_id is stale")
 	require.Equal(t, "fallback-token", resolution.Token, "resolveToken should retry with the repository integration installation token")
-	require.False(t, resolution.IsUserToken, "fallback installation token should still be treated as an app token")
+	require.False(t, resolution.IsUserToken(), "fallback installation token should still be treated as an app token")
 	require.NoError(t, mock.ExpectationsWereMet(), "all integration fallback expectations should be met")
-}
-
-func TestIntegrationInstallationID(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		integration *models.Integration
-		expected    int64
-		expectErr   bool
-	}{
-		{
-			name:      "nil integration",
-			expectErr: true,
-		},
-		{
-			name:        "empty config",
-			integration: &models.Integration{},
-			expectErr:   true,
-		},
-		{
-			name: "invalid config",
-			integration: &models.Integration{
-				Config: []byte(`{`),
-			},
-			expectErr: true,
-		},
-		{
-			name: "missing installation id",
-			integration: &models.Integration{
-				Config: []byte(`{"installation_id":0}`),
-			},
-			expectErr: true,
-		},
-		{
-			name: "valid installation id",
-			integration: &models.Integration{
-				Config: []byte(`{"installation_id":42}`),
-			},
-			expected: 42,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			installationID, err := integrationInstallationID(tt.integration)
-			if tt.expectErr {
-				require.Error(t, err, "integrationInstallationID should return an error for invalid integration config")
-				return
-			}
-
-			require.NoError(t, err, "integrationInstallationID should parse a valid installation id")
-			require.Equal(t, tt.expected, installationID, "integrationInstallationID should return the parsed installation id")
-		})
-	}
 }
 
 func TestGetInstallationTokenForRepo_ErrorPaths(t *testing.T) {
@@ -1950,7 +1922,7 @@ func TestResolveToken_UsesGitHubAppUserCredential(t *testing.T) {
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "resolveToken should use the GitHub App user credential when available")
 	require.Equal(t, "ghu_user_token", resolution.Token, "resolveToken should return the user access token")
-	require.True(t, resolution.IsUserToken, "resolveToken should mark GitHub App user tokens as user-authored")
+	require.True(t, resolution.IsUserToken(), "resolveToken should mark GitHub App user tokens as user-authored")
 }
 
 func TestResolveToken_UserPreferredFallsBackWhenUserTokenCannotAccessRepo(t *testing.T) {
@@ -1999,7 +1971,7 @@ func TestResolveToken_UserPreferredFallsBackWhenUserTokenCannotAccessRepo(t *tes
 	resolution, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "user_preferred should fall back to the app token when the user token cannot access the repo")
 	require.Equal(t, "app-token-fallback", resolution.Token, "resolveToken should fall back to the installation token")
-	require.False(t, resolution.IsUserToken, "resolveToken should mark the fallback token as app-authored")
+	require.False(t, resolution.IsUserToken(), "resolveToken should mark the fallback token as app-authored")
 }
 
 func TestResolveToken_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing.T) {
@@ -2040,36 +2012,6 @@ func TestResolveToken_UserRequiredErrorsWhenUserTokenCannotAccessRepo(t *testing
 	_, err := svc.resolveToken(context.Background(), run, repo, settings, "")
 	require.Error(t, err, "user_required should fail when the user token cannot access the target repo")
 	require.Contains(t, err.Error(), "cannot access repo", "resolveToken should surface repo access failures for user-required auth")
-}
-
-func TestUserTokenCanAccessRepo_ErrorPaths(t *testing.T) {
-	t.Parallel()
-
-	t.Run("invalid repo name", func(t *testing.T) {
-		t.Parallel()
-		svc := &PRService{httpClient: &http.Client{}, logger: zerolog.Nop()}
-		ok, err := svc.userTokenCanAccessRepo(context.Background(), "token", "/repo")
-		require.False(t, ok, "userTokenCanAccessRepo should reject malformed repo names")
-		require.Error(t, err, "userTokenCanAccessRepo should return an error for malformed repo names")
-	})
-
-	t.Run("server error", func(t *testing.T) {
-		t.Parallel()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"message":"boom"}`))
-		}))
-		defer server.Close()
-
-		svc := &PRService{
-			baseURL:    server.URL,
-			httpClient: server.Client(),
-			logger:     zerolog.Nop(),
-		}
-		ok, err := svc.userTokenCanAccessRepo(context.Background(), "token", "owner/repo")
-		require.False(t, ok, "userTokenCanAccessRepo should not grant access on GitHub API failures")
-		require.Error(t, err, "userTokenCanAccessRepo should propagate unexpected API errors")
-	})
 }
 
 func TestValidateUserToken_ValidToken(t *testing.T) {
@@ -3253,32 +3195,12 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 	}
 }
 
-func TestCommitIdentity(t *testing.T) {
+func TestGithubAPIError_HTTPStatus(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil resolution falls back to bot", func(t *testing.T) {
-		t.Parallel()
-		name, email := commitIdentity(nil)
-		require.Equal(t, "143 Agent", name)
-		require.Equal(t, "noreply@143.dev", email)
-	})
-
-	t.Run("app token falls back to bot", func(t *testing.T) {
-		t.Parallel()
-		name, email := commitIdentity(&tokenResolution{IsUserToken: false})
-		require.Equal(t, "143 Agent", name)
-		require.Equal(t, "noreply@143.dev", email)
-	})
-
-	t.Run("user token uses user identity", func(t *testing.T) {
-		t.Parallel()
-		name, email := commitIdentity(&tokenResolution{
-			IsUserToken: true,
-			User:        &models.User{Name: "Alice", Email: "alice@example.com"},
-		})
-		require.Equal(t, "Alice", name)
-		require.Equal(t, "alice@example.com", email)
-	})
+	var nilErr *githubAPIError
+	require.Equal(t, 0, nilErr.HTTPStatus(), "HTTPStatus should return 0 for a nil receiver")
+	require.Equal(t, http.StatusConflict, (&githubAPIError{StatusCode: http.StatusConflict}).HTTPStatus(), "HTTPStatus should expose the wrapped status code")
 }
 
 func TestPushSessionBranch(t *testing.T) {
@@ -3511,7 +3433,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(prTestUserColumns).AddRow(
-				userID, orgID, "alice@example.com", "Alice", "member", nil, nil, nil, nil, nil, now,
+				userID, orgID, "alice@example.com", "Alice", "member", nil, nil, nil, nil, nil, nil, now,
 			),
 		)
 	mock.ExpectQuery("INSERT INTO pull_requests").

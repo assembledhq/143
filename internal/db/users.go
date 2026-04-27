@@ -32,30 +32,35 @@ func NewUserStore(db DBTX) *UserStore {
 	return &UserStore{db: db}
 }
 
-const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, password_hash, google_id, created_at`
+const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, created_at`
 const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
-// On conflict, it updates the user's name, login, avatar, and email.
+// On conflict, it updates the user's name, login, avatar, email, and the
+// GitHub-attribution noreply email (so a re-authorize flow refreshes it
+// when GitHub returns a different value, and the backfilled fallback gets
+// replaced once we have a real /user/emails answer).
 func (s *UserStore) UpsertFromGitHub(ctx context.Context, user *models.User) error {
 	query := `
-		INSERT INTO users (org_id, email, name, role, github_id, github_login, avatar_url)
-		VALUES (@org_id, @email, @name, @role, @github_id, @github_login, @avatar_url)
+		INSERT INTO users (org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url)
+		VALUES (@org_id, @email, @name, @role, @github_id, @github_login, @github_noreply_email, @avatar_url)
 		ON CONFLICT (github_id) WHERE github_id IS NOT NULL DO UPDATE
 		SET name = EXCLUDED.name,
 		    email = EXCLUDED.email,
 		    github_login = EXCLUDED.github_login,
+		    github_noreply_email = COALESCE(EXCLUDED.github_noreply_email, users.github_noreply_email),
 		    avatar_url = EXCLUDED.avatar_url
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
-		"org_id":       user.OrgID,
-		"email":        user.Email,
-		"name":         user.Name,
-		"role":         user.Role,
-		"github_id":    user.GitHubID,
-		"github_login": user.GitHubLogin,
-		"avatar_url":   user.AvatarURL,
+		"org_id":               user.OrgID,
+		"email":                user.Email,
+		"name":                 user.Name,
+		"role":                 user.Role,
+		"github_id":            user.GitHubID,
+		"github_login":         user.GitHubLogin,
+		"github_noreply_email": user.GitHubNoreplyEmail,
+		"avatar_url":           user.AvatarURL,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -294,22 +299,30 @@ func (s *UserStore) UpsertFromGoogle(ctx context.Context, user *models.User) err
 
 // LinkGitHubAccount attaches a GitHub identity to an existing user.
 //
+// noreplyEmail may be empty when the OAuth flow couldn't fetch /user/emails;
+// in that case the existing column value is preserved (COALESCE) so the
+// migration's backfilled fallback survives an incomplete re-link.
+//
 // TODO(2026-04-25): drop the orgID parameter and the `AND org_id = @org_id`
 // filter once users.org_id is removed. The org scope is a legacy
 // single-org-per-user safety belt; with multi-org, the (id) predicate alone
 // is sufficient because user IDs are globally unique.
-func (s *UserStore) LinkGitHubAccount(ctx context.Context, userID, orgID uuid.UUID, githubID int64, githubLogin string, avatarURL string) error {
+func (s *UserStore) LinkGitHubAccount(ctx context.Context, userID, orgID uuid.UUID, githubID int64, githubLogin, avatarURL, noreplyEmail string) error {
 	query := `
 		UPDATE users
-		SET github_id = @github_id, github_login = @github_login, avatar_url = @avatar_url
+		SET github_id = @github_id,
+		    github_login = @github_login,
+		    avatar_url = @avatar_url,
+		    github_noreply_email = COALESCE(NULLIF(@github_noreply_email, ''), github_noreply_email)
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":           userID,
-		"org_id":       orgID,
-		"github_id":    githubID,
-		"github_login": githubLogin,
-		"avatar_url":   avatarURL,
+		"id":                   userID,
+		"org_id":               orgID,
+		"github_id":            githubID,
+		"github_login":         githubLogin,
+		"avatar_url":           avatarURL,
+		"github_noreply_email": noreplyEmail,
 	})
 	return err
 }
@@ -369,7 +382,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 ) ([]models.User, time.Time, error) {
 	query := `
 		SELECT u.id, m.org_id, u.email, u.name, m.role,
-		       u.github_id, u.github_login, u.avatar_url,
+		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
 		       u.password_hash, u.google_id, u.created_at,
 		       m.created_at AS membership_created_at
 		FROM users u
@@ -407,7 +420,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 		)
 		if err := rows.Scan(
 			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
-			&u.GitHubID, &u.GitHubLogin, &u.AvatarURL,
+			&u.GitHubID, &u.GitHubLogin, &u.GitHubNoreplyEmail, &u.AvatarURL,
 			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
 			&memTime,
 		); err != nil {
