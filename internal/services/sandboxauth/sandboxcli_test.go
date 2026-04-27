@@ -204,6 +204,8 @@ func TestRunAuthToken_ErrorPaths(t *testing.T) {
 			name: "host returns structured error",
 			handler: func(conn net.Conn) {
 				defer conn.Close()
+				var req Request
+				require.NoError(t, json.NewDecoder(conn).Decode(&req), "host should receive the auth-token request before replying with an error")
 				require.NoError(t, json.NewEncoder(conn).Encode(&Response{Error: "revoked"}), "host should encode an error response")
 			},
 			wantCode: 1,

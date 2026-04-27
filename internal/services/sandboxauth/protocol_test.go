@@ -39,7 +39,9 @@ func TestClient_Get_TransportErrorBranches(t *testing.T) {
 		{
 			name: "empty response",
 			handler: func(conn net.Conn) {
-				_ = conn.Close()
+				defer conn.Close()
+				var req Request
+				require.NoError(t, json.NewDecoder(conn).Decode(&req), "server should receive the request before simulating an empty response")
 			},
 			wantErr: "empty response",
 		},
@@ -47,6 +49,8 @@ func TestClient_Get_TransportErrorBranches(t *testing.T) {
 			name: "decode error",
 			handler: func(conn net.Conn) {
 				defer conn.Close()
+				var req Request
+				require.NoError(t, json.NewDecoder(conn).Decode(&req), "server should receive the request before sending malformed JSON")
 				_, _ = conn.Write([]byte("not-json\n"))
 			},
 			wantErr: "decode response",

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+var gitHubTransportTestMu sync.Mutex
 
 func expectUserLastOrgLookup(mock pgxmock.PgxPoolIface, userID uuid.UUID, lastOrgID *uuid.UUID) {
 	rows := pgxmock.NewRows([]string{"last_org_id"})
@@ -574,8 +577,8 @@ func TestAuthHandler_Callback(t *testing.T) {
 }
 
 func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
-	// No t.Parallel: this test rewrites http.DefaultTransport so the hardcoded
-	// GitHub OAuth/API URLs resolve to a local httptest server.
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		setupMock func(mock pgxmock.PgxPoolIface, now time.Time)
@@ -636,6 +639,8 @@ func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "should create pgxmock pool")
 			defer mock.Close()
@@ -657,6 +662,8 @@ func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
 			}))
 			defer server.Close()
 
+			gitHubTransportTestMu.Lock()
+			defer gitHubTransportTestMu.Unlock()
 			restoreTransport := rewriteGitHubTransport(t, server.URL)
 			defer restoreTransport()
 
@@ -3364,14 +3371,16 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 }
 
 func TestFetchGitHubNoreplyEmail_DefaultEndpointWrapper(t *testing.T) {
-	// No t.Parallel: this test rewrites http.DefaultTransport so the hardcoded
-	// GitHub API hostname resolves to a local httptest server.
+	t.Parallel()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/user/emails", r.URL.Path, "wrapper should probe the default GitHub /user/emails endpoint")
 		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
 	}))
 	defer server.Close()
 
+	gitHubTransportTestMu.Lock()
+	defer gitHubTransportTestMu.Unlock()
 	restoreTransport := rewriteGitHubTransport(t, server.URL)
 	defer restoreTransport()
 
