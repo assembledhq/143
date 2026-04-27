@@ -781,23 +781,6 @@ type CodingAuth struct {
 	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
-type LegacyCodingAuthStatus struct {
-	HasLegacyAmpSecret   bool   `json:"has_legacy_amp_secret"`
-	AmpMaskedKey         string `json:"amp_masked_key,omitempty"`
-	HasAmpCredential     bool   `json:"has_amp_credential"`
-	HasLegacyPiSecret    bool   `json:"has_legacy_pi_secret"`
-	PiMaskedKey          string `json:"pi_masked_key,omitempty"`
-	HasLegacyPiDefaults  bool   `json:"has_legacy_pi_defaults"`
-	HasPiCredential      bool   `json:"has_pi_credential"`
-	PiRequiresManualAuth bool   `json:"pi_requires_manual_auth"`
-}
-
-type LegacyCodingAuthMigrationResult struct {
-	MigratedAmp          bool `json:"migrated_amp"`
-	MigratedPi           bool `json:"migrated_pi"`
-	RemovedLegacySecrets bool `json:"removed_legacy_secrets"`
-}
-
 type CreateCodingAuthInput struct {
 	Agent         AgentType         `json:"agent"`
 	AuthType      CodingAuthType    `json:"auth_type"`

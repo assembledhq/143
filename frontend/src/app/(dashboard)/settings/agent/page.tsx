@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Plus, ShieldAlert, Trash2 } from "lucide-react";
+import { Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
@@ -128,14 +128,8 @@ export default function AgentPage() {
     queryKey: ["coding-auths"],
     queryFn: () => api.codingAuths.list(),
   });
-  const { data: legacyStatusResponse } = useQuery({
-    queryKey: ["coding-auths", "legacy-status"],
-    queryFn: () => api.codingAuths.legacyStatus(),
-    enabled: isAdmin,
-  });
   const rows = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse?.data]);
   const selected = rows.find((row) => row.id === selectedId) ?? null;
-  const legacyStatus = legacyStatusResponse?.data;
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -203,7 +197,6 @@ export default function AgentPage() {
     },
     onSuccess: async (created) => {
       await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
-      await queryClient.invalidateQueries({ queryKey: ["coding-auths", "legacy-status"] });
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
       await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       closeAddModal();
@@ -243,31 +236,6 @@ export default function AgentPage() {
     onError: (error) => {
       captureError(error, { feature: "coding-auth-delete" });
       toast.error("Could not disable auth");
-    },
-  });
-
-  const migrateLegacyMutation = useMutation({
-    mutationFn: () => api.codingAuths.migrateLegacy(),
-    onSuccess: async (response) => {
-      await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
-      await queryClient.invalidateQueries({ queryKey: ["coding-auths", "legacy-status"] });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
-      const migrated = [
-        response.data.migrated_amp ? "Amp" : null,
-        response.data.migrated_pi ? "Pi" : null,
-      ].filter(Boolean);
-      if (migrated.length > 0) {
-        toast.success(`Migrated legacy ${migrated.join(" and ")} auth`);
-      } else if (response.data.removed_legacy_secrets) {
-        toast.success("Removed legacy coding-agent secrets from org settings");
-      } else {
-        toast.success("No legacy coding-agent auth needed migration");
-      }
-    },
-    onError: (error) => {
-      captureError(error, { feature: "coding-auth-legacy-migrate" });
-      toast.error("Could not migrate legacy coding-agent auth");
     },
   });
 
@@ -409,51 +377,6 @@ export default function AgentPage() {
             </div>
           )}
         />
-
-        {(legacyStatus?.has_legacy_amp_secret || legacyStatus?.has_legacy_pi_secret || legacyStatus?.pi_requires_manual_auth) ? (
-          <Card className="border-amber-500/20 bg-amber-500/5">
-            <CardContent className="flex items-start justify-between gap-4 py-4">
-              <div className="flex min-w-0 gap-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-                <div className="space-y-1.5 text-sm">
-                  {legacyStatus.has_legacy_amp_secret ? (
-                    <p>
-                      Legacy Amp auth is still stored in org settings
-                      {legacyStatus.amp_masked_key ? ` (${legacyStatus.amp_masked_key})` : ""}. Move it into the coding-auth stack so it follows the same encrypted credential path as the other agents.
-                    </p>
-                  ) : null}
-                  {legacyStatus.has_legacy_pi_secret ? (
-                    <p>
-                      Legacy Pi auth is still stored in org settings
-                      {legacyStatus.pi_masked_key ? ` (${legacyStatus.pi_masked_key})` : ""}. Move it into the coding-auth stack so Pi uses the same dedicated credential flow as the other coding agents.
-                    </p>
-                  ) : null}
-                  {legacyStatus.pi_requires_manual_auth ? (
-                    <p>
-                      Pi defaults are configured, but Pi still needs its own API key. Pi no longer borrows Claude Code, Codex, or Gemini CLI credentials.
-                    </p>
-                  ) : null}
-                </div>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                {(legacyStatus.has_legacy_amp_secret || legacyStatus.has_legacy_pi_secret) ? (
-                  <Button
-                    variant="outline"
-                    onClick={() => migrateLegacyMutation.mutate()}
-                    disabled={migrateLegacyMutation.isPending}
-                  >
-                    Migrate legacy auth
-                  </Button>
-                ) : null}
-                {legacyStatus.pi_requires_manual_auth ? (
-                  <Button variant="outline" onClick={() => openAddModal("pi")}>
-                    Add Pi auth
-                  </Button>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
 
         <section className="space-y-4">
           <div className="space-y-1.5">

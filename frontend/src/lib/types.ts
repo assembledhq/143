@@ -793,23 +793,6 @@ export interface CodingAuth {
   updated_at: string;
 }
 
-export interface LegacyCodingAuthStatus {
-  has_legacy_amp_secret: boolean;
-  amp_masked_key?: string;
-  has_amp_credential: boolean;
-  has_legacy_pi_secret: boolean;
-  pi_masked_key?: string;
-  has_legacy_pi_defaults: boolean;
-  has_pi_credential: boolean;
-  pi_requires_manual_auth: boolean;
-}
-
-export interface LegacyCodingAuthMigrationResult {
-  migrated_amp: boolean;
-  migrated_pi: boolean;
-  removed_legacy_secrets: boolean;
-}
-
 export interface RepoSummary {
   repository_id: string;
   full_name: string;
