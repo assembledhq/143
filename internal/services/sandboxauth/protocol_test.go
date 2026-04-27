@@ -14,7 +14,6 @@ func TestClient_Get_UsesEarlierContextDeadline(t *testing.T) {
 	t.Parallel()
 
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req), "server should receive a valid request")
 		require.NoError(t, json.NewEncoder(conn).Encode(&Response{Token: "tok"}), "server should encode a valid response")
@@ -39,7 +38,6 @@ func TestClient_Get_TransportErrorBranches(t *testing.T) {
 		{
 			name: "empty response",
 			handler: func(conn net.Conn) {
-				defer conn.Close()
 				var req Request
 				require.NoError(t, json.NewDecoder(conn).Decode(&req), "server should receive the request before simulating an empty response")
 			},
@@ -48,7 +46,6 @@ func TestClient_Get_TransportErrorBranches(t *testing.T) {
 		{
 			name: "decode error",
 			handler: func(conn net.Conn) {
-				defer conn.Close()
 				var req Request
 				require.NoError(t, json.NewDecoder(conn).Decode(&req), "server should receive the request before sending malformed JSON")
 				_, _ = conn.Write([]byte("not-json\n"))

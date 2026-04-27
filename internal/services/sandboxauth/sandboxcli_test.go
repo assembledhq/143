@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,17 @@ func gitAvailable() bool {
 // runs handler once per accepted connection. Returns the socket path; the
 // listener and goroutine are cleaned up via t.Cleanup so each test can
 // share-nothing.
+//
+// The helper owns connection teardown rather than the handler. After the
+// handler completes its request/response exchange, we half-close the write
+// side and drain any remaining bytes from the client before fully closing.
+// Without this, a fast handler exit could race the client's request flush:
+// json.Decode returns as soon as the JSON value is parsed, but the kernel
+// may not yet have delivered the trailing newline, and the immediate
+// Close() then surfaces as "write: broken pipe" on whichever side still has
+// bytes in flight. Handlers must therefore NOT defer conn.Close themselves
+// — closing the conn from inside the handler defeats the half-close
+// handshake.
 func startSocketServer(t *testing.T, handler func(conn net.Conn)) string {
 	t.Helper()
 	// AF_UNIX socket paths are limited to ~104 bytes on macOS (108 on Linux).
@@ -50,7 +62,19 @@ func startSocketServer(t *testing.T, handler func(conn net.Conn)) string {
 			if err != nil {
 				return
 			}
-			handler(conn)
+			go func(c net.Conn) {
+				defer func() {
+					if uc, ok := c.(*net.UnixConn); ok {
+						_ = uc.CloseWrite()
+					}
+					// Bound the drain so a misbehaving client can't leak
+					// this goroutine across tests in the same process.
+					_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+					_, _ = io.Copy(io.Discard, c)
+					_ = c.Close()
+				}()
+				handler(c)
+			}(conn)
 		}
 	}()
 	return sock
@@ -60,7 +84,6 @@ func TestClient_GetSuccess(t *testing.T) {
 	t.Parallel()
 
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req))
 		require.Equal(t, OpGet, req.Op)
@@ -96,7 +119,6 @@ func TestClient_GetDialFailure(t *testing.T) {
 
 func TestRunGitCredential_GetReturnsCreds(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req))
 		_ = json.NewEncoder(conn).Encode(&Response{Token: "tok", Username: "x-access-token"})
@@ -112,9 +134,6 @@ func TestRunGitCredential_GetReturnsCreds(t *testing.T) {
 
 func TestRunGitCredential_DefaultsUsernameWhenHostOmitsIt(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
-		// Drain the request before responding so the deferred Close doesn't
-		// race the client's write and surface as a "broken pipe".
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req), "host should read the request first")
 		require.NoError(t, json.NewEncoder(conn).Encode(&Response{Token: "tok"}), "host should encode a response")
@@ -144,7 +163,6 @@ func TestRunGitCredential_StoreAndEraseAreNoOps(t *testing.T) {
 
 func TestRunGitCredential_HostError(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req))
 		_ = json.NewEncoder(conn).Encode(&Response{Error: "resolver: token revoked"})
@@ -171,7 +189,6 @@ func TestRunGitCredential_RejectsUnknownVerb(t *testing.T) {
 
 func TestRunAuthToken_PrintsToken(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
-		defer conn.Close()
 		var req Request
 		require.NoError(t, json.NewDecoder(conn).Decode(&req))
 		_ = json.NewEncoder(conn).Encode(&Response{Token: "abcd1234"})
@@ -207,7 +224,6 @@ func TestRunAuthToken_ErrorPaths(t *testing.T) {
 		{
 			name: "host returns structured error",
 			handler: func(conn net.Conn) {
-				defer conn.Close()
 				var req Request
 				require.NoError(t, json.NewDecoder(conn).Decode(&req), "host should receive the auth-token request before replying with an error")
 				require.NoError(t, json.NewEncoder(conn).Encode(&Response{Error: "revoked"}), "host should encode an error response")
