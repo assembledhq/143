@@ -61,7 +61,7 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 	return nil
 }
 
-func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, turnNumber int, message string) error {
+func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error {
 	query := `
 		UPDATE session_logs
 		SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"type":"assistant_final","duplicate_of_transcript":true}'::jsonb
@@ -70,6 +70,7 @@ func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, 
 			FROM session_logs
 			WHERE org_id = @org_id
 			  AND session_id = @session_id
+			  AND thread_id IS NOT DISTINCT FROM @thread_id
 			  AND turn_number = @turn_number
 			  AND level = 'output'
 			  AND message = @message
@@ -80,6 +81,7 @@ func (s *SessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":      orgID,
 		"session_id":  sessionID,
+		"thread_id":   threadID,
 		"turn_number": turnNumber,
 		"message":     message,
 	})

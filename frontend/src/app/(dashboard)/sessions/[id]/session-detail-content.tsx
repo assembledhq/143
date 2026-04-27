@@ -1282,6 +1282,13 @@ function ChatPanel({
     const fetchedLogIds = new Set<number>();
     const assistantTranscriptByTurn = new Map<number, Set<string>>();
     const planModeSeedMessages: SessionMessage[] = [];
+    const normalizeTranscriptContent = (content: string) =>
+      content
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((line) => line.replace(/[ \t\r]+$/g, ""))
+        .join("\n")
+        .replace(/\n+$/g, "");
 
     for (const entry of baseTimelineEntries) {
       switch (entry.kind) {
@@ -1291,13 +1298,13 @@ function ChatPanel({
           }
           if (entry.data.role === "assistant") {
             const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-            contents.add(entry.data.content);
+            contents.add(normalizeTranscriptContent(entry.data.content));
             assistantTranscriptByTurn.set(entry.data.turn_number, contents);
           }
           break;
         case "plan_message": {
           const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-          contents.add(entry.data.content);
+          contents.add(normalizeTranscriptContent(entry.data.content));
           assistantTranscriptByTurn.set(entry.data.turn_number, contents);
           break;
         }
@@ -1321,7 +1328,7 @@ function ChatPanel({
       if (log.level !== "output") return true;
       if (log.metadata?.type === "tool_result") return true;
       if (log.metadata?.type === "assistant_final" && log.metadata?.duplicate_of_transcript === true) return false;
-      return !assistantTranscriptByTurn.get(log.turn_number)?.has(log.message);
+      return !assistantTranscriptByTurn.get(log.turn_number)?.has(normalizeTranscriptContent(log.message));
     });
 
     if (overlayLogs.length === 0) return baseTimelineEntries;
