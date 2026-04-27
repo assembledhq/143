@@ -137,11 +137,13 @@ func (s *Server) Listen(
 	if err != nil {
 		return "", fmt.Errorf("sandboxauth: listen on %s: %w", sockPath, err)
 	}
-	// Keep the socket owner-only. The orchestrator process creates it as
-	// the same numeric uid the sandbox image runs as (`useradd sandbox`
-	// becomes uid 1000 in the image, matching the deploy user on the host),
-	// so the bind-mounted socket remains reachable inside the container
-	// without granting group/world access.
+	// Keep the socket owner-only. The orchestrator (running as appuser in
+	// the worker server image) and the in-sandbox client (running as the
+	// `sandbox` user in the sandbox image) are both pinned to UID 1000,
+	// so the bind-mounted socket file's preserved owner UID matches at
+	// both ends without granting group/world access. See the Dockerfile
+	// and sandbox/Dockerfile for the pinning, and provision.sh for the
+	// matching ownership on the host bind-mount source.
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
