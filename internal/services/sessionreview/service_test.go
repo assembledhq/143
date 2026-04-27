@@ -168,7 +168,8 @@ func TestReviewPromptForMode(t *testing.T) {
 // sessionReviewSessionColumns mirrors the column ordering of session-store
 // SELECTs/UPDATEs used by ClaimIdle / ClaimForResume. Kept in this test file
 // because the production code reaches into pgx via the SessionStore directly
-// and we need to feed the exact row shape it expects to scan.
+// and we need to feed the exact row shape it expects to scan, including the
+// derived primary_issue_id field returned by sessionSelectColumns.
 var sessionReviewSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
 	"complexity_tier", "confidence_score", "confidence_reasoning", "risk_factors",
