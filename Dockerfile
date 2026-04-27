@@ -40,7 +40,12 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:8080/healthz || exit 1
 
-RUN useradd -r -s /usr/sbin/nologin appuser \
+# UID 1000 is pinned so the host-side bind-mount source for the sandbox
+# auth socket directory (/var/run/143/sandbox-auth, owned 1000:1000 by
+# systemd-tmpfiles — see deploy/scripts/provision.sh) is writable by
+# this user, and so the per-session unix socket created here at mode 0600
+# is readable by the sandbox container's `sandbox` user (also UID 1000).
+RUN useradd --uid 1000 --user-group --shell /usr/sbin/nologin appuser \
     && mkdir -p /app/.data \
     && chown -R appuser:appuser /app
 USER appuser
