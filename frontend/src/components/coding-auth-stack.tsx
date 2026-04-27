@@ -1,13 +1,16 @@
 "use client";
 
-import { GripVertical, MoveUp, MoveDown, ChevronsUp } from "lucide-react";
+import { useState } from "react";
+import { GripVertical, MoveUp, MoveDown, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AGENTS_BY_KEY } from "@/lib/agents";
+import { cn } from "@/lib/utils";
 import type { CodingAuth } from "@/lib/types";
 
 type MoveDirection = "up" | "down";
+export type DropPosition = "before" | "after";
 
 function agentLabel(agent: CodingAuth["agent"]) {
   return AGENTS_BY_KEY[agent]?.label ?? agent;
@@ -55,14 +58,17 @@ export function CodingAuthStack({
   selectedId,
   onSelect,
   onMove,
-  onMoveToTop,
+  onReorder,
 }: {
   rows: CodingAuth[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onMove: (id: string, direction: MoveDirection) => void;
-  onMoveToTop: (id: string) => void;
+  onReorder: (sourceId: string, targetId: string, position: DropPosition) => void;
 }) {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<{ id: string; position: DropPosition } | null>(null);
+
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card">
       <Table className="table-fixed">
@@ -77,81 +83,121 @@ export function CodingAuthStack({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((row, index) => (
-            <TableRow
-              key={row.id}
-              className={selectedId === row.id ? "bg-muted/40" : ""}
-            >
-              <TableCell>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="h-9 rounded-lg border border-border bg-muted/30 px-3 py-0 text-sm font-medium text-foreground hover:bg-muted/60"
-                  onClick={() => onSelect(row.id)}
-                >
-                  <span>{row.priority}</span>
-                  <GripVertical className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-                </Button>
-              </TableCell>
-              <TableCell className="font-medium whitespace-normal">{agentLabel(row.agent)}</TableCell>
-              <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
-              <TableCell className="whitespace-normal">
-                <div className="space-y-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-auto justify-start px-0 py-0 font-medium text-foreground hover:bg-transparent"
-                    onClick={() => onSelect(row.id)}
-                  >
-                    {row.label}
-                  </Button>
-                  {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className={statusBadgeClass(row.status)}>
-                    {statusLabel(row.status)}
-                  </Badge>
-                  {row.is_default ? <Badge>Default</Badge> : null}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center justify-end gap-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Move ${row.label} to top`}
-                    onClick={() => onMoveToTop(row.id)}
-                    disabled={index === 0}
-                  >
-                    <ChevronsUp className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Move ${row.label} up`}
-                    onClick={() => onMove(row.id, "up")}
-                    disabled={index === 0}
-                  >
-                    <MoveUp className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Move ${row.label} down`}
-                    onClick={() => onMove(row.id, "down")}
-                    disabled={index === rows.length - 1}
-                  >
-                    <MoveDown className="h-4 w-4" />
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          ))}
+          {rows.map((row, index) => {
+            const showDropAbove = dragOver?.id === row.id && dragOver.position === "before";
+            const showDropBelow = dragOver?.id === row.id && dragOver.position === "after";
+            return (
+              <TableRow
+                key={row.id}
+                draggable
+                onDragStart={(event) => {
+                  setDraggingId(row.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", row.id);
+                }}
+                onDragOver={(event) => {
+                  if (!draggingId || draggingId === row.id) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const position: DropPosition =
+                    event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                  setDragOver((prev) =>
+                    prev?.id === row.id && prev.position === position
+                      ? prev
+                      : { id: row.id, position },
+                  );
+                }}
+                onDragLeave={(event) => {
+                  // Only clear if leaving the row itself, not entering a child element.
+                  if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                  if (dragOver?.id === row.id) setDragOver(null);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (draggingId && draggingId !== row.id && dragOver?.id === row.id) {
+                    onReorder(draggingId, row.id, dragOver.position);
+                  }
+                  setDraggingId(null);
+                  setDragOver(null);
+                }}
+                onDragEnd={() => {
+                  setDraggingId(null);
+                  setDragOver(null);
+                }}
+                className={cn(
+                  selectedId === row.id ? "bg-muted/40" : "",
+                  draggingId === row.id ? "opacity-40" : "",
+                  showDropAbove ? "shadow-[inset_0_2px_0_0_var(--color-primary)]" : "",
+                  showDropBelow ? "shadow-[inset_0_-2px_0_0_var(--color-primary)]" : "",
+                  "cursor-grab active:cursor-grabbing",
+                )}
+              >
+                <TableCell>
+                  <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground">
+                    <span>{row.priority}</span>
+                    <GripVertical className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  </div>
+                </TableCell>
+                <TableCell className="font-medium whitespace-normal">{agentLabel(row.agent)}</TableCell>
+                <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
+                <TableCell className="whitespace-normal">
+                  <div className="space-y-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-auto justify-start px-0 py-0 font-medium text-foreground hover:bg-transparent"
+                      onClick={() => onSelect(row.id)}
+                    >
+                      {row.label}
+                    </Button>
+                    {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className={statusBadgeClass(row.status)}>
+                      {statusLabel(row.status)}
+                    </Badge>
+                    {row.is_default ? <Badge>Default</Badge> : null}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Move ${row.label} up`}
+                      onClick={() => onMove(row.id, "up")}
+                      disabled={index === 0}
+                    >
+                      <MoveUp className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Move ${row.label} down`}
+                      onClick={() => onMove(row.id, "down")}
+                      disabled={index === rows.length - 1}
+                    >
+                      <MoveDown className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label={`Edit ${row.label}`}
+                      onClick={() => onSelect(row.id)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>

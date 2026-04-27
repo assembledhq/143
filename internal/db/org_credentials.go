@@ -71,11 +71,47 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 		return nil, fmt.Errorf("%s: %w", provider, err)
 	}
 
+	if isCodingAuthProvider(provider) {
+		nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
+		if err != nil {
+			return nil, err
+		}
+
+		query := `
+			INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
+			VALUES (@org_id, @provider, @label, @config, 'active', @created_by, @priority)
+			ON CONFLICT (org_id, provider, label)
+			DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now(),
+				priority = CASE
+					WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
+					ELSE org_credentials.priority
+				END
+			RETURNING id`
+
+		args := pgx.NamedArgs{
+			"org_id":     orgID,
+			"provider":   string(provider),
+			"label":      label,
+			"config":     encrypted,
+			"created_by": createdBy,
+			"priority":   nextPriority,
+		}
+
+		var id uuid.UUID
+		err = s.db.QueryRow(ctx, query, args).Scan(&id)
+		if err != nil {
+			return nil, fmt.Errorf("upsert %s credential: %w", provider, err)
+		}
+		return &id, nil
+	}
+
+	// Non-coding providers (GitHub, Sentry, Linear, Notion, …) ignore priority
+	// — it's only meaningful for the coding-agent fallback stack.
 	query := `
 		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by)
 		VALUES (@org_id, @provider, @label, @config, 'active', @created_by)
 		ON CONFLICT (org_id, provider, label)
-		DO UPDATE SET config = @config, status = 'active', updated_at = now()
+		DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now()
 		RETURNING id`
 
 	args := pgx.NamedArgs{
@@ -111,14 +147,26 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 		return nil, fmt.Errorf("%s: %w", provider, err)
 	}
 
+	nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+
 	// ON CONFLICT only updates if the existing row is pending_auth or disabled —
 	// never stomps on a credential that holds a real access token (active) or one
-	// that's still mid-rotation in the user's mental model (invalid).
+	// that's still mid-rotation in the user's mental model (invalid). When
+	// resurrecting a disabled row we bump its priority to the next slot so it
+	// appears at the bottom of the fallback stack rather than carrying over an
+	// old position the user may not remember.
 	query := `
-		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by)
-		VALUES (@org_id, @provider, @label, @config, 'pending_auth', @created_by)
+		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
+		VALUES (@org_id, @provider, @label, @config, 'pending_auth', @created_by, @priority)
 		ON CONFLICT (org_id, provider, label)
-		DO UPDATE SET config = @config, status = 'pending_auth', updated_at = now()
+		DO UPDATE SET config = EXCLUDED.config, status = 'pending_auth', updated_at = now(),
+			priority = CASE
+				WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
+				ELSE org_credentials.priority
+			END
 		WHERE org_credentials.status IN ('pending_auth', 'disabled')
 		RETURNING id`
 
@@ -128,6 +176,7 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 		"label":      label,
 		"config":     encrypted,
 		"created_by": createdBy,
+		"priority":   nextPriority,
 	}
 
 	var id uuid.UUID
@@ -673,22 +722,50 @@ func (s *OrgCredentialStore) ReorderCodingAuths(ctx context.Context, orgID uuid.
 	return tx.Commit(ctx)
 }
 
-func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
-	cfg, provider, err := providerConfigForCodingAuthInput(input)
-	if err != nil {
-		return nil, err
+// isCodingAuthProvider reports whether a provider participates in the
+// coding-agent fallback stack. Priority is only meaningful for these
+// providers; other credentials (GitHub, Sentry, …) keep the default.
+func isCodingAuthProvider(provider models.ProviderName) bool {
+	switch provider {
+	case models.ProviderAnthropic,
+		models.ProviderOpenAI,
+		models.ProviderOpenAIChatGPT,
+		models.ProviderGemini,
+		models.ProviderAmp,
+		models.ProviderPi:
+		return true
 	}
+	return false
+}
 
+// nextCodingAuthPriority returns the next priority slot for a new coding-auth row
+// in the org's fallback stack. Disabled rows are excluded so a user who removed
+// an entry can re-add at the bottom without leaving gaps from old positions.
+func (s *OrgCredentialStore) nextCodingAuthPriority(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var nextPriority int
-	if scanErr := s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT COALESCE(MAX(priority), 0) + 1
 		FROM org_credentials
 		WHERE org_id = @org_id
 		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
 		  AND status != 'disabled'`,
 		pgx.NamedArgs{"org_id": orgID},
-	).Scan(&nextPriority); scanErr != nil {
-		return nil, fmt.Errorf("get next coding auth priority: %w", scanErr)
+	).Scan(&nextPriority)
+	if err != nil {
+		return 0, fmt.Errorf("get next coding auth priority: %w", err)
+	}
+	return nextPriority, nil
+}
+
+func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
+	cfg, provider, err := providerConfigForCodingAuthInput(input)
+	if err != nil {
+		return nil, err
+	}
+
+	nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
+	if err != nil {
+		return nil, err
 	}
 
 	encrypted, err := s.marshalAndEncrypt(cfg)
