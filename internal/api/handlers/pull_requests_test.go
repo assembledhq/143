@@ -451,6 +451,24 @@ func TestPullRequestHandler_Merge(t *testing.T) {
 		require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REPO_ACCESS_DENIED", "Merge should return the repo-access-denied code")
 	})
 
+	t.Run("returns 502 when GitHub reports merged=false", func(t *testing.T) {
+		t.Parallel()
+
+		svc := &stubPullRequestHealthService{
+			mergeFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeResponse, error) {
+				return nil, ghservice.ErrGitHubMergeIncomplete
+			},
+		}
+
+		handler := NewPullRequestHandler(svc)
+		req := mergeRequest(prID.String(), &models.User{ID: userID, OrgID: orgID}, orgID)
+		rr := httptest.NewRecorder()
+		handler.Merge(rr, req)
+
+		require.Equal(t, http.StatusBadGateway, rr.Code, "Merge should return 502 when GitHub responds 200 but merged=false")
+		require.Contains(t, rr.Body.String(), "PULL_REQUEST_MERGE_INCOMPLETE", "Merge should return the merge-incomplete code")
+	})
+
 	t.Run("returns 500 on unknown failures", func(t *testing.T) {
 		t.Parallel()
 

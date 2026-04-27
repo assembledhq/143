@@ -68,6 +68,31 @@ func TestFetchRepoMergeSettingsRejectsMalformedJSON(t *testing.T) {
 	require.Contains(t, err.Error(), "decode GitHub repo merge settings", "fetchRepoMergeSettings should wrap decode failures")
 }
 
+// TestFetchRepoMergeSettingsSurfacesHTTPError covers the early-return path
+// where the GitHub /repos/{owner}/{repo} call fails before we ever try to
+// decode the body.
+func TestFetchRepoMergeSettingsSurfacesHTTPError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"Server Error"}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		logger:     zerolog.New(io.Discard),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	_, err := service.fetchRepoMergeSettings(context.Background(), "install-token", "assembledhq", "143")
+	require.Error(t, err, "fetchRepoMergeSettings should surface upstream HTTP failures")
+	var apiErr *GitHubAPIError
+	require.True(t, errors.As(err, &apiErr), "fetchRepoMergeSettings should wrap upstream errors as *GitHubAPIError")
+	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+}
+
 // TestMergePullRequestOnGitHubSuccess covers the happy path: GitHub returns 200
 // with merged=true and we forward the response intact.
 func TestMergePullRequestOnGitHubSuccess(t *testing.T) {
@@ -451,6 +476,36 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	require.NoError(t, issueMock.ExpectationsWereMet(), "issue expectations should be met")
 	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "job expectations should be met")
+}
+
+// TestPRServiceMergePullRequestErrorsWhenInitialLoadFails covers the very
+// first failure mode in MergePullRequest: the initial pullRequests.GetByID
+// returning an error (DB outage, deleted PR, etc.) wrapped with the
+// "load pull request" prefix so callers can attribute the failure.
+func TestPRServiceMergePullRequestErrorsWhenInitialLoadFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	prMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pull request mock")
+	defer prMock.Close()
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("pr load failed"))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	_, err = service.MergePullRequest(context.Background(), orgID, prID, uuid.New())
+	require.Error(t, err, "MergePullRequest should surface initial load failures")
+	require.Contains(t, err.Error(), "load pull request", "MergePullRequest should wrap initial load errors with the load prefix")
+	require.Contains(t, err.Error(), "pr load failed", "MergePullRequest should preserve the underlying load error")
+	require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
 }
 
 func TestPRServiceMergePullRequestRejectsNonOpenPullRequests(t *testing.T) {
