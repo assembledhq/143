@@ -32,12 +32,14 @@ import (
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/sandbox"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/services/validation"
 	"github.com/assembledhq/143/internal/telemetry"
@@ -261,7 +263,12 @@ func main() {
 	}
 	go nodeManager.StartHeartbeat(ctx)
 
-	// Start worker if mode includes worker capability
+	// Start worker if mode includes worker capability.
+	// sandboxAuthShutdown is hoisted to function scope so the graceful
+	// shutdown goroutine (declared later) can drain the per-session
+	// credential socket listeners that buildServices spun up. Stays nil
+	// in api-only mode where buildServices never runs.
+	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
 		workerCount := cfg.WorkerProcessCount
@@ -339,6 +346,9 @@ func main() {
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
+			if services != nil {
+				sandboxAuthShutdown = services.SandboxAuthShutdown
+			}
 		}
 		// Refuse to start an anemic worker. Without agent services (GitHub App,
 		// Docker, sandbox health), run_agent won't register, but the worker will
@@ -507,6 +517,13 @@ func main() {
 			logger.Error().Err(err).Msg("server shutdown failed")
 		}
 		<-gwDone
+		// Drain per-session GitHub credential socket listeners after the
+		// API and worker have stopped accepting new turns. Doing this last
+		// avoids racing an in-flight turn against socket teardown — by the
+		// time we get here, no orchestrator path can call Listen anymore.
+		if sandboxAuthShutdown != nil {
+			sandboxAuthShutdown()
+		}
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
@@ -718,6 +735,25 @@ func buildServices(
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
+
+	// Identity resolver + per-session credential socket server. Wired
+	// together so an agent's `git push` / `gh pr comment` can reach a fresh
+	// GitHub token without the host ever planting a long-lived secret in the
+	// container's env. Both are optional: when SandboxAuthSocketDir is empty
+	// (e.g. local dev that hasn't provisioned the directory) sessions fall
+	// back to the legacy GITHUB_TOKEN env path.
+	userStore := db.NewUserStore(pool)
+	identityResolver := identity.NewResolver(ghSvc, logger)
+	if appUserAuthSvc != nil {
+		identityResolver.SetAppUserAuth(appUserAuthSvc)
+	}
+	identityResolver.SetUsers(userStore)
+	identityResolver.SetIntegrations(integrationStore)
+	var sandboxAuthServer *sandboxauth.Server
+	if cfg.SandboxAuthSocketDir != "" {
+		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+	}
+
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:         sandboxProvider,
 		Adapters:         agentAdapters,
@@ -742,6 +778,9 @@ func buildServices(
 		UsageTracker:     usageTracker,
 		Cancels:          cancelRegistry,
 		OrgSettingsCache: orgSettingsCache,
+		IdentityResolver: identityResolver,
+		SandboxAuth:      sandboxAuthServer,
+		Users:            userStore,
 		NodeID:           cfg.NodeID,
 		Logger:           logger,
 	})
@@ -752,7 +791,6 @@ func buildServices(
 	)
 
 	// PR service.
-	userStore := db.NewUserStore(pool)
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	prService := ghservice.NewPRService(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
@@ -820,7 +858,7 @@ func buildServices(
 		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
 	}
 
-	return &worker.Services{
+	svc := &worker.Services{
 		Orchestrator:    orchestrator,
 		Validation:      validationSvc,
 		PR:              prService,
@@ -833,6 +871,13 @@ func buildServices(
 		GitHub:          ghSvc,
 		TitleService:    titleService,
 	}
+	if sandboxAuthServer != nil {
+		// Capture by value: the closure outlives buildServices, but the
+		// *Server pointer is stable for the process lifetime.
+		s := sandboxAuthServer
+		svc.SandboxAuthShutdown = s.Shutdown
+	}
+	return svc
 }
 
 func wireWorkerPRService(

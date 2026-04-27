@@ -16,17 +16,24 @@ type Organization struct {
 }
 
 type User struct {
-	ID           uuid.UUID `db:"id" json:"id"`
-	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
-	Email        string    `db:"email" json:"email"`
-	Name         string    `db:"name" json:"name"`
-	Role         string    `db:"role" json:"role"`
-	GitHubID     *int64    `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin  *string   `db:"github_login" json:"github_login,omitempty"`
-	AvatarURL    *string   `db:"avatar_url" json:"avatar_url,omitempty"`
-	PasswordHash *string   `db:"password_hash" json:"-"`
-	GoogleID     *string   `db:"google_id" json:"google_id,omitempty"`
-	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	ID          uuid.UUID `db:"id" json:"id"`
+	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
+	Email       string    `db:"email" json:"email"`
+	Name        string    `db:"name" json:"name"`
+	Role        string    `db:"role" json:"role"`
+	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
+	// GitHubNoreplyEmail is the address used to attribute git commits so they
+	// link back to the user's GitHub profile. Stored separately from Email
+	// (the human-facing contact address) because GitHub only links commits
+	// authored by either the user's verified primary email or one of their
+	// noreply addresses (`{id}+{login}@users.noreply.github.com`). Populated
+	// from `/user/emails` during OAuth, with a deterministic fallback.
+	GitHubNoreplyEmail *string   `db:"github_noreply_email" json:"-"`
+	AvatarURL          *string   `db:"avatar_url" json:"avatar_url,omitempty"`
+	PasswordHash       *string   `db:"password_hash" json:"-"`
+	GoogleID           *string   `db:"google_id" json:"google_id,omitempty"`
+	CreatedAt          time.Time `db:"created_at" json:"created_at"`
 }
 
 type UserWithSettings struct {
@@ -246,7 +253,15 @@ type Session struct {
 	DiffCollectedAt      *time.Time      `db:"diff_collected_at" json:"diff_collected_at,omitempty"`
 	LatestDiffSnapshotID *uuid.UUID      `db:"latest_diff_snapshot_id" json:"latest_diff_snapshot_id,omitempty"`
 	DeletedAt            *time.Time      `db:"deleted_at" json:"-"`
-	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+	// GitIdentitySource records which token authority the agent used for
+	// git pushes ("user" — the triggering user's GitHub OAuth token; "app"
+	// — the GitHub App installation token). Stamped at session-start by
+	// the orchestrator after the identity resolver picks the right token.
+	// nil for sessions that ran before this audit was added or that never
+	// got a credential helper wired (preview sandboxes, PM bootstrap, etc.).
+	GitIdentitySource *string    `db:"git_identity_source" json:"git_identity_source,omitempty"`
+	GitIdentityUserID *uuid.UUID `db:"git_identity_user_id" json:"git_identity_user_id,omitempty"`
+	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.

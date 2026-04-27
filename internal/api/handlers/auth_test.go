@@ -572,6 +572,119 @@ func TestAuthHandler_Callback(t *testing.T) {
 	}
 }
 
+func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, now time.Time)
+	}{
+		{
+			name: "existing github user updates and signs in",
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time) {
+				userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+				userID := uuid.New()
+				orgID := uuid.New()
+				githubID := int64(42)
+				oldLogin := "alice-old"
+				oldNoreply := "42+alice-old@users.noreply.github.com"
+
+				mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+					WithArgs(githubID).
+					WillReturnRows(pgxmock.NewRows(userColumns).
+						AddRow(userID, orgID, "old@example.com", "Old Alice", "member", &githubID, &oldLogin, &oldNoreply, (*string)(nil), (*string)(nil), (*string)(nil), now))
+
+				mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+
+				expectUserLastOrgLookup(mock, userID, nil)
+				mock.ExpectQuery("INSERT INTO auth_sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+			},
+		},
+		{
+			name: "email link path links github account and signs in",
+			setupMock: func(mock pgxmock.PgxPoolIface, now time.Time) {
+				userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+				userID := uuid.New()
+				orgID := uuid.New()
+
+				mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+					WithArgs(int64(42)).
+					WillReturnRows(pgxmock.NewRows(userColumns))
+
+				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\) = LOWER\\(@email\\)").
+					WithArgs("42+alicehub@users.noreply.github.com").
+					WillReturnRows(pgxmock.NewRows(userColumns).
+						AddRow(userID, orgID, "alice@example.com", "Alice", "member", (*int64)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*string)(nil), now))
+
+				mock.ExpectExec("UPDATE users\\s+SET github_id = @github_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+				expectUserLastOrgLookup(mock, userID, nil)
+				mock.ExpectQuery("INSERT INTO auth_sessions").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool")
+			defer mock.Close()
+
+			now := time.Now()
+			tt.setupMock(mock, now)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/login/oauth/access_token":
+					_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+				case "/user":
+					_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"","avatar_url":"https://example.com/avatar.png"}`))
+				case "/user/emails":
+					_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			handler := NewAuthHandler(
+				&config.Config{FrontendURL: "http://frontend.test"},
+				mock,
+				db.NewUserStore(mock),
+				db.NewAuthSessionStore(mock),
+				nil,
+				nil,
+			)
+			// Point the handler at the local httptest server. The same URL
+			// serves /login/oauth/access_token, /user, and /user/emails —
+			// the handler uses gitHubAPIBase() vs gitHubOAuthBase() to
+			// choose the path prefix, but here both bases collapse to the
+			// same httptest server.
+			handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+			req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+			w := httptest.NewRecorder()
+
+			handler.Callback(w, req)
+			require.Equal(t, http.StatusTemporaryRedirect, w.Code, "Callback should redirect after successful OAuth login")
+			require.Equal(t, "http://frontend.test", w.Header().Get("Location"), "Callback should redirect to the configured frontend")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestAuthHandler_Providers(t *testing.T) {
 	t.Parallel()
 
@@ -1146,7 +1259,7 @@ func TestAuthHandler_Register(t *testing.T) {
 func TestAuthHandler_EmailLogin(t *testing.T) {
 	t.Parallel()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	tests := []struct {
 		name         string
@@ -1174,7 +1287,7 @@ func TestAuthHandler_EmailLogin(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(uuid.New(), uuid.New(), "oauth@example.com", "OAuth User", "admin", nil, nil, nil, nil, nil, nil),
+							AddRow(uuid.New(), uuid.New(), "oauth@example.com", "OAuth User", "admin", nil, nil, nil, nil, nil, nil, nil),
 					)
 			},
 			expectedCode: http.StatusUnauthorized,
@@ -1277,14 +1390,14 @@ func TestAuthHandler_Register_DuplicateEmail(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	// GetByEmail returns a user (duplicate)
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(userColumns).
-				AddRow(uuid.New(), uuid.New(), "dup@example.com", "Existing", "admin", nil, nil, nil, nil, nil, nil),
+				AddRow(uuid.New(), uuid.New(), "dup@example.com", "Existing", "admin", nil, nil, nil, nil, nil, nil, nil),
 		)
 
 	handler := NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
@@ -1307,7 +1420,7 @@ func TestAuthHandler_Register_InvitationClaimFailureReturnsGone(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	orgID := uuid.New()
 	invitationID := uuid.New()
 
@@ -1429,6 +1542,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(expectedUserID, now))
 	// Grant membership inside the same tx as the invitation claim.
@@ -1488,7 +1602,7 @@ func TestAuthHandler_Register_WithInvitation_NotFound(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
 	// GetByEmail returns no user
@@ -1521,7 +1635,7 @@ func TestAuthHandler_Register_WithInvitation_Expired(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
@@ -1553,7 +1667,7 @@ func TestAuthHandler_Register_WithInvitation_EmailMismatch(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
@@ -1585,7 +1699,7 @@ func TestAuthHandler_Register_WithInvitation_AlreadyAccepted(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
@@ -1617,7 +1731,7 @@ func TestAuthHandler_Register_WithInvitation_Revoked(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
 		WithArgs(pgxmock.AnyArg()).
@@ -1649,7 +1763,7 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	orgID := uuid.New()
 	invitationID := uuid.New()
 	newUserID := uuid.New()
@@ -1793,7 +1907,7 @@ func TestAuthHandler_Register_WithInvitation_ClearsCookie(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	invitationColumns := []string{"id", "org_id", "email", "github_username", "role", "invited_by", "token", "status", "expires_at", "created_at", "accepted_at"}
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
@@ -1963,7 +2077,7 @@ func TestAuthHandler_Register_NoInvitation_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	newOrgID := uuid.New()
 	newUserID := uuid.New()
 	now := time.Now()
@@ -2017,7 +2131,7 @@ func TestAuthHandler_Register_NoInvitation_UserCreateFailsRollsBack(t *testing.T
 	require.NoError(t, err)
 	defer mock.Close()
 
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
 	now := time.Now()
 
 	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
@@ -3111,4 +3225,194 @@ func TestAuthHandler_ClaimInvitationForExistingUser_TokenNotFound(t *testing.T) 
 	require.NotNil(t, invErr)
 	require.Equal(t, "INVITE_NOT_FOUND", invErr.code)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestComputeNoreplyEmail(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "1234+alice@users.noreply.github.com", computeNoreplyEmail(1234, "alice"),
+		"computeNoreplyEmail should produce the canonical user-id-prefixed form")
+	require.Equal(t, "", computeNoreplyEmail(0, "alice"),
+		"computeNoreplyEmail should refuse to make up an address without a real user id")
+	require.Equal(t, "", computeNoreplyEmail(1234, ""),
+		"computeNoreplyEmail should refuse to make up an address without a login")
+}
+
+// fetchGitHubNoreplyEmail picks a user's noreply address from /user/emails
+// when present; otherwise it falls back to the canonical id+login form. The
+// test patches the package-level http.DefaultClient via httptest only at the
+// HTTP level — we point the client's transport at a captured server. We use
+// a dedicated test that drives the helper through a wrapping HTTP server
+// with the canonical default transport to avoid leaking state across tests.
+func TestFetchGitHubNoreplyEmail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("uses noreply entry from /user/emails", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/user/emails", r.URL.Path)
+			require.Equal(t, "Bearer ghu_token", r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`[
+				{"email":"alice@example.com","primary":true,"verified":true,"visibility":"private"},
+				{"email":"42+alicehub@users.noreply.github.com","primary":false,"verified":true,"visibility":null}
+			]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
+	})
+
+	t.Run("falls back to canonical form when /user/emails has no noreply", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[{"email":"alice@example.com","primary":true,"verified":true,"visibility":"public"}]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
+	})
+
+	t.Run("falls back to canonical form on HTTP error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
+	})
+
+	t.Run("prefers verified canonical form over deprecated unverified noreply", func(t *testing.T) {
+		t.Parallel()
+		// GitHub may return both the deprecated `{login}@noreply.github.com`
+		// and the canonical `{id}+{login}@noreply.github.com`. The deprecated
+		// form breaks if the user later renames; prefer the canonical row,
+		// and only when it's verified.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[
+				{"email":"alicehub@users.noreply.github.com","primary":false,"verified":true,"visibility":null},
+				{"email":"42+alicehub@users.noreply.github.com","primary":false,"verified":true,"visibility":null}
+			]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got,
+			"the canonical user-id-prefixed form must beat the deprecated login-only noreply")
+	})
+
+	t.Run("prefers any verified noreply over an unverified one", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Canonical row exists but is unverified; deprecated row is
+			// verified. We pick the verified one rather than the canonical-
+			// but-unverified row, because GitHub only attributes commits
+			// authored with a *verified* address.
+			_, _ = w.Write([]byte(`[
+				{"email":"42+alicehub@users.noreply.github.com","primary":false,"verified":false,"visibility":null},
+				{"email":"alicehub@users.noreply.github.com","primary":false,"verified":true,"visibility":null}
+			]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "alicehub@users.noreply.github.com", got)
+	})
+
+	t.Run("uses unverified noreply only as last resort before fallback", func(t *testing.T) {
+		t.Parallel()
+		// Some legacy GitHub accounts have never toggled the verified flag
+		// on noreply rows. Accept the unverified entry in preference to
+		// nothing rather than dropping back to the synthesized fallback —
+		// at least it's still self-consistent with what GitHub returns
+		// in /user/emails.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[
+				{"email":"42+alicehub@users.noreply.github.com","primary":false,"verified":false,"visibility":null}
+			]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got)
+	})
+
+	t.Run("falls back when request construction fails", func(t *testing.T) {
+		t.Parallel()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, "://bad", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "invalid email probe URLs should fall back to the canonical synthesized address")
+	})
+
+	t.Run("falls back when transport fails", func(t *testing.T) {
+		t.Parallel()
+
+		// nil client → fetchGitHubNoreplyEmailFrom uses its own short-timeout
+		// client. The unrouted target IP triggers a fast connection refusal
+		// which the helper must convert into a fallback rather than a return
+		// error.
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, "http://127.0.0.1:1/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "transport failures should fall back to the canonical synthesized address")
+	})
+
+	t.Run("falls back when response JSON is malformed", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), server.Client(), server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "decode failures should fall back to the canonical synthesized address")
+	})
+
+	t.Run("uses default short-timeout client when none is provided", func(t *testing.T) {
+		t.Parallel()
+
+		// Confirms the production wiring: when h.httpClient is nil, the
+		// AuthHandler.fetchGitHubNoreplyEmail wrapper passes nil through
+		// and the inner function still produces a valid response by
+		// constructing its own short-timeout client. We exercise the
+		// nil-client branch directly here.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		}))
+		defer server.Close()
+
+		got := fetchGitHubNoreplyEmailFrom(context.Background(), nil, server.URL+"/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "nil client should fall back to the helper's short-timeout client and still return the discovered noreply email")
+	})
+
+	t.Run("respects ctx cancellation", func(t *testing.T) {
+		t.Parallel()
+
+		// A cancelled context must short-circuit the request and produce
+		// the fallback. Threading context through ensures a hung GitHub
+		// call can't outlast the OAuth login it's serving.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		got := fetchGitHubNoreplyEmailFrom(ctx, nil, "https://api.github.com/user/emails", "ghu_token", 42, "alicehub")
+		require.Equal(t, "42+alicehub@users.noreply.github.com", got, "cancelled context should produce the fallback rather than the network response")
+	})
+}
+
+func TestAuthHandler_FetchGitHubNoreplyEmail_DelegatesToInjectedURL(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/user/emails", r.URL.Path, "AuthHandler should probe the API base + /user/emails")
+		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
+	handler.SetGitHubURLsForTest(server.URL, "", server.Client())
+
+	got := handler.fetchGitHubNoreplyEmail(context.Background(), "ghu_token", 42, "alicehub")
+	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "AuthHandler.fetchGitHubNoreplyEmail should delegate to the injected GitHub API base + httptest server")
 }

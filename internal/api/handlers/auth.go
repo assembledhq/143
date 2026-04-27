@@ -35,6 +35,47 @@ type AuthHandler struct {
 	memberships     *db.OrganizationMembershipStore
 	userCredentials *db.UserCredentialStore
 	audit           *db.AuditEmitter
+	// gitHubAPIBaseURL / gitHubOAuthBaseURL are overridable so tests can
+	// point the OAuth callback flow at a local httptest.Server instead of
+	// mutating http.DefaultTransport (which would silently redirect any
+	// HTTP traffic from concurrent tests in the same binary). Empty strings
+	// mean "use the production GitHub URL".
+	gitHubAPIBaseURL   string
+	gitHubOAuthBaseURL string
+	// httpClient is optional. When nil, callers fall back to
+	// http.DefaultClient (production) or a locally-scoped client with a
+	// short timeout (the noreply-email probe).
+	httpClient *http.Client
+}
+
+// SetGitHubURLsForTest overrides the GitHub API and OAuth base URLs and
+// the HTTP client. Test-only — production paths use the real github.com /
+// api.github.com endpoints. Pass an empty string to leave a default.
+func (h *AuthHandler) SetGitHubURLsForTest(apiBaseURL, oauthBaseURL string, client *http.Client) {
+	h.gitHubAPIBaseURL = apiBaseURL
+	h.gitHubOAuthBaseURL = oauthBaseURL
+	h.httpClient = client
+}
+
+func (h *AuthHandler) gitHubAPIBase() string {
+	if h.gitHubAPIBaseURL != "" {
+		return strings.TrimRight(h.gitHubAPIBaseURL, "/")
+	}
+	return "https://api.github.com"
+}
+
+func (h *AuthHandler) gitHubOAuthBase() string {
+	if h.gitHubOAuthBaseURL != "" {
+		return strings.TrimRight(h.gitHubOAuthBaseURL, "/")
+	}
+	return "https://github.com"
+}
+
+func (h *AuthHandler) gitHubHTTPClient() *http.Client {
+	if h.httpClient != nil {
+		return h.httpClient
+	}
+	return http.DefaultClient
 }
 
 // SetAuditEmitter injects the audit emitter for logging auth events.
@@ -457,9 +498,17 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compute the GitHub-attribution noreply email up-front so every account
+	// path (existing, link, signup, invite) persists it consistently.
+	noreplyEmail := h.fetchGitHubNoreplyEmail(r.Context(), tokenResp.AccessToken, ghUser.ID, ghUser.Login)
+
 	email := ghUser.Email
 	if email == "" {
-		email = ghUser.Login + "@users.noreply.github.com"
+		// Use the canonical user-id-prefixed form rather than the deprecated
+		// `{login}@users.noreply.github.com` shape, so that commits authored
+		// with this address stay linked to the user even if they later
+		// rename their GitHub account.
+		email = noreplyEmail
 	}
 
 	// Account linking: try GitHub ID → email → create new.
@@ -472,6 +521,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		existingUser.Email = email
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
+		existingUser.GitHubNoreplyEmail = &noreplyEmail
 		if upsertErr := h.userStore.UpsertFromGitHub(r.Context(), &existingUser); upsertErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
@@ -485,7 +535,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Try email match for account linking.
 	if emailUser, emailErr := h.userStore.GetByEmail(r.Context(), email); emailErr == nil {
-		if linkErr := h.userStore.LinkGitHubAccount(r.Context(), emailUser.ID, emailUser.OrgID, ghUser.ID, ghUser.Login, ghUser.AvatarURL); linkErr != nil {
+		if linkErr := h.userStore.LinkGitHubAccount(r.Context(), emailUser.ID, emailUser.OrgID, ghUser.ID, ghUser.Login, ghUser.AvatarURL, noreplyEmail); linkErr != nil {
 			writeError(w, r, http.StatusInternalServerError, "LINK_FAILED", "failed to link GitHub account", linkErr)
 			return
 		}
@@ -501,13 +551,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		inv, _, role, invErr := h.validateInvitation(r.Context(), pendingInvite, email, ghUser.Login)
 		if invErr == nil {
 			user := &models.User{
-				OrgID:       inv.OrgID,
-				Email:       email,
-				Name:        ghUser.Name,
-				Role:        role,
-				GitHubID:    &ghUser.ID,
-				GitHubLogin: &ghUser.Login,
-				AvatarURL:   &ghUser.AvatarURL,
+				OrgID:              inv.OrgID,
+				Email:              email,
+				Name:               ghUser.Name,
+				Role:               role,
+				GitHubID:           &ghUser.ID,
+				GitHubLogin:        &ghUser.Login,
+				GitHubNoreplyEmail: &noreplyEmail,
+				AvatarURL:          &ghUser.AvatarURL,
 			}
 			createdUser, sessionToken, claimErr, createErr := h.acceptInvitationAndUpsertUser(
 				r.Context(),
@@ -535,11 +586,12 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := &models.User{
-		Email:       email,
-		Name:        ghUser.Name,
-		GitHubID:    &ghUser.ID,
-		GitHubLogin: &ghUser.Login,
-		AvatarURL:   &ghUser.AvatarURL,
+		Email:              email,
+		Name:               ghUser.Name,
+		GitHubID:           &ghUser.ID,
+		GitHubLogin:        &ghUser.Login,
+		GitHubNoreplyEmail: &noreplyEmail,
+		AvatarURL:          &ghUser.AvatarURL,
 	}
 	sessionToken, err := h.createSignupOrg(r.Context(), ghUser.Login+"'s Org", user, func(ctx context.Context, us *db.UserStore, u *models.User) error {
 		return us.UpsertFromGitHub(ctx, u)
@@ -952,26 +1004,20 @@ type githubUser struct {
 }
 
 func (h *AuthHandler) exchangeGitHubCode(code string) (*githubTokenResponse, error) {
-	return exchangeGitHubOAuthCode(h.cfg.GitHubOAuthClientID, h.cfg.GitHubOAuthClientSecret, code)
-}
-
-// exchangeGitHubOAuthCode is the shared implementation for exchanging a GitHub
-// OAuth authorization code for an access token.
-func exchangeGitHubOAuthCode(clientID, clientSecret, code string) (*githubTokenResponse, error) {
 	data := url.Values{
-		"client_id":     {clientID},
-		"client_secret": {clientSecret},
+		"client_id":     {h.cfg.GitHubOAuthClientID},
+		"client_secret": {h.cfg.GitHubOAuthClientSecret},
 		"code":          {code},
 	}
 
-	req, err := http.NewRequest("POST", "https://github.com/login/oauth/access_token", nil)
+	req, err := http.NewRequest("POST", h.gitHubOAuthBase()+"/login/oauth/access_token", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.URL.RawQuery = data.Encode()
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is GitHub OAuth endpoint
+	resp, err := h.gitHubHTTPClient().Do(req) // #nosec G704 -- URL is GitHub OAuth endpoint or test override
 	if err != nil {
 		return nil, fmt.Errorf("token exchange request: %w", err)
 	}
@@ -988,14 +1034,14 @@ func exchangeGitHubOAuthCode(clientID, clientSecret, code string) (*githubTokenR
 }
 
 func (h *AuthHandler) fetchGitHubUser(accessToken string) (*githubUser, error) {
-	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
+	req, err := http.NewRequest("GET", h.gitHubAPIBase()+"/user", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint
+	resp, err := h.gitHubHTTPClient().Do(req) // #nosec G704 -- URL is GitHub API endpoint or test override
 	if err != nil {
 		return nil, fmt.Errorf("github user request: %w", err)
 	}
@@ -1011,6 +1057,115 @@ func (h *AuthHandler) fetchGitHubUser(accessToken string) (*githubUser, error) {
 		return nil, fmt.Errorf("decode github user: %w", err)
 	}
 	return &user, nil
+}
+
+// gitHubEmail is one row from GET /user/emails.
+type gitHubEmail struct {
+	Email      string `json:"email"`
+	Primary    bool   `json:"primary"`
+	Verified   bool   `json:"verified"`
+	Visibility string `json:"visibility"`
+}
+
+// noreplyEmailHTTPTimeout bounds the /user/emails probe so a hung GitHub
+// API doesn't block the OAuth login critical path. The fallback path
+// produces a usable address either way.
+const noreplyEmailHTTPTimeout = 10 * time.Second
+
+// fetchGitHubNoreplyEmail returns the address GitHub uses to attribute commits
+// to the user's profile.
+//
+// Strategy (in order):
+//  1. Probe `GET /user/emails` and look for the user's `noreply` entry —
+//     this is what GitHub itself recommends for committing as the user.
+//  2. Fall back to the deterministic `{user_id}+{login}@users.noreply.github.com`
+//     form. This format has been the canonical scheme since August 2017 and
+//     is always linkable to the user's GitHub account.
+//
+// Errors from /user/emails are non-fatal: the function still returns the
+// computed fallback so the caller can persist it. We never return an empty
+// string for a real GitHub user.
+func (h *AuthHandler) fetchGitHubNoreplyEmail(ctx context.Context, accessToken string, userID int64, login string) string {
+	// Pass h.httpClient (may be nil) directly rather than going through
+	// gitHubHTTPClient(): when nil, the inner function applies the explicit
+	// noreplyEmailHTTPTimeout. http.DefaultClient has no timeout, so going
+	// through gitHubHTTPClient() would silently drop that guarantee.
+	return fetchGitHubNoreplyEmailFrom(ctx, h.httpClient, h.gitHubAPIBase()+"/user/emails", accessToken, userID, login)
+}
+
+// fetchGitHubNoreplyEmailFrom is the testable seam for the noreply lookup.
+// The API URL is parameterized so unit tests can point at a httptest.Server,
+// and the client is injectable so tests can pass server.Client() directly
+// rather than mutating http.DefaultTransport (which would leak across
+// concurrent tests in the same binary). When client is nil, a dedicated
+// client with noreplyEmailHTTPTimeout is used — this matches production
+// behavior, where AuthHandler.httpClient is nil and the function still
+// needs an explicit timeout because the OAuth login critical path can't
+// rely on http.DefaultClient (which has no timeout).
+func fetchGitHubNoreplyEmailFrom(ctx context.Context, client *http.Client, emailsURL, accessToken string, userID int64, login string) string {
+	fallback := computeNoreplyEmail(userID, login)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, emailsURL, nil)
+	if err != nil {
+		return fallback
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	if client == nil {
+		client = &http.Client{Timeout: noreplyEmailHTTPTimeout}
+	}
+	resp, err := client.Do(req) // #nosec G704 -- URL is GitHub API endpoint or test override
+	if err != nil {
+		return fallback
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Common when the OAuth scope/App permission lacks `user:email` —
+		// the fallback is correct and safe to persist.
+		return fallback
+	}
+
+	var emails []gitHubEmail
+	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+		return fallback
+	}
+
+	// Preference order:
+	//  1. The canonical user-id-prefixed noreply (`{id}+{login}@…`), verified.
+	//     This is the address GitHub itself recommends and the only one that
+	//     stays linked to the user across login renames.
+	//  2. Any verified noreply address.
+	//  3. Any noreply address (last-resort: GitHub may surface unverified
+	//     rows on accounts that haven't toggled the flag).
+	//  4. The deterministic fallback.
+	canonical := computeNoreplyEmail(userID, login)
+	for _, e := range emails {
+		if e.Verified && canonical != "" && strings.EqualFold(e.Email, canonical) {
+			return e.Email
+		}
+	}
+	for _, e := range emails {
+		if e.Verified && strings.HasSuffix(e.Email, "@users.noreply.github.com") {
+			return e.Email
+		}
+	}
+	for _, e := range emails {
+		if strings.HasSuffix(e.Email, "@users.noreply.github.com") {
+			return e.Email
+		}
+	}
+	return fallback
+}
+
+// computeNoreplyEmail returns the canonical user-id-prefixed noreply address.
+// userID==0 or empty login returns "" — caller decides what to do with that
+// (today: never invoked when github_id is unset).
+func computeNoreplyEmail(userID int64, login string) string {
+	if userID <= 0 || login == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d+%s@users.noreply.github.com", userID, login)
 }
 
 // --- Google OAuth helpers ---

@@ -151,7 +151,7 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func sessionTestRowWithPolicyDefaults(values []interface{}) []interface{} {
@@ -204,6 +204,14 @@ const (
 	legacySessionBaseCommitSHAIndex = 44
 	legacySessionDiffCollectedIndex = 54
 	legacySessionLatestDiffIndex    = 55
+
+	// preIdentitySessionColumnsLen is the column count before
+	// git_identity_source / git_identity_user_id were appended. The
+	// dispatch logic in sessionTestRow is calibrated to produce rows of
+	// this length; padSessionIdentityColumns fills in the missing 2 nils
+	// at the end so each test fixture doesn't need to know about the new
+	// columns.
+	preIdentitySessionColumnsLen = 74
 )
 
 const (
@@ -370,26 +378,30 @@ func sessionRowLikelyOmitsWorkerNodeID(values []interface{}) bool {
 }
 
 func sessionTestRow(values ...interface{}) []interface{} {
+	return padSessionIdentityColumns(normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...)))
+}
+
+func sessionTestRowDispatch(values ...interface{}) []interface{} {
 	if sessionRowNeedsPolicyDefaults(values) {
 		values = normalizeSessionRowAgentType(values, 3)
 		switch len(values) {
-		case len(sessionColumns) - 3:
+		case preIdentitySessionColumnsLen - 3:
 			return sessionTestRowWithPolicyDefaults(values)
-		case len(sessionColumns) - 4:
+		case preIdentitySessionColumnsLen - 4:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, false)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, false)
-		case len(sessionColumns) - 5:
+		case preIdentitySessionColumnsLen - 5:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, false)
-		case len(sessionColumns) - 6:
+		case preIdentitySessionColumnsLen - 6:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, false, true)
-		case len(sessionColumns) - 7:
+		case preIdentitySessionColumnsLen - 7:
 			if sessionRowLikelyOmitsWorkerNodeID(values) {
 				return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), false, true, true)
 			}
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, false, true)
-		case len(sessionColumns) - 8:
+		case preIdentitySessionColumnsLen - 8:
 			return sessionRowWithCurrentOptionalDefaults(sessionTestRowWithPolicyDefaults(values), true, true, true)
 		case legacySessionColumnsLen - 3:
 			return expandLegacySessionRow(sessionTestRowWithPolicyDefaults(values))
@@ -414,52 +426,52 @@ func sessionTestRow(values ...interface{}) []interface{} {
 	values = normalizeSessionRowAgentType(values, 6)
 
 	switch len(values) {
-	case len(sessionColumns):
-		return normalizeSessionRowPrimaryIssueID(values)
+	case preIdentitySessionColumnsLen:
+		return values
 	case legacySessionColumnsLen:
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(values))
+		return expandLegacySessionRow(values)
 	case legacySessionColumnsLen - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, false)))
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, false))
 		}
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, false)))
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, false))
 	case legacySessionColumnsLen - 2:
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, false)))
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, false))
 	case legacySessionColumnsLen - 4:
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, false, true)))
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, false, true))
 	case legacySessionColumnsLen - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, true)))
+			return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, false, true, true))
 		}
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true)))
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, false, true))
 	case legacySessionColumnsLen - 5:
-		return normalizeSessionRowPrimaryIssueID(expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true)))
-	case len(sessionColumns) - 1:
+		return expandLegacySessionRow(sessionRowWithLegacyOptionalDefaults(values, true, true, true))
+	case preIdentitySessionColumnsLen - 1:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, true, false))
+			return sessionRowWithCurrentOptionalDefaults(values, false, true, false)
 		}
-		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, false, false))
-	case len(sessionColumns) - 2:
-		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, true, false))
-	case len(sessionColumns) - 4:
-		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, false, true))
-	case len(sessionColumns) - 3:
+		return sessionRowWithCurrentOptionalDefaults(values, true, false, false)
+	case preIdentitySessionColumnsLen - 2:
+		return sessionRowWithCurrentOptionalDefaults(values, true, true, false)
+	case preIdentitySessionColumnsLen - 4:
+		return sessionRowWithCurrentOptionalDefaults(values, false, false, true)
+	case preIdentitySessionColumnsLen - 3:
 		if sessionRowLikelyOmitsWorkerNodeID(values) {
-			return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, false, true, true))
+			return sessionRowWithCurrentOptionalDefaults(values, false, true, true)
 		}
-		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, false, true))
-	case len(sessionColumns) - 5:
-		return normalizeSessionRowPrimaryIssueID(sessionRowWithCurrentOptionalDefaults(values, true, true, true))
+		return sessionRowWithCurrentOptionalDefaults(values, true, false, true)
+	case preIdentitySessionColumnsLen - 5:
+		return sessionRowWithCurrentOptionalDefaults(values, true, true, true)
 	default:
 		panic(fmt.Sprintf(
 			"sessionTestRow received %d values, want %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, or %d (plus policy-less variants)",
 			len(values),
-			len(sessionColumns),
-			len(sessionColumns)-1,
-			len(sessionColumns)-2,
-			len(sessionColumns)-3,
-			len(sessionColumns)-4,
-			len(sessionColumns)-5,
+			preIdentitySessionColumnsLen,
+			preIdentitySessionColumnsLen-1,
+			preIdentitySessionColumnsLen-2,
+			preIdentitySessionColumnsLen-3,
+			preIdentitySessionColumnsLen-4,
+			preIdentitySessionColumnsLen-5,
 			legacySessionColumnsLen,
 			legacySessionColumnsLen-1,
 			legacySessionColumnsLen-2,
@@ -472,6 +484,27 @@ func sessionTestRow(values ...interface{}) []interface{} {
 
 func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 	return rows.AddRow(sessionTestRow(values...)...)
+}
+
+// padSessionIdentityColumns retrofits rows produced by the legacy
+// sessionTestRow dispatch (which predates the git_identity_source /
+// git_identity_user_id columns) with nil values for those columns. Inserts
+// the nils immediately before created_at so callers don't have to update
+// their fixtures one-by-one.
+func padSessionIdentityColumns(row []interface{}) []interface{} {
+	if len(row) >= len(sessionColumns) {
+		return row
+	}
+	if len(row) != len(sessionColumns)-2 {
+		// Some other length we don't recognize — let the row through
+		// unchanged so the AddRow call surfaces the real mismatch.
+		return row
+	}
+	padded := make([]interface{}, 0, len(sessionColumns))
+	padded = append(padded, row[:len(row)-1]...)
+	padded = append(padded, nil, nil)
+	padded = append(padded, row[len(row)-1])
+	return padded
 }
 
 func sessionAnyArgs(count int) []interface{} {
