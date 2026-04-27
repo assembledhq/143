@@ -32,6 +32,7 @@ import { ProgressBar } from "./shared";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { PlanTab } from "./plan-tab";
 import { WorkTab } from "./work-tab";
+import { MobileBackButton } from "@/components/mobile-back-button";
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "Low", numeric: 75 },
@@ -216,6 +217,7 @@ export function ProjectDetailContent({ id }: { id: string }) {
     <div className="p-6 space-y-6">
       <div>
         <div className="flex items-center gap-3">
+          <MobileBackButton to="/projects" label="Back to projects" />
           <h1 className="text-lg font-semibold text-foreground">{project.title}</h1>
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
             {isActive && (

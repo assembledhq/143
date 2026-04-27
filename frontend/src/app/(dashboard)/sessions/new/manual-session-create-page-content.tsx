@@ -52,6 +52,7 @@ import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
 import { useOptimisticSessions } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
+import { MobileBackButton } from "@/components/mobile-back-button";
 import {
   type CodingAgentReasoningEffort,
   getDefaultCodingAgentReasoningForAgent,
@@ -717,11 +718,7 @@ export function ManualSessionCreatePageContent() {
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
       return;
     }
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) {
-      setIsDragActive(false);
-      setDragMessage(null);
-    }
+    resetDragState();
   }
 
   async function handleDrop(event: React.DragEvent<HTMLDivElement>) {
@@ -802,6 +799,9 @@ export function ManualSessionCreatePageContent() {
 
   return (
     <div className="flex flex-col h-full">
+      <div className="md:hidden flex items-center px-2 pt-2">
+        <MobileBackButton to="/sessions" label="Back to sessions" />
+      </div>
       <div
         className="flex flex-1 flex-col px-4 pb-4"
         data-testid="manual-session-dropzone"

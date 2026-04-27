@@ -45,15 +45,17 @@ export function useFilterSuffix(
   currentUserFilter: string,
   status: string | null,
   repo: string | null,
+  search: string | null,
 ): string {
   return useMemo(() => {
     const params = new URLSearchParams();
     if (currentUserFilter !== "mine") params.set("user", currentUserFilter);
     if (status) params.set("status", status);
     if (repo) params.set("repo", repo);
+    if (search) params.set("search", search);
     const qs = params.toString();
     return qs ? `?${qs}` : "";
-  }, [currentUserFilter, status, repo]);
+  }, [currentUserFilter, status, repo, search]);
 }
 
 export function useOwnerScopeFilter() {

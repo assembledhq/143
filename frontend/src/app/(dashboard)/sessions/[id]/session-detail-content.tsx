@@ -24,6 +24,7 @@ import {
   Square,
   PanelRightOpen,
   PanelRightClose,
+  PanelBottomOpen,
   Clock,
   MessageSquare,
   Paperclip,
@@ -54,6 +55,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
@@ -95,6 +101,7 @@ import { PreviewPanel } from "@/components/preview/preview-panel";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner } from "@/components/pr-health-banner";
 import { ReviewButton } from "@/components/review-button";
+import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet } from "@/lib/session-status-groups";
@@ -1581,6 +1588,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     previewParam === "1" ? "preview" : "overview"
   );
   const [showDetailPanel, setShowDetailPanel] = useState(true);
+  // Mobile bottom sheet — separate state so the desktop inline panel can
+  // default open while the mobile sheet defaults closed (no SSR-unsafe
+  // matchMedia needed).
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -1596,6 +1607,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
+    // On mobile the right panel lives in a bottom sheet — auto-open it so the
+    // file tree is reachable when entering review. Gate on viewport because
+    // the Sheet's overlay isn't viewport-aware (md:hidden only hides
+    // SheetContent, not SheetOverlay) — opening on desktop would dim the
+    // screen behind a hidden sheet.
+    if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
+      setMobileDetailOpen(true);
+    }
   }, [setReviewParam]);
 
   // --- Exit review mode ---
@@ -2223,6 +2242,155 @@ export function SessionDetailContent({ id }: { id: string }) {
   const trimmedDraftTitle = draftTitle.trim();
   const canSaveTitle = trimmedDraftTitle.length > 0 && trimmedDraftTitle !== currentTitle && !updateSessionMutation.isPending;
 
+  // Right-panel content. Rendered inline on desktop and inside a bottom sheet
+  // on mobile — the same JSX in both places so tab state stays consistent.
+  const panelTabsEl = (
+    <Tabs
+      value={detailTab}
+      onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
+      className="flex flex-col flex-1 min-h-0 gap-0"
+    >
+      <div className="border-b border-border px-2 py-2 shrink-0">
+        <div className="flex items-center gap-2">
+          <TabsList variant="line" size="sm" className="border-b-0 flex-1">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="changes">
+              Changes
+              {changesCount != null && changesCount > 0 && (
+                <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                  {changesCount}
+                </Badge>
+              )}
+            </TabsTrigger>
+            {showValidationTab && (
+              <TabsTrigger value="validation">Validation</TabsTrigger>
+            )}
+            <TabsTrigger value="preview">Preview</TabsTrigger>
+          </TabsList>
+          {canRequestReview && (
+            <ReviewButton
+              capabilities={reviewCapabilities}
+              pendingMode={pendingReviewMode}
+              onReview={(mode) => startReviewMutation.mutate(mode)}
+            />
+          )}
+          {hasPR && prData?.data?.github_pr_url ? (
+            <>
+              {prStatus === "closed" && (
+                <Badge variant="secondary" className="h-7 px-2 text-xs">
+                  PR closed
+                </Badge>
+              )}
+              <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                  <ExternalLink className="h-3 w-3" />
+                  View PR
+                </Button>
+              </a>
+            </>
+          ) : showPRAction && !prErrorNotice ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs gap-1.5"
+              disabled={prActionDisabled}
+              title={prActionTitle}
+              onClick={() => createPRMutation.mutate(undefined)}
+            >
+              {prActionSpinning ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : prState === "failed" || localPRActionError ? (
+                <AlertTriangle className="h-3 w-3" />
+              ) : (
+                <GitPullRequest className="h-3 w-3" />
+              )}
+              {prActionLabel}
+            </Button>
+          ) : null}
+        </div>
+        {prErrorNotice && (
+          <ErrorNotice
+            className="mx-2 mt-2"
+            title={prErrorNotice.title}
+            description={prErrorNotice.description}
+            action={prErrorNotice.action}
+          />
+        )}
+      </div>
+
+      <TabsContent value="changes" className="flex-1 min-h-0">
+        <ChangesTab
+          filteredFiles={filteredFiles}
+          activeFileIndex={activeFileIndex}
+          onFileSelect={setActiveFileIndex}
+          onOpenReview={openReview}
+          comments={comments}
+          onCommentClick={handleCommentClick}
+          passes={passes}
+          passRange={passRange}
+          onPassRangeChange={setPassRange}
+          emptyStatusText={
+            session.status === "running" || session.status === "pending"
+              ? "Changes will appear here as the agent modifies files."
+              : "This session did not produce any file changes."
+          }
+        />
+      </TabsContent>
+      <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
+        <div className="space-y-4">
+          {pullRequestId && prStatus === "open" && (
+            prHealth ? (
+              <PRHealthBanner
+                health={prHealth}
+                pendingAction={pendingRepairAction}
+                repairError={repairActionError}
+                onFixTests={() => startRepairMutation.mutate("fix_tests")}
+                onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
+              />
+            ) : isPRHealthLoading ? (
+              <Card className="border-border/60">
+                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Loading PR health…</span>
+                </CardContent>
+              </Card>
+            ) : null
+          )}
+          {pullRequestId && prStatus === "closed" && (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                    <XCircle className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-sm font-medium text-foreground">PR closed</div>
+                    <p className="text-sm text-foreground">{closedPRSummary}</p>
+                    <p className="text-sm text-muted-foreground">
+                      This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          <OverviewTab session={session} members={members} />
+        </div>
+      </TabsContent>
+      {showValidationTab && (
+        <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
+          <ValidationTab sessionId={id} />
+        </TabsContent>
+      )}
+      <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
+        <PreviewPanel
+          sessionId={id}
+          previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
+        />
+      </TabsContent>
+    </Tabs>
+  );
+
   return (
     <div className="flex h-full">
       {/* Center area: chat or review diff view */}
@@ -2230,6 +2398,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {/* Session header bar */}
         <div className="border-b border-border px-4 py-3 bg-background flex items-center justify-between shrink-0">
           <div className="min-w-0 flex-1 flex items-center gap-2">
+            <MobileBackButton to="/sessions" label="Back to sessions" />
             {isEditingTitle ? (
               <div className="min-w-0 flex-1 flex items-center gap-2">
                 <Input
@@ -2292,10 +2461,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               />
             )}
           </div>
+          {/* Desktop toggle: hides/shows the inline right panel. */}
           <Button
             variant="ghost"
             size="icon"
-            className={cn("h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
+            className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
             disabled={centerMode === "review" && showDetailPanel}
             onClick={() => setShowDetailPanel(!showDetailPanel)}
             title={
@@ -2305,6 +2475,18 @@ export function SessionDetailContent({ id }: { id: string }) {
             }
           >
             {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
+          {/* Mobile toggle: opens the bottom sheet. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="md:hidden h-9 w-9 shrink-0"
+            onClick={() => setMobileDetailOpen(true)}
+            aria-label="Open details"
+            aria-controls="session-detail-sheet"
+            aria-expanded={mobileDetailOpen}
+          >
+            <PanelBottomOpen className="h-5 w-5" />
           </Button>
         </div>
 
@@ -2415,162 +2597,31 @@ export function SessionDetailContent({ id }: { id: string }) {
         />
       </div>
 
-      {/* Detail panel (collapsible right sidebar) */}
+      {/* Detail panel — inline on desktop, hidden on mobile (rendered as a
+          bottom sheet below). */}
       {showDetailPanel && (
-        <>
-        <ResizeHandle onResize={handleDetailResize} />
-        <div
-          style={{ width: detailWidth }}
-          className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
-        >
-          {/* Detail tabs */}
-          <Tabs
-            value={detailTab}
-            onValueChange={(v) => handleDetailTabClick(v as DetailTab)}
-            className="flex flex-col flex-1 min-h-0 gap-0"
+        <div className="hidden md:flex">
+          <ResizeHandle onResize={handleDetailResize} />
+          <div
+            style={{ width: detailWidth }}
+            className="border-l border-border bg-muted/20 flex flex-col shrink-0 overflow-hidden"
           >
-            <div className="border-b border-border px-2 py-2 shrink-0">
-              <div className="flex items-center gap-2">
-                <TabsList variant="line" size="sm" className="border-b-0 flex-1">
-                  <TabsTrigger value="overview">Overview</TabsTrigger>
-                  <TabsTrigger value="changes">
-                    Changes
-                    {changesCount != null && changesCount > 0 && (
-                      <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                        {changesCount}
-                      </Badge>
-                    )}
-                  </TabsTrigger>
-                  {showValidationTab && (
-                    <TabsTrigger value="validation">Validation</TabsTrigger>
-                  )}
-                  <TabsTrigger value="preview">Preview</TabsTrigger>
-                </TabsList>
-                {canRequestReview && (
-                  <ReviewButton
-                    capabilities={reviewCapabilities}
-                    pendingMode={pendingReviewMode}
-                    onReview={(mode) => startReviewMutation.mutate(mode)}
-                  />
-                )}
-                {hasPR && prData?.data?.github_pr_url ? (
-                  <>
-                    {prStatus === "closed" && (
-                      <Badge variant="secondary" className="h-7 px-2 text-xs">
-                        PR closed
-                      </Badge>
-                    )}
-                    <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                      <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                        <ExternalLink className="h-3 w-3" />
-                        View PR
-                      </Button>
-                    </a>
-                  </>
-                ) : showPRAction && !prErrorNotice ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs gap-1.5"
-                    disabled={prActionDisabled}
-                    title={prActionTitle}
-                    onClick={() => createPRMutation.mutate(undefined)}
-                  >
-                    {prActionSpinning ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : prState === "failed" || localPRActionError ? (
-                      <AlertTriangle className="h-3 w-3" />
-                    ) : (
-                      <GitPullRequest className="h-3 w-3" />
-                    )}
-                    {prActionLabel}
-                  </Button>
-                ) : null}
-              </div>
-              {prErrorNotice && (
-                <ErrorNotice
-                  className="mx-2 mt-2"
-                  title={prErrorNotice.title}
-                  description={prErrorNotice.description}
-                  action={prErrorNotice.action}
-                />
-              )}
-            </div>
-
-            <TabsContent value="changes" className="flex-1 min-h-0">
-              <ChangesTab
-                filteredFiles={filteredFiles}
-                activeFileIndex={activeFileIndex}
-                onFileSelect={setActiveFileIndex}
-                onOpenReview={openReview}
-                comments={comments}
-                onCommentClick={handleCommentClick}
-                passes={passes}
-                passRange={passRange}
-                onPassRangeChange={setPassRange}
-                emptyStatusText={
-                  session.status === "running" || session.status === "pending"
-                    ? "Changes will appear here as the agent modifies files."
-                    : "This session did not produce any file changes."
-                }
-              />
-            </TabsContent>
-            <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-              <div className="space-y-4">
-                {pullRequestId && prStatus === "open" && (
-                  prHealth ? (
-                    <PRHealthBanner
-                      health={prHealth}
-                      pendingAction={pendingRepairAction}
-                      repairError={repairActionError}
-                      onFixTests={() => startRepairMutation.mutate("fix_tests")}
-                      onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
-                    />
-                  ) : isPRHealthLoading ? (
-                    <Card className="border-border/60">
-                      <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>Loading PR health…</span>
-                      </CardContent>
-                    </Card>
-                  ) : null
-                )}
-                {pullRequestId && prStatus === "closed" && (
-                  <Card className="border-border/60">
-                    <CardContent className="p-4">
-                      <div className="flex items-start gap-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                          <XCircle className="h-4 w-4" />
-                        </div>
-                        <div className="min-w-0 space-y-1">
-                          <div className="text-sm font-medium text-foreground">PR closed</div>
-                          <p className="text-sm text-foreground">{closedPRSummary}</p>
-                          <p className="text-sm text-muted-foreground">
-                            This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
-                          </p>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-                <OverviewTab session={session} members={members} />
-              </div>
-            </TabsContent>
-            {showValidationTab && (
-              <TabsContent value="validation" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-                <ValidationTab sessionId={id} />
-              </TabsContent>
-            )}
-            <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-              <PreviewPanel
-                sessionId={id}
-                previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
-              />
-            </TabsContent>
-          </Tabs>
+            {panelTabsEl}
+          </div>
         </div>
-        </>
       )}
+
+      {/* Detail panel — bottom sheet on mobile. */}
+      <Sheet open={mobileDetailOpen} onOpenChange={setMobileDetailOpen}>
+        <SheetContent
+          side="bottom"
+          id="session-detail-sheet"
+          className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
+        >
+          <SheetTitle className="sr-only">Session details</SheetTitle>
+          {panelTabsEl}
+        </SheetContent>
+      </Sheet>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
