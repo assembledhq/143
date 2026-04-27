@@ -180,6 +180,15 @@ type PRAuthInterceptDetails = {
   can_fallback_to_app: boolean;
 };
 
+// PRAuthPromptState is a discriminated union so merge prompts don't carry
+// create-PR-only fields (connect_url, resume_token, can_fallback_to_app).
+// create_pr prompts come from the backend's auth interception payload; merge
+// prompts are always synthesized client-side and connect via the hardcoded
+// /github/connect endpoint with no resume token and no fallback.
+type PRAuthPromptState =
+  | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | { purpose: "merge_pr" };
+
 type PRActionErrorState = {
   code?: string;
   message: string;
@@ -1633,10 +1642,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [centerMode, exitReview, setPreviewParam]);
   const [localPRState, setLocalPRState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPRActionError, setLocalPRActionError] = useState<PRActionErrorState | null>(null);
-  const [pendingRepairAction, setPendingRepairAction] = useState<"fix_tests" | "resolve_conflicts" | null>(null);
+  const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [pendingReviewMode, setPendingReviewMode] = useState<import("@/lib/types").SessionReviewMode | null>(null);
-  const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthInterceptDetails | null>(null);
+  const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -1729,6 +1738,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const closedPRSummary = closedPRNumber
     ? `PR #${closedPRNumber} was closed without merging.`
     : "This pull request was closed without merging.";
+  const mergedPRNumber = prData?.data?.github_pr_number;
+  const mergedPRSummary = mergedPRNumber
+    ? `PR #${mergedPRNumber} was merged successfully.`
+    : "This pull request was merged successfully.";
 
   // React to pr_creation_state transitions with toast feedback. Tracks the
   // previous value via ref so we fire once per transition rather than on
@@ -1812,10 +1825,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onMutate: (action) => {
       setRepairActionError(null);
-      setPendingRepairAction(action);
+      setPendingPRAction(action);
     },
     onSuccess: (response) => {
-      setPendingRepairAction(null);
+      setPendingPRAction(null);
       void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
       void queryClient.invalidateQueries({ queryKey: ["session", id] });
       void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
@@ -1826,8 +1839,44 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
     },
     onError: (err) => {
-      setPendingRepairAction(null);
+      setPendingPRAction(null);
       setRepairActionError(err instanceof ApiError ? err.message : "Failed to open repair session");
+    },
+  });
+  // mergeMutation is intentionally separate from startRepairMutation: a
+  // successful merge has no follow-up session to navigate to and surfaces a
+  // distinct toast. Both mutations share the same pendingPRAction so the
+  // banner can disable every button while one is in flight.
+  const mergeMutation = useMutation({
+    mutationFn: async () => {
+      if (!pullRequestId) {
+        throw new Error("Pull request not found");
+      }
+      return api.pullRequests.merge(pullRequestId);
+    },
+    onMutate: () => {
+      setRepairActionError(null);
+      setPendingPRAction("merge");
+    },
+    onSuccess: () => {
+      setPendingPRAction(null);
+      void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      toast.success("PR merged", prUrl ? {
+        action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
+      } : undefined);
+    },
+    onError: (err) => {
+      setPendingPRAction(null);
+      // Surface merge failures via toast rather than the banner's repairError
+      // slot. Merge errors (branch protection, head-SHA race, GitHub 503)
+      // typically resolve themselves on the next health refetch — by the time
+      // the user reads the message the banner has already updated, so an
+      // in-banner error would feel stale alongside the new state.
+      const message = err instanceof ApiError ? err.message : "Failed to merge pull request";
+      toast.error(message);
     },
   });
   useEffect(() => {
@@ -1915,11 +1964,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const canCreatePR = hasSnapshot && !hasPR && !isRunning;
   const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && !isRunning;
+  const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
     queryFn: () => api.githubStatus.get(),
-    enabled: canCreatePR,
+    enabled: needsGitHubStatus,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -1952,7 +2002,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         isPRAuthInterceptDetails(err.details)) {
         setLocalPRState("idle");
         setLocalPRActionError(null);
-        setPRAuthPrompt(err.details);
+        setPRAuthPrompt({ ...err.details, purpose: "create_pr" });
         clearPRResumeParams();
         return;
       }
@@ -2235,6 +2285,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionTitle = "Connect your GitHub account to create PRs";
   }
 
+  function handleMergeAction() {
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "merge_pr" });
+      return;
+    }
+    mergeMutation.mutate();
+  }
+
   const prErrorNotice = prActionError ? {
     title: prErrorTitle(snapshotUnavailable, localPRActionError?.code),
     description: prActionError,
@@ -2283,6 +2341,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               {prStatus === "closed" && (
                 <Badge variant="secondary" className="h-7 px-2 text-xs">
                   PR closed
+                </Badge>
+              )}
+              {prStatus === "merged" && (
+                <Badge variant="secondary" className="h-7 px-2 text-xs">
+                  PR merged
                 </Badge>
               )}
               <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
@@ -2346,10 +2409,12 @@ export function SessionDetailContent({ id }: { id: string }) {
             prHealth ? (
               <PRHealthBanner
                 health={prHealth}
-                pendingAction={pendingRepairAction}
+                pendingAction={pendingPRAction}
                 repairError={repairActionError}
+                mergeAuthRequired={ghBlocked}
                 onFixTests={() => startRepairMutation.mutate("fix_tests")}
                 onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
+                onMerge={handleMergeAction}
               />
             ) : isPRHealthLoading ? (
               <Card className="border-border/60">
@@ -2372,6 +2437,24 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <p className="text-sm text-foreground">{closedPRSummary}</p>
                     <p className="text-sm text-muted-foreground">
                       This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+          {pullRequestId && prStatus === "merged" && (
+            <Card className="border-border/60">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
+                    <CheckCircle2 className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-sm font-medium text-foreground">PR merged</div>
+                    <p className="text-sm text-foreground">{mergedPRSummary}</p>
+                    <p className="text-sm text-muted-foreground">
+                      This change has landed. Open a follow-up session if you need to make another revision.
                     </p>
                   </div>
                 </div>
@@ -2635,13 +2718,19 @@ export function SessionDetailContent({ id }: { id: string }) {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Open this pull request as yourself?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {prAuthPrompt?.purpose === "merge_pr"
+                ? "Merge this pull request as yourself?"
+                : "Open this pull request as yourself?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app.
+              {prAuthPrompt?.purpose === "merge_pr"
+                ? "Authorize GitHub once to merge pull requests as you."
+                : "Authorize GitHub once to open PRs as you. If you skip this, 143 can still open the PR as the app."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            {prAuthPrompt?.can_fallback_to_app ? (
+            {prAuthPrompt?.purpose === "create_pr" && prAuthPrompt.can_fallback_to_app ? (
               <AlertDialogCancel
                 onClick={(event) => {
                   event.preventDefault();
@@ -2656,7 +2745,9 @@ export function SessionDetailContent({ id }: { id: string }) {
               onClick={(event) => {
                 event.preventDefault();
                 if (!prAuthPrompt) return;
-                api.githubStatus.connect(prAuthPrompt.resume_token);
+                const resumeToken =
+                  prAuthPrompt.purpose === "create_pr" ? prAuthPrompt.resume_token : undefined;
+                api.githubStatus.connect(resumeToken || undefined);
               }}
             >
               Continue with GitHub

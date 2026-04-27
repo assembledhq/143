@@ -372,6 +372,7 @@ export interface PullRequestHealthResponse {
   checks?: PullRequestCheckSummary[];
   can_resolve_conflicts: boolean;
   can_fix_tests: boolean;
+  can_merge: boolean;
   enrichment_status: "not_requested" | "pending" | "ready" | "failed" | "stale";
   enrichment_requested: boolean;
   enrichment_ready: boolean;
@@ -388,6 +389,13 @@ export interface PullRequestRepairResponse {
   base_sha: string;
   health_version: number;
   repair_action_type: "fix_tests" | "resolve_conflicts";
+}
+
+export interface PullRequestMergeResponse {
+  merged: boolean;
+  sha: string;
+  message: string;
+  merge_method: "merge" | "squash" | "rebase";
 }
 
 export interface PullRequestUpdatedEvent {

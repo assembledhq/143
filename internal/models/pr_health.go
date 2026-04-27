@@ -155,6 +155,7 @@ type PullRequestHealthResponse struct {
 	Checks                       []PullRequestCheckSummary         `json:"checks,omitempty"`
 	CanResolveConflicts          bool                              `json:"can_resolve_conflicts"`
 	CanFixTests                  bool                              `json:"can_fix_tests"`
+	CanMerge                     bool                              `json:"can_merge"`
 	EnrichmentStatus             PullRequestHealthEnrichmentStatus `json:"enrichment_status"`
 	EnrichmentRequested          bool                              `json:"enrichment_requested"`
 	EnrichmentReady              bool                              `json:"enrichment_ready"`
@@ -171,6 +172,21 @@ type PullRequestRepairResponse struct {
 	BaseSHA          string                      `json:"base_sha"`
 	HealthVersion    int64                       `json:"health_version"`
 	RepairActionType PullRequestRepairActionType `json:"repair_action_type"`
+}
+
+type PullRequestMergeMethod string
+
+const (
+	PullRequestMergeMethodMerge  PullRequestMergeMethod = "merge"
+	PullRequestMergeMethodSquash PullRequestMergeMethod = "squash"
+	PullRequestMergeMethodRebase PullRequestMergeMethod = "rebase"
+)
+
+type PullRequestMergeResponse struct {
+	Merged      bool                   `json:"merged"`
+	SHA         string                 `json:"sha"`
+	Message     string                 `json:"message"`
+	MergeMethod PullRequestMergeMethod `json:"merge_method"`
 }
 
 type PullRequestRepairRun struct {

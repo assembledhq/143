@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, GitPullRequest, Loader2, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
@@ -8,25 +8,34 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
-type RepairAction = "fix_tests" | "resolve_conflicts" | null;
+// PRBannerAction names every action the banner can launch. The pending value
+// is shared across buttons so they can disable each other while one is in
+// flight; the union is intentionally explicit so the spinner/label switch in
+// each button is type-checked.
+export type PRBannerAction = "fix_tests" | "resolve_conflicts" | "merge" | null;
 
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
-  pendingAction: RepairAction;
+  pendingAction: PRBannerAction;
   repairError?: string | null;
+  mergeAuthRequired?: boolean;
   onFixTests: () => void;
   onResolveConflicts: () => void;
+  onMerge: () => void;
 };
 
 export function PRHealthBanner({
   health,
   pendingAction,
   repairError,
+  mergeAuthRequired = false,
   onFixTests,
   onResolveConflicts,
+  onMerge,
 }: PRHealthBannerProps) {
   const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
   const syncedLabel = health.github_state_synced_at ? formatTimeAgo(health.github_state_synced_at) : "Syncing";
+  const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || health.can_merge;
 
   return (
     <Card className="border-border/60">
@@ -78,7 +87,7 @@ export function PRHealthBanner({
               </div>
             )}
 
-            {(health.can_resolve_conflicts || health.can_fix_tests) && (
+            {hasActionableButton && (
               <div className="space-y-2">
                 <div className="flex flex-wrap gap-2">
                   {health.can_resolve_conflicts && (
@@ -111,10 +120,30 @@ export function PRHealthBanner({
                       {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
                     </Button>
                   )}
+                  {health.can_merge && (
+                    <Button
+                      size="sm"
+                      variant="default"
+                      disabled={pendingAction !== null}
+                      onClick={onMerge}
+                    >
+                      {pendingAction === "merge" ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <GitMerge className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      {pendingAction === "merge" ? "Merging…" : "Merge"}
+                    </Button>
+                  )}
                 </div>
                 {health.can_resolve_conflicts && health.can_fix_tests && (
                   <p className="text-xs text-muted-foreground">
                     Resolve conflicts first. CI may need to rerun afterward.
+                  </p>
+                )}
+                {mergeAuthRequired && health.can_merge && (
+                  <p className="text-xs text-muted-foreground">
+                    Connect your GitHub account to merge this pull request as yourself.
                   </p>
                 )}
               </div>

@@ -113,6 +113,10 @@ func TestRunGitCredential_GetReturnsCreds(t *testing.T) {
 func TestRunGitCredential_DefaultsUsernameWhenHostOmitsIt(t *testing.T) {
 	sock := startSocketServer(t, func(conn net.Conn) {
 		defer conn.Close()
+		// Drain the request before responding so the deferred Close doesn't
+		// race the client's write and surface as a "broken pipe".
+		var req Request
+		require.NoError(t, json.NewDecoder(conn).Decode(&req), "host should read the request first")
 		require.NoError(t, json.NewEncoder(conn).Encode(&Response{Token: "tok"}), "host should encode a response")
 	})
 	t.Setenv(SocketEnvVar, sock)
