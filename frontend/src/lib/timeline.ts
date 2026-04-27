@@ -20,21 +20,31 @@ function isVisibleAssistantOutput(log: SessionLog): boolean {
   return log.level === "output" && (!log.metadata || !log.metadata.type || isAssistantFinalMetadata(log.metadata));
 }
 
+function normalizeTranscriptContent(content: string): string {
+  return content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+$/g, ""))
+    .join("\n")
+    .replace(/\n+$/g, "");
+}
+
 function duplicateOutputLogIds(messages: SessionMessage[], logs: SessionLog[]): Set<number> {
   const visibleByTurnAndContent = new Map<number, Map<string, SessionLog[]>>();
   for (const log of logs) {
     if (!isVisibleAssistantOutput(log)) continue;
     const turnMap = visibleByTurnAndContent.get(log.turn_number) ?? new Map<string, SessionLog[]>();
-    const group = turnMap.get(log.message) ?? [];
+    const normalizedMessage = normalizeTranscriptContent(log.message);
+    const group = turnMap.get(normalizedMessage) ?? [];
     group.push(log);
-    turnMap.set(log.message, group);
+    turnMap.set(normalizedMessage, group);
     visibleByTurnAndContent.set(log.turn_number, turnMap);
   }
 
   const duplicateIDs = new Set<number>();
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
-    const candidates = visibleByTurnAndContent.get(msg.turn_number)?.get(msg.content) ?? [];
+    const candidates = visibleByTurnAndContent.get(msg.turn_number)?.get(normalizeTranscriptContent(msg.content)) ?? [];
     if (candidates.length === 0) continue;
     const marked = candidates.filter((candidate) => candidate.metadata?.duplicate_of_transcript === true && isAssistantFinalMetadata(candidate.metadata));
     const suppress = marked.length > 0 ? marked : candidates;
