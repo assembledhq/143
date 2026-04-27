@@ -715,10 +715,11 @@ type PullRequestEvent struct {
 	Action string `json:"action"`
 	Number int    `json:"number"`
 	PR     struct {
-		Merged   bool   `json:"merged"`
-		HTMLURL  string `json:"html_url"`
-		MergedAt string `json:"merged_at"`
-		Head     struct {
+		Merged         bool   `json:"merged"`
+		HTMLURL        string `json:"html_url"`
+		MergedAt       string `json:"merged_at"`
+		MergeCommitSHA string `json:"merge_commit_sha"`
+		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 	} `json:"pull_request"`
@@ -750,7 +751,15 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		s.runMergedPullRequestFollowUps(ctx, pr, event.PR.Head.SHA)
+		// Prefer the merge commit SHA so the deploy row reflects the commit
+		// that landed on the base branch (squash/rebase merges produce a new
+		// SHA distinct from the head). Fall back to head SHA if GitHub omitted
+		// merge_commit_sha for some reason.
+		commitSHA := event.PR.MergeCommitSHA
+		if commitSHA == "" {
+			commitSHA = event.PR.Head.SHA
+		}
+		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
 	} else {
 		// PR was closed without merging.
 		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {

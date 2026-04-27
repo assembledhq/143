@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -318,6 +319,134 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with nil session_id")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 	require.NoError(t, deployMock.ExpectationsWereMet(), "all deploy store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
+// TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA confirms the webhook
+// path threads the merge commit SHA through to the deploy row and the
+// evaluate_experiment job, matching what the API merge path emits. Without
+// this preference, squash/rebase merges would record the pre-merge head SHA
+// in deploys.commit_sha — a different commit than what's actually on main.
+func TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	mergeCommitSHA := "merge-commit-abc"
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      db.NewDeployStore(deployMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+	// Assert the deploy insert receives the merge commit SHA, not the head.
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID,
+			"org_id":          orgID,
+			"environment":     "production",
+			"commit_sha":      &mergeCommitSHA,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
+
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = true
+	event.PR.Head.SHA = "head-pre-merge"
+	event.PR.MergeCommitSHA = mergeCommitSHA
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy insert should receive the merge commit SHA, not the head SHA")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
+}
+
+func TestHandlePullRequestEvent_MergedFallsBackToHeadSHAWhenMergeCommitMissing(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	headSHA := "head-fallback-abc"
+
+	prMock := newMockPool(t)
+	deployMock := newMockPool(t)
+	jobMock := newMockPool(t)
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		sessions:     db.NewSessionStore(newMockPool(t)),
+		issues:       db.NewIssueStore(newMockPool(t)),
+		deploys:      db.NewDeployStore(deployMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, (*uuid.UUID)(nil), orgID, "testorg/testrepo", now)...),
+		)
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	deployMock.ExpectQuery("SELECT id, pull_request_id, org_id, environment, deployed_at, commit_sha, created_at\n\t\tFROM deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "org_id", "environment", "deployed_at", "commit_sha", "created_at"}))
+	deployMock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id": prID,
+			"org_id":          orgID,
+			"environment":     "production",
+			"commit_sha":      &headSHA,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
+
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := PullRequestEvent{Action: "closed", Number: 42}
+	event.PR.Merged = true
+	event.PR.Head.SHA = headSHA
+	event.PR.MergeCommitSHA = ""
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent should not return an error for a merged PR with no merge_commit_sha")
+	require.NoError(t, deployMock.ExpectationsWereMet(), "deploy insert should fall back to the head SHA when merge_commit_sha is empty")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 

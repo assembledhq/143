@@ -238,6 +238,10 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 			// the PR is still in a mergeable state. 503 lets the UI prompt the
 			// user to retry rather than treating this as a permanent rejection.
 			writeError(w, r, http.StatusServiceUnavailable, "PR_MERGE_STATE_UNAVAILABLE", "could not confirm pull request is still mergeable; please retry", err)
+		case errors.Is(err, ghservice.ErrGitHubMergeIncomplete):
+			// GitHub returned 200 but reported merged=false. Treat as a
+			// gateway-level failure so the UI prompts the user to retry.
+			writeError(w, r, http.StatusBadGateway, "PULL_REQUEST_MERGE_INCOMPLETE", "GitHub did not complete the merge; please retry", err)
 		default:
 			// GitHub itself can refuse with 405 (method not allowed) or 409
 			// (head SHA mismatch / branch protection); surface those as 409

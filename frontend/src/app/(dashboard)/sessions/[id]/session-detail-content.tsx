@@ -2723,7 +2723,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           if (!open) setPRAuthPrompt(null);
         }}
       >
-          <AlertDialogContent>
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
               {prAuthPrompt?.purpose === "merge_pr"

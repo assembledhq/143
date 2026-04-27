@@ -26,6 +26,12 @@ var ErrNoMergeMethodAllowed = errors.New("no merge method is allowed on this rep
 // user should retry once the refresh succeeds.
 var ErrMergeStateRefreshFailed = errors.New("failed to refresh pull request state before merge")
 
+// ErrGitHubMergeIncomplete is returned when GitHub responded 200 to the merge
+// call but reported merged=false in the body. This is rare in practice but
+// we want a typed sentinel so the handler can map it to a 502 rather than a
+// generic 500.
+var ErrGitHubMergeIncomplete = errors.New("github reported merge not completed")
+
 // gitHubRepoMergeSettings captures the subset of repository fields we use to
 // pick a merge method. GitHub's repo response has many more fields; we only
 // decode what we need.
@@ -69,7 +75,7 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	// GitHub data — falling through on a stale snapshot would defeat the
 	// safety check, so we surface the failure and let the user retry.
 	if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrMergeStateRefreshFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrMergeStateRefreshFailed, err)
 	}
 	// Reload PR after the sync so we see the freshest persisted state.
 	pr, err = s.pullRequests.GetByID(ctx, orgID, pullRequestID)
@@ -89,7 +95,13 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		// CanMerge=true requires a clean merge_state, which in turn requires a
 		// successful sync that wrote a snapshot with a head SHA. Reaching this
 		// branch means our invariants drifted; refuse rather than skip the
-		// race-protection guard that the SHA gives us downstream.
+		// race-protection guard that the SHA gives us downstream. Log at error
+		// level so this surfaces as a server-side issue rather than blending
+		// into normal 409 traffic.
+		s.logger.Error().
+			Str("pull_request_id", pullRequestID.String()).
+			Str("repo", pr.GitHubRepo).
+			Msg("pull request health reports CanMerge=true but is missing head SHA; refusing to merge without race-protection guard")
 		return nil, fmt.Errorf("%w: pull request health is missing head SHA", ErrPullRequestNotMergeable)
 	}
 
@@ -98,12 +110,19 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		return nil, fmt.Errorf("load repository: %w", err)
 	}
 
+	// Default to user_preferred so we still attempt the merge as the user's
+	// token first; the resolver downgrades to the app token when that fails.
+	// Org-load/parse errors are non-fatal — they'd block legitimate merges if
+	// they were — but we log so a misconfigured row is debuggable.
 	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
 	if s.orgs != nil {
-		if org, orgErr := s.orgs.GetByID(ctx, orgID); orgErr == nil {
-			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
-				orgSettings = parsed
-			}
+		org, orgErr := s.orgs.GetByID(ctx, orgID)
+		if orgErr != nil {
+			s.logger.Warn().Err(orgErr).Str("org_id", orgID.String()).Msg("failed to load org settings for merge; defaulting to user_preferred authorship")
+		} else if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr != nil {
+			s.logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("failed to parse org settings for merge; defaulting to user_preferred authorship")
+		} else {
+			orgSettings = parsed
 		}
 	}
 
@@ -145,7 +164,7 @@ func (s *PRService) MergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		return nil, err
 	}
 	if !mergeResp.Merged {
-		return nil, fmt.Errorf("github reported merge not completed: %s", mergeResp.Message)
+		return nil, fmt.Errorf("%w: %s", ErrGitHubMergeIncomplete, mergeResp.Message)
 	}
 
 	// Eagerly persist merged status so the UI flips immediately. The GitHub

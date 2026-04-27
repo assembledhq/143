@@ -55,6 +55,32 @@ func TestDeployStore_Create_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestDeployStore_Create_ConflictIsNoOp(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewDeployStore(mock)
+	sha := "abc123"
+
+	d := &models.Deploy{
+		PullRequestID: uuid.New(),
+		OrgID:         uuid.New(),
+		Environment:   "production",
+		CommitSHA:     &sha,
+	}
+
+	mock.ExpectQuery("INSERT INTO deploys").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}))
+
+	err = store.Create(context.Background(), d)
+	require.NoError(t, err, "ON CONFLICT DO NOTHING should produce a successful no-op even when no row is returned")
+	require.Equal(t, uuid.Nil, d.ID, "deploy fields should remain unset when the insert is skipped by ON CONFLICT")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestDeployStore_GetByPullRequestID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
