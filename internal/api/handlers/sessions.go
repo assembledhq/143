@@ -36,6 +36,14 @@ type sessionPRTitleSyncer interface {
 	SyncSessionTitle(ctx context.Context, session *models.Session) error
 }
 
+// sessionMembershipStore is the subset of OrganizationMembershipStore that
+// StreamLogs needs to authorize cross-org SSE subscriptions when the client
+// can't send X-Active-Org-ID (EventSource has no header API). See StreamLogs
+// for context.
+type sessionMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+}
+
 type SessionHandler struct {
 	runStore         *db.SessionStore
 	logStore         *db.SessionLogStore
@@ -51,6 +59,7 @@ type SessionHandler struct {
 	issueSnapshots   *db.SessionTurnIssueSnapshotStore
 	threadStore      *db.SessionThreadStore
 	viewStore        *db.SessionViewStore
+	memberships      sessionMembershipStore
 	prCredentials    githubStatusCredentialStore
 	prAuthChecker    interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
@@ -124,6 +133,13 @@ func (h *SessionHandler) SetShutdownSignal(ch <-chan struct{}) {
 // succeeds but leaves the snapshot to be reclaimed by the TTL reaper.
 func (h *SessionHandler) SetSnapshotStore(s storage.SnapshotStore) {
 	h.snapshotStore = s
+}
+
+// SetMembershipStore wires the membership store used by StreamLogs to
+// authorize an explicit ?org_id= query param. Required for the SSE log stream
+// to work for multi-org users (EventSource cannot send X-Active-Org-ID).
+func (h *SessionHandler) SetMembershipStore(store sessionMembershipStore) {
+	h.memberships = store
 }
 
 // SetPRCredentialStore injects the personal GitHub credential store used to
@@ -661,6 +677,58 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 // and also serves as the initial log fetch for active runs.
 func (h *SessionHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	h.writeLogsForOrg(w, r, orgID)
+}
+
+var (
+	errSessionStreamOrgInvalid   = errors.New("invalid session stream org")
+	errSessionStreamOrgForbidden = errors.New("forbidden session stream org")
+	errSessionStreamUnauthorized = errors.New("unauthorized session stream request")
+)
+
+// streamOrgID resolves the org for a SSE log stream request, honouring an
+// optional ?org_id= query param when the X-Active-Org-ID header is absent
+// (EventSource has no header API). The query value is accepted only when the
+// requesting user holds a membership in that org. Falls back to the auth
+// middleware's resolved active org when no query param is supplied — that
+// preserves the existing fetch-based behaviour for callers that *can* set the
+// header. See pull_requests.go's streamOrgIDFromRequest for the prior art.
+func (h *SessionHandler) streamOrgID(r *http.Request) (uuid.UUID, error) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	requestedRaw := strings.TrimSpace(r.URL.Query().Get("org_id"))
+	if requestedRaw == "" {
+		return orgID, nil
+	}
+
+	requestedOrgID, err := uuid.Parse(requestedRaw)
+	if err != nil {
+		return uuid.Nil, errSessionStreamOrgInvalid
+	}
+	if requestedOrgID == orgID {
+		return requestedOrgID, nil
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return uuid.Nil, errSessionStreamUnauthorized
+	}
+	if h.memberships == nil {
+		return uuid.Nil, errors.New("membership store not configured")
+	}
+	if _, err := h.memberships.Get(r.Context(), user.ID, requestedOrgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, errSessionStreamOrgForbidden
+		}
+		return uuid.Nil, err
+	}
+	return requestedOrgID, nil
+}
+
+// writeLogsForOrg writes the JSON log list for the given org. Split out so
+// StreamLogs can delegate to it with the org resolved by streamOrgID (which
+// honours the ?org_id= query fallback when the X-Active-Org-ID header is
+// missing).
+func (h *SessionHandler) writeLogsForOrg(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) {
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
@@ -690,7 +758,24 @@ func (h *SessionHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 
 // StreamLogs streams agent run logs as Server-Sent Events.
 func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	// EventSource cannot send X-Active-Org-ID, so accept ?org_id= as a
+	// fallback. Validates the requesting user has membership in the org —
+	// see streamOrgID for details. Without this, multi-org users whose
+	// session-hint last_org_id != their actively-viewed org would 404.
+	orgID, err := h.streamOrgID(r)
+	if err != nil {
+		switch {
+		case errors.Is(err, errSessionStreamOrgInvalid):
+			writeError(w, r, http.StatusBadRequest, "INVALID_ORG", "invalid org_id")
+		case errors.Is(err, errSessionStreamOrgForbidden):
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied")
+		case errors.Is(err, errSessionStreamUnauthorized):
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing user")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL", "failed to authorize log stream", err)
+		}
+		return
+	}
 	runID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid run ID")
@@ -705,9 +790,11 @@ func (h *SessionHandler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// For terminal runs, return existing logs as JSON instead of SSE
-	// since there will be no new logs to stream.
+	// since there will be no new logs to stream. Pass orgID explicitly so
+	// the resolved org from streamOrgID flows through (GetLogs reads it
+	// from context, which may not match for header-less SSE callers).
 	if isTerminalStatus(run.Status) {
-		h.GetLogs(w, r)
+		h.writeLogsForOrg(w, r, orgID)
 		return
 	}
 

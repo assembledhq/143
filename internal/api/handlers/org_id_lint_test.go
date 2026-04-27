@@ -77,6 +77,9 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SessionFileHandler.GetFileContent":        "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionFileHandler.GetFileContext":        "delegates to getSessionContainer which uses OrgIDFromContext",
 		"SessionComposerHandler.ListSlashCommands": "built-in catalog is not org-scoped; project discovery branch delegates to buildProjectSlashCommandGroup which uses OrgIDFromContext",
+		"SessionHandler.StreamLogs":                "EventSource cannot send X-Active-Org-ID; delegates to streamOrgID which calls OrgIDFromContext and additionally honours a membership-validated ?org_id= query fallback",
+		"UploadHandler.ServeUpload":                "<img>/<a> tag fetches cannot send X-Active-Org-ID; authorizes off the path-encoded org-id + UserFromContext membership check rather than active-org context",
+		"UsageHandler.ExportCSV":                   "window.open downloads cannot send X-Active-Org-ID; delegates to exportOrgID which calls OrgIDFromContext and additionally honours a membership-validated ?org_id= query fallback",
 
 		// Preview inspector handlers — delegate to requireInspector + getActivePreview
 		// which use OrgIDFromContext.
