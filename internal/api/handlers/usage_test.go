@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -327,11 +328,16 @@ func TestUsageHandler_ExportCSV_NoRollupStore(t *testing.T) {
 }
 
 // stubUsageMembershipStore implements usageMembershipStore for tests.
+// errOverride lets a test exercise the non-ErrNoRows membership-error branch.
 type stubUsageMembershipStore struct {
-	allowed map[[2]uuid.UUID]bool
+	allowed     map[[2]uuid.UUID]bool
+	errOverride error
 }
 
 func (s *stubUsageMembershipStore) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if s.errOverride != nil {
+		return models.OrganizationMembership{}, s.errOverride
+	}
 	if s.allowed[[2]uuid.UUID{userID, orgID}] {
 		return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
 	}
@@ -402,6 +408,138 @@ func TestUsageHandler_ExportCSV_OrgIDQueryNonMember(t *testing.T) {
 	handler.ExportCSV(rr, req)
 	require.Equal(t, http.StatusForbidden, rr.Code)
 	require.Contains(t, rr.Body.String(), "FORBIDDEN")
+}
+
+// When ?org_id= matches the context-resolved org, the helper short-circuits
+// without touching the membership store. Covers the equality branch in
+// exportOrgID.
+func TestUsageHandler_ExportCSV_OrgIDQueryMatchesContext(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	// Intentionally no WithMembershipStore: the equality short-circuit must
+	// return before the membership lookup.
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{
+			exportRows: &stubRows{
+				rows: [][]any{
+					{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
+				},
+			},
+		}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + orgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUsageHandler_ExportCSV_OrgIDQueryMalformed(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=not-a-uuid"
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_ORG")
+}
+
+func TestUsageHandler_ExportCSV_OrgIDQueryMissingUser(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	requestedOrgID := uuid.New()
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{}),
+		WithMembershipStore(&stubUsageMembershipStore{allowed: map[[2]uuid.UUID]bool{}}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	// No user in context — exercises the errUsageExportUnauthorized path.
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusUnauthorized, rr.Code)
+	require.Contains(t, rr.Body.String(), "UNAUTHORIZED")
+}
+
+func TestUsageHandler_ExportCSV_OrgIDQueryMembershipNotConfigured(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	requestedOrgID := uuid.New()
+	userID := uuid.New()
+	// No WithMembershipStore — programmer error.
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	ctx := middleware.WithOrgID(req.Context(), uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "INTERNAL")
+}
+
+func TestUsageHandler_ExportCSV_OrgIDQueryMembershipStoreError(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	requestedOrgID := uuid.New()
+	userID := uuid.New()
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{}),
+		WithMembershipStore(&stubUsageMembershipStore{
+			allowed:     map[[2]uuid.UUID]bool{},
+			errOverride: errors.New("db unreachable"),
+		}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	ctx := middleware.WithOrgID(req.Context(), uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, rr.Body.String(), "INTERNAL")
 }
 
 func TestUsageHandler_ExportCSV_HourlyGranularity(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -22,12 +23,17 @@ import (
 
 // stubUploadMembershipStore implements uploadMembershipStore for tests.
 // allowed lists (userID, orgID) pairs that resolve to a membership; everything
-// else returns pgx.ErrNoRows so the handler 403s.
+// else returns pgx.ErrNoRows so the handler 403s. errOverride lets a test
+// short-circuit Get to a non-ErrNoRows failure (e.g. a synthetic DB error).
 type stubUploadMembershipStore struct {
-	allowed map[[2]uuid.UUID]bool
+	allowed     map[[2]uuid.UUID]bool
+	errOverride error
 }
 
 func (s *stubUploadMembershipStore) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if s.errOverride != nil {
+		return models.OrganizationMembership{}, s.errOverride
+	}
 	if s.allowed[[2]uuid.UUID{userID, orgID}] {
 		return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
 	}
@@ -253,6 +259,82 @@ func TestUploadHandler_ServeUpload_S3Mode(t *testing.T) {
 
 	// S3 client is nil, so GetObject will fail — handler returns 404.
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestUploadHandler_ServeUpload_KeyWithoutSlash(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+	h := NewUploadHandler(store)
+	h.SetMembershipStore(newStubMembershipStore(t))
+
+	// Single-segment key (no "/") — must be rejected before parsing it as a UUID.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/no-slash-here", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeUpload(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_KEY")
+}
+
+func TestUploadHandler_ServeUpload_MissingUser(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+	h := NewUploadHandler(store)
+	h.SetMembershipStore(newStubMembershipStore(t))
+
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	// No user injected into the request context.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+orgID.String()+"/file.png", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeUpload(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Contains(t, w.Body.String(), "UNAUTHORIZED")
+}
+
+func TestUploadHandler_ServeUpload_MembershipNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+	h := NewUploadHandler(store) // no SetMembershipStore — programmer error.
+
+	userID := uuid.MustParse("00000000-0000-0000-0000-0000000000aa")
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+orgID.String()+"/file.png", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeUpload(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "NOT_CONFIGURED")
+}
+
+func TestUploadHandler_ServeUpload_MembershipStoreError(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/api/v1/uploads/files")
+	h := NewUploadHandler(store)
+	stub := newStubMembershipStore(t)
+	stub.errOverride = errors.New("boom")
+	h.SetMembershipStore(stub)
+
+	userID := uuid.MustParse("00000000-0000-0000-0000-0000000000aa")
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+orgID.String()+"/file.png", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	h.ServeUpload(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "INTERNAL")
 }
 
 func TestExtensionFromMIME(t *testing.T) {
