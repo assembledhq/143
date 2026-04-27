@@ -243,6 +243,43 @@ describe("ManualSessionCreatePageContent", () => {
     expect(dropzone).toHaveAttribute("data-drag-active", "true");
   });
 
+  it("clears the dropzone after nested drag-enter events once the drag leaves the hero", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const dropzone = await screen.findByTestId("manual-session-dropzone");
+    const addButton = screen.getByRole("button", { name: "Add files or photos" });
+    const file = new File(["image-bytes"], "design-shot.png", { type: "image/png" });
+
+    fireEvent.dragEnter(dropzone, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+    fireEvent.dragEnter(addButton, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    expect(dropzone).toHaveAttribute("data-drag-active", "true");
+
+    fireEvent.dragLeave(dropzone, {
+      dataTransfer: {
+        files: [file],
+        items: [{ kind: "file", type: "image/png", getAsFile: () => file }],
+        types: ["Files"],
+      },
+    });
+
+    await waitFor(() => {
+      expect(dropzone).toHaveAttribute("data-drag-active", "false");
+    });
+  });
+
   it("uploads an image dropped onto the hero area and shows it in the attachment strip", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
@@ -501,9 +538,14 @@ describe("ManualSessionCreatePageContent", () => {
       renderWithProviders(<ManualSessionCreatePageContent />);
 
       await screen.findByPlaceholderText("Tell the agent what to do...");
-      // Give the persist effect a chance to run.
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+      await waitFor(() => {
+        expect(mocks.settingsGetMock).toHaveBeenCalledTimes(1);
+        expect(mocks.repositoriesListMock).toHaveBeenCalledTimes(1);
+        expect(mocks.resolvedCredsMock).toHaveBeenCalledTimes(1);
+        expect(mocks.codexAuthStatusMock).toHaveBeenCalledTimes(1);
+        expect(mocks.authMeMock).toHaveBeenCalledTimes(1);
+        expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+      });
     });
 
     it("restores a hydrated reasoning override and uses it at submit time", async () => {

@@ -29,6 +29,7 @@ import { api } from "@/lib/api";
 import { AGENTS } from "@/lib/agents";
 import { BranchPicker } from "@/components/branch-picker";
 import { NoReposWarning } from "@/components/no-repos-warning";
+import { MobileBackButton } from "@/components/mobile-back-button";
 import { cn } from "@/lib/utils";
 import type { OrgSettings, Organization, Repository, SingleResponse } from "@/lib/types";
 
@@ -159,7 +160,10 @@ export default function NewProjectPage() {
     <div className="p-6 max-w-2xl mx-auto">
       <div className="space-y-6">
         <div>
-          <h1 className="text-lg font-semibold text-foreground">New project</h1>
+          <div className="flex items-center gap-2">
+            <MobileBackButton to="/projects" label="Back to projects" />
+            <h1 className="text-lg font-semibold text-foreground">New project</h1>
+          </div>
           <p className="text-sm text-muted-foreground mt-1">
             Describe what you want to build and we&apos;ll set it up for you.
           </p>
