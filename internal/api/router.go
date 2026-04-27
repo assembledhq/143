@@ -167,7 +167,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
-	usageHandler := handlers.NewUsageHandler(containerUsageStore, handlers.WithRollupStore(usageRollupStore))
+	usageHandler := handlers.NewUsageHandler(
+		containerUsageStore,
+		handlers.WithRollupStore(usageRollupStore),
+		handlers.WithMembershipStore(membershipStore),
+	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -200,6 +204,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetPRAuthCredentialChecker(appUserAuthSvc)
 	sessionHandler.SetPRAuthFlow(cfg.CSRFSigningKey, cfg.FrontendURL)
 	sessionHandler.SetStreams(sessionStreams)
+	sessionHandler.SetMembershipStore(membershipStore)
 	pullRequestHandler.SetStreams(prHealthStreams)
 	pullRequestHandler.SetMembershipStore(membershipStore)
 	if prService != nil {
@@ -465,6 +470,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, "/api/v1/uploads/files")
 	}
 	uploadHandler := handlers.NewUploadHandler(uploadStore)
+	uploadHandler.SetMembershipStore(membershipStore)
 
 	r := chi.NewRouter()
 

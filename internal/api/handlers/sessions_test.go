@@ -2248,6 +2248,152 @@ func TestSessionHandler_StreamLogs_InvalidID(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_ID")
 }
 
+// stubSessionMembershipStore implements sessionMembershipStore for unit tests
+// without spinning up Postgres. allowed lists (userID, orgID) pairs that
+// resolve to a membership; everything else returns pgx.ErrNoRows.
+type stubSessionMembershipStore struct {
+	allowed map[[2]uuid.UUID]bool
+}
+
+func (s *stubSessionMembershipStore) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if s.allowed[[2]uuid.UUID{userID, orgID}] {
+		return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
+	}
+	return models.OrganizationMembership{}, pgx.ErrNoRows
+}
+
+// Regression: EventSource cannot send X-Active-Org-ID, so multi-org users
+// whose context org (resolved from session last_org_id) differs from the org
+// they're actively viewing previously got a silent 404. The handler must
+// honour the ?org_id= query fallback when the user has membership in that
+// org. Mirrors pull_requests.go's prior art.
+func TestSessionHandler_StreamLogs_OrgIDQueryFallback(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	contextOrgID := uuid.New()   // resolved from session hint — wrong org
+	requestedOrgID := uuid.New() // active org per X-Active-Org-ID, passed via query
+	userID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	issueID := uuid.New()
+
+	handler := newSessionHandler(t, mock)
+	handler.SetMembershipStore(&stubSessionMembershipStore{
+		allowed: map[[2]uuid.UUID]bool{{userID, requestedOrgID}: true},
+	})
+
+	// Run lookup uses the *requested* org, not the context org.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, requestedOrgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	// Terminal status triggers writeLogsForOrg path: second session lookup + log listing.
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, requestedOrgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil,
+				"idle",
+				(*string)(nil),
+				nil,
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(1), runID, requestedOrgID, nil, now, "info", "Done", nil, nil),
+		)
+
+	url := "/api/v1/sessions/" + runID.String() + "/logs/stream?org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, contextOrgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.StreamLogs(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_StreamLogs_OrgIDQueryNonMember(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	requestedOrgID := uuid.New()
+	userID := uuid.New()
+
+	handler := newSessionHandler(t, mock)
+	handler.SetMembershipStore(&stubSessionMembershipStore{
+		allowed: map[[2]uuid.UUID]bool{}, // user is not in requestedOrgID
+	})
+
+	url := "/api/v1/sessions/" + uuid.New().String() + "/logs/stream?org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", uuid.New().String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.StreamLogs(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "FORBIDDEN")
+}
+
 // TestSessionHandler_StreamLogs_ShutdownSignal verifies that the SSE loop
 // returns promptly when shutdownCh is closed, instead of blocking
 // Server.Shutdown until its deadline expires.

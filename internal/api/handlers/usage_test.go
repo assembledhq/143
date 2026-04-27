@@ -326,6 +326,84 @@ func TestUsageHandler_ExportCSV_NoRollupStore(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
+// stubUsageMembershipStore implements usageMembershipStore for tests.
+type stubUsageMembershipStore struct {
+	allowed map[[2]uuid.UUID]bool
+}
+
+func (s *stubUsageMembershipStore) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
+	if s.allowed[[2]uuid.UUID{userID, orgID}] {
+		return models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: "member"}, nil
+	}
+	return models.OrganizationMembership{}, pgx.ErrNoRows
+}
+
+// Regression: window.open downloads can't send X-Active-Org-ID. Multi-org
+// users whose context org (resolved from session last_org_id) differs from
+// their actively-viewed org would otherwise silently get the wrong org's CSV.
+// The handler must honour ?org_id= when the user has membership in that org.
+func TestUsageHandler_ExportCSV_OrgIDQueryFallback(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	contextOrgID := uuid.New()   // wrong: session last_org_id
+	requestedOrgID := uuid.New() // right: actively-viewed org
+	userID := uuid.New()
+
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{
+			exportRows: &stubRows{
+				rows: [][]any{
+					{time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), "", "", 30.0, 1, 1, 1, int64(100), int64(50), 0.25},
+				},
+			},
+		}),
+		WithMembershipStore(&stubUsageMembershipStore{
+			allowed: map[[2]uuid.UUID]bool{{userID, requestedOrgID}: true},
+		}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	ctx := middleware.WithOrgID(req.Context(), contextOrgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUsageHandler_ExportCSV_OrgIDQueryNonMember(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	requestedOrgID := uuid.New()
+	userID := uuid.New()
+
+	handler := NewUsageHandler(
+		db.NewContainerUsageStore(mock),
+		WithRollupStore(&stubUsageRollupStore{}),
+		WithMembershipStore(&stubUsageMembershipStore{allowed: map[[2]uuid.UUID]bool{}}),
+	)
+
+	url := "/api/v1/usage/export?start=2026-04-01T00:00:00Z&end=2026-04-02T00:00:00Z&org_id=" + requestedOrgID.String()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	ctx := middleware.WithOrgID(req.Context(), uuid.New())
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ExportCSV(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code)
+	require.Contains(t, rr.Body.String(), "FORBIDDEN")
+}
+
 func TestUsageHandler_ExportCSV_HourlyGranularity(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
