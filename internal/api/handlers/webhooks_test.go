@@ -84,7 +84,7 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 				mock.ExpectQuery("SELECT .+ FROM users WHERE github_id").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "password_hash", "google_id", "created_at"}),
+						pgxmock.NewRows([]string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}),
 					)
 
 				// 3. Create org (2 named args)

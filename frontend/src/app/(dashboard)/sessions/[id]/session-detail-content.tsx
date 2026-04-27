@@ -2058,6 +2058,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const composerUploadInputRef = useRef<HTMLInputElement>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
   const openComments = useMemo(() => comments.filter((comment) => !comment.resolved), [comments]);
+  const attachedReviewComments = useMemo(
+    () => centerMode === "review" ? openComments : [],
+    [centerMode, openComments],
+  );
   const composerCanSendMessage = session?.status !== "skipped" && session?.status !== "pending" && session?.sandbox_state !== "destroyed";
   const composerIsRunning = session?.status === "running";
   const composerIsSnapshotExpired = session?.sandbox_state === "destroyed";
@@ -2104,8 +2108,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
       setComposerUploadError(null);
       const draftMessage = opts.overrideMessage ?? composerMessage;
-      const formattedMessage = openComments.length > 0
-        ? formatReviewMessage(openComments, filteredFiles, draftMessage)
+      const formattedMessage = attachedReviewComments.length > 0
+        ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
         : draftMessage;
       const isPlanRequest = opts.planMode ?? composerPlanMode;
 
@@ -2502,6 +2506,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {/* Chat panel — always mounted to preserve scroll, SSE connections, etc. */}
           <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
             <ChatPanel
+              key={id}
               session={session}
               sessionId={id}
               isActive={isActive}
@@ -2568,7 +2573,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               isUploading={composerIsUploading}
               onUpload={handleComposerUpload}
               onRemoveAttachment={handleRemoveComposerAttachment}
-              openComments={openComments}
+              openComments={attachedReviewComments}
               availableModels={composerAvailableModels}
               canSendMessage={composerCanSendMessage}
               isRunning={composerIsRunning}

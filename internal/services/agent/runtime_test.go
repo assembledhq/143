@@ -105,6 +105,10 @@ func (s *runtimeTestSessionStore) UpdateBaseCommitSHA(context.Context, uuid.UUID
 	return nil
 }
 
+func (s *runtimeTestSessionStore) SetGitIdentity(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) error {
+	return nil
+}
+
 func (s *runtimeTestSessionStore) UpdateFailure(context.Context, uuid.UUID, uuid.UUID, string, string, []string, bool) error {
 	return nil
 }

@@ -59,6 +59,25 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Install GitHub CLI (gh) at the version pinned in versions.json. We use the
+# upstream tarball rather than the apt repo to avoid an extra signing-key
+# rotation chore and to keep the version pin in exactly one place. gh reads
+# GH_TOKEN automatically, so the agent can invoke `gh pr ...` directly with
+# the token returned by the per-session credential helper.
+COPY sandbox/versions.json /tmp/versions.json
+RUN GH_VERSION=$(jq -r '.gh_cli' /tmp/versions.json) && \
+    ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) GH_ARCH=amd64 ;; \
+        arm64) GH_ARCH=arm64 ;; \
+        *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tgz && \
+    tar -xzf /tmp/gh.tgz -C /tmp && \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" /usr/local/bin/gh && \
+    rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${GH_ARCH}" /tmp/versions.json && \
+    gh --version
+
 # Copy the Go toolchain from the go-builder stage so previews that run the
 # agent's own Go source (e.g. `go run ./cmd/server`) compile inside the
 # sandbox at session-start time. Reusing the builder's /usr/local/go

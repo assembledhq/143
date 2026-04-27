@@ -17,6 +17,8 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/assembledhq/143/internal/testutil"
 )
@@ -339,6 +341,10 @@ func (m *mockSessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.baseCommitSHAs = append(m.baseCommitSHAs, baseCommitSHA)
+	return nil
+}
+
+func (m *mockSessionStore) SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error {
 	return nil
 }
 
@@ -774,25 +780,28 @@ func strPtr(s string) *string {
 }
 
 type testDeps struct {
-	provider       *testutil.MockSandboxProvider
-	adapter        *mockAgentAdapter
-	sessions       *mockSessionStore
-	projects       *mockProjectTaskUpdater
-	issues         *mockIssueStore
-	repos          *mockRepositoryStore
-	logs           *mockSessionLogStore
-	questions      *mockSessionQuestionStore
-	messages       *mockSessionMessageStore
-	decisions      *mockDecisionLogStore
-	jobs           *mockJobStore
-	github         *mockGitHubTokenProvider
-	codexAuth      agent.CodexAuthProvider
-	claudeCodeAuth agent.ClaudeCodeAuthProvider
-	creds          *mockCredentialProvider
-	snapshots      *mockSnapshotStore
-	cancels        *agent.CancelRegistry
-	nodeID         string
-	orgs           *mockOrgStore
+	provider         *testutil.MockSandboxProvider
+	adapter          *mockAgentAdapter
+	sessions         *mockSessionStore
+	projects         *mockProjectTaskUpdater
+	issues           *mockIssueStore
+	repos            *mockRepositoryStore
+	logs             *mockSessionLogStore
+	questions        *mockSessionQuestionStore
+	messages         *mockSessionMessageStore
+	decisions        *mockDecisionLogStore
+	jobs             *mockJobStore
+	github           *mockGitHubTokenProvider
+	codexAuth        agent.CodexAuthProvider
+	claudeCodeAuth   agent.ClaudeCodeAuthProvider
+	creds            *mockCredentialProvider
+	snapshots        *mockSnapshotStore
+	cancels          *agent.CancelRegistry
+	nodeID           string
+	orgs             *mockOrgStore
+	identityResolver *identity.Resolver
+	sandboxAuth      agent.SandboxAuthServer
+	users            agent.UserLookup
 }
 
 func defaultDeps() testDeps {
@@ -855,6 +864,9 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		Snapshots:        snapshotStore,
 		Cancels:          d.cancels,
 		Orgs:             orgStore,
+		IdentityResolver: d.identityResolver,
+		SandboxAuth:      d.sandboxAuth,
+		Users:            d.users,
 		NodeID:           d.nodeID,
 		Logger:           zerolog.Nop(),
 		MaxConcurrent:    3,
@@ -1383,6 +1395,286 @@ func TestRunAgent_FinalizeDestroyReturnsFalseSkipsDestroy(t *testing.T) {
 
 	require.Equal(t, 0, d.provider.GetDestroyCalls(), "must not destroy when finalize CAS loses the race")
 	require.Equal(t, 1, d.sessions.finalizeCalls)
+}
+
+// fakeSandboxAuthServer records calls to Listen and exposes the close func it
+// hands back so tests can assert that closeAuthSocket fires on every exit
+// path through RunAgent.
+type fakeSandboxAuthServer struct {
+	listenCalls     int
+	closeCalls      int
+	listenErr       error
+	closeSessionIDs []uuid.UUID
+}
+
+func (f *fakeSandboxAuthServer) Listen(_ context.Context, _ uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
+	f.listenCalls++
+	if f.listenErr != nil {
+		return "", f.listenErr
+	}
+	return "/tmp/fake.sock", nil
+}
+
+func (f *fakeSandboxAuthServer) Close(sessionID uuid.UUID) {
+	f.closeCalls++
+	f.closeSessionIDs = append(f.closeSessionIDs, sessionID)
+}
+
+// fakeUserStore is a no-op UserLookup used to satisfy the orchestrator's
+// dependency without producing a Co-authored-by trailer for tests that don't
+// care.
+type fakeUserStore struct{}
+
+func (fakeUserStore) GetByID(_ context.Context, _, _ uuid.UUID) (models.User, error) {
+	return models.User{}, errors.New("not configured")
+}
+
+// TestRunAgent_AuthSocketClosedWhenCreateFails verifies that the per-session
+// GitHub credential socket is torn down even when sandbox creation fails
+// after the socket was opened. Without the defer guard, a Listen-then-fail
+// sequence would leak one socket per failed session.
+func TestRunAgent_AuthSocketClosedWhenCreateFails(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TriggeredByUserID = func() *uuid.UUID { id := uuid.New(); return &id }()
+
+	d := defaultDeps()
+	// Force IntegrationSkills to be non-empty so the AuthSocket code path
+	// fires. The orchestrator gates the socket on `IntegrationSkills != ""`
+	// so the agent has CLI tools to authenticate against GitHub for.
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+
+	// Identity resolver hands back an app token without making any HTTP
+	// calls — its installation source is the existing mock GitHub provider
+	// which short-circuits to a pre-staged token.
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+
+	// Make sandbox creation fail *after* the socket has been opened.
+	createErr := errors.New("create failed")
+	d.provider.CreateFn = func(_ context.Context, _ agent.SandboxConfig) (*agent.Sandbox, error) {
+		return nil, createErr
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should propagate the sandbox-create failure")
+	require.ErrorIs(t, err, createErr, "RunAgent should wrap the underlying create error")
+
+	require.Equal(t, 1, authStub.listenCalls, "sandbox auth socket must be opened before container create")
+	require.Equal(t, 1, authStub.closeCalls, "sandbox auth socket must be closed when container create fails")
+}
+
+// TestRunAgent_AuthSocketClosedOnAcquireHoldError verifies the close fires on
+// the AcquireTurnHold-error branch: the listener was opened by
+// prepareSandboxGitHubAuth before container create, and AcquireTurnHold
+// runs *after* the create succeeds. Without an explicit close on this
+// branch, every AcquireTurnHold failure would leak a per-session
+// listener until the orchestrator process exited.
+func TestRunAgent_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TriggeredByUserID = func() *uuid.UUID { id := uuid.New(); return &id }()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.sessions.acquireHoldErr = errors.New("acquire failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should propagate the acquire-hold failure")
+	require.Contains(t, err.Error(), "acquire turn hold", "RunAgent should surface the acquire-hold failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before container create")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when acquire-hold fails after socket was opened")
+}
+
+// TestRunAgent_AuthSocketClosedOnHydrateRaceLoss verifies the close fires on
+// the losing-hydrate-race branch: AcquireTurnHold succeeds but reports a
+// different container_id (another holder published first), so we destroy
+// our local sandbox. The listener we opened before container create must
+// also be torn down — the winning container is owned by the other holder
+// and has its own listener.
+func TestRunAgent_AuthSocketClosedOnHydrateRaceLoss(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.TriggeredByUserID = func() *uuid.UUID { id := uuid.New(); return &id }()
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.sessions.acquireHoldFn = func(proposed string) (string, error) {
+		return "winner-container", nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when AcquireTurnHold reports a different container_id")
+	require.Contains(t, err.Error(), "sandbox race", "RunAgent should surface the sandbox-race condition")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before the race is detected")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when the local sandbox is destroyed after losing the hydrate race")
+}
+
+func TestRunAgent_PreviewHeldContainerKeepsSandboxAuthSocketOpen(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.sessions.releaseHoldFn = func() (bool, string, error) {
+		return false, "test-sandbox", nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:         "ok",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed while preview keeps the container alive")
+	require.Equal(t, 1, authStub.listenCalls, "RunAgent should open a sandbox auth socket when integration skills are available")
+	require.Equal(t, 0, authStub.closeCalls, "RunAgent must keep the auth socket open while preview holds the container for reuse")
+}
+
+func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue and update the PR.",
+		},
+	}
+	var createdCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		createdCfg = cfg
+		return &agent.Sandbox{ID: "resume-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	require.NoError(t, err, "ContinueSession should succeed on a fresh resume")
+	require.Equal(t, 1, authStub.listenCalls, "ContinueSession should open a sandbox auth socket for fresh sandboxes")
+	require.Equal(t, "/tmp/fake.sock", createdCfg.AuthSocketPath, "ContinueSession should bind-mount the per-session auth socket into fresh containers")
+	require.Equal(t, sandboxauth.SandboxSocketPath, createdCfg.Env[sandboxauth.SocketEnvVar], "ContinueSession should expose the in-sandbox auth socket path")
+	require.Equal(t, "143 Agent", createdCfg.Env[sandboxauth.GitNameEnvVar], "ContinueSession should set the git author name for the sandbox")
+	require.Equal(t, "noreply@143.dev", createdCfg.Env[sandboxauth.GitEmailEnvVar], "ContinueSession should set the git author email for the sandbox")
+	require.Contains(t, createdCfg.Env["PATH"], "/home/sandbox/.local/bin", "ContinueSession should prepend the gh wrapper directory to PATH")
+	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "ContinueSession should rerun git-bootstrap after cloning the fresh workspace")
+	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
 }
 
 func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
@@ -3011,6 +3303,203 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.Equal(t, 0, d.sessions.finalizeCalls, "FinalizeContainerDestroy must not run while preview holds")
 	require.GreaterOrEqual(t, d.sessions.acquireHoldCalls, 1)
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
+}
+
+// TestContinueSession_ReusedContainerReopensAuthListener locks in the
+// regression: when a preview is holding the container alive across turns,
+// ContinueSession must (re)open the per-session credential listener even
+// though it skips container creation. Without this, an orchestrator restart
+// between turns would leave the alive container with no live socket to dial,
+// and the agent's next git push would fail. The directory bind-mount carries
+// the recreated socket through to the running container.
+func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	existing := "preview-container-xyz"
+	session.ContainerID = &existing
+	session.SandboxState = string(models.SandboxStateRunning)
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not be called on the reuse path")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, existing, sandbox.ID, "adapter must run against the reused container")
+		return &agent.AgentResult{
+			Summary:         "done",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+	d.sessions.releaseHoldFn = func() (bool, string, error) {
+		return false, existing, nil
+	}
+
+	orch := buildOrchestrator(d)
+	require.NoError(t, orch.ContinueSession(context.Background(), session))
+
+	require.Equal(t, 1, authStub.listenCalls,
+		"ContinueSession on a reused container must reopen the per-session auth listener so post-restart resumes can still dial it")
+	require.Equal(t, 0, authStub.closeCalls,
+		"the listener must stay open while preview keeps the reused container alive")
+	require.Equal(t, 0, d.provider.GetDestroyCalls(),
+		"reused container must not be destroyed while preview holds it")
+	// git-bootstrap configures the in-container git config and credential
+	// helper; on a reused container it was already run by the original
+	// RunAgent, so we must not re-run it (the socket the helper points at
+	// gets recreated transparently via the directory bind-mount).
+	for _, cmd := range d.provider.ExecCalls {
+		require.NotContains(t, cmd, "143-tools git-bootstrap",
+			"git-bootstrap must not re-run on reused containers; original RunAgent already wired git config")
+	}
+}
+
+// TestContinueSession_AuthSocketClosedOnAcquireHoldError verifies that
+// ContinueSession closes the per-session credential listener on the
+// AcquireTurnHold-error branch: prepareSandboxGitHubAuth ran before
+// container create, so the listener is live by the time AcquireTurnHold
+// errors. Without an explicit close, the listener (and its socket file)
+// would outlive the failed turn.
+func TestContinueSession_AuthSocketClosedOnAcquireHoldError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// No ContainerID, no SnapshotKey: forces the fresh-Create path that
+	// goes through prepareSandboxGitHubAuth → Listen before AcquireTurnHold.
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	d.sessions.acquireHoldErr = errors.New("db write failed")
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err, "ContinueSession should propagate the acquire-hold failure")
+	require.Contains(t, err.Error(), "acquire turn hold", "ContinueSession should surface the acquire-hold failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before acquire-hold")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when acquire-hold fails after the listener was opened")
+}
+
+// TestContinueSession_AuthSocketClosedOnHydrateFailure verifies that the
+// hydrate-failure branch in ContinueSession also tears down the listener.
+// prepareSandboxGitHubAuth opens the listener before HydrateSandboxFromSnapshot
+// runs, so a hydrate failure must close it explicitly — there's no
+// container yet to attach a deferred close to.
+func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	// SnapshotKey forces the hydrate path, which fails when the snapshot
+	// store can't fulfil the restore (the orchestrator's mock provider
+	// returns an error from Restore by default unless we wire one up).
+	snapshotKey := "snap-key"
+	session.SnapshotKey = &snapshotKey
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+			models.ProviderSentry: {
+				Provider: models.ProviderSentry,
+				Config:   models.SentryConfig{AccessToken: "sentry-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	authStub := &fakeSandboxAuthServer{}
+	d.sandboxAuth = authStub
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	hydrateErr := errors.New("hydrate failed")
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, _ io.Reader) error {
+		return hydrateErr
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.Error(t, err, "ContinueSession should propagate the hydrate failure")
+	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
+
+	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before hydrate")
+	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
 }
 
 // TestContinueSession_AcquireHoldErrorFailsTurn covers the branch where

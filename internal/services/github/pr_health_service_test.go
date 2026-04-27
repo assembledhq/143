@@ -1356,7 +1356,7 @@ var prHealthSessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "created_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "diff_collected_at", "latest_diff_snapshot_id", "deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status string) []any {
@@ -1375,7 +1375,7 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status str
 		nil, "", "", int64(0), nil,
 		"", nil, nil, 0,
 		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
+		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, now,
 	}
 }
 

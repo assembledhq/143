@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
 
 // Compile-time check that DockerProvider implements agent.SandboxProvider.
@@ -346,6 +348,28 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		})
 	} else {
 		hostCfg.DNS = []string{"1.1.1.1", "8.8.8.8"}
+	}
+
+	// Bind-mount the per-session GitHub credential socket *directory*.
+	//
+	// We mount the directory containing the socket — not the socket file
+	// itself — so the in-container path keeps resolving to the live socket
+	// even if the host process recreates it (close+reopen cycle on a turn
+	// boundary, or orchestrator restart while a preview keeps the
+	// container alive). Linux file bind-mounts pin the source inode at
+	// mount time and would orphan on recreate; directory bind-mounts
+	// resolve filenames at lookup time and survive recreate cleanly.
+	//
+	// Cross-tenant isolation: each container's source dir is unique to its
+	// session, so even though the host listener could in principle answer
+	// any session's request, the only socket reachable from inside this
+	// container is its own.
+	if cfg.AuthSocketPath != "" {
+		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
+			Type:   mount.TypeBind,
+			Source: filepath.Dir(cfg.AuthSocketPath),
+			Target: sandboxauth.SandboxSocketDir,
+		})
 	}
 
 	if cfg.DiskLimitGB > 0 {
