@@ -3198,9 +3198,9 @@ func TestGithubAPIError_IsExistingPullRequest(t *testing.T) {
 func TestGithubAPIError_HTTPStatus(t *testing.T) {
 	t.Parallel()
 
-	var nilErr *githubAPIError
+	var nilErr *GitHubAPIError
 	require.Equal(t, 0, nilErr.HTTPStatus(), "HTTPStatus should return 0 for a nil receiver")
-	require.Equal(t, http.StatusConflict, (&githubAPIError{StatusCode: http.StatusConflict}).HTTPStatus(), "HTTPStatus should expose the wrapped status code")
+	require.Equal(t, http.StatusConflict, (&GitHubAPIError{StatusCode: http.StatusConflict}).HTTPStatus(), "HTTPStatus should expose the wrapped status code")
 }
 
 func TestPushSessionBranch(t *testing.T) {
