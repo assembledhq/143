@@ -349,6 +349,7 @@ export interface PullRequest {
 export interface PullRequestCheckSummary {
   name: string;
   category: "test" | "lint" | "build" | "deploy" | "unknown";
+  status: "passed" | "failed" | "pending";
   provider?: string;
   details_url?: string;
   summary?: string;

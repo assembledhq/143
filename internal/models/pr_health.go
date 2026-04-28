@@ -52,6 +52,25 @@ func (c PullRequestCheckCategory) Validate() error {
 	}
 }
 
+type PullRequestCheckStatus string
+
+const (
+	PullRequestCheckStatusPassed  PullRequestCheckStatus = "passed"
+	PullRequestCheckStatusFailed  PullRequestCheckStatus = "failed"
+	PullRequestCheckStatusPending PullRequestCheckStatus = "pending"
+)
+
+func (s PullRequestCheckStatus) Validate() error {
+	switch s {
+	case PullRequestCheckStatusPassed,
+		PullRequestCheckStatusFailed,
+		PullRequestCheckStatusPending:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestCheckStatus: %q", s)
+	}
+}
+
 type PullRequestHealthEnrichmentStatus string
 
 const (
@@ -95,6 +114,7 @@ func (a PullRequestRepairActionType) Validate() error {
 type PullRequestCheckSummary struct {
 	Name       string                   `json:"name"`
 	Category   PullRequestCheckCategory `json:"category"`
+	Status     PullRequestCheckStatus   `json:"status"`
 	Provider   string                   `json:"provider,omitempty"`
 	DetailsURL string                   `json:"details_url,omitempty"`
 	Summary    string                   `json:"summary,omitempty"`

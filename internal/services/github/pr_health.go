@@ -119,6 +119,81 @@ func containsAny(s string, needles ...string) bool {
 	return false
 }
 
+func normalizeCheckRunStatus(check gitHubCheckRun) models.PullRequestCheckStatus {
+	switch strings.ToLower(strings.TrimSpace(check.Status)) {
+	case "queued", "waiting", "in_progress", "requested", "pending":
+		return models.PullRequestCheckStatusPending
+	}
+
+	switch strings.ToLower(strings.TrimSpace(check.Conclusion)) {
+	case "success", "neutral", "skipped":
+		return models.PullRequestCheckStatusPassed
+	case "failure", "cancelled", "timed_out", "startup_failure", "stale", "action_required":
+		return models.PullRequestCheckStatusFailed
+	default:
+		if strings.EqualFold(check.Status, "completed") {
+			return models.PullRequestCheckStatusFailed
+		}
+		return models.PullRequestCheckStatusPending
+	}
+}
+
+func normalizeStoredCheckStatus(status models.PullRequestCheckStatus) models.PullRequestCheckStatus {
+	switch status {
+	case models.PullRequestCheckStatusPassed,
+		models.PullRequestCheckStatusFailed,
+		models.PullRequestCheckStatusPending:
+		return status
+	default:
+		return models.PullRequestCheckStatusPending
+	}
+}
+
+func normalizeStoredCheckSummaries(summary *models.PullRequestHealthSummary) {
+	if summary == nil {
+		return
+	}
+
+	remainingFailedTests := summary.FailingTestCount
+	for _, check := range summary.Checks {
+		if classifyStoredCheckStatus(check) == models.PullRequestCheckStatusFailed && check.Category == models.PullRequestCheckCategoryTest && remainingFailedTests > 0 {
+			remainingFailedTests--
+		}
+	}
+
+	for i := range summary.Checks {
+		if summary.Checks[i].Status.Validate() == nil {
+			continue
+		}
+		if summary.Checks[i].Category == models.PullRequestCheckCategoryTest && remainingFailedTests > 0 {
+			summary.Checks[i].Status = models.PullRequestCheckStatusFailed
+			remainingFailedTests--
+			continue
+		}
+		summary.Checks[i].Status = models.PullRequestCheckStatusPending
+	}
+}
+
+func classifyStoredCheckStatus(check models.PullRequestCheckSummary) models.PullRequestCheckStatus {
+	return normalizeStoredCheckStatus(check.Status)
+}
+
+func deriveAggregateCIStatus(checks []models.PullRequestCheckSummary) string {
+	hasPending := false
+	for _, check := range checks {
+		switch classifyStoredCheckStatus(check) {
+		case models.PullRequestCheckStatusFailed:
+			return "failure"
+		case models.PullRequestCheckStatusPending:
+			hasPending = true
+		}
+	}
+	if hasPending {
+		return "pending"
+	}
+	return "success"
+}
+
 func buildPRHealthSummaryText(health models.PullRequestHealthResponse) string {
 	conflicted := health.HasConflicts || health.MergeState == models.PullRequestMergeStateConflicted
 	switch {
