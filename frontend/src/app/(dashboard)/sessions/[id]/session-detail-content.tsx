@@ -34,6 +34,7 @@ import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import {
   AlertDialog,
@@ -334,15 +335,17 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
                 )}
               </CardTitle>
               {session.failure_retry_advised && (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => retryMutation.mutate()}
-                  disabled={retryMutation.isPending}
-                >
-                  <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
-                  {retryMutation.isPending ? "Retrying..." : "Retry"}
-                </Button>
+                <DisabledTooltip disabled={retryMutation.isPending} content="Retrying session...">
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => retryMutation.mutate()}
+                    disabled={retryMutation.isPending}
+                  >
+                    <RefreshCw className={`mr-1.5 h-3 w-3 ${retryMutation.isPending ? "animate-spin" : ""}`} />
+                    {retryMutation.isPending ? "Retrying..." : "Retry"}
+                  </Button>
+                </DisabledTooltip>
               )}
             </div>
           </CardHeader>
@@ -890,6 +893,26 @@ function SessionComposer({
 
   const hasContent = message.trim() || attachments.length > 0 || openComments.length > 0;
   const sendDisabled = hasInvalidCommands || !hasContent || !canSendMessage || sendPending || isRunning;
+  const inactiveSessionMessage = isSnapshotExpired
+    ? "Session environment has expired and can no longer be continued."
+    : "Session is not active.";
+  const attachDisabledReason = isUploading
+    ? "Uploading attachments..."
+    : !canSendMessage
+      ? inactiveSessionMessage
+      : undefined;
+  const cancelDisabledReason = cancelPending ? "Cancelling session..." : undefined;
+  const sendDisabledReason = hasInvalidCommands
+    ? `${invalidCommandTokens.join(", ")} ${invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip${invalidCommandTokens.length === 1 ? "" : "s"} to continue.`
+    : !hasContent
+      ? "Add a message, attachment, or review comment before sending."
+      : !canSendMessage
+        ? inactiveSessionMessage
+        : sendPending
+          ? (planMode ? "Sending plan request..." : "Sending message...")
+          : isRunning
+            ? "Wait for the current agent response to finish before sending another message."
+            : undefined;
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     setCaretPosition(e.currentTarget.selectionStart ?? message.length);
@@ -1112,17 +1135,19 @@ function SessionComposer({
           />
 
           <div className="flex items-center gap-1 px-2 pb-2">
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
-              title="Attach files or images"
-              disabled={!canSendMessage || isUploading}
-              onClick={() => uploadInputRef.current?.click()}
-            >
-              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
-            </Button>
+            <DisabledTooltip disabled={!canSendMessage || isUploading} content={attachDisabledReason}>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                title="Attach files or images"
+                disabled={!canSendMessage || isUploading}
+                onClick={() => uploadInputRef.current?.click()}
+              >
+                {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+              </Button>
+            </DisabledTooltip>
             <input
               ref={uploadInputRef}
               type="file"
@@ -1166,33 +1191,37 @@ function SessionComposer({
 
             <div className="ml-auto flex items-center gap-1">
               {isRunning ? (
-                <Button
-                  size="icon"
-                  variant="outline"
-                  className="h-8 w-8 shrink-0 rounded-lg"
-                  title="Cancel session"
-                  disabled={cancelPending}
-                  onClick={onCancelSession}
-                >
-                  <Square className="h-3 w-3" />
-                </Button>
+                <DisabledTooltip disabled={cancelPending} content={cancelDisabledReason}>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-8 w-8 shrink-0 rounded-lg"
+                    title="Cancel session"
+                    disabled={cancelPending}
+                    onClick={onCancelSession}
+                  >
+                    <Square className="h-3 w-3" />
+                  </Button>
+                </DisabledTooltip>
               ) : (
-                <Button
-                  size="icon"
-                  variant={planMode ? "outline" : "default"}
-                  className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
-                  title={planMode ? "Send plan request" : "Send message"}
-                  disabled={!hasContent || !canSendMessage || sendPending || isRunning}
-                  onClick={onSend}
-                >
-                  {sendPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : planMode ? (
-                    <ClipboardList className="h-4 w-4" />
-                  ) : (
-                    <ArrowUp className="h-4 w-4" />
-                  )}
-                </Button>
+                <DisabledTooltip disabled={sendDisabled} content={sendDisabledReason}>
+                  <Button
+                    size="icon"
+                    variant={planMode ? "outline" : "default"}
+                    className={cn("h-8 w-8 shrink-0 rounded-lg", planMode && "border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/30")}
+                    title={planMode ? "Send plan request" : "Send message"}
+                    disabled={sendDisabled}
+                    onClick={onSend}
+                  >
+                    {sendPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : planMode ? (
+                      <ClipboardList className="h-4 w-4" />
+                    ) : (
+                      <ArrowUp className="h-4 w-4" />
+                    )}
+                  </Button>
+                </DisabledTooltip>
               )}
             </div>
           </div>
@@ -2356,6 +2385,19 @@ export function SessionDetailContent({ id }: { id: string }) {
   } : null;
   const trimmedDraftTitle = draftTitle.trim();
   const canSaveTitle = trimmedDraftTitle.length > 0 && trimmedDraftTitle !== currentTitle && !updateSessionMutation.isPending;
+  const saveTitleDisabledReason = updateSessionMutation.isPending
+    ? "Saving title..."
+    : trimmedDraftTitle.length === 0
+      ? "Enter a title before saving."
+      : trimmedDraftTitle === currentTitle
+        ? "Enter a different title to save your changes."
+        : undefined;
+  const titleEditPendingReason = updateSessionMutation.isPending ? "Saving title..." : undefined;
+  const detailToggleTitle = centerMode === "review" && showDetailPanel
+    ? "File tree required during review"
+    : showDetailPanel
+      ? "Hide details"
+      : "Show details";
 
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
@@ -2407,23 +2449,25 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </a>
               </>
             ) : showPRAction && !prErrorNotice ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 text-xs gap-1.5"
-                disabled={prActionDisabled}
-                title={prActionTitle}
-                onClick={() => createPRMutation.mutate(undefined)}
-              >
-                {prActionSpinning ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : prState === "failed" || localPRActionError ? (
-                  <AlertTriangle className="h-3 w-3" />
-                ) : (
-                  <GitPullRequest className="h-3 w-3" />
-                )}
-                {prActionLabel}
-              </Button>
+              <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  disabled={prActionDisabled}
+                  title={prActionTitle}
+                  onClick={() => createPRMutation.mutate(undefined)}
+                >
+                  {prActionSpinning ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : prState === "failed" || localPRActionError ? (
+                    <AlertTriangle className="h-3 w-3" />
+                  ) : (
+                    <GitPullRequest className="h-3 w-3" />
+                  )}
+                  {prActionLabel}
+                </Button>
+              </DisabledTooltip>
             ) : null}
           </div>
         </div>
@@ -2547,27 +2591,31 @@ export function SessionDetailContent({ id }: { id: string }) {
                   className="h-8 max-w-xl"
                   disabled={updateSessionMutation.isPending}
                 />
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  aria-label="Save title"
-                  disabled={!canSaveTitle}
-                  onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
-                >
-                  <Check className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  aria-label="Cancel title"
-                  disabled={updateSessionMutation.isPending}
-                  onClick={() => {
-                    setDraftTitle(currentTitle);
-                    setIsEditingTitle(false);
-                  }}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
+                <DisabledTooltip disabled={!canSaveTitle} content={saveTitleDisabledReason}>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label="Save title"
+                    disabled={!canSaveTitle}
+                    onClick={() => updateSessionMutation.mutate(trimmedDraftTitle)}
+                  >
+                    <Check className="h-4 w-4" />
+                  </Button>
+                </DisabledTooltip>
+                <DisabledTooltip disabled={updateSessionMutation.isPending} content={titleEditPendingReason}>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label="Cancel title"
+                    disabled={updateSessionMutation.isPending}
+                    onClick={() => {
+                      setDraftTitle(currentTitle);
+                      setIsEditingTitle(false);
+                    }}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </DisabledTooltip>
               </div>
             ) : (
               <>
@@ -2601,20 +2649,18 @@ export function SessionDetailContent({ id }: { id: string }) {
             )}
           </div>
           {/* Desktop toggle: hides/shows the inline right panel. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
-            disabled={centerMode === "review" && showDetailPanel}
-            onClick={() => setShowDetailPanel(!showDetailPanel)}
-            title={
-              centerMode === "review" && showDetailPanel
-                ? "File tree required during review"
-                : showDetailPanel ? "Hide details" : "Show details"
-            }
-          >
-            {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-          </Button>
+          <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn("hidden md:inline-flex h-8 w-8 shrink-0", centerMode === "review" && showDetailPanel && "opacity-30 cursor-not-allowed")}
+              disabled={centerMode === "review" && showDetailPanel}
+              onClick={() => setShowDetailPanel(!showDetailPanel)}
+              title={detailToggleTitle}
+            >
+              {showDetailPanel ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+            </Button>
+          </DisabledTooltip>
           {/* Mobile toggle: opens the bottom sheet. */}
           <Button
             variant="ghost"
