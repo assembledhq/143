@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -82,6 +84,13 @@ type PRService struct {
 	// so a late wiring change picks up before the next Resolve call.
 	cachedResolverMu sync.Mutex
 	cachedResolver   *identity.Resolver
+
+	// postPRSnapshotUploads tracks in-flight goroutines that stream the
+	// post-PR sandbox snapshot to object storage. Used by tests to await
+	// upload completion before asserting on session state. Production
+	// callers don't need to wait — the goroutine self-completes and updates
+	// the session row atomically.
+	postPRSnapshotUploads sync.WaitGroup
 }
 
 func NewPRService(
@@ -238,6 +247,23 @@ const (
 	SnapshotUnavailablePRMessage = "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again."
 )
 
+// WaitForPostPRSnapshotUploads blocks until every in-flight post-PR snapshot
+// upload goroutine spawned by CreatePR has finished. Two callers:
+//
+//   - Server graceful shutdown drains uploads before exiting so a terminated
+//     worker doesn't strand sessions with pending_snapshot_key set forever
+//     (cmd/server/main.go).
+//   - Tests await upload completion before asserting on the resulting
+//     Session state (snapshot_key / pending_snapshot_key).
+//
+// The wait respects only the goroutines' own per-upload timeout
+// (postPRSnapshotUploadTimeout, currently 6 minutes); callers that need a
+// shorter budget should run this in a separate goroutine and select on
+// their own ctx.
+func (s *PRService) WaitForPostPRSnapshotUploads() {
+	s.postPRSnapshotUploads.Wait()
+}
+
 // ErrSnapshotExpired is returned by CreatePR when the session's saved
 // snapshot has truly expired (reaped or cleaned up after retention).
 var ErrSnapshotExpired = errors.New("session snapshot expired")
@@ -256,7 +282,7 @@ var ErrSnapshotUnavailable = errors.New("session snapshot unavailable")
 // package can match resolver errors via errors.Is without taking a direct
 // dependency on the identity package.
 var (
-	ErrGitHubUserAuthRequired        = identity.ErrUserAuthRequired
+	ErrGitHubUserAuthRequired         = identity.ErrUserAuthRequired
 	ErrGitHubUserAuthRepoAccessDenied = identity.ErrUserAuthRepoAccessDenied
 )
 
@@ -360,8 +386,10 @@ type CreatePRParams struct {
 // uploaded blobs through the GitHub Trees API. That flow silently truncated
 // files whose changes spanned less than the whole file (PR #442).
 //
-// Returns ErrSnapshotExpired when the session's snapshot is missing (reaped,
-// cleanup-on-merge, or never captured) — the UI prompts the user to re-run.
+// Returns ErrSnapshotNotCaptured when the session never persisted a
+// reusable checkpoint, ErrSnapshotExpired when it was retention-reaped, or
+// ErrSnapshotUnavailable when the DB points at a key whose blob is missing
+// in storage — the UI prompts the user to re-run in each case.
 // Returns ErrNoChanges when the pushed branch produces no diff against the
 // base branch; the session's snapshot has no meaningful changes to ship.
 func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
@@ -370,6 +398,17 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	// PR. If a PR already exists for this session, return it without
 	// re-pushing.
 	if existing, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID); err == nil {
+		// If the original CreatePR crashed mid-upload, the session may
+		// still carry a pending_snapshot_key with no in-flight uploader.
+		// Surface that here so the stuck-resume case is observable; the
+		// orchestrator's gate will keep continue_session retrying until a
+		// reconciler (or worker shutdown drain) clears it.
+		if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+			s.logger.Warn().
+				Str("session_id", run.ID.String()).
+				Str("pending_snapshot_key", *run.PendingSnapshotKey).
+				Msg("CreatePR retry hit existing PR with pending_snapshot_key still set; resume will block until cleared")
+		}
 		return &existing, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing pull request: %w", err)
@@ -449,9 +488,23 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	if err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail); err != nil {
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, token, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	if err != nil {
 		return nil, err
 	}
+	// Ensure the captured tar is removed on every error path between here
+	// and the dispatch site below — including PR-content generation, label
+	// attachment, pullRequests.Create, and SetPendingSnapshotKey failures.
+	// On the success path, dispatchPostPRSnapshotUpload zeroes
+	// pushed.CapturedSnapshotPath to transfer ownership to the goroutine,
+	// and this defer becomes a no-op (intentional asymmetry: the goroutine
+	// removes the file on completion; double-removing would race a future
+	// caller's tempfile if pid recycled the inode).
+	defer func() {
+		if pushed != nil && pushed.CapturedSnapshotPath != "" {
+			_ = os.Remove(pushed.CapturedSnapshotPath)
+		}
+	}()
 
 	var title, body string
 	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr == nil {
@@ -496,6 +549,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	authoredBy := resolution.AuthoredBy()
+	headSHA := pushed.HeadSHA
 	pr := &models.PullRequest{
 		SessionID:      &run.ID,
 		OrgID:          run.OrgID,
@@ -507,9 +561,36 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		Status:         "open",
 		ReviewStatus:   "pending",
 		AuthoredBy:     authoredBy,
+		HeadSHA:        &headSHA,
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
+	}
+
+	// Record the pending snapshot, then dispatch the upload. If capture
+	// failed in pushSessionBranch the path is empty — log and skip the
+	// upload, leaving Session.SnapshotKey at its pre-PR value (degraded
+	// resume, but the PR itself is fine).
+	if pushed.CapturedSnapshotErr != nil {
+		s.logger.Warn().
+			Err(pushed.CapturedSnapshotErr).
+			Str("session_id", run.ID.String()).
+			Msg("post-PR sandbox snapshot capture failed; resume will see stale state")
+	} else if pushed.CapturedSnapshotPath != "" {
+		newSnapshotKey := fmt.Sprintf("snapshots/%s/%s/post-pr.tar.zst", run.OrgID, run.ID)
+		if setErr := s.sessions.SetPendingSnapshotKey(ctx, run.OrgID, run.ID, newSnapshotKey); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
+		} else {
+			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
+			// Ownership invariant: from this point on, the goroutine
+			// spawned by dispatchPostPRSnapshotUpload solely owns the temp
+			// file at pushed.CapturedSnapshotPath. Clearing the path here
+			// prevents the deferred cleanup at function entry from
+			// double-removing it. Anything that needs the file (re-upload,
+			// recovery) must coordinate via pending_snapshot_key, not by
+			// re-reading the path.
+			pushed.CapturedSnapshotPath = ""
+		}
 	}
 
 	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, "pr_created"); err != nil {
@@ -523,6 +604,67 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+// postPRSnapshotUploadTimeout bounds a single upload attempt. Deliberately
+// kept under the worker package's maxRetryableDuration (8m) so that a
+// continue_session job blocked on ErrSnapshotPending will outlast the upload
+// window — i.e. when the gate finally lifts (Promote or Clear), the job is
+// still alive to retry, not already dead-lettered. If you raise this, raise
+// maxRetryableDuration in lockstep or expect resumes to dead-letter under
+// load (large sandbox tar + slow object storage).
+const postPRSnapshotUploadTimeout = 6 * time.Minute
+
+// dispatchPostPRSnapshotUpload streams the captured push-sandbox tar to
+// object storage in the background, then atomically promotes
+// pending_snapshot_key into snapshot_key on success or clears it on failure.
+// The goroutine uses a fresh background context (the worker job's ctx is
+// likely cancelled by the time we return here), bounded by
+// postPRSnapshotUploadTimeout to keep upload retries from leaking forever.
+//
+// Owns the temp file at tarPath: removes it on completion regardless of
+// outcome. tarSize is logged for observability so spikes in PR-creation
+// snapshot size (e.g. a session that produced an unexpected node_modules
+// tree) are visible without re-stat'ing the file.
+func (s *PRService) dispatchPostPRSnapshotUpload(orgID, sessionID uuid.UUID, key, tarPath string, tarSize int64) {
+	s.postPRSnapshotUploads.Add(1)
+	go func() {
+		defer s.postPRSnapshotUploads.Done()
+		bgCtx, cancel := context.WithTimeout(context.Background(), postPRSnapshotUploadTimeout)
+		defer cancel()
+		defer func() { _ = os.Remove(tarPath) }()
+
+		// #nosec G304 -- tarPath was produced by os.CreateTemp inside captureSandboxSnapshot earlier in this same process; it is not user input.
+		f, openErr := os.Open(tarPath)
+		if openErr != nil {
+			s.logger.Warn().Err(openErr).Str("session_id", sessionID.String()).Msg("open post-PR snapshot tar failed")
+			if clearErr := s.sessions.ClearPendingSnapshot(bgCtx, orgID, sessionID); clearErr != nil {
+				s.logger.Warn().Err(clearErr).Str("session_id", sessionID.String()).Msg("clear pending snapshot after open failure failed")
+			}
+			return
+		}
+		defer f.Close()
+
+		startedAt := time.Now()
+		if saveErr := s.snapshots.Save(bgCtx, key, f); saveErr != nil {
+			s.logger.Warn().Err(saveErr).Str("session_id", sessionID.String()).Str("key", key).Int64("tar_size_bytes", tarSize).Msg("post-PR snapshot upload failed")
+			if clearErr := s.sessions.ClearPendingSnapshot(bgCtx, orgID, sessionID); clearErr != nil {
+				s.logger.Warn().Err(clearErr).Str("session_id", sessionID.String()).Msg("clear pending snapshot after save failure failed")
+			}
+			return
+		}
+
+		if promoteErr := s.sessions.PromotePendingSnapshot(bgCtx, orgID, sessionID, key); promoteErr != nil {
+			s.logger.Warn().Err(promoteErr).Str("session_id", sessionID.String()).Str("key", key).Msg("promote pending snapshot failed")
+			return
+		}
+		s.logger.Info().
+			Str("session_id", sessionID.String()).
+			Str("key", key).
+			Int64("tar_size_bytes", tarSize).
+			Dur("upload_duration", time.Since(startedAt)).
+			Msg("post-PR snapshot promoted")
+	}()
 }
 
 // SyncSessionTitle propagates a user-edited session title to the existing PR,
@@ -590,12 +732,26 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // The GitHub token is never passed via argv or URL. It's written to a file
 // inside the sandbox and read by a GIT_ASKPASS helper, so `ps` inside the
 // container shows only a plain https URL with no credentials.
+// pushResult captures what pushSessionBranch produced on a successful push:
+// the new HEAD SHA from the remote (parsed from the script's stdout sentinel),
+// and an optional snapshot of the post-push sandbox spooled to a local temp
+// file. The snapshot is best-effort — if capture fails, the caller still gets
+// a valid HeadSHA (PR creation succeeds) and CapturedSnapshotErr is set so
+// the caller can log it. The caller owns the temp file and MUST remove it
+// once it has finished streaming or has decided to abandon it.
+type pushResult struct {
+	HeadSHA              string
+	CapturedSnapshotPath string
+	CapturedSnapshotSize int64
+	CapturedSnapshotErr  error
+}
+
 func (s *PRService) pushSessionBranch(
 	ctx context.Context,
 	run *models.Session,
 	repo *models.Repository,
 	token, snapshotKey, branchName, commitMsg, authorName, authorEmail string,
-) error {
+) (*pushResult, error) {
 	cfg := agent.DefaultSandboxConfig()
 	cfg.SessionID = run.ID.String()
 	cfg.OrgID = run.OrgID.String()
@@ -609,9 +765,9 @@ func (s *PRService) pushSessionBranch(
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, s.sandboxProvider, s.snapshots, snapshotKey, cfg)
 	if err != nil {
 		if errors.Is(err, agent.ErrSnapshotMissing) {
-			return ErrSnapshotUnavailable
+			return nil, ErrSnapshotUnavailable
 		}
-		return fmt.Errorf("hydrate sandbox: %w", err)
+		return nil, fmt.Errorf("hydrate sandbox: %w", err)
 	}
 	defer func() {
 		// Use a detached context with a short timeout so cleanup runs even
@@ -626,14 +782,14 @@ func (s *PRService) pushSessionBranch(
 	// Write the commit message, credential, and askpass helper to files.
 	// Passing the credential via file keeps it out of argv and shell history.
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushCommitMsgPath, []byte(commitMsg)); err != nil {
-		return fmt.Errorf("write commit message to sandbox: %w", err)
+		return nil, fmt.Errorf("write commit message to sandbox: %w", err)
 	}
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushInputPath, []byte(token)); err != nil {
-		return fmt.Errorf("write credential to sandbox: %w", err)
+		return nil, fmt.Errorf("write credential to sandbox: %w", err)
 	}
 	helperScript := "#!/bin/sh\nexec cat " + shellQuote(pushInputPath) + "\n"
 	if err := s.sandboxProvider.WriteFile(ctx, sandbox, pushHelperPath, []byte(helperScript)); err != nil {
-		return fmt.Errorf("write push helper to sandbox: %w", err)
+		return nil, fmt.Errorf("write push helper to sandbox: %w", err)
 	}
 
 	pushURL := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo.FullName)
@@ -642,13 +798,13 @@ func (s *PRService) pushSessionBranch(
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
 	if execErr != nil {
-		return fmt.Errorf("exec push script: %w", execErr)
+		return nil, fmt.Errorf("exec push script: %w", execErr)
 	}
 	switch exitCode {
 	case 0:
-		return nil
+		// Continue to HeadSHA parse + snapshot capture below.
 	case pushExitNoChanges:
-		return ErrNoChanges
+		return nil, ErrNoChanges
 	default:
 		msg := strings.TrimSpace(stderr.String())
 		// Defense in depth: if the token ever leaks into stderr (e.g. via a
@@ -657,8 +813,91 @@ func (s *PRService) pushSessionBranch(
 		if msg == "" {
 			msg = "(no stderr)"
 		}
-		return fmt.Errorf("git push failed (exit %d): %s", exitCode, msg)
+		return nil, fmt.Errorf("git push failed (exit %d): %s", exitCode, msg)
 	}
+
+	headSHA, parseErr := parsePushHeadSHA(stdout.String())
+	if parseErr != nil {
+		return nil, fmt.Errorf("parse push head sha: %w", parseErr)
+	}
+
+	result := &pushResult{HeadSHA: headSHA}
+	// Capture a snapshot of the post-push sandbox before the deferred Destroy
+	// runs. This is the state we want a "Fix tests" / continue resume to see:
+	// clean working tree, HEAD at the just-pushed commit, working branch
+	// tracking origin. Best-effort — if it fails, the caller logs and
+	// proceeds without advancing Session.SnapshotKey.
+	if path, size, captureErr := s.captureSandboxSnapshot(ctx, sandbox); captureErr != nil {
+		result.CapturedSnapshotErr = captureErr
+	} else {
+		result.CapturedSnapshotPath = path
+		result.CapturedSnapshotSize = size
+	}
+	return result, nil
+}
+
+// parsePushHeadSHA scans the push script's stdout for the well-known
+// __143_HEAD_SHA=<sha> sentinel line and returns the SHA. Returns an error if
+// no sentinel is present (the script always emits one on the success branch,
+// so its absence indicates the script ran a different path than expected).
+//
+// The SHA must match a 40-char lowercase hex string (git's SHA-1 object
+// format). Anchoring on the format prevents a future server-side hook,
+// custom git config, or unrelated stdout line from masquerading as the
+// sentinel — only `__143_HEAD_SHA=<40-hex>` on its own line is accepted.
+func parsePushHeadSHA(stdout string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
+	var sawSentinelButInvalid bool
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		match := pushHeadSHALineRE.FindStringSubmatch(line)
+		if match == nil {
+			if strings.HasPrefix(line, pushHeadSHASentinel) {
+				sawSentinelButInvalid = true
+			}
+			continue
+		}
+		return match[1], nil
+	}
+	if sawSentinelButInvalid {
+		return "", fmt.Errorf("head sha sentinel %q present but value is not a 40-char hex SHA", pushHeadSHASentinel)
+	}
+	return "", fmt.Errorf("head sha sentinel %q not found in stdout", pushHeadSHASentinel)
+}
+
+// pushHeadSHALineRE anchors on a complete sentinel line: the prefix, exactly
+// 40 lowercase hex chars (git's SHA-1 object format), and nothing else. The
+// scanner trims surrounding whitespace before matching.
+var pushHeadSHALineRE = regexp.MustCompile(`^` + regexp.QuoteMeta(pushHeadSHASentinel) + `([0-9a-f]{40})$`)
+
+// captureSandboxSnapshot tars the sandbox via the provider and spools the
+// archive to a local temp file. Returns (path, size, nil) on success — the
+// caller owns the file and is responsible for os.Remove. On failure, the
+// temp file (if any was created) is removed before returning.
+func (s *PRService) captureSandboxSnapshot(ctx context.Context, sandbox *agent.Sandbox) (string, int64, error) {
+	reader, err := s.sandboxProvider.Snapshot(ctx, sandbox)
+	if err != nil {
+		return "", 0, fmt.Errorf("snapshot sandbox: %w", err)
+	}
+	defer reader.Close()
+
+	f, err := os.CreateTemp("", "143-pr-snapshot-*.tar.zst")
+	if err != nil {
+		return "", 0, fmt.Errorf("create temp file: %w", err)
+	}
+	path := f.Name()
+
+	size, copyErr := io.Copy(f, reader)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(path)
+		return "", 0, fmt.Errorf("spool snapshot: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return "", 0, fmt.Errorf("close snapshot file: %w", closeErr)
+	}
+	return path, size, nil
 }
 
 // Sandbox-internal paths used by the push flow. Under /tmp so they're
@@ -677,6 +916,12 @@ const (
 // the remote tracking branch — i.e. there is nothing meaningful to push.
 const pushExitNoChanges = 77
 
+// pushHeadSHASentinel is a well-known prefix the push script writes to stdout
+// after a successful `git push`. The caller scans stdout for this line and
+// extracts the just-pushed commit SHA. Chosen to be unlikely to collide with
+// any line git itself prints.
+const pushHeadSHASentinel = "__143_HEAD_SHA="
+
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
 // buildPushScript) so they're safe to embed directly. The credential is read
@@ -685,6 +930,12 @@ const pushExitNoChanges = 77
 // The cleanup function is hoisted into a shell function rather than inlined
 // in the trap because `trap 'rm -f %[1]s ...'` would interleave single-
 // quoted strings in a way that works but is fragile to reason about.
+//
+// On the success branch (push lands), the script prints
+// `__143_HEAD_SHA=<sha>` so the caller can persist the just-pushed commit
+// onto the PullRequest row without a second GitHub round-trip. The line is
+// only emitted on the success branch — the `exit %[7]d` no-changes contract
+// is unchanged.
 const pushScriptTemplate = `set -eu
 cleanup() { rm -f %[1]s %[2]s %[3]s; }
 trap cleanup EXIT
@@ -702,6 +953,7 @@ if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
 fi
 chmod +x %[3]s
 GIT_ASKPASS=%[3]s GIT_TERMINAL_PROMPT=0 git push %[8]s HEAD:refs/heads/%[9]s
+echo "%[10]s$(git rev-parse HEAD)"
 `
 
 // buildPushScript renders pushScriptTemplate with caller-supplied values.
@@ -720,6 +972,11 @@ func buildPushScript(workDir, authorName, authorEmail, branchName, pushURL strin
 		pushExitNoChanges,
 		shellQuote(pushURL),
 		shellQuote(branchName),
+		// pushHeadSHASentinel is a compile-time string literal containing only
+		// safe shell characters ("__143_HEAD_SHA="), so it's intentionally
+		// interpolated raw — no shellQuote. Anyone who later changes the
+		// sentinel to include shell metacharacters MUST add quoting here.
+		pushHeadSHASentinel,
 	)
 }
 

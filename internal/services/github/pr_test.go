@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -126,11 +127,13 @@ type prTestSandboxProvider struct {
 	execExit    int
 	execErr     error
 	execStderr  string
+	execStdout  string
 	createErr   error
 	restoreErr  error
 	writeErrs   map[string]error
 	destroyErr  error
 	destroyed   int
+	snapshotErr error
 }
 
 func (p *prTestSandboxProvider) Name() string { return "test" }
@@ -149,6 +152,9 @@ func (p *prTestSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, strin
 
 func (p *prTestSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	p.lastExecCmd = cmd
+	if p.execStdout != "" {
+		_, _ = io.WriteString(stdout, p.execStdout)
+	}
 	if p.execStderr != "" {
 		_, _ = io.WriteString(stderr, p.execStderr)
 	}
@@ -192,6 +198,9 @@ func (p *prTestSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) 
 }
 
 func (p *prTestSandboxProvider) Snapshot(context.Context, *agent.Sandbox) (io.ReadCloser, error) {
+	if p.snapshotErr != nil {
+		return nil, p.snapshotErr
+	}
 	return io.NopCloser(bytes.NewReader(nil)), nil
 }
 
@@ -3206,13 +3215,19 @@ func TestGithubAPIError_HTTPStatus(t *testing.T) {
 func TestPushSessionBranch(t *testing.T) {
 	t.Parallel()
 
+	const fakeHeadSHA = "abc1234567890abcdef1234567890abcdef12345"
+	successStdout := pushHeadSHASentinel + fakeHeadSHA + "\n"
+
 	tests := []struct {
-		name           string
-		snapshots      *prTestSnapshotStore
-		provider       *prTestSandboxProvider
-		wantErrIs      error
-		wantErrSubstr  string
-		wantDestroyCnt int
+		name                 string
+		snapshots            *prTestSnapshotStore
+		provider             *prTestSandboxProvider
+		wantErrIs            error
+		wantErrSubstr        string
+		wantDestroyCnt       int
+		wantHeadSHA          string
+		wantSnapshotCaptured bool
+		wantSnapshotErr      bool
 	}{
 		{
 			name:           "missing snapshot object maps to unavailable",
@@ -3257,10 +3272,27 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
-			name:           "success writes helper files and executes push",
+			name:           "missing head sha sentinel returns parse error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
-			provider:       &prTestSandboxProvider{},
+			provider:       &prTestSandboxProvider{execStdout: "no sentinel here\n"},
+			wantErrSubstr:  "head sha sentinel",
 			wantDestroyCnt: 1,
+		},
+		{
+			name:                 "success returns head sha and captured snapshot",
+			snapshots:            &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:             &prTestSandboxProvider{execStdout: successStdout},
+			wantDestroyCnt:       1,
+			wantHeadSHA:          fakeHeadSHA,
+			wantSnapshotCaptured: true,
+		},
+		{
+			name:            "snapshot capture failure does not fail the push",
+			snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:        &prTestSandboxProvider{execStdout: successStdout, snapshotErr: errors.New("snapshot exec died")},
+			wantDestroyCnt:  1,
+			wantHeadSHA:     fakeHeadSHA,
+			wantSnapshotErr: true,
 		},
 	}
 
@@ -3276,7 +3308,7 @@ func TestPushSessionBranch(t *testing.T) {
 			run := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 			repo := &models.Repository{FullName: "owner/repo"}
 
-			err := svc.pushSessionBranch(
+			result, err := svc.pushSessionBranch(
 				context.Background(),
 				run,
 				repo,
@@ -3287,6 +3319,11 @@ func TestPushSessionBranch(t *testing.T) {
 				"Test User",
 				"test@example.com",
 			)
+			t.Cleanup(func() {
+				if result != nil && result.CapturedSnapshotPath != "" {
+					_ = os.Remove(result.CapturedSnapshotPath)
+				}
+			})
 
 			if tt.wantErrIs != nil {
 				require.ErrorIs(t, err, tt.wantErrIs, "pushSessionBranch should return the expected sentinel error")
@@ -3295,15 +3332,269 @@ func TestPushSessionBranch(t *testing.T) {
 				require.Contains(t, err.Error(), tt.wantErrSubstr, "pushSessionBranch should include the expected error text")
 			} else {
 				require.NoError(t, err, "pushSessionBranch should succeed")
+				require.NotNil(t, result, "pushSessionBranch should return a non-nil result on success")
 				require.Equal(t, []byte("commit message"), tt.provider.writes[pushCommitMsgPath], "pushSessionBranch should write the commit message file")
 				require.Equal(t, []byte("secret-token"), tt.provider.writes[pushInputPath], "pushSessionBranch should write the credential input file")
 				require.Contains(t, string(tt.provider.writes[pushHelperPath]), pushInputPath, "pushSessionBranch should write a helper script that reads the credential input file")
 				require.Contains(t, tt.provider.lastExecCmd, "GIT_ASKPASS", "pushSessionBranch should run git push through the helper script")
+				require.Equal(t, tt.wantHeadSHA, result.HeadSHA, "pushSessionBranch should return the parsed HEAD SHA")
+				if tt.wantSnapshotCaptured {
+					require.NotEmpty(t, result.CapturedSnapshotPath, "pushSessionBranch should spool the post-push snapshot to a temp file")
+					require.NoError(t, result.CapturedSnapshotErr, "snapshot capture should succeed when provider.Snapshot returns no error")
+				}
+				if tt.wantSnapshotErr {
+					require.Error(t, result.CapturedSnapshotErr, "snapshot capture failure should be surfaced on the result, not as a function error")
+					require.Empty(t, result.CapturedSnapshotPath, "no temp file should remain when snapshot capture fails")
+				}
 			}
 
 			require.Equal(t, tt.wantDestroyCnt, tt.provider.destroyed, "pushSessionBranch should always destroy the hydrated sandbox")
 		})
 	}
+}
+
+func TestParsePushHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	const fakeSHA = "abc1234567890abcdef1234567890abcdef12345"
+	tests := []struct {
+		name      string
+		stdout    string
+		wantSHA   string
+		wantErrIs string
+	}{
+		{
+			name:    "single line success",
+			stdout:  pushHeadSHASentinel + fakeSHA + "\n",
+			wantSHA: fakeSHA,
+		},
+		{
+			name:    "sentinel preceded by git push noise",
+			stdout:  "Counting objects: 5, done.\nWriting objects: 100% (5/5), done.\n" + pushHeadSHASentinel + fakeSHA + "\n",
+			wantSHA: fakeSHA,
+		},
+		{
+			name:    "trailing whitespace is trimmed",
+			stdout:  pushHeadSHASentinel + fakeSHA + "  \r\n",
+			wantSHA: fakeSHA,
+		},
+		{
+			name:      "missing sentinel returns error",
+			stdout:    "no sentinel here\nanother line\n",
+			wantErrIs: "head sha sentinel",
+		},
+		{
+			name:      "empty SHA after sentinel rejected",
+			stdout:    pushHeadSHASentinel + "\n",
+			wantErrIs: "not a 40-char hex SHA",
+		},
+		{
+			name:      "uppercase SHA rejected",
+			stdout:    pushHeadSHASentinel + "ABC1234567890ABCDEF1234567890ABCDEF12345\n",
+			wantErrIs: "not a 40-char hex SHA",
+		},
+		{
+			name:      "short SHA rejected",
+			stdout:    pushHeadSHASentinel + "abc123\n",
+			wantErrIs: "not a 40-char hex SHA",
+		},
+		{
+			name:      "trailing junk after SHA rejected",
+			stdout:    pushHeadSHASentinel + fakeSHA + " unexpected\n",
+			wantErrIs: "not a 40-char hex SHA",
+		},
+		{
+			name:      "empty stdout returns error",
+			stdout:    "",
+			wantErrIs: "head sha sentinel",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sha, err := parsePushHeadSHA(tt.stdout)
+			if tt.wantErrIs != "" {
+				require.Error(t, err, "parsePushHeadSHA should return an error")
+				require.Contains(t, err.Error(), tt.wantErrIs, "parsePushHeadSHA error should mention the failure mode")
+				return
+			}
+			require.NoError(t, err, "parsePushHeadSHA should succeed for valid stdout")
+			require.Equal(t, tt.wantSHA, sha, "parsePushHeadSHA should return the SHA verbatim from the sentinel line")
+		})
+	}
+}
+
+// blockingSnapshotStore.Save blocks on the saveStarted channel before
+// returning. Tests use it to assert that PendingSnapshotKey is set and
+// SnapshotKey is unchanged while an upload is in flight, then unblock and
+// verify the atomic promotion.
+type blockingSnapshotStore struct {
+	saveStarted chan struct{}
+	saveRelease chan struct{}
+	saveErr     error
+	saveKey     string
+}
+
+func (s *blockingSnapshotStore) Save(_ context.Context, key string, _ io.Reader) error {
+	s.saveKey = key
+	close(s.saveStarted)
+	<-s.saveRelease
+	return s.saveErr
+}
+func (s *blockingSnapshotStore) Load(context.Context, string, io.Writer) error { return nil }
+func (s *blockingSnapshotStore) Delete(context.Context, string) error          { return nil }
+
+func TestDispatchPostPRSnapshotUpload_PromotesOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	tarFile, err := os.CreateTemp("", "143-pr-snapshot-test-*.tar.zst")
+	require.NoError(t, err, "test setup: create temp tar file")
+	_, err = tarFile.WriteString("synthetic-tar-content")
+	require.NoError(t, err, "test setup: write to temp tar file")
+	require.NoError(t, tarFile.Close(), "test setup: close temp tar file")
+	tarPath := tarFile.Name()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	const newKey = "snapshots/org/session/post-pr.tar.zst"
+
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := &blockingSnapshotStore{
+		saveStarted: make(chan struct{}),
+		saveRelease: make(chan struct{}),
+	}
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	svc.dispatchPostPRSnapshotUpload(orgID, sessionID, newKey, tarPath, int64(len("synthetic-tar-content")))
+
+	<-store.saveStarted
+	require.Equal(t, newKey, store.saveKey, "Save should be invoked with the post-PR snapshot key")
+
+	close(store.saveRelease)
+	svc.WaitForPostPRSnapshotUploads()
+
+	_, statErr := os.Stat(tarPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "the temp tar file must be removed once the upload goroutine finishes")
+	require.NoError(t, mock.ExpectationsWereMet(), "PromotePendingSnapshot should be the only DB call on the success path")
+}
+
+func TestDispatchPostPRSnapshotUpload_ClearsOnSaveFailure(t *testing.T) {
+	t.Parallel()
+
+	tarFile, err := os.CreateTemp("", "143-pr-snapshot-test-*.tar.zst")
+	require.NoError(t, err, "test setup: create temp tar file")
+	require.NoError(t, tarFile.Close(), "test setup: close temp tar file")
+	tarPath := tarFile.Name()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := &blockingSnapshotStore{
+		saveStarted: make(chan struct{}),
+		saveRelease: make(chan struct{}),
+		saveErr:     errors.New("upload exploded"),
+	}
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+
+	svc.dispatchPostPRSnapshotUpload(orgID, sessionID, "snapshots/whatever", tarPath, 0)
+
+	<-store.saveStarted
+	close(store.saveRelease)
+	svc.WaitForPostPRSnapshotUploads()
+
+	_, statErr := os.Stat(tarPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "the temp tar file must be removed even when Save fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "ClearPendingSnapshot should be the only DB call on the failure path")
+}
+
+// TestDispatchPostPRSnapshotUpload_ClearsOnOpenFailure pins the
+// open-error branch of the upload goroutine: if the captured tar can't be
+// reopened (e.g. it was reaped by another process between capture and
+// dispatch), the goroutine still has to clear pending_snapshot_key so
+// continue_session can resume rather than blocking forever on the gate.
+func TestDispatchPostPRSnapshotUpload_ClearsOnOpenFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	// ClearPendingSnapshot is the only DB call expected — Save is never
+	// reached because the tar can't be opened.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: &prTestSnapshotStore{},
+		logger:    zerolog.Nop(),
+	}
+
+	// A path that does not exist forces os.Open to fail. /dev/null/missing
+	// is portable: the open syscall returns ENOTDIR on every Unix.
+	svc.dispatchPostPRSnapshotUpload(uuid.New(), uuid.New(), "snapshots/whatever", "/dev/null/does-not-exist", 0)
+	svc.WaitForPostPRSnapshotUploads()
+
+	require.NoError(t, mock.ExpectationsWereMet(), "open failure must trigger ClearPendingSnapshot exactly once")
+}
+
+// TestDispatchPostPRSnapshotUpload_LogsPromoteFailure pins the
+// promote-error branch: when Save succeeds but the atomic promote write
+// fails, the goroutine logs and returns without falling through to a
+// success log. The pending_snapshot_key stays set; the reaper handles it.
+func TestDispatchPostPRSnapshotUpload_LogsPromoteFailure(t *testing.T) {
+	t.Parallel()
+
+	tarFile, err := os.CreateTemp("", "143-pr-snapshot-test-*.tar.zst")
+	require.NoError(t, err, "test setup: create temp tar file")
+	require.NoError(t, tarFile.Close(), "test setup: close temp tar file")
+	tarPath := tarFile.Name()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	// Promote returns an error from the DB; no follow-up Clear call.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("connection reset"))
+
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: &prTestSnapshotStore{},
+		logger:    zerolog.Nop(),
+	}
+
+	svc.dispatchPostPRSnapshotUpload(uuid.New(), uuid.New(), "snapshots/whatever", tarPath, 42)
+	svc.WaitForPostPRSnapshotUploads()
+
+	_, statErr := os.Stat(tarPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "the temp tar file must still be removed when Promote fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "Promote-failure path must not retry or fall through to extra DB calls")
 }
 
 func TestCreatePR_ConfigChecks(t *testing.T) {
@@ -3437,7 +3728,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 			),
 		)
 	mock.ExpectQuery("INSERT INTO pull_requests").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3469,7 +3760,15 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := &prTestSandboxProvider{}
+	// snapshotErr makes pushSessionBranch's post-push snapshot capture fail
+	// (best-effort), which short-circuits the upload-goroutine path —
+	// avoiding mock-expectation interleaving with the synchronous DB writes
+	// that follow CreatePR's PR row insert. The snapshot upload path itself
+	// is exercised separately in TestDispatchPostPRSnapshotUpload.
+	provider := &prTestSandboxProvider{
+		execStdout:  pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
+		snapshotErr: errors.New("test: skip post-pr snapshot"),
+	}
 	svc := &PRService{
 		tokenProvider: &Service{
 			cache: map[int64]*cachedToken{
@@ -3512,6 +3811,155 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	_ = body
 }
 
+// TestCreatePR_SuccessDispatchesPostPRSnapshotUpload covers the end-to-end
+// wiring that the sibling TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR
+// deliberately short-circuits via snapshotErr: that on the happy path
+// CreatePR persists pending_snapshot_key, hands the captured tar to the
+// upload goroutine, and the goroutine eventually promotes the key into
+// snapshot_key. Mock expectations run with MatchExpectationsInOrder(false)
+// because the goroutine's PromotePendingSnapshot interleaves with the
+// post-Create UpdateStatus calls from the main flow.
+func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	now := time.Now()
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	wantPendingKey := fmt.Sprintf("snapshots/%s/%s/post-pr.tar.zst", orgID, runID)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+	mock.ExpectQuery("SELECT .+ FROM issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestIssueColumns).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, &repoID,
+				"Broken button", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 1, "high", []string{"bug"}, "fp",
+				now, now, nil,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+				orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only","pr_draft_default":true}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestUserColumns).AddRow(
+				userID, orgID, "alice@example.com", "Alice", "member", nil, nil, nil, nil, nil, nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	// SetPendingSnapshotKey: the synchronous write that records the
+	// post-PR upload in flight. pgx NamedArgs expand to positional args by
+	// @-placeholder order: SET pending_snapshot_key = @key first, then
+	// WHERE id = @id, org_id = @org_id, so the key is arg #0.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = @key").
+		WithArgs(wantPendingKey, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// PromotePendingSnapshot: the async write fired by the upload
+	// goroutine after Save() succeeds. SQL order is @id, @org_id,
+	// @expected_key, so the key guard is arg #2.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), wantPendingKey).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "primary_issue_id", "created_at", "last_activity_at"}).
+				AddRow(runID, orgID, &issueID, now, now),
+		)
+	mock.ExpectExec("UPDATE issues SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"number":   42,
+				"html_url": "https://github.com/owner/repo/pull/42",
+			}), "mock server should encode the created PR")
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/42/labels":
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{{"name": "143-generated"}}), "mock server should encode label response")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// Real success path: no snapshotErr, real Snapshot reader. The
+	// dispatch goroutine spools an empty tar, calls
+	// prTestSnapshotStore.Save (no-op success), and promotes.
+	provider := &prTestSandboxProvider{
+		execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
+	}
+	svc := &PRService{
+		tokenProvider: &Service{
+			cache: map[int64]*cachedToken{
+				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+			},
+		},
+		pullRequests:    db.NewPullRequestStore(mock),
+		sessions:        db.NewSessionStore(mock),
+		issues:          db.NewIssueStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		users:           db.NewUserStore(mock),
+		orgs:            db.NewOrganizationStore(mock),
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		baseURL:         server.URL,
+		httpClient:      server.Client(),
+		logger:          zerolog.Nop(),
+	}
+
+	run := &models.Session{
+		ID:                runID,
+		OrgID:             orgID,
+		PrimaryIssueID:    &issueID,
+		RepositoryID:      &repoID,
+		TriggeredByUserID: &userID,
+		SnapshotKey:       &snapshotKey,
+		ResultSummary:     func() *string { s := "Implemented the fix"; return &s }(),
+	}
+
+	pr, err := svc.CreatePR(context.Background(), run)
+	require.NoError(t, err, "CreatePR should succeed for a snapshot-backed session")
+	require.Equal(t, 42, pr.GitHubPRNumber, "CreatePR should store the returned PR number")
+
+	// Drain the upload goroutine before checking expectations — Promote
+	// is async and would otherwise race the assertion.
+	svc.WaitForPostPRSnapshotUploads()
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations (including async PromotePendingSnapshot) should be met")
+}
+
 func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
 	t.Parallel()
 
@@ -3552,13 +4000,15 @@ func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
 				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
 			},
 		},
-		pullRequests:    db.NewPullRequestStore(mock),
-		repos:           db.NewRepositoryStore(mock),
-		sandboxProvider: &prTestSandboxProvider{},
-		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
-		baseURL:         server.URL,
-		httpClient:      server.Client(),
-		logger:          zerolog.Nop(),
+		pullRequests: db.NewPullRequestStore(mock),
+		repos:        db.NewRepositoryStore(mock),
+		sandboxProvider: &prTestSandboxProvider{
+			execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
+		},
+		snapshots:  &prTestSnapshotStore{payload: []byte("snapshot")},
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		logger:     zerolog.Nop(),
 	}
 
 	run := &models.Session{

@@ -146,7 +146,7 @@ var sessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -487,23 +487,31 @@ func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 }
 
 // padSessionIdentityColumns retrofits rows produced by the legacy
-// sessionTestRow dispatch (which predates the git_identity_source /
-// git_identity_user_id columns) with nil values for those columns. Inserts
-// the nils immediately before created_at so callers don't have to update
-// their fixtures one-by-one.
+// sessionTestRow dispatch with nil values for columns added after the
+// fixture conventions were settled: the pending-snapshot pair
+// (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
+// runtime_soft_deadline_at) and the trailing git_identity_source /
+// git_identity_user_id pair (immediately before created_at). Callers don't
+// have to update their fixtures one-by-one.
 func padSessionIdentityColumns(row []interface{}) []interface{} {
 	if len(row) >= len(sessionColumns) {
 		return row
 	}
-	if len(row) != len(sessionColumns)-2 {
+	if len(row) != len(sessionColumns)-4 {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
 	}
+	const pendingSnapshotKeyIndex = 42
+	withPending := make([]interface{}, 0, len(row)+2)
+	withPending = append(withPending, row[:pendingSnapshotKeyIndex]...)
+	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
+	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
+
 	padded := make([]interface{}, 0, len(sessionColumns))
-	padded = append(padded, row[:len(row)-1]...)
+	padded = append(padded, withPending[:len(withPending)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, row[len(row)-1])
+	padded = append(padded, withPending[len(withPending)-1])
 	return padded
 }
 

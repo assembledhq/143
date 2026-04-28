@@ -40,6 +40,14 @@ var ErrConcurrencyLimit = fmt.Errorf("concurrency limit reached")
 // without resorting to error-string matching.
 var ErrSessionTimedOut = errors.New("session timed out")
 
+// ErrSnapshotPending is returned from ContinueSession when the session has a
+// non-empty pending_snapshot_key — i.e. a post-PR snapshot upload is still
+// in flight. Hydrating from the previous SnapshotKey would restore the stale
+// pre-PR state (uncommitted edits at the original BaseCommitSHA), so we
+// prefer to wait. The worker handler wraps this in a RetryableError so the
+// job is requeued without consuming an attempt.
+var ErrSnapshotPending = errors.New("snapshot upload pending")
+
 // canonicalTimeoutLogMessage is the single log phrase emitted whenever a
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
@@ -1543,6 +1551,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		Str("org_id", session.OrgID.String()).
 		Int("turn", session.CurrentTurn).
 		Logger()
+
+	// Gate: if a post-PR snapshot upload is still in flight, hydrating from
+	// the prior SnapshotKey would restore stale pre-PR state. Bail out early
+	// with ErrSnapshotPending so the worker requeues the job. No state has
+	// been mutated yet — this is the cleanest place for the gate. The status
+	// stays where the user left it (typically `pr_created`); no failure
+	// message is registered because this is a transient wait, not an error.
+	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
+		return ErrSnapshotPending
+	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
 	hasSnapshot := session.SnapshotKey != nil && *session.SnapshotKey != "" &&

@@ -26,8 +26,8 @@ type PullRequestFilters struct {
 
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
 	query := `
-		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by)
-		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by)
+		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha)
+		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha)
 		RETURNING id, created_at, updated_at`
 
 	authoredBy := pr.AuthoredBy
@@ -45,6 +45,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 		"status":           pr.Status,
 		"review_status":    pr.ReviewStatus,
 		"authored_by":      authoredBy,
+		"head_sha":         pr.HeadSHA,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)

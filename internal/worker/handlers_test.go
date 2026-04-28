@@ -34,7 +34,7 @@ var workerSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -165,22 +165,30 @@ func workerSessionTestRow(values ...any) []any {
 }
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
-// workerSessionTestRowDispatch with nil values for the new
-// git_identity_source / git_identity_user_id columns. Inserts the nils
-// immediately before created_at so existing fixtures (which were written
-// against the pre-identity column count) keep working without touching
-// every call site.
+// workerSessionTestRowDispatch with nil values for columns added after the
+// fixture conventions were settled: the pending-snapshot pair
+// (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
+// runtime_soft_deadline_at) and the trailing git_identity_source /
+// git_identity_user_id pair (immediately before created_at). Existing
+// fixtures emit a "pre-pending, pre-identity" row; we pad it to the
+// current layout without touching every call site.
 func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-2 {
+	if len(row) != len(workerSessionColumns)-4 {
 		return row
 	}
+	const pendingSnapshotKeyIndex = 42
+	withPending := make([]any, 0, len(row)+2)
+	withPending = append(withPending, row[:pendingSnapshotKeyIndex]...)
+	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
+	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
+
 	padded := make([]any, 0, len(workerSessionColumns))
-	padded = append(padded, row[:len(row)-1]...)
+	padded = append(padded, withPending[:len(withPending)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, row[len(row)-1])
+	padded = append(padded, withPending[len(withPending)-1])
 	return padded
 }
 
@@ -802,6 +810,11 @@ func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pull
 	}
 	return nil
 }
+
+// WaitForPostPRSnapshotUploads is a no-op in the worker tests — there are
+// no real upload goroutines to drain, the method exists only to satisfy
+// the prCreator interface used by the server's shutdown path.
+func (s *stubPRService) WaitForPostPRSnapshotUploads() {}
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID
@@ -2987,6 +3000,46 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable pins the
+// invariant that ErrSnapshotPending (returned by the orchestrator's gate
+// while a post-PR snapshot upload is still in flight) becomes a
+// RetryableError so the worker requeues the job without consuming an
+// attempt. A regression here would make Fix-tests resumes dead-letter
+// while the upload is mid-flight.
+func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, string(models.SessionStatusIdle), 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session) error {
+			return agent.ErrSnapshotPending
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the gate signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSnapshotPending must be wrapped as RetryableError so the worker requeues without consuming an attempt")
+	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "the wrapped error must preserve the ErrSnapshotPending sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
 }
 
 // ---------------------------------------------------------------------------

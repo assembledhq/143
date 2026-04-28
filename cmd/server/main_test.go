@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
 )
 
 func TestBuildBaseMetadata(t *testing.T) {
@@ -105,5 +110,89 @@ func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	}
 	if _, ok := metadata["preview_internal_base_url"]; ok {
 		t.Errorf("preview_internal_base_url should be omitted when not configured")
+	}
+}
+
+// fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads
+// on a release channel. Tests use it to drive the success-vs-timeout branches
+// of drainPostPRUploads deterministically.
+type fakeDrainer struct {
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (f *fakeDrainer) WaitForPostPRSnapshotUploads() {
+	f.calls.Add(1)
+	<-f.release
+}
+
+func TestDrainPostPRUploads_NilDrainerNoop(t *testing.T) {
+	t.Parallel()
+
+	// Nil drainer must return immediately rather than panicking — this is
+	// the api-only-mode path where workerServices.PR is never built.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		drainPostPRUploads(context.Background(), nil, zerolog.Nop())
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("drainPostPRUploads with nil drainer should return immediately")
+	}
+}
+
+func TestDrainPostPRUploads_CompletesBeforeDeadline(t *testing.T) {
+	t.Parallel()
+
+	drainer := &fakeDrainer{release: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		drainPostPRUploads(ctx, drainer, zerolog.Nop())
+	}()
+
+	// Release the simulated upload — the drain should observe completion
+	// and return without hitting drainCtx.Done().
+	close(drainer.release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("drainPostPRUploads should return when uploads complete")
+	}
+	if got := drainer.calls.Load(); got != 1 {
+		t.Errorf("WaitForPostPRSnapshotUploads should be called exactly once, got %d", got)
+	}
+}
+
+func TestDrainPostPRUploads_CtxDoneTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	// Drainer never releases — exercises the drainCtx.Done() branch. The
+	// goroutine that called Wait remains parked; production accepts this
+	// as the goroutine will be killed when the process exits and the
+	// reaper will clear the stranded pending_snapshot_key row.
+	drainer := &fakeDrainer{release: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		drainPostPRUploads(ctx, drainer, zerolog.Nop())
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("drainPostPRUploads should return once drainCtx expires")
+	}
+	if got := drainer.calls.Load(); got != 1 {
+		t.Errorf("WaitForPostPRSnapshotUploads should be called exactly once, got %d", got)
 	}
 }
