@@ -5,8 +5,8 @@
 > **Implementation log (2026-04-27):**
 >
 > **PR 1 — schema & migration tooling (landed):**
-> - `migrations/000102_coding_credentials.{up,down}.sql` — unified table, four partial indexes, `coding_credentials_migrations` sentinel.
-> - `migrations/000103_copy_coding_credentials.{up,down}.sql` — idempotent SQL data copy from `org_credentials` (with `openai_chatgpt → openai_subscription` rename) and `user_credentials` (team-default rows promoted to org-scoped).
+> - `migrations/000103_coding_credentials.{up,down}.sql` — unified table, four partial indexes, `coding_credentials_migrations` sentinel.
+> - `migrations/000104_copy_coding_credentials.{up,down}.sql` — idempotent SQL data copy from `org_credentials` (with `openai_chatgpt → openai_subscription` rename) and `user_credentials` (team-default rows promoted to org-scoped).
 > - `cmd/migrate-coding-credentials-anthropic-split/` — standalone batched encrypted-blob post-step (cursor-paginated by `(created_at, id)`, per-row `statement_timeout`, dry-run flag, sentinel write on completion). `make migrate-coding-credentials-anthropic-split` target.
 >
 > **PR 2 — store, resolver, dual-write (landed):**
