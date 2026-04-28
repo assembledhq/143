@@ -29,7 +29,7 @@ var sessionTestColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -60,7 +60,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil,
 		nil, nil, nil, nil,
-		nil, 0, lastActivityAt, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+		nil, 0, lastActivityAt, "none", nil, nil, nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at
 		nil,      // runtime_soft_deadline_at
 		nil,      // runtime_hard_deadline_at
 		nil,      // runtime_last_progress_at
@@ -299,6 +299,101 @@ func TestSessionStore_ClearSnapshotKey(t *testing.T) {
 	err = store.ClearSnapshotKey(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "ClearSnapshotKey should update the row without error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_SetPendingSnapshotKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// Set must stamp pending_snapshot_set_at = NOW() in the same UPDATE so
+	// the stranded-pending reaper has a timestamp to match against. Pin the
+	// regex so a regression that drops the set_at write is caught.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = @key[\\s\\S]*pending_snapshot_set_at = NOW\\(\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SetPendingSnapshotKey(context.Background(), orgID, sessionID, "snapshots/org/session/post-pr.tar.zst")
+	require.NoError(t, err, "SetPendingSnapshotKey should not error on a clean update")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	expected := "snapshots/org/session/post-pr.tar.zst"
+
+	// Promote should match on pending_snapshot_key = @expected_key — that's
+	// the optimistic-concurrency guard against a stale upload clobbering a
+	// newer one. Verify the named arg is in the SQL.
+	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
+	// in the same statement — otherwise the reaper would see a phantom
+	// timestamp on a row whose pending key has already been promoted.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*pending_snapshot_key = @expected_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.PromotePendingSnapshot(context.Background(), orgID, sessionID, expected)
+	require.NoError(t, err, "PromotePendingSnapshot should not error on a clean update")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_ClearPendingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	// Clear must NULL both pending_snapshot_key AND pending_snapshot_set_at
+	// in lockstep, same reasoning as Promote.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ClearPendingSnapshot(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ClearPendingSnapshot should not error")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
+func TestSessionStore_ReapStrandedPendingSnapshots(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	threshold := time.Now().Add(-15 * time.Minute)
+
+	// Reaper must scope on both columns being non-NULL AND on the timestamp
+	// guard; without the guard, a fresh upload that just stamped set_at would
+	// be reaped out from under itself.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*pending_snapshot_key IS NOT NULL[\\s\\S]*pending_snapshot_set_at IS NOT NULL[\\s\\S]*pending_snapshot_set_at <= @older_than").
+		WithArgs(threshold).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	cleared, err := store.ReapStrandedPendingSnapshots(context.Background(), threshold)
+	require.NoError(t, err, "ReapStrandedPendingSnapshots should not error on a clean update")
+	require.Equal(t, int64(3), cleared, "ReapStrandedPendingSnapshots should return the rows-affected count")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
 }
 
 // TestSessionStore_ListByOrg_MRUOrdering verifies the list query orders by

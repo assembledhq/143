@@ -128,6 +128,17 @@ func TestScheduler_SetPMDocStore(t *testing.T) {
 	require.NotNil(t, s.pmDocs, "pmDocs should be set after SetPMDocStore")
 }
 
+func TestScheduler_SetSessionStore(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	require.Nil(t, s.sessions, "sessions should be nil before SetSessionStore (stranded-pending reaper disabled)")
+
+	store := &mockSchedulerSessionStore{}
+	s.SetSessionStore(store)
+	require.NotNil(t, s.sessions, "sessions should be set after SetSessionStore so the reaper pass runs")
+}
+
 func TestScheduler_ScheduleContextRefreshes_NilStore(t *testing.T) {
 	t.Parallel()
 
@@ -722,4 +733,63 @@ func TestScheduler_ReapStuckAutomationRuns_PerOrgReapErrorContinues(t *testing.T
 	// the others (crashed worker in org A shouldn't block cleanup in org B).
 	s.reapStuckAutomationRuns(context.Background())
 	require.Equal(t, 2, runs.reapCalls)
+}
+
+// mockSchedulerSessionStore captures the cutoff passed by the reaper so tests
+// can assert that strandedPendingSnapshotThreshold was applied as a relative
+// offset from `now`, not as an absolute that drifts as wall-clock advances.
+type mockSchedulerSessionStore struct {
+	reapCalls int
+	lastAsOf  time.Time
+	clearN    int64
+	reapErr   error
+}
+
+func (m *mockSchedulerSessionStore) ReapStrandedPendingSnapshots(_ context.Context, olderThan time.Time) (int64, error) {
+	m.reapCalls++
+	m.lastAsOf = olderThan
+	return m.clearN, m.reapErr
+}
+
+func TestScheduler_ReapStrandedPendingSnapshots(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	sessions := &mockSchedulerSessionStore{clearN: 2}
+	s := &Scheduler{
+		sessions: sessions,
+		logger:   zerolog.Nop(),
+	}
+
+	s.reapStrandedPendingSnapshots(context.Background(), now)
+	require.Equal(t, 1, sessions.reapCalls, "reaper should fire once per tick")
+	require.WithinDuration(t,
+		now.Add(-strandedPendingSnapshotThreshold),
+		sessions.lastAsOf,
+		time.Millisecond,
+		"reaper must pass now - threshold so a clock skew between the scheduler and DB doesn't bias the cutoff",
+	)
+}
+
+func TestScheduler_ReapStrandedPendingSnapshots_NilStoreNoop(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic when sessions is not wired (mode without scheduler-eligible session store).
+	s.reapStrandedPendingSnapshots(context.Background(), time.Now())
+}
+
+func TestScheduler_ReapStrandedPendingSnapshots_StoreErrorSwallowed(t *testing.T) {
+	t.Parallel()
+
+	sessions := &mockSchedulerSessionStore{reapErr: pgx.ErrTxClosed}
+	s := &Scheduler{
+		sessions: sessions,
+		logger:   zerolog.Nop(),
+	}
+
+	// A reaper failure must never propagate up the tick — other passes must
+	// still run on the same tick.
+	s.reapStrandedPendingSnapshots(context.Background(), time.Now())
+	require.Equal(t, 1, sessions.reapCalls)
 }

@@ -416,6 +416,8 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil, nil, nil,
 				nil, 0, now, "snapshot", &snapshotKey,
+				nil, // pending_snapshot_key
+				nil, // pending_snapshot_set_at
 				nil, nil, nil, "", "", 0, 0, "", nil,
 				nil, "", "", int64(0), nil,
 				"", nil, nil, 0,

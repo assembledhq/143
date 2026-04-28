@@ -24,7 +24,7 @@ var sessionColumns = []string{
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
 	"agent_session_id", "current_turn", "last_activity_at",
-	"sandbox_state", "snapshot_key",
+	"sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -59,6 +59,8 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		now,      // last_activity_at
 		"none",   // sandbox_state
 		nil,      // snapshot_key
+		nil,      // pending_snapshot_key
+		nil,      // pending_snapshot_set_at
 		nil,      // runtime_soft_deadline_at
 		nil,      // runtime_hard_deadline_at
 		nil,      // runtime_last_progress_at
