@@ -200,8 +200,14 @@ type PRActionErrorState = {
 };
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const SNAPSHOT_EXPIRED_PR_MESSAGE =
+  "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.";
+const SNAPSHOT_NOT_CAPTURED_PR_MESSAGE =
+  "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.";
 const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
-  "This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.";
+  "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again.";
+
+type PRSnapshotState = "expired" | "not_captured" | "unavailable";
 
 function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
   if (!value || typeof value !== "object") return false;
@@ -211,16 +217,55 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
     typeof details.can_fallback_to_app === "boolean";
 }
 
-function normalizeSnapshotPRMessage(message?: string | null): string {
-  if (!message || /^session state expired\b/i.test(message)) {
-    return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+function classifyPRSnapshotState({
+  sessionSnapshotKey,
+  sessionSandboxState,
+  serverMessage,
+  localCode,
+}: {
+  sessionSnapshotKey?: string | null;
+  sessionSandboxState?: string | null;
+  serverMessage?: string | null;
+  localCode?: string;
+}): PRSnapshotState | null {
+  if (localCode === "SNAPSHOT_EXPIRED") return "expired";
+  if (localCode === "SNAPSHOT_NOT_CAPTURED") return "not_captured";
+  if (localCode === "SNAPSHOT_UNAVAILABLE") return "unavailable";
+  if (serverMessage === SNAPSHOT_EXPIRED_PR_MESSAGE) return "expired";
+  if (serverMessage === SNAPSHOT_NOT_CAPTURED_PR_MESSAGE) return "not_captured";
+  if (serverMessage === SNAPSHOT_UNAVAILABLE_PR_MESSAGE) return "unavailable";
+  if (/^session state expired\b/i.test(serverMessage || "")) return "unavailable";
+  if (!sessionSnapshotKey) {
+    return sessionSandboxState === "destroyed" ? "expired" : "not_captured";
   }
-  return message;
+  return null;
 }
 
-function prErrorTitle(snapshotUnavailable: boolean, errorCode?: string): string {
-  if (snapshotUnavailable || errorCode === "SNAPSHOT_EXPIRED") {
-    return "PR snapshot unavailable";
+function snapshotPRMessage(state: PRSnapshotState | null, message?: string | null): string {
+  if (message && !/^session state expired\b/i.test(message)) {
+    return message;
+  }
+  switch (state) {
+    case "expired":
+      return SNAPSHOT_EXPIRED_PR_MESSAGE;
+    case "not_captured":
+      return SNAPSHOT_NOT_CAPTURED_PR_MESSAGE;
+    case "unavailable":
+      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+    default:
+      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+  }
+}
+
+function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string): string {
+  if (snapshotState === "expired" || errorCode === "SNAPSHOT_EXPIRED") {
+    return "Session snapshot expired";
+  }
+  if (snapshotState === "not_captured" || errorCode === "SNAPSHOT_NOT_CAPTURED") {
+    return "No reusable checkpoint saved";
+  }
+  if (snapshotState === "unavailable" || errorCode === "SNAPSHOT_UNAVAILABLE") {
+    return "Saved checkpoint unavailable";
   }
   if (errorCode === "PR_RESUME_EXPIRED") {
     return "Couldn't resume PR creation";
@@ -2225,19 +2270,23 @@ export function SessionDetailContent({ id }: { id: string }) {
   const changesCount = diffStats?.filesChanged;
   const showValidationTab = !session.triggered_by_user_id;
   const prState = session.pr_creation_state;
-  const snapshotExpired = !session.snapshot_key;
-  const serverSnapshotUnavailable = /^session state expired\b/i.test(session.pr_creation_error || "");
-  const localSnapshotUnavailable = localPRActionError?.code === "SNAPSHOT_EXPIRED";
-  const snapshotUnavailable = snapshotExpired || localSnapshotUnavailable || serverSnapshotUnavailable;
-  const snapshotExpiredMessage = normalizeSnapshotPRMessage(
-    localSnapshotUnavailable ? localPRActionError.message : session.pr_creation_error
+  const snapshotState = classifyPRSnapshotState({
+    sessionSnapshotKey: session.snapshot_key,
+    sessionSandboxState: session.sandbox_state,
+    serverMessage: session.pr_creation_error,
+    localCode: localPRActionError?.code,
+  });
+  const snapshotUnavailable = snapshotState !== null;
+  const snapshotMessage = snapshotPRMessage(
+    snapshotState,
+    localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
   const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
-    : (localSnapshotUnavailable ? snapshotExpiredMessage : localPRActionError?.message) ||
-      (snapshotUnavailable ? snapshotExpiredMessage : null) ||
+    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+      (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canCreatePR ||
@@ -2265,7 +2314,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionTitle = "Pushing changes and opening the pull request";
   } else if (snapshotUnavailable) {
     prActionDisabled = true;
-    prActionTitle = snapshotExpiredMessage;
+    prActionTitle = snapshotMessage;
   } else if (localPRActionError) {
     prActionLabel = "Retry";
     prActionTitle = localPRActionError.message;
@@ -2290,7 +2339,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotUnavailable, localPRActionError?.code),
+    title: prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
     action: prActionDisabled ? undefined : {
       label: prActionLabel,
