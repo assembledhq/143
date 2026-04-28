@@ -21,6 +21,7 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { SessionListItem } from "@/lib/types";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import {
   workingSet,
   filterToStatusParam,
@@ -80,7 +81,7 @@ function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"
   let label: string;
 
   if (prSummary.status === "merged") {
-    dotColor = "bg-violet-500";
+    dotColor = prMergedAccent.dot;
     label = "Merged";
   } else if (prSummary.status === "closed") {
     dotColor = "bg-muted-foreground";
