@@ -545,6 +545,26 @@ func TestGitHubCodeReviewSource_TokenFunc_ErrorPropagates(t *testing.T) {
 	require.Contains(t, err.Error(), "socket unavailable")
 }
 
+func TestGitHubCodeReviewSource_NoTokenConfigured(t *testing.T) {
+	t.Parallel()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{Owner: "o", Repo: "r"})
+
+	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
+	require.Error(t, err, "a source with neither Token nor TokenFunc must error rather than send an unauthenticated request")
+	require.Contains(t, err.Error(), "no token configured")
+}
+
+func TestGitHubCodeReviewSource_DoGetPaginated_ResolveTokenError(t *testing.T) {
+	t.Parallel()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{Owner: "o", Repo: "r"})
+
+	_, err := doGetPaginated[ghReviewComment](context.Background(), src, "http://unused")
+	require.Error(t, err, "doGetPaginated must short-circuit when no token can be resolved")
+	require.Contains(t, err.Error(), "no token configured")
+}
+
 func TestGitHubCodeReviewSource_TokenFunc_EmptyTokenIsError(t *testing.T) {
 	t.Parallel()
 

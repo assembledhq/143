@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -81,19 +80,8 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 			reg.RegisterCodeReviewSource(source)
 			fmt.Fprintf(logger, "143-tools: registered github (%s/%s)\n", owner, repo)
 		} else if sockPath := os.Getenv(sandboxauth.SocketEnvVar); sockPath != "" {
-			client := sandboxauth.NewClient(sockPath)
-			tokenFunc := func(ctx context.Context) (string, error) {
-				resp, err := client.Get(ctx, sandboxauth.ActionAPI)
-				if err != nil {
-					return "", err
-				}
-				if resp.Error != "" {
-					return "", fmt.Errorf("auth socket: %s", resp.Error)
-				}
-				return resp.Token, nil
-			}
 			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
-				TokenFunc: tokenFunc,
+				TokenFunc: sandboxauth.NewClient(sockPath).GetAPIToken,
 				Owner:     owner,
 				Repo:      repo,
 			})
