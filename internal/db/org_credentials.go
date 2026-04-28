@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,44 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/models"
 )
+
+// codingAuthProviders is the canonical list of providers that participate in
+// the org-level coding-auth fallback stack. Priority is meaningful only for
+// these — other credentials (GitHub, Sentry, …) keep the column default.
+//
+// This is intentionally distinct from models.CodingAgentProviders, which
+// enumerates personal-credential coding providers: openai_chatgpt is the
+// Codex subscription/OAuth flavor (org-only), and openrouter is currently
+// only wired into personal LLM credentials, not the org fallback stack.
+var codingAuthProviders = []models.ProviderName{
+	models.ProviderAnthropic,
+	models.ProviderOpenAI,
+	models.ProviderOpenAIChatGPT,
+	models.ProviderGemini,
+	models.ProviderAmp,
+	models.ProviderPi,
+}
+
+// codingAuthProviderSQLList renders codingAuthProviders as a parenthesized
+// SQL value list (e.g. "('anthropic', 'openai', …)") for embedding directly
+// into `provider IN ...` clauses. Provider values are typed constants known
+// at compile time, so there is no SQL injection surface.
+var codingAuthProviderSQLList = func() string {
+	parts := make([]string, len(codingAuthProviders))
+	for i, p := range codingAuthProviders {
+		parts[i] = "'" + string(p) + "'"
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}()
+
+func isCodingAuthProvider(provider models.ProviderName) bool {
+	for _, p := range codingAuthProviders {
+		if p == provider {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrCredentialLabelTaken is returned by InsertPendingAuth when the
 // (org, provider, label) tuple already references a credential that cannot
@@ -154,7 +193,6 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 	// appears at the bottom of the fallback stack rather than carrying over an
 	// old position the user may not remember.
 	var id uuid.UUID
-	var labelTakenErr *ErrCredentialLabelTaken
 	err = s.withCodingAuthPriority(ctx, orgID, func(tx pgx.Tx, nextPriority int) error {
 		query := `
 			INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
@@ -181,28 +219,23 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 		if scanErr == nil {
 			return nil
 		}
-		if errors.Is(scanErr, pgx.ErrNoRows) {
-			// Conflict on (org, provider, label) but the existing row is
-			// active/invalid. Look up the actual status (still inside the
-			// transaction so the read is consistent with the failed insert)
-			// to surface a useful error to the caller.
-			var existingStatus string
-			lookupErr := tx.QueryRow(ctx,
-				`SELECT status FROM org_credentials WHERE org_id = @org_id AND provider = @provider AND label = @label`,
-				pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
-			).Scan(&existingStatus)
-			if lookupErr != nil {
-				labelTakenErr = &ErrCredentialLabelTaken{Label: label, ExistingStatus: "unknown"}
-			} else {
-				labelTakenErr = &ErrCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
-			}
-			return labelTakenErr
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			return fmt.Errorf("insert pending %s credential: %w", provider, scanErr)
 		}
-		return fmt.Errorf("insert pending %s credential: %w", provider, scanErr)
+		// Conflict on (org, provider, label) but the existing row is
+		// active/invalid. Look up the actual status (still inside the
+		// transaction so the read is consistent with the failed insert)
+		// to surface a useful error to the caller.
+		existingStatus := "unknown"
+		var status string
+		if lookupErr := tx.QueryRow(ctx,
+			`SELECT status FROM org_credentials WHERE org_id = @org_id AND provider = @provider AND label = @label`,
+			pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
+		).Scan(&status); lookupErr == nil {
+			existingStatus = status
+		}
+		return &ErrCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
 	})
-	if labelTakenErr != nil {
-		return nil, labelTakenErr
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +688,7 @@ func (s *OrgCredentialStore) ListCodingAuths(ctx context.Context, orgID uuid.UUI
 		FROM org_credentials
 		WHERE org_id = @org_id
 		  AND status != 'disabled'
-		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
+		  AND provider IN ` + codingAuthProviderSQLList + `
 		ORDER BY priority, created_at`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
@@ -724,22 +757,6 @@ func (s *OrgCredentialStore) ReorderCodingAuths(ctx context.Context, orgID uuid.
 	return tx.Commit(ctx)
 }
 
-// isCodingAuthProvider reports whether a provider participates in the
-// coding-agent fallback stack. Priority is only meaningful for these
-// providers; other credentials (GitHub, Sentry, …) keep the default.
-func isCodingAuthProvider(provider models.ProviderName) bool {
-	switch provider {
-	case models.ProviderAnthropic,
-		models.ProviderOpenAI,
-		models.ProviderOpenAIChatGPT,
-		models.ProviderGemini,
-		models.ProviderAmp,
-		models.ProviderPi:
-		return true
-	}
-	return false
-}
-
 // withCodingAuthPriority runs fn inside a transaction guarded by a per-org
 // advisory lock so that the priority lookup + INSERT pair is serialized
 // across concurrent callers in the same org. Without this, two simultaneous
@@ -779,7 +796,7 @@ func (s *OrgCredentialStore) withCodingAuthPriority(
 		SELECT COALESCE(MAX(priority), 0) + 1
 		FROM org_credentials
 		WHERE org_id = @org_id
-		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
+		  AND provider IN `+codingAuthProviderSQLList+`
 		  AND status != 'disabled'`,
 		pgx.NamedArgs{"org_id": orgID},
 	).Scan(&nextPriority); err != nil {
