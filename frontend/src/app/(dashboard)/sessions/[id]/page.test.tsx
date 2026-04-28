@@ -17,8 +17,8 @@ const { routerPush } = vi.hoisted(() => ({
   routerPush: vi.fn(),
 }));
 
-vi.mock('sonner', () => ({
-  toast,
+vi.mock('@/lib/notify', () => ({
+  notify: toast,
 }));
 
 vi.mock('next/navigation', () => ({

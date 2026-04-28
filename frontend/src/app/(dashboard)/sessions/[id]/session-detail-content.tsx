@@ -30,7 +30,7 @@ import {
   Paperclip,
   Pencil,
 } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
