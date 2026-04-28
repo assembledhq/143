@@ -197,10 +197,14 @@ func padWorkerLinearFields(values []any) []any {
 
 func workerSessionTestRow(values ...any) []any {
 	row := workerSessionTestRowDispatch(values...)
-	// Dispatch produces rows of length preLinearWorkerSessionColumnsLen
-	// (no linear_*, no git_identity_*). Layer the two pad helpers so
-	// fixtures stay oblivious to the column-shaping migrations.
-	if len(row) == len(workerSessionColumns)-2-4 {
+	// Dispatch returns the pre-Linear legacy shape (no pending_snapshot_*,
+	// no linear_*, no git_identity_*). Chain the pads so fixtures stay
+	// oblivious to the column-shaping migrations:
+	//   - padWorkerLinearFields adds the four linear_* defaults at the
+	//     position right before deleted_at/created_at (76 → 80).
+	//   - padWorkerIdentityNils splices pending_snapshot_* after snapshot_key
+	//     and the git_identity_* pair before created_at (80 → 84).
+	if len(row) == preLinearWorkerSessionColumnsLen {
 		row = padWorkerLinearFields(row)
 	}
 	return padWorkerIdentityNils(row)

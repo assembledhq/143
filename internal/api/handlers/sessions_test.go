@@ -229,11 +229,12 @@ const (
 // route to the wrong padding helper.
 func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	t.Parallel()
+	const pendingSnapshotFieldsAdded = 2
 	const linearFieldsAdded = 4
 	const identityFieldsAdded = 2
-	require.Equal(t, preLinearSessionColumnsLen+linearFieldsAdded+identityFieldsAdded, len(sessionColumns),
-		"sessionColumns shifted; bump preLinearSessionColumnsLen, linearFieldsAdded, "+
-			"or identityFieldsAdded if a new migration added more session columns")
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+linearFieldsAdded+identityFieldsAdded, len(sessionColumns),
+		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
+			"linearFieldsAdded, or identityFieldsAdded if a new migration added more session columns")
 }
 
 // linearSessionDefaults returns the placeholder values for the four
@@ -426,10 +427,15 @@ func sessionRowLikelyOmitsWorkerNodeID(values []interface{}) bool {
 
 func sessionTestRow(values ...interface{}) []interface{} {
 	row := normalizeSessionRowPrimaryIssueID(sessionTestRowDispatch(values...))
-	// Dispatch produces rows of length preLinearSessionColumnsLen (no
-	// linear_*, no git_identity_*). Layer the two pads so each fixture
-	// stays oblivious to the column-shaping migrations.
-	if len(row) == len(sessionColumns)-2-4 {
+	// Dispatch returns the pre-Linear legacy shape (no pending_snapshot_*,
+	// no linear_*, no git_identity_*). Chain the pads so each fixture stays
+	// oblivious to the column-shaping migrations:
+	//   - padLinearFields adds the four linear_* defaults at the position
+	//     right before deleted_at/created_at (76 → 80).
+	//   - padSessionIdentityColumns splices pending_snapshot_* after
+	//     snapshot_key and the git_identity_* pair before created_at
+	//     (80 → 84).
+	if len(row) == preLinearSessionColumnsLen {
 		row = padLinearFields(row)
 	}
 	return padSessionIdentityColumns(row)
