@@ -152,4 +152,14 @@
   h1, h2, h3 {
     @apply tracking-tight;
   }
+  /* Prevent iOS Safari from auto-zooming when focusing form fields. Triggered
+     when computed font-size is <16px. Scoped to mobile widths so desktop
+     typography is unchanged. */
+  @media (max-width: 640px) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+    textarea,
+    select {
+      font-size: 16px;
+    }
+  }
 }
