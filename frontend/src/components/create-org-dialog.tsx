@@ -4,7 +4,7 @@ import { FormEvent, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 
 import { Button } from "@/components/ui/button";
 import {

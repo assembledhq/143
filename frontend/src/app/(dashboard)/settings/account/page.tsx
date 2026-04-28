@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";

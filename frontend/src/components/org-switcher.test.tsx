@@ -20,8 +20,8 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock, replace: vi.fn() }),
 }));
 
-vi.mock("sonner", () => ({
-  toast: {
+vi.mock("@/lib/notify", () => ({
+  notify: {
     info: toastInfo,
     error: toastError,
   },

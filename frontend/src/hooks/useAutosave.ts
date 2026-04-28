@@ -7,7 +7,7 @@ import {
   type QueryClient,
   type QueryKey,
 } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { captureError } from "@/lib/errors";
 
 export type AutosaveStatus = "idle" | "saving" | "saved" | "error";
