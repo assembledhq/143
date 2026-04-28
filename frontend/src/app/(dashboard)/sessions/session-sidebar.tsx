@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
@@ -138,7 +139,10 @@ function OptimisticSessionRow({ session }: { session: OptimisticSession }) {
             {session.title}
           </p>
           <div className="flex items-center gap-3 mt-0.5">
-            <span className="text-xs text-muted-foreground shrink-0">{cfg.label}</span>
+            <span className="text-xs text-muted-foreground shrink-0">
+              <span>{cfg.label}</span>
+              <AnimatedEllipsis />
+            </span>
             <span className="text-xs text-muted-foreground/50">just now</span>
           </div>
         </div>
@@ -473,7 +477,8 @@ export function SessionSidebar() {
                   <div className="flex items-center justify-between mt-0.5">
                     <div className="flex items-center gap-3 min-w-0">
                       <span className="text-xs text-muted-foreground shrink-0">
-                        {cfg.label}
+                        <span>{cfg.label}</span>
+                        {isWorkingSession && <AnimatedEllipsis />}
                       </span>
                       {session.pm_plan_id && !session.triggered_by_user_id && (
                         <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">

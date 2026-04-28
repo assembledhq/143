@@ -31,6 +31,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
+import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
 import { SessionOwnerToggle } from "./session-owner-toggle";
@@ -108,10 +109,14 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       cell: ({ row }) => {
         const status = row.original.status;
         const cfg = statusConfig[status] || statusConfig.pending;
+        const working = workingSet.has(status);
         return (
           <div className="flex items-center gap-2">
             <SessionStatusDot status={status} />
-            <span className={`text-xs font-medium ${cfg.text}`}>{cfg.label}</span>
+            <span className={`text-xs font-medium ${cfg.text}`}>
+              <span>{cfg.label}</span>
+              {working && <AnimatedEllipsis />}
+            </span>
           </div>
         );
       },
