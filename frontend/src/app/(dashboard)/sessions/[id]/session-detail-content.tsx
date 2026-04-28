@@ -1537,7 +1537,7 @@ function ChatPanel({
   return (
     <div className="relative flex flex-col h-full">
       {showJumpToLatest && (
-        <div className="absolute bottom-24 right-4 z-20">
+        <div className="absolute bottom-4 right-4 z-20">
           <Button
             type="button"
             size="sm"
