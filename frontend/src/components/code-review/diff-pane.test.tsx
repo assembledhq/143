@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { createRef } from "react";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { createRef, forwardRef } from "react";
 import { DiffPane, type DiffPaneHandle } from "./diff-pane";
 import type { DiffFile, DiffLine, DiffHunk } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
@@ -8,12 +8,19 @@ import type { CommentLineKey } from "@/hooks/use-review-comments";
 
 // Mock FileDiffSection to avoid deep rendering
 vi.mock("./file-diff-section", () => ({
-  FileDiffSection: vi.fn().mockImplementation(({ file, isActive, sessionId, onBrowseFile }: { file: DiffFile; isActive: boolean; sessionId?: string; onBrowseFile?: (p: string) => void }) => (
-    <div data-testid={`file-${file.newPath}`} data-active={isActive} data-session={sessionId}>
-      {file.newPath}
-      {onBrowseFile && <button data-testid={`browse-${file.newPath}`} onClick={() => onBrowseFile(file.newPath)}>Browse</button>}
-    </div>
-  )),
+  FileDiffSection: forwardRef<HTMLDivElement, {
+    file: DiffFile;
+    isActive: boolean;
+    sessionId?: string;
+    onBrowseFile?: (p: string) => void;
+  }>(function MockFileDiffSection({ file, isActive, sessionId, onBrowseFile }, ref) {
+    return (
+      <div ref={ref} data-testid={`file-${file.newPath}`} data-active={isActive} data-session={sessionId}>
+        {file.newPath}
+        {onBrowseFile && <button data-testid={`browse-${file.newPath}`} onClick={() => onBrowseFile(file.newPath)}>Browse</button>}
+      </div>
+    );
+  }),
 }));
 
 function makeLine(type: DiffLine["type"], content: string, oldLn: number | null, newLn: number | null): DiffLine {
@@ -114,12 +121,15 @@ describe("DiffPane", () => {
   it("exposes scrollToFile via ref", () => {
     const ref = createRef<DiffPaneHandle>();
     const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
+    const scrollIntoView = vi.fn();
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(scrollIntoView);
     render(<DiffPane ref={ref} files={files} viewMode="unified" />);
 
     // scrollToFile should not throw even if element is not found
     expect(() => ref.current?.scrollToFile(99)).not.toThrow();
     // scrollToFile with valid index should also not throw
     expect(() => ref.current?.scrollToFile(0)).not.toThrow();
+    expect(scrollIntoView).toHaveBeenCalled();
   });
 
   it("exposes scrollToNextHunk and scrollToPrevHunk via ref", () => {
@@ -162,5 +172,61 @@ describe("DiffPane", () => {
     expect(() => ref.current?.scrollToFile(0)).not.toThrow();
     expect(() => ref.current?.scrollToNextHunk()).not.toThrow();
     expect(() => ref.current?.scrollToPrevHunk()).not.toThrow();
+  });
+
+  it("reports the topmost visible file when the diff pane scroll position changes", () => {
+    const onActiveFileChange = vi.fn();
+    const files = [makeDiffFile("a.ts"), makeDiffFile("b.ts")];
+    const { container } = render(
+      <DiffPane
+        files={files}
+        viewMode="unified"
+        onActiveFileChange={onActiveFileChange}
+      />
+    );
+
+    const scrollContainer = container.firstElementChild as HTMLDivElement;
+    const firstFile = screen.getByTestId("file-a.ts");
+    const secondFile = screen.getByTestId("file-b.ts");
+
+    vi.spyOn(scrollContainer, "getBoundingClientRect").mockReturnValue({
+      top: 0,
+      bottom: 600,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    vi.spyOn(firstFile, "getBoundingClientRect").mockReturnValue({
+      top: -220,
+      bottom: 80,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 300,
+      x: 0,
+      y: -220,
+      toJSON: () => ({}),
+    });
+
+    vi.spyOn(secondFile, "getBoundingClientRect").mockReturnValue({
+      top: 24,
+      bottom: 324,
+      left: 0,
+      right: 800,
+      width: 800,
+      height: 300,
+      x: 0,
+      y: 24,
+      toJSON: () => ({}),
+    });
+
+    fireEvent.scroll(scrollContainer);
+
+    expect(onActiveFileChange).toHaveBeenCalledWith(1);
   });
 });
