@@ -1,5 +1,6 @@
 import { MessageSquare } from "lucide-react";
 import { StatusDot } from "@/components/status-dot";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import { DiffStatsBadge } from "./diff-stats-badge";
 import type { DiffStats } from "@/lib/diff-parser";
 
@@ -23,7 +24,7 @@ const statusDotColor: Record<string, string> = {
   awaiting_input: "bg-amber-500",
   needs_human_guidance: "bg-orange-500",
   completed: "bg-emerald-500",
-  pr_created: "bg-violet-500",
+  pr_created: prMergedAccent.dot,
   failed: "bg-destructive",
   cancelled: "bg-muted-foreground/50",
   skipped: "bg-muted-foreground/30",
