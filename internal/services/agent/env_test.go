@@ -65,6 +65,21 @@ func (m *envUserCredentialProvider) GetTeamDefault(_ context.Context, _ uuid.UUI
 	return nil, nil
 }
 
+type envCodingCredentialProvider struct {
+	resolvable map[models.ProviderName][]models.DecryptedCodingCredential
+	errs       map[models.ProviderName]error
+}
+
+func (m *envCodingCredentialProvider) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if err, ok := m.errs[provider]; ok {
+		return nil, err
+	}
+	if creds, ok := m.resolvable[provider]; ok {
+		return creds, nil
+	}
+	return nil, nil
+}
+
 type envOrgStore struct {
 	org   models.Organization
 	err   error
@@ -494,6 +509,93 @@ func TestAgentEnvResolveProviderConfig_UsesPriorityOrderedOrgAPIKeys(t *testing.
 	require.Equal(t, "priority-api-key", cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should choose the highest-priority org API key row")
 }
 
+func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+	expiresAt := time.Now().Add(time.Hour)
+
+	tests := []struct {
+		name     string
+		provider models.ProviderName
+		rows     map[models.ProviderName][]models.DecryptedCodingCredential
+		assert   func(t *testing.T, cfg models.ProviderConfig)
+	}{
+		{
+			name:     "returns anthropic subscription twin as legacy anthropic config",
+			provider: models.ProviderAnthropic,
+			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropicSubscription: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderAnthropicSubscription,
+						Config: models.AnthropicSubscriptionConfig{
+							AccessToken:  "claude-token",
+							RefreshToken: "claude-refresh",
+							ExpiresAt:    expiresAt,
+						},
+						Status: models.CodingCredentialStatusActive,
+					},
+				},
+			},
+			assert: func(t *testing.T, cfg models.ProviderConfig) {
+				t.Helper()
+				require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return the legacy AnthropicConfig shape")
+				sub := cfg.(models.AnthropicConfig).Subscription
+				require.NotNil(t, sub, "resolveProviderConfig should preserve the Claude subscription payload")
+				require.Equal(t, "claude-token", sub.AccessToken, "resolveProviderConfig should preserve the Claude access token")
+				require.Equal(t, "claude-refresh", sub.RefreshToken, "resolveProviderConfig should preserve the Claude refresh token")
+			},
+		},
+		{
+			name:     "returns openai subscription twin as legacy chatgpt config",
+			provider: models.ProviderOpenAI,
+			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAISubscription: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderOpenAISubscription,
+						Config: models.OpenAISubscriptionConfig{
+							AccessToken:  "openai-token",
+							RefreshToken: "openai-refresh",
+							ExpiresAt:    expiresAt,
+							AccountType:  "plus",
+						},
+						Status: models.CodingCredentialStatusActive,
+					},
+				},
+			},
+			assert: func(t *testing.T, cfg models.ProviderConfig) {
+				t.Helper()
+				require.IsType(t, models.OpenAIChatGPTConfig{}, cfg, "resolveProviderConfig should return the legacy OpenAIChatGPTConfig shape")
+				require.Equal(t, "openai-token", cfg.(models.OpenAIChatGPTConfig).AccessToken, "resolveProviderConfig should preserve the OpenAI access token")
+				require.Equal(t, "openai-refresh", cfg.(models.OpenAIChatGPTConfig).RefreshToken, "resolveProviderConfig should preserve the OpenAI refresh token")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: &envCodingCredentialProvider{resolvable: tt.rows},
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
+			})
+
+			cfg := env.resolveProviderConfig(ctx, orgID, &userID, tt.provider)
+
+			tt.assert(t, cfg)
+		})
+	}
+}
+
 func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 	t.Parallel()
 
@@ -540,6 +642,8 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 		t.Parallel()
 
 		require.Nil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}), "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}), "compatibleCodingProviderConfig should accept Anthropic subscription rows for the subscription twin")
+		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAISubscription, models.OpenAISubscriptionConfig{AccessToken: "openai-sub", RefreshToken: "openai-refresh"}), "compatibleCodingProviderConfig should accept OpenAI subscription rows for the subscription twin")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}), "compatibleCodingProviderConfig should accept Anthropic API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}), "compatibleCodingProviderConfig should accept OpenAI API keys")
 		require.NotNil(t, compatibleCodingProviderConfig(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}), "compatibleCodingProviderConfig should accept Gemini API keys")

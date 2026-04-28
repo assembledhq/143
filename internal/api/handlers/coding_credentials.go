@@ -270,6 +270,18 @@ func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request)
 				"status must be one of: active, disabled, invalid (pending_auth is set by the OAuth flow)")
 			return
 		}
+		if *input.Status == models.CodingCredentialStatusActive {
+			current, err := h.store.Get(r.Context(), scope, id)
+			if err != nil {
+				h.handleStoreError(w, r, err, "READ_BEFORE_STATUS_FAILED")
+				return
+			}
+			if current.Status == models.CodingCredentialStatusPendingAuth {
+				writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
+					"pending_auth credentials must be activated by completing the OAuth flow")
+				return
+			}
+		}
 		if err := h.store.UpdateStatus(r.Context(), scope, id, *input.Status); err != nil {
 			h.handleStoreError(w, r, err, "STATUS_FAILED")
 			return
