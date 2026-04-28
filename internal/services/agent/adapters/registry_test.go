@@ -22,5 +22,5 @@ func TestDefaultMap(t *testing.T) {
 	require.NotNil(t, adapters[models.AgentTypeAmp], "DefaultMap should include Amp")
 	require.NotNil(t, adapters[models.AgentTypePi], "DefaultMap should include Pi")
 	require.Equal(t, []models.SessionReviewMode{models.SessionReviewModeDefault, models.SessionReviewModeSecurity}, agent.AdapterReviewModes(adapters[models.AgentTypeClaudeCode]), "Claude Code should advertise the native review modes through the shared registry")
-	require.Nil(t, agent.AdapterReviewModes(adapters[models.AgentTypeCodex]), "non-review-capable adapters should continue to report no review modes")
+	require.Equal(t, []models.SessionReviewMode{models.SessionReviewModeDefault}, agent.AdapterReviewModes(adapters[models.AgentTypeCodex]), "Codex should advertise its native review mode through the shared registry")
 }
