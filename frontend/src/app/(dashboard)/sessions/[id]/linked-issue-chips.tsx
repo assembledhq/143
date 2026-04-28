@@ -24,14 +24,8 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         const isPrimary = link.role === "primary";
         // Linear links must always carry an external_id (the Linear key
         // like "ACS-1234"). Falling back to a UUID slice would surface a
-        // bug as a confusing chip; render an explicit placeholder instead.
-        if (isLinear && !link.external_id) {
-          // Surface in the console so dogfooding catches the missing key
-          // without the user having to file a ticket.
-          if (typeof console !== "undefined") {
-            console.warn("LinkedIssueChips: linear link missing external_id", link);
-          }
-        }
+        // bug as a confusing chip; render an explicit placeholder instead
+        // so the missing key is visible during dogfooding.
         const ident = isLinear
           ? (link.external_id ?? "Linear (no key)")
           : (link.external_id ?? link.issue_id.slice(0, 8));
@@ -48,10 +42,13 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           // Prefer the workspace-qualified URL when we cached the slug;
           // it resolves correctly regardless of which workspace the user
           // last viewed in Linear. Fall back to the universal redirect
-          // for legacy links written before slug caching landed.
+          // for legacy links written before slug caching landed. Both
+          // segments are URL-encoded defensively even though the backend
+          // already normalizes them — guards against future code paths
+          // that surface user-typed slug overrides.
           const url = link.issue_workspace_slug
-            ? `https://linear.app/${link.issue_workspace_slug}/issue/${link.external_id}`
-            : `https://linear.app/issue/${link.external_id}`;
+            ? `https://linear.app/${encodeURIComponent(link.issue_workspace_slug)}/issue/${encodeURIComponent(link.external_id)}`
+            : `https://linear.app/issue/${encodeURIComponent(link.external_id)}`;
           return (
             <a
               key={link.id}

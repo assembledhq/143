@@ -326,9 +326,10 @@ func (s *Service) withProviderStateLocked(
 
 // SessionURL builds the absolute deep-link to a session that we send to
 // Linear. Centralized here so attachment URL and comment body never disagree
-// and so callers don't have to know the FRONTEND_URL plumbing. Trailing
-// slashes are stripped defensively so a misconfigured FRONTEND_URL doesn't
-// produce a `//sessions/<id>` URL that breaks Linear's renderer.
+// and so callers don't have to know the FRONTEND_URL plumbing. NewService
+// already trims trailing slashes; we re-trim here as defense-in-depth so
+// any future direct-construction path (notably tests) still produces a
+// clean URL instead of `//sessions/<id>` that breaks Linear's renderer.
 func (s *Service) SessionURL(sessionID uuid.UUID) string {
 	if s == nil || s.appBaseURL == "" {
 		return fmt.Sprintf("/sessions/%s", sessionID.String())
@@ -503,6 +504,7 @@ func (s *Service) LinkResolved(
 		auditReason = "linear_null_repo_carveout"
 	}
 	if err := s.providerState.Merge(ctx, orgID, linkID, db.LinearProviderState{
+		Identifier:         resolved.Identifier,
 		TeamID:             resolved.Issue.TeamID,
 		WorkspaceSlug:      resolved.Issue.WorkspaceSlug,
 		LinkAuditReason:    auditReason,

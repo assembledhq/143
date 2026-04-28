@@ -106,7 +106,17 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 	sessionURL := s.SessionURL(in.Session.ID)
 	body := commentBodyForMilestone(in.Event, in.IssueIdent, sessionURL, in.PRNumber)
 
-	return s.withProviderStateLocked(ctx, in.Session.OrgID, in.Link.ID,
+	// Durable handles captured from successful API calls. If the locked tx
+	// later fails to commit, we replay these via a non-tx Merge so a retry
+	// observes the live CommentID/AttachmentID and takes the update branch
+	// rather than calling commentCreate/attachmentCreate a second time. The
+	// Linear API has no client-supplied idempotency key on commentCreate so
+	// this best-effort rescue is the closest we can get to outbox semantics
+	// without a side table.
+	var rescue db.LinearProviderState
+	hasRescue := false
+
+	txErr := s.withProviderStateLocked(ctx, in.Session.OrgID, in.Link.ID,
 		func(ctx context.Context, txState providerStateStore, _ stateEventStore, state db.LinearProviderState) error {
 			attachmentResult, err := client.CreateOrUpdateAttachment(ctx, AttachmentWriteInput{
 				IssueID:  in.IssueID,
@@ -124,6 +134,11 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 			if err != nil {
 				return fmt.Errorf("write linear attachment: %w", err)
 			}
+			if attachmentResult.ID != "" && attachmentResult.ID != state.AttachmentID {
+				rescue.AttachmentID = attachmentResult.ID
+				rescue.AttachmentURL = attachmentResult.URL
+				hasRescue = true
+			}
 
 			if state.CommentID == "" {
 				// First write — create. Subsequent milestones update in
@@ -133,6 +148,8 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 					return fmt.Errorf("create linear comment: %w", err)
 				}
 				state.CommentID = commentID
+				rescue.CommentID = commentID
+				hasRescue = true
 			} else {
 				if err := client.UpdateComment(ctx, state.CommentID, body); err != nil {
 					return fmt.Errorf("update linear comment: %w", err)
@@ -148,6 +165,20 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 			}
 			return nil
 		})
+
+	if txErr != nil && hasRescue {
+		// Locked tx failed after we already created Linear-side artifacts.
+		// Persist the durable handles via the non-tx store on a separate
+		// connection so a retry sees them and takes the update branch.
+		// Best-effort: if this also fails the retry will double-post.
+		if mergeErr := s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, rescue); mergeErr != nil {
+			s.logger.Error().Err(mergeErr).
+				Str("link_id", in.Link.ID.String()).
+				Msg("failed to rescue linear durable handles after locked tx failure; retry may double-post")
+		}
+	}
+
+	return txErr
 }
 
 // shouldPostSessionLinks consults the parsed org settings. Defaults
@@ -374,9 +405,19 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				prefer = s.reviewStatePreferences(ctx, in.Session.OrgID)
 			}
 			target, err := client.WorkflowStateForType(ctx, state.TeamID, prefer, targetType)
-			if err != nil || target == nil {
-				// No target state available — record skip rather than
-				// error so the audit trail explains it.
+			if err != nil {
+				// Transient lookup failure (network, 401, missing teamID
+				// during a race). Surface so the worker retries; do NOT
+				// record a skip event — the unique constraint on
+				// (session_id, issue_id, event_kind) would burn this
+				// transition slot, and the retry would observe
+				// ErrLinearStateEventExists and silently no-op.
+				return fmt.Errorf("resolve target workflow state: %w", err)
+			}
+			if target == nil {
+				// No target state exists for this type in this team. This is
+				// a permanent (operator-fixable) condition — record a skip
+				// so the audit trail explains it.
 				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
 			}
 
@@ -385,9 +426,9 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			// operation) from "already past target" (issue moved on
 			// without us — refuse to rewind) so the operator audit log
 			// gives a faithful explanation.
-			if !isForwardMove(state.LastKnownStateType, target.Type) {
+			if !shouldMoveToTarget(in.Event, state.LastKnownStateType, state.LastKnownStateName, target.Type, target.Name) {
 				reason := db.LinearStateSkipAlreadyPastTarget
-				if state.LastKnownStateType == target.Type {
+				if state.LastKnownStateType == target.Type && strings.EqualFold(state.LastKnownStateName, target.Name) {
 					reason = db.LinearStateSkipAlreadyInTargetState
 				}
 				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, reason)
@@ -525,4 +566,14 @@ func isForwardMove(current, target string) bool {
 		return false
 	}
 	return tr > cr
+}
+
+func shouldMoveToTarget(event MilestoneEvent, currentType, currentName, targetType, targetName string) bool {
+	if event == MilestonePROpened &&
+		currentType == "started" &&
+		targetType == "started" &&
+		!strings.EqualFold(currentName, targetName) {
+		return true
+	}
+	return isForwardMove(currentType, targetType)
 }

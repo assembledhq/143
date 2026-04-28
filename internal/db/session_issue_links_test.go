@@ -83,6 +83,35 @@ func TestSessionIssueLinkStore_Create(t *testing.T) {
 	}
 }
 
+func TestSessionIssueLinkStore_CreateAllowingNullRepo_AllowsRepoLessSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionIssueLinkStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectQuery(`INSERT INTO session_issue_links[\s\S]+AND \(s\.repository_id IS NULL OR i\.repository_id IS NULL OR s\.repository_id = i\.repository_id\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(linkID))
+
+	got, err := store.CreateAllowingNullRepo(context.Background(), orgID, sessionID, issueID, models.SessionIssueLinkRolePrimary, 0, nil)
+	require.NoError(t, err, "CreateAllowingNullRepo should allow issue-only sessions with no repository")
+	require.Equal(t, linkID, got, "CreateAllowingNullRepo should return the inserted link id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionIssueLinkSelectColumns_UsesLinearIdentifierForExternalID(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, sessionIssueLinkSelectColumns, "COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id", "linked issue enrichment should expose the human Linear key when provider state has it")
+}
+
 func TestSessionIssueLinkStore_ListBySession(t *testing.T) {
 	t.Parallel()
 

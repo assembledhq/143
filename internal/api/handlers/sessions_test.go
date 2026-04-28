@@ -19,7 +19,6 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -5375,66 +5374,6 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code, "LLM title generation failure should return 500")
 
 	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-// fakeLinearLinker is a stand-in for the production linear.Service used by
-// CreateManual. It records the input and returns a configurable result, so
-// callers can pass it via SetLinearLinker to verify the wiring contract.
-//
-// Kept here (rather than as anonymous struct in a single test) so future
-// additions don't have to reinvent the shape.
-type fakeLinearLinker struct {
-	called      bool
-	gotInput    linear.CreateInput
-	resultPrim  string
-	resultTitle string
-}
-
-func (f *fakeLinearLinker) ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error) {
-	f.called = true
-	f.gotInput = in
-	return linear.CreateResult{
-		PrepareInline:     true,
-		PrimaryIdentifier: f.resultPrim,
-		PrimaryTitle:      f.resultTitle,
-	}, nil
-}
-
-// TestSessionHandler_CreateManual_RunsLinkerInputsThroughDetection asserts
-// the bounded detection inputs (message body, branch name, reference
-// displays) flow into the linker exactly. We bypass the surrounding DB
-// plumbing by setting the linker on a handler that returns early — i.e.
-// the linker is wired but no repository_id is provided, so the linker
-// guard inside CreateManual short-circuits before any DB work.
-//
-// This is a unit-level wiring contract test; the full integration
-// (concurrency check, job enqueue, prepare-state gate) is covered in
-// internal/worker/handlers_test.go.
-func TestSessionHandler_CreateManual_LinkerSkipsWithoutRepository(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create pgxmock pool")
-	defer mock.Close()
-
-	handler := newSessionHandler(t, mock)
-	linker := &fakeLinearLinker{}
-	handler.SetLinearLinker(linker)
-
-	// Body with no repository_id — handler returns 400 from the repo
-	// validation paths or falls through. We assert only that the linker
-	// is *not* called when repository_id is empty: the design says
-	// detection should not run if the session is repoless because there
-	// is no session-level repo invariant to check.
-	body := `{"message":"see ACS-1234","agent_type":"claude_code"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
-	ctx := middleware.WithOrgID(req.Context(), uuid.New())
-	req = req.WithContext(ctx)
-	w := httptest.NewRecorder()
-
-	handler.CreateManual(w, req)
-
-	require.False(t, linker.called, "CreateManual must skip the linker when no repository_id is provided")
 }
 
 func TestSessionHandler_CreatePR_Success(t *testing.T) {

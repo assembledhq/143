@@ -172,6 +172,11 @@ export interface Session {
   linear_private?: boolean;
   linear_state_sync_disabled?: boolean;
   linear_identifier_hint?: string;
+  // linear_prepare_state is the server-side gate that blocks turn 1 until
+  // the primary Linear issue snapshot is captured. The backend emits it on
+  // every session payload; no UI affordance reads it yet, but exposing the
+  // type keeps a future "Preparing Linear context..." indicator one diff
+  // away rather than requiring an API contract change.
   linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;

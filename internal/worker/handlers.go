@@ -1232,7 +1232,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			// `failed` here because failRun in the orchestrator is the
 			// canonical entry point for those.
 			if errors.Is(createErr, ghservice.ErrNoChanges) {
-				enqueueLinearMilestoneFromHandler(ctx, stores.Jobs, orgID, runID, "ended_no_pr", logger)
+				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
 			}
 			if shouldDeadLetterPRError(createErr) {
 				return &FatalError{Err: createErr}
@@ -1244,27 +1244,6 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		return nil
-	}
-}
-
-// enqueueLinearMilestoneFromHandler is the worker-side helper for firing
-// terminal Linear milestone events (ended_no_pr, failed) from job handlers
-// that have a JobStore but not a wired LinearMilestoneEnqueuer. The queue,
-// priority, and dedupe-key shape match linear.MilestoneEnqueuerFor so
-// multi-source events for the same (session, event) collapse cleanly.
-func enqueueLinearMilestoneFromHandler(ctx context.Context, jobs *db.JobStore, orgID, sessionID uuid.UUID, event string, logger zerolog.Logger) {
-	if jobs == nil {
-		return
-	}
-	dedupe := "linear_milestone:" + sessionID.String() + ":" + event
-	payload := map[string]any{
-		"org_id":     orgID.String(),
-		"session_id": sessionID.String(),
-		"event":      event,
-		"pr_number":  0,
-	}
-	if _, err := jobs.Enqueue(ctx, orgID, "linear", "linear_milestone", payload, 5, &dedupe); err != nil {
-		logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("event", event).Msg("failed to enqueue terminal linear_milestone")
 	}
 }
 
@@ -2505,7 +2484,11 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 			}
 		}
 		if primary == nil {
-			// No primary Linear link — nothing to write.
+			// No primary link at all — log so operators chasing "why
+			// didn't Linear update?" don't have to grep the worker for
+			// silence. Common when the link was removed before the
+			// milestone fired; benign.
+			logger.Info().Str("session_id", sessionID.String()).Msg("linear_milestone: no primary link; skipping")
 			return nil
 		}
 		// Resolve the Linear external ID + identifier from the issue.
@@ -2514,6 +2497,15 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 			return fmt.Errorf("fetch primary linear issue: %w", err)
 		}
 		if issue.Source != models.IssueSourceLinear {
+			// The primary link points at a non-Linear issue (data drift —
+			// usually means the issue was re-sourced). Log loudly: this
+			// shouldn't happen for a job dispatched as `linear_milestone`,
+			// and silent return makes operator debugging painful.
+			logger.Warn().
+				Str("session_id", sessionID.String()).
+				Str("issue_id", primary.IssueID.String()).
+				Str("issue_source", string(issue.Source)).
+				Msg("linear_milestone: primary issue is not a Linear issue; skipping")
 			return nil
 		}
 		identifier := ""

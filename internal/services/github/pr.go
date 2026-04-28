@@ -1943,7 +1943,7 @@ func stripLinearColonPrefix(s string) string {
 // linearBracketPrefixRE matches a single leading "[KEY-N] " prefix; we use
 // it to strip stale prefixes from a title before re-prefixing on title
 // resync, so resync never double-prefixes (design 62 §"Title resync").
-var linearBracketPrefixRE = regexp.MustCompile(`^\[[A-Z][A-Z0-9_]{0,9}-\d+\]\s+`)
+var linearBracketPrefixRE = regexp.MustCompile(`^\[[A-Z][A-Z0-9_]{0,9}-[0-9]+\]\s+`)
 
 // stripLeadingBracketPrefixes removes every leading "[KEY-N] " from title.
 // Order matters: the loop trims one prefix at a time so a title like

@@ -93,19 +93,44 @@ func Build(deps BuildDeps) *Service {
 	return svc
 }
 
+// MilestoneJobEnqueuer is the narrow surface EnqueueMilestone needs — both
+// *db.JobStore and the agent package's local JobStore interface satisfy it
+// structurally, so the consolidator works across import boundaries without
+// pulling additional packages into either side.
+type MilestoneJobEnqueuer interface {
+	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+}
+
+// EnqueueMilestone is the canonical enqueuer for linear_milestone jobs:
+// every caller (PR-event closure via MilestoneEnqueuerFor, terminal-state
+// orchestrator path, no-changes worker handler) routes through here so the
+// queue name, priority, and dedupe-key shape never drift. Best-effort —
+// failures only log because terminal session bookkeeping must not stall on
+// Linear-side hiccups.
+func EnqueueMilestone(ctx context.Context, jobs MilestoneJobEnqueuer, logger zerolog.Logger, orgID, sessionID uuid.UUID, event string, prNumber int) {
+	if jobs == nil {
+		return
+	}
+	dedupe := "linear_milestone:" + sessionID.String() + ":" + event
+	payload := map[string]any{
+		"org_id":     orgID.String(),
+		"session_id": sessionID.String(),
+		"event":      event,
+		"pr_number":  prNumber,
+	}
+	if _, err := jobs.Enqueue(ctx, orgID, "linear", "linear_milestone", payload, 5, &dedupe); err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("event", event).
+			Msg("failed to enqueue linear_milestone job")
+	}
+}
+
 // MilestoneEnqueuerFor returns the closure that PRService.SetLinearMilestoneEnqueuer
-// expects, sharing the same JobStore + queue convention as Build. Held as a
-// helper so the router and main.go don't diverge on dedupe-key shape.
+// expects, sharing the same JobStore + queue convention as Build via
+// EnqueueMilestone.
 func MilestoneEnqueuerFor(jobs *db.JobStore, logger zerolog.Logger) func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int) {
 	return func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int) {
-		dedupe := "linear_milestone:" + sessionID.String() + ":" + event
-		if _, err := jobs.Enqueue(ctx, orgID, "linear", "linear_milestone", map[string]any{
-			"org_id":     orgID.String(),
-			"session_id": sessionID.String(),
-			"event":      event,
-			"pr_number":  prNumber,
-		}, 5, &dedupe); err != nil {
-			logger.Warn().Err(err).Msg("failed to enqueue linear_milestone job")
-		}
+		EnqueueMilestone(ctx, jobs, logger, orgID, sessionID, event, prNumber)
 	}
 }

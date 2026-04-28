@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSubtitleForMilestone(t *testing.T) {
@@ -67,6 +68,58 @@ func TestIsForwardMove(t *testing.T) {
 		if got != c.want {
 			t.Errorf("isForwardMove(%q, %q) = %v, want %v", c.from, c.to, got, c.want)
 		}
+	}
+}
+
+func TestShouldMoveToTarget_AllowsPROpenWithinStartedStates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		event       MilestoneEvent
+		currentType string
+		currentName string
+		targetType  string
+		targetName  string
+		expected    bool
+	}{
+		{
+			name:        "PR open can move between different started states",
+			event:       MilestonePROpened,
+			currentType: "started",
+			currentName: "In Progress",
+			targetType:  "started",
+			targetName:  "In Review",
+			expected:    true,
+		},
+		{
+			name:        "PR open does not move when already in target state",
+			event:       MilestonePROpened,
+			currentType: "started",
+			currentName: "In Review",
+			targetType:  "started",
+			targetName:  "In Review",
+			expected:    false,
+		},
+		{
+			name:        "linked event keeps same-type sideways moves disabled",
+			event:       MilestoneLinked,
+			currentType: "started",
+			currentName: "In Progress",
+			targetType:  "started",
+			targetName:  "In Review",
+			expected:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := shouldMoveToTarget(tt.event, tt.currentType, tt.currentName, tt.targetType, tt.targetName)
+			require.Equal(t, tt.expected, got, "shouldMoveToTarget should enforce the expected state-transition policy")
+		})
 	}
 }
 

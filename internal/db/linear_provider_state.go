@@ -17,6 +17,10 @@ import (
 // columns on session_issue_links or its own polluting columns on the side
 // table) lets future trackers grow their own provider without schema churn.
 type LinearProviderState struct {
+	// Identifier is the human Linear key (e.g. "ACS-1234"). The canonical
+	// issues.external_id remains Linear's UUID because API writes need it;
+	// linked-issue views and PR title prefixes read this field instead.
+	Identifier string `json:"identifier,omitempty"`
 	// AttachmentID is the Linear attachmentCreate id we persist as the durable
 	// handle for this session's attachment on the issue. Subsequent milestones
 	// use attachmentUpdate, not attachmentCreate, so this is the dedupe anchor.
@@ -73,6 +77,11 @@ type LinearProviderState struct {
 	// LastSkippedReason captures the last suppress decision (debounced,
 	// user_recent_edit, linear_github_integration_active, etc.).
 	LastSkippedReason string `json:"last_skipped_reason,omitempty"`
+	// PrimarySnapshot is the JSON-encoded LinearTurnContext captured at link
+	// time so the agent's pre-turn-0 boot can hydrate without a live Linear
+	// read. Stored as RawMessage to keep this package free of any
+	// services/linear import; consumers re-decode into LinearTurnContext.
+	PrimarySnapshot json.RawMessage `json:"primary_snapshot,omitempty"`
 }
 
 // LinearAttachmentMetadata is the stable schema we send in attachment
@@ -186,6 +195,9 @@ func (s *LinearProviderStateStore) Merge(ctx context.Context, orgID, linkID uuid
 // recording a skip reason) would clobber sticky flags like
 // CoexistsWithGitHubIntegration back to false on every call.
 func MergeLinearProviderState(current, patch LinearProviderState) LinearProviderState {
+	if patch.Identifier != "" {
+		current.Identifier = patch.Identifier
+	}
 	if patch.AttachmentID != "" {
 		current.AttachmentID = patch.AttachmentID
 	}
@@ -224,6 +236,9 @@ func MergeLinearProviderState(current, patch LinearProviderState) LinearProvider
 	}
 	if patch.IssueRepoStale != nil {
 		current.IssueRepoStale = patch.IssueRepoStale
+	}
+	if len(patch.PrimarySnapshot) > 0 {
+		current.PrimarySnapshot = patch.PrimarySnapshot
 	}
 	return current
 }

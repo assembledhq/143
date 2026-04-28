@@ -91,7 +91,7 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 
 	// Snapshot the linked issue context for turn 0 so the worker doesn't
 	// have to re-fetch when it boots.
-	if err := s.snapshotPrimaryContext(ctx, in.OrgID, in.SessionID, linkID, resolved); err != nil {
+	if err := s.snapshotPrimaryContext(ctx, in.OrgID, linkID, resolved); err != nil {
 		s.logger.Warn().Err(err).Msg("failed to snapshot linear context; turn 1 may need to refetch")
 	}
 
@@ -135,7 +135,7 @@ func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit
 // snapshotPrimaryContext writes the turn-0 issue snapshot so the agent's
 // boot path has everything without a live read. Used by both the inline
 // and the async resolution paths.
-func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, sessionID, linkID uuid.UUID, resolved *ResolvedIssue) error {
+func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, linkID uuid.UUID, resolved *ResolvedIssue) error {
 	if s.providerState == nil {
 		return nil
 	}
@@ -144,7 +144,7 @@ func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, sessionID, 
 	if err != nil {
 		return fmt.Errorf("encode snapshot: %w", err)
 	}
-	// Persist into provider_state as `last_known_state_*` plus a
+	// Persist into provider_state as `last_known_state_*` plus the
 	// snapshot blob the agent context-builder reads. We don't introduce a
 	// per-turn table here because session_turn_issue_snapshots already
 	// covers turn 1 onwards; this is the pre-turn-0 cache.
@@ -155,12 +155,8 @@ func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, sessionID, 
 	current.LastKnownStateName = resolved.Issue.StateName
 	current.LastKnownStateType = resolved.Issue.StateType
 	current.TeamID = resolved.Issue.TeamID
-	if err := s.providerState.Upsert(ctx, orgID, linkID, current); err != nil {
-		return err
-	}
-	_ = sessionID
-	_ = raw
-	return nil
+	current.PrimarySnapshot = raw
+	return s.providerState.Upsert(ctx, orgID, linkID, current)
 }
 
 // enqueueLinkWorker schedules link_linear_issue for follow-up work. The
@@ -226,7 +222,7 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
 		return err
 	}
-	_ = s.snapshotPrimaryContext(ctx, orgID, sessionID, linkID, resolved)
+	_ = s.snapshotPrimaryContext(ctx, orgID, linkID, resolved)
 	_ = s.sessions.SetLinearIdentifierHint(ctx, orgID, sessionID, resolved.Identifier)
 
 	for i, ident := range identifiers[1:] {

@@ -78,8 +78,11 @@ func (s *LinearTeamKeyStore) ReplaceForIntegration(ctx context.Context, orgID, i
 
 func (s *LinearTeamKeyStore) replaceForIntegrationNoTx(ctx context.Context, ex DBTX, orgID, integrationID uuid.UUID, workspaceID string, teams []LinearTeamKey) error {
 	if _, err := ex.Exec(ctx, `
-		DELETE FROM linear_team_keys WHERE integration_id = @integration_id`,
-		pgx.NamedArgs{"integration_id": integrationID}); err != nil {
+		DELETE FROM linear_team_keys WHERE integration_id = @integration_id AND org_id = @org_id`,
+		pgx.NamedArgs{
+			"integration_id": integrationID,
+			"org_id":         orgID,
+		}); err != nil {
 		return fmt.Errorf("clear linear team keys: %w", err)
 	}
 

@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -2596,24 +2597,13 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 // signal. Best effort — a failed enqueue logs and moves on so terminal
 // session bookkeeping isn't held hostage by Linear-side hiccups.
 //
-// jobs may be nil in tests; in production it's always wired via
-// OrchestratorConfig.Jobs. The "linear" queue and priority 5 mirror
-// linear.MilestoneEnqueuerFor so retries and dead-letter behavior match
-// the PR-event path.
+// Routes through linear.EnqueueMilestone so the queue/priority/dedupe-key
+// shape stays consistent with the PR-event and no-changes paths.
 func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.Session, event string) {
-	if o == nil || o.jobs == nil || run == nil {
+	if o == nil || run == nil {
 		return
 	}
-	dedupe := "linear_milestone:" + run.ID.String() + ":" + event
-	payload := map[string]any{
-		"org_id":     run.OrgID.String(),
-		"session_id": run.ID.String(),
-		"event":      event,
-		"pr_number":  0,
-	}
-	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "linear", "linear_milestone", payload, 5, &dedupe); err != nil {
-		o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("event", event).Msg("failed to enqueue linear_milestone for terminal session state")
-	}
+	linear.EnqueueMilestone(ctx, o.jobs, o.logger, run.OrgID, run.ID, event, 0)
 }
 
 // failRunWithCategory marks a run as failed with a structured failure category,

@@ -27,7 +27,9 @@ func NewSessionIssueLinkStore(db DBTX) *SessionIssueLinkStore {
 // correctly when the user is logged into the right workspace).
 const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.issue_id, sil.role,
 	sil.position, sil.added_by_user_id, sil.created_at,
-	i.title AS issue_title, i.source AS issue_source, i.external_id, i.description,
+	i.title AS issue_title, i.source AS issue_source,
+	COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id,
+	i.description,
 	i.repository_id, i.status AS issue_status,
 	(provider_state.state->>'workspace_slug') AS issue_workspace_slug`
 
@@ -35,7 +37,9 @@ const sessionIssueLinkFromClause = `
 	FROM session_issue_links sil
 	JOIN issues i ON i.id = sil.issue_id AND i.org_id = sil.org_id
 	LEFT JOIN session_issue_link_provider_state provider_state
-	  ON provider_state.link_id = sil.id AND provider_state.provider = 'linear'`
+	  ON provider_state.link_id = sil.id
+	  AND provider_state.org_id = sil.org_id
+	  AND provider_state.provider = 'linear'`
 
 func (s *SessionIssueLinkStore) Create(
 	ctx context.Context,
@@ -100,9 +104,9 @@ func (s *SessionIssueLinkStore) CreateAllowingNullRepo(
 		WHERE s.id = @session_id
 		  AND s.org_id = @org_id
 		  AND s.deleted_at IS NULL
-		  AND s.repository_id IS NOT NULL
-		  -- carve-out: allow null-repo Linear issues; explicit mismatch rejected
-		  AND (i.repository_id IS NULL OR s.repository_id = i.repository_id)
+		  -- carve-out: allow issue-only sessions and null-repo Linear issues;
+		  -- explicit repo mismatch is still rejected.
+		  AND (s.repository_id IS NULL OR i.repository_id IS NULL OR s.repository_id = i.repository_id)
 		ON CONFLICT (session_id, issue_id) DO NOTHING
 		RETURNING id`
 

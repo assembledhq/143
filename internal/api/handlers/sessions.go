@@ -80,10 +80,13 @@ type SessionHandler struct {
 	shutdownCh <-chan struct{}
 }
 
-// linearSessionLinker is the narrow surface SessionHandler needs from the
-// Linear service. The concrete *linear.Service satisfies this; the
-// interface stays here so CreateManual is testable without dragging in the
-// full Linear stack.
+// linearSessionLinker is the single-method surface SessionHandler invokes
+// on the Linear service. The interface lives here (not in the linear
+// package) so SetLinearLinker can accept a stub in tests without bringing
+// up the full Linear stack. We do still depend on linear.CreateInput /
+// linear.CreateResult at the type level — those are pure value structs
+// that the handler builds anyway, and re-defining them locally would only
+// add adapter code without breaking the dependency.
 type linearSessionLinker interface {
 	ResolveAndLinkAtCreate(ctx context.Context, in linear.CreateInput) (linear.CreateResult, error)
 }

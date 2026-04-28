@@ -4,6 +4,16 @@
 -- state (attachment IDs, rolling comment IDs, prior-state captures, last-known
 -- state cache) lives in this side table keyed by link_id. Future trackers grow
 -- their own rows in the same table without polluting the join.
+
+-- The two ALTER TABLE statements below take AccessExclusiveLock on `sessions`
+-- (a hot table). Each ADD COLUMN is metadata-only on PG ≥11 because the
+-- DEFAULTs are constants, but if a long-running transaction is holding any
+-- lock on `sessions`, this migration will queue behind it and stall every new
+-- query until it acquires. Fail fast instead — operators can replay the
+-- migration during a quieter window. lock_timeout is transaction-local and
+-- resets at commit.
+SET LOCAL lock_timeout = '5s';
+
 CREATE TABLE session_issue_link_provider_state (
     link_id    uuid PRIMARY KEY REFERENCES session_issue_links(id) ON DELETE CASCADE,
     org_id     uuid NOT NULL REFERENCES organizations(id),
@@ -54,17 +64,18 @@ CREATE TABLE linear_team_keys (
 CREATE INDEX idx_linear_team_keys_org_workspace
     ON linear_team_keys (org_id, workspace_id);
 
--- Per-session Linear policy flags. Frozen at session create — see design 62
--- §"Composer controls must express distinct semantics" for why these are not
--- editable later (avoids confusing "post the missed events now" backfills).
+-- Per-session Linear policy + prepare-state columns. Combined into a single
+-- ALTER so the catalog update is one statement against the hot sessions
+-- table. Flags are frozen at session create — see design 62 §"Composer
+-- controls must express distinct semantics" for why these are not editable
+-- later (avoids confusing "post the missed events now" backfills).
+-- linear_prepare_state is the idempotent dedupe surface for prepare-and-link
+-- work; the job worker uses (session_id, source_inputs_hash) as the key so
+-- re-detections collapse cleanly.
 ALTER TABLE sessions
     ADD COLUMN linear_private boolean NOT NULL DEFAULT false,
     ADD COLUMN linear_state_sync_disabled boolean NOT NULL DEFAULT false,
-    ADD COLUMN linear_identifier_hint text;
-
--- Idempotent dedupe surface for prepare-and-link work. The job worker uses
--- (session_id, source_inputs_hash) as the key so re-detections collapse cleanly.
-ALTER TABLE sessions
+    ADD COLUMN linear_identifier_hint text,
     ADD COLUMN linear_prepare_state text NOT NULL DEFAULT 'none',
     ADD CONSTRAINT chk_sessions_linear_prepare_state
         CHECK (linear_prepare_state IN ('none', 'pending', 'ready', 'failed'));

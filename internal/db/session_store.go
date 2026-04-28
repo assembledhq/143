@@ -507,7 +507,7 @@ func (s *SessionStore) SetLinearPrepareState(ctx context.Context, orgID, session
 // includes the identifier — Linear's GitHub integration matches branch
 // prefixes independently of the PR title.
 func (s *SessionStore) SetLinearIdentifierHint(ctx context.Context, orgID, sessionID uuid.UUID, identifier string) error {
-	_, err := s.db.Exec(ctx, `
+	tag, err := s.db.Exec(ctx, `
 		UPDATE sessions
 		SET linear_identifier_hint = NULLIF(@identifier, '')
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
@@ -516,7 +516,13 @@ func (s *SessionStore) SetLinearIdentifierHint(ctx context.Context, orgID, sessi
 			"org_id":     orgID,
 			"identifier": identifier,
 		})
-	return err
+	if err != nil {
+		return fmt.Errorf("update linear identifier hint: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("session not found")
+	}
+	return nil
 }
 
 func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {

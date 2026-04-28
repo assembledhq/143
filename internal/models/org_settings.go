@@ -283,8 +283,14 @@ type LinearAutomationSettings struct {
 	MoveWorkflowStates *bool `json:"move_workflow_states,omitempty"`
 	// ReviewStateNamePreferences lists the workflow state names we'd prefer
 	// to land in when a PR opens, in order. First match in the team's state
-	// set wins. Empty falls back to a sensible default list at the call
-	// site. Stored as raw strings because workspaces customize freely.
+	// set wins. Stored as raw strings because workspaces customize freely.
+	//
+	// Semantics: empty slice and nil are treated identically — both fall
+	// back to DefaultLinearReviewStateNames. There is no "explicitly empty
+	// to disable PR-open transitions" knob; use MoveWorkflowStates=false
+	// for that. If we ever need to express "leave PR-open state alone but
+	// keep the other transitions," switch this field to *[]string so the
+	// nil-vs-empty distinction becomes meaningful.
 	ReviewStateNamePreferences []string `json:"review_state_name_preferences,omitempty"`
 	// PerTeam overrides keyed by Linear team key. Inherits the org-level
 	// flags when the key is missing.
