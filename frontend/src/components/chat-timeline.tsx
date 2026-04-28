@@ -624,19 +624,6 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
 
   flushHidden();
 
-  // Show diff summary after all timeline entries when changes exist
-  if (diffStats && (diffStats.added > 0 || diffStats.removed > 0)) {
-    rendered.push(
-      <CodeDiffSummary
-        key="diff-summary"
-        added={diffStats.added}
-        removed={diffStats.removed}
-        filesChanged={diffStats.files_changed}
-        onClick={onDiffClick}
-      />
-    );
-  }
-
   if (isRunning) {
     rendered.push(
       <div key="working" className="flex justify-start">
@@ -650,6 +637,19 @@ export function ChatTimeline({ entries, isRunning, diffStats, onDiffClick, onApp
           </span>
         </div>
       </div>
+    );
+  }
+
+  // Keep the diff summary at the very bottom of the session UI.
+  if (diffStats && (diffStats.added > 0 || diffStats.removed > 0)) {
+    rendered.push(
+      <CodeDiffSummary
+        key="diff-summary"
+        added={diffStats.added}
+        removed={diffStats.removed}
+        filesChanged={diffStats.files_changed}
+        onClick={onDiffClick}
+      />
     );
   }
 
