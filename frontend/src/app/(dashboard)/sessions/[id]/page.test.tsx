@@ -965,6 +965,17 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('View PR')).toBeInTheDocument();
   });
 
+  it('keeps the tab rail scrollable while separating top-right actions', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const tabRail = await screen.findByLabelText('Session detail tabs');
+    const actions = screen.getByLabelText('Session detail actions');
+
+    expect(tabRail).toHaveClass('overflow-x-auto');
+    expect(actions).toHaveClass('shrink-0');
+    expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+  });
+
   it('renders the PR health banner at the top of Overview when a linked PR is open', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
@@ -1091,9 +1102,11 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect((await screen.findAllByText('PR merged')).length).toBeGreaterThanOrEqual(2);
+    expect(await screen.findByText('PR merged')).toBeInTheDocument();
+    expect(screen.queryAllByText('PR merged')).toHaveLength(1);
     expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-violet-700', 'dark:text-violet-400');
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
 
