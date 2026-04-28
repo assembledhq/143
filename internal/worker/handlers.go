@@ -163,7 +163,7 @@ type Services struct {
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
-	Linear *linear.Service // nil-safe: Linear session-linking disabled if nil
+	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	// SandboxAuthShutdown drains the per-session GitHub credential socket
 	// listeners. nil when no SandboxAuthSocketDir is configured (local
 	// dev). Called from cmd/server graceful shutdown after the API drains
@@ -1224,6 +1224,16 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 			}
+			// "no changes to push" is a terminal-but-non-failure outcome:
+			// the session ran to completion but produced nothing worth
+			// shipping. Tell the Linear linker so the attachment subtitle
+			// stops saying "Running" forever and the audit log records the
+			// terminal state. Other PR creation errors are not fired as
+			// `failed` here because failRun in the orchestrator is the
+			// canonical entry point for those.
+			if errors.Is(createErr, ghservice.ErrNoChanges) {
+				enqueueLinearMilestoneFromHandler(ctx, stores.Jobs, orgID, runID, "ended_no_pr", logger)
+			}
 			if shouldDeadLetterPRError(createErr) {
 				return &FatalError{Err: createErr}
 			}
@@ -1234,6 +1244,27 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		return nil
+	}
+}
+
+// enqueueLinearMilestoneFromHandler is the worker-side helper for firing
+// terminal Linear milestone events (ended_no_pr, failed) from job handlers
+// that have a JobStore but not a wired LinearMilestoneEnqueuer. The queue,
+// priority, and dedupe-key shape match linear.MilestoneEnqueuerFor so
+// multi-source events for the same (session, event) collapse cleanly.
+func enqueueLinearMilestoneFromHandler(ctx context.Context, jobs *db.JobStore, orgID, sessionID uuid.UUID, event string, logger zerolog.Logger) {
+	if jobs == nil {
+		return
+	}
+	dedupe := "linear_milestone:" + sessionID.String() + ":" + event
+	payload := map[string]any{
+		"org_id":     orgID.String(),
+		"session_id": sessionID.String(),
+		"event":      event,
+		"pr_number":  0,
+	}
+	if _, err := jobs.Enqueue(ctx, orgID, "linear", "linear_milestone", payload, 5, &dedupe); err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("event", event).Msg("failed to enqueue terminal linear_milestone")
 	}
 }
 
@@ -2492,8 +2523,11 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 		if identifier == "" {
 			identifier = issue.ExternalID
 		}
-		sessionURL := fmt.Sprintf("/sessions/%s", sessionID.String())
 
+		// SessionURL is built inside the linear.Service from its configured
+		// AppBaseURL — the worker doesn't have the FRONTEND_URL plumbed
+		// here and would otherwise post a relative path that Linear renders
+		// as plain text.
 		event := linear.MilestoneEvent(input.Event)
 		in := linear.MilestoneInput{
 			Event:      event,
@@ -2501,7 +2535,6 @@ func newLinearMilestoneHandler(stores *Stores, svc *linear.Service, logger zerol
 			Link:       *primary,
 			IssueID:    issue.ExternalID,
 			PRNumber:   input.PRNumber,
-			SessionURL: sessionURL,
 			IssueIdent: identifier,
 		}
 		if err := svc.HandleMilestone(ctx, in); err != nil {

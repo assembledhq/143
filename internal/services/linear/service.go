@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -27,13 +28,30 @@ type Service struct {
 	issues            *db.IssueStore
 	links             *db.SessionIssueLinkStore
 	teamKeys          *db.LinearTeamKeyStore
-	providerState     *db.LinearProviderStateStore
-	stateEvents       *db.LinearStateEventStore
+	providerState     providerStateStore
+	stateEvents       stateEventStore
 	sessions          *db.SessionStore
 	clientFactory     ClientFactory
 	orgSettingsLoader OrgSettingsLoader
 	jobEnqueuer       JobEnqueuer
 	linksChanged      LinksChangedNotifier
+	// pool is used to begin transactions for the rolling-comment and
+	// state-transition writes that need a SELECT ... FOR UPDATE row lock to
+	// be race-safe across concurrent milestone events. Optional: when nil,
+	// the writes fall back to the non-transactional path used by tests.
+	pool db.TxStarter
+	// appBaseURL is the absolute origin (e.g. "https://app.143.dev") used to
+	// build session deep-links sent to Linear. Linear renders the attachment
+	// URL and comment body verbatim, so a relative path would arrive as
+	// non-clickable text. Always set via Build / Config.
+	appBaseURL string
+	// teamKeyCache is a TTL'd in-process cache of the per-org team-key
+	// allowlist used by detection. Refreshed lazily on miss; the
+	// refresh_linear_team_keys cron continues to write through the store, and
+	// invalidation is best-effort via the TTL since stale entries only cause
+	// transient detection misses (the next session create within the TTL
+	// after a refresh might miss new keys, then self-heal).
+	teamKeyCache teamKeyAllowlistCache
 }
 
 // SetLinksChangedNotifier wires the SSE fan-out hook.
@@ -45,6 +63,23 @@ func (s *Service) notifyLinksChanged(ctx context.Context, orgID, sessionID uuid.
 	if s.linksChanged != nil {
 		s.linksChanged(ctx, orgID, sessionID, kind)
 	}
+}
+
+// providerStateStore is the narrow store surface HandleMilestone /
+// HandleStateTransition need. Held as an interface so writes_test.go can
+// substitute an in-memory fake without standing up pgxmock; concrete
+// production usage is *db.LinearProviderStateStore.
+type providerStateStore interface {
+	Get(ctx context.Context, orgID, linkID uuid.UUID) (db.LinearProviderState, error)
+	Upsert(ctx context.Context, orgID, linkID uuid.UUID, state db.LinearProviderState) error
+	Merge(ctx context.Context, orgID, linkID uuid.UUID, patch db.LinearProviderState) error
+}
+
+// stateEventStore is the narrow surface used to record state-transition or
+// skip events. Held as an interface for the same reason as
+// providerStateStore.
+type stateEventStore interface {
+	Insert(ctx context.Context, orgID uuid.UUID, in db.LinearStateEventInput) error
 }
 
 // OrgSettingsLoader resolves an org's parsed settings. Held as a function
@@ -185,6 +220,16 @@ type Config struct {
 	Sessions          *db.SessionStore
 	ClientFactory     ClientFactory
 	OrgSettingsLoader OrgSettingsLoader
+	// Pool is used by HandleMilestone / HandleStateTransition to begin a tx
+	// for SELECT ... FOR UPDATE on the provider-state row, so two concurrent
+	// milestone events for the same link can't both create a rolling
+	// comment or both move the issue past a forward-only state check.
+	// Optional in tests.
+	Pool db.TxStarter
+	// AppBaseURL is the absolute origin used to build session deep-links
+	// posted to Linear. Required for clickable attachment URLs and comment
+	// bodies; passing a relative path here is treated as a misconfiguration.
+	AppBaseURL string
 }
 
 func NewService(cfg Config) *Service {
@@ -200,7 +245,95 @@ func NewService(cfg Config) *Service {
 		sessions:          cfg.Sessions,
 		clientFactory:     cfg.ClientFactory,
 		orgSettingsLoader: cfg.OrgSettingsLoader,
+		pool:              cfg.Pool,
+		appBaseURL:        strings.TrimRight(cfg.AppBaseURL, "/"),
 	}
+}
+
+// withProviderStateLocked runs fn inside a transaction that holds a row-level
+// lock on the provider_state row for (org_id, link_id). Two concurrent
+// milestone events for the same link will serialize through this lock so
+// only one of them can observe CommentID == "" and create a fresh comment;
+// the loser sees the winner's CommentID and takes the update branch. fn
+// receives stores bound to the tx so any subsequent writes participate in
+// the same transaction.
+//
+// When the service has no pool (older tests) the call falls through to fn
+// with the non-transactional stores. Any caller that needs strict
+// serialization must check for that path explicitly.
+func (s *Service) withProviderStateLocked(
+	ctx context.Context,
+	orgID, linkID uuid.UUID,
+	fn func(ctx context.Context, txState providerStateStore, txEvents stateEventStore, state db.LinearProviderState) error,
+) error {
+	if s.pool == nil {
+		state, err := s.providerState.Get(ctx, orgID, linkID)
+		if err != nil {
+			return fmt.Errorf("read provider state: %w", err)
+		}
+		return fn(ctx, s.providerState, s.stateEvents, state)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock or insert-then-lock the provider_state row. We can't SELECT FOR
+	// UPDATE a row that doesn't exist yet, so insert a zero-state row first
+	// (idempotent — ON CONFLICT DO NOTHING) and then take the lock. This
+	// matches the behavior of LinearProviderStateStore.Get returning an
+	// empty state when no row exists.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO session_issue_link_provider_state (link_id, org_id, provider, state, updated_at)
+		VALUES (@link_id, @org_id, @provider, '{}'::jsonb, now())
+		ON CONFLICT (link_id) DO NOTHING`,
+		pgx.NamedArgs{
+			"link_id":  linkID,
+			"org_id":   orgID,
+			"provider": "linear",
+		}); err != nil {
+		return fmt.Errorf("seed provider state: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		SELECT 1 FROM session_issue_link_provider_state
+		WHERE link_id = @link_id AND org_id = @org_id AND provider = @provider
+		FOR UPDATE`,
+		pgx.NamedArgs{
+			"link_id":  linkID,
+			"org_id":   orgID,
+			"provider": "linear",
+		}); err != nil {
+		return fmt.Errorf("lock provider state: %w", err)
+	}
+
+	txState := db.NewLinearProviderStateStore(tx)
+	txEvents := db.NewLinearStateEventStore(tx)
+	state, err := txState.Get(ctx, orgID, linkID)
+	if err != nil {
+		return fmt.Errorf("read locked provider state: %w", err)
+	}
+	if err := fn(ctx, txState, txEvents, state); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit provider state tx: %w", err)
+	}
+	return nil
+}
+
+// SessionURL builds the absolute deep-link to a session that we send to
+// Linear. Centralized here so attachment URL and comment body never disagree
+// and so callers don't have to know the FRONTEND_URL plumbing. Trailing
+// slashes are stripped defensively so a misconfigured FRONTEND_URL doesn't
+// produce a `//sessions/<id>` URL that breaks Linear's renderer.
+func (s *Service) SessionURL(sessionID uuid.UUID) string {
+	if s == nil || s.appBaseURL == "" {
+		return fmt.Sprintf("/sessions/%s", sessionID.String())
+	}
+	return fmt.Sprintf("%s/sessions/%s", strings.TrimRight(s.appBaseURL, "/"), sessionID.String())
 }
 
 // Enabled returns true when the org has an active Linear integration. The
@@ -242,9 +375,17 @@ func (s *Service) integrationFor(ctx context.Context, orgID uuid.UUID) (models.I
 // TeamKeyAllowlist returns the org's cached team-key allowlist as a map for
 // detection. Cheap; detection runs on every session create. Refreshes are
 // driven by the integration sync worker, not this hot path.
+//
+// A short in-process TTL cache fronts the DB query so back-to-back session
+// creates from the same org don't hammer linear_team_keys. RefreshTeamKeys
+// invalidates the entry after writing, and the TTL bounds staleness when
+// another process refreshes (e.g. the cron worker on a different node).
 func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[string]bool, error) {
 	if s == nil || s.teamKeys == nil {
 		return map[string]bool{}, nil
+	}
+	if cached, ok := s.teamKeyCache.get(orgID); ok {
+		return cached, nil
 	}
 	keys, err := s.teamKeys.ListByOrg(ctx, orgID)
 	if err != nil {
@@ -254,6 +395,7 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 	for _, k := range keys {
 		allow[k.TeamKey] = true
 	}
+	s.teamKeyCache.put(orgID, allow)
 	return allow, nil
 }
 
@@ -284,7 +426,11 @@ func (s *Service) RefreshTeamKeys(ctx context.Context, orgID uuid.UUID) error {
 			workspaceID = t.WorkspaceID
 		}
 	}
-	return s.teamKeys.ReplaceForIntegration(ctx, orgID, integration.ID, workspaceID, rows)
+	if err := s.teamKeys.ReplaceForIntegration(ctx, orgID, integration.ID, workspaceID, rows); err != nil {
+		return err
+	}
+	s.teamKeyCache.invalidate(orgID)
+	return nil
 }
 
 // ResolvePrimary fetches the unambiguous primary Linear issue and the local

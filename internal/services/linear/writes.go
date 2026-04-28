@@ -30,13 +30,17 @@ const (
 // pass the session and link in the same shape regardless of the milestone;
 // the service decides whether to hit attachmentCreate vs attachmentUpdate
 // and whether to commentCreate vs commentUpdate based on persisted state.
+//
+// The session deep-link sent to Linear is built by the service via
+// SessionURL(session.ID); callers must not pass URLs in. This is what keeps
+// the attachment URL and the comment body in sync, and ensures we never
+// post a relative path that Linear renders as plain text.
 type MilestoneInput struct {
 	Event      MilestoneEvent
 	Session    *models.Session
 	Link       models.SessionIssueLink
 	IssueID    string // Linear (external) issue id
 	PRNumber   int    // 0 when not applicable
-	SessionURL string // 143 deep link to the session
 	IssueIdent string // e.g. "ACS-1234"
 }
 
@@ -55,8 +59,18 @@ const botCommentPrefix = "🤖 143 automated update —"
 //   - org/team automation flags say "don't post session links to Linear"
 //
 // Idempotency: AttachmentID and CommentID in provider_state act as the
-// dedupe anchors. Re-running this with the same milestone is a no-op
-// modulo Linear-side metadata refresh.
+// dedupe anchors. Re-running this with the same milestone is a no-op modulo
+// Linear-side metadata refresh.
+//
+// Race-safety: the rolling comment is created at most once per link even
+// when two distinct milestone events (e.g. `linked` from the create path
+// and `pr_opened` from the GitHub webhook) race. The provider-state row is
+// locked with SELECT ... FOR UPDATE for the duration of the
+// CreateComment/CreateOrUpdateAttachment calls so the loser observes the
+// winner's CommentID and takes the update branch instead of posting a
+// duplicate. The job-level dedupe key on (session_id, event) only collapses
+// replays of the same event — it does not prevent two different events from
+// both seeing CommentID == "", which is what the row lock here addresses.
 func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error {
 	if in.Session == nil {
 		return fmt.Errorf("nil session")
@@ -72,21 +86,15 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 		return nil
 	}
 
-	state, err := s.providerState.Get(ctx, in.Session.OrgID, in.Link.ID)
-	if err != nil {
-		return fmt.Errorf("read provider state: %w", err)
-	}
-
 	teamKey := teamKeyFromIdentifier(in.IssueIdent)
 	if !s.shouldPostSessionLinks(ctx, in.Session.OrgID, teamKey) {
 		return nil
 	}
 
-	integration, token, err := s.integrationFor(ctx, in.Session.OrgID)
+	_, token, err := s.integrationFor(ctx, in.Session.OrgID)
 	if err != nil {
 		return err
 	}
-	_ = integration
 	client, err := s.clientFactory(ctx, token)
 	if err != nil {
 		return fmt.Errorf("build linear client: %w", err)
@@ -95,47 +103,51 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 	outcome := outcomeForMilestone(in.Event)
 	subtitle := subtitleForMilestone(in.Event, in.PRNumber)
 	title := attachmentTitle(in.Session)
+	sessionURL := s.SessionURL(in.Session.ID)
+	body := commentBodyForMilestone(in.Event, in.IssueIdent, sessionURL, in.PRNumber)
 
-	attachmentResult, err := client.CreateOrUpdateAttachment(ctx, AttachmentWriteInput{
-		IssueID:  in.IssueID,
-		PriorID:  state.AttachmentID,
-		Title:    title,
-		Subtitle: subtitle,
-		URL:      in.SessionURL,
-		Metadata: db.LinearAttachmentMetadata{
-			Service:   "143",
-			SessionID: in.Session.ID.String(),
-			Primary:   true,
-			Outcome:   string(outcome),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("write linear attachment: %w", err)
-	}
+	return s.withProviderStateLocked(ctx, in.Session.OrgID, in.Link.ID,
+		func(ctx context.Context, txState providerStateStore, _ stateEventStore, state db.LinearProviderState) error {
+			attachmentResult, err := client.CreateOrUpdateAttachment(ctx, AttachmentWriteInput{
+				IssueID:  in.IssueID,
+				PriorID:  state.AttachmentID,
+				Title:    title,
+				Subtitle: subtitle,
+				URL:      sessionURL,
+				Metadata: db.LinearAttachmentMetadata{
+					Service:   "143",
+					SessionID: in.Session.ID.String(),
+					Primary:   true,
+					Outcome:   string(outcome),
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("write linear attachment: %w", err)
+			}
 
-	body := commentBodyForMilestone(in.Event, in.IssueIdent, in.SessionURL, in.PRNumber)
-	if state.CommentID == "" {
-		// First write — create. Subsequent milestones update in place to
-		// avoid notification fatigue.
-		commentID, err := client.CreateComment(ctx, in.IssueID, body)
-		if err != nil {
-			return fmt.Errorf("create linear comment: %w", err)
-		}
-		state.CommentID = commentID
-	} else {
-		if err := client.UpdateComment(ctx, state.CommentID, body); err != nil {
-			return fmt.Errorf("update linear comment: %w", err)
-		}
-	}
+			if state.CommentID == "" {
+				// First write — create. Subsequent milestones update in
+				// place to avoid notification fatigue.
+				commentID, err := client.CreateComment(ctx, in.IssueID, body)
+				if err != nil {
+					return fmt.Errorf("create linear comment: %w", err)
+				}
+				state.CommentID = commentID
+			} else {
+				if err := client.UpdateComment(ctx, state.CommentID, body); err != nil {
+					return fmt.Errorf("update linear comment: %w", err)
+				}
+			}
 
-	state.AttachmentID = attachmentResult.ID
-	state.AttachmentURL = attachmentResult.URL
-	state.LastWriteOutcome = string(outcome)
-	state.LastSkippedReason = ""
-	if err := s.providerState.Upsert(ctx, in.Session.OrgID, in.Link.ID, state); err != nil {
-		return fmt.Errorf("persist provider state after write: %w", err)
-	}
-	return nil
+			state.AttachmentID = attachmentResult.ID
+			state.AttachmentURL = attachmentResult.URL
+			state.LastWriteOutcome = string(outcome)
+			state.LastSkippedReason = ""
+			if err := txState.Upsert(ctx, in.Session.OrgID, in.Link.ID, state); err != nil {
+				return fmt.Errorf("persist provider state after write: %w", err)
+			}
+			return nil
+		})
 }
 
 // shouldPostSessionLinks consults the parsed org settings. Defaults
@@ -276,6 +288,14 @@ func teamKeyFromIdentifier(identifier string) string {
 // every guard from design 62 §"Guards (all must hold)". Records the decision
 // (transition or skip) in session_issue_link_state_events for fire-once and
 // audit. Replays are no-ops.
+//
+// Atomicity: the row-level lock on provider_state plus the unique constraint
+// on (session_id, issue_id, event_kind) gate the Linear API call so a
+// crash between UpdateIssueState and the local writes can't cause a second
+// retry to repeat the move. The event row is inserted inside the same
+// transaction as the API call: on commit both are durable; on rollback (or
+// process death) neither is, and the unique constraint prevents an
+// already-fired event from re-entering this code path.
 func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) error {
 	if in.Session == nil {
 		return fmt.Errorf("nil session")
@@ -307,94 +327,134 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 		return s.recordSkip(ctx, in, eventKind, skipReason)
 	}
 
-	state, err := s.providerState.Get(ctx, in.Session.OrgID, in.Link.ID)
+	_, token, err := s.integrationFor(ctx, in.Session.OrgID)
 	if err != nil {
 		return err
 	}
-
-	integration, token, err := s.integrationFor(ctx, in.Session.OrgID)
-	if err != nil {
-		return err
-	}
-	_ = integration
 	client, err := s.clientFactory(ctx, token)
 	if err != nil {
 		return fmt.Errorf("build linear client: %w", err)
 	}
 
-	// Coexistence with Linear's GitHub integration: if their attachments are
-	// already on the issue, suppress our merge-time writes to avoid double
-	// transitions and double cycle/sprint membership.
-	if in.Event == MilestonePRMerged {
-		coexists := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
-		if !coexists {
-			detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)
-			if detectErr == nil && detected {
-				coexists = true
-				_ = s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
-					CoexistsWithGitHubIntegration: db.BoolPtr(true),
-				})
+	return s.withProviderStateLocked(ctx, in.Session.OrgID, in.Link.ID,
+		func(ctx context.Context, txState providerStateStore, txEvents stateEventStore, state db.LinearProviderState) error {
+			// Coexistence with Linear's GitHub integration: if their
+			// attachments are already on the issue, suppress our merge-time
+			// writes to avoid double transitions and double cycle/sprint
+			// membership.
+			if in.Event == MilestonePRMerged {
+				coexists := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
+				if !coexists {
+					detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)
+					if detectErr == nil && detected {
+						coexists = true
+						_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+							CoexistsWithGitHubIntegration: db.BoolPtr(true),
+						})
+					}
+				}
+				if coexists {
+					return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipLinearGitHubIntegration)
+				}
 			}
-		}
-		if coexists {
-			return s.recordSkip(ctx, in, eventKind, db.LinearStateSkipLinearGitHubIntegration)
-		}
-	}
 
-	// Recent human edits: skip if a human moved the issue within the last
-	// 10 minutes. This protects manual workflows.
-	since := time.Now().Add(-10 * time.Minute)
-	humanEdited, err := client.IssueRecentHumanEdits(ctx, in.IssueID, since)
-	if err == nil && humanEdited {
-		return s.recordSkip(ctx, in, eventKind, db.LinearStateSkipUserRecentEdit)
-	}
+			// Recent human edits: skip if a human moved the issue within
+			// the last 10 minutes. This protects manual workflows.
+			since := time.Now().Add(-10 * time.Minute)
+			humanEdited, err := client.IssueRecentHumanEdits(ctx, in.IssueID, since)
+			if err == nil && humanEdited {
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipUserRecentEdit)
+			}
 
-	// Resolve target state by type, applying the org's review-state name
-	// preferences for the PR-open milestone.
-	targetType := stateTypeFor(in.Event)
-	prefer := []string{}
-	if in.Event == MilestonePROpened {
-		prefer = s.reviewStatePreferences(ctx, in.Session.OrgID)
-	}
-	target, err := client.WorkflowStateForType(ctx, state.TeamID, prefer, targetType)
-	if err != nil || target == nil {
-		// No target state available — record skip rather than error so the
-		// audit trail explains it.
-		return s.recordSkip(ctx, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
-	}
+			// Resolve target state by type, applying the org's review-state
+			// name preferences for the PR-open milestone.
+			targetType := stateTypeFor(in.Event)
+			prefer := []string{}
+			if in.Event == MilestonePROpened {
+				prefer = s.reviewStatePreferences(ctx, in.Session.OrgID)
+			}
+			target, err := client.WorkflowStateForType(ctx, state.TeamID, prefer, targetType)
+			if err != nil || target == nil {
+				// No target state available — record skip rather than
+				// error so the audit trail explains it.
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
+			}
 
-	// Forward-only: refuse to move backwards. Differentiate "already in
-	// target state" (no-op, expected during normal operation) from
-	// "already past target" (issue moved on without us — refuse to rewind)
-	// so the operator audit log gives a faithful explanation.
-	if !isForwardMove(state.LastKnownStateType, target.Type) {
-		reason := db.LinearStateSkipAlreadyPastTarget
-		if state.LastKnownStateType == target.Type {
-			reason = db.LinearStateSkipAlreadyInTargetState
-		}
-		return s.recordSkip(ctx, in, eventKind, reason)
-	}
+			// Forward-only: refuse to move backwards. Differentiate
+			// "already in target state" (no-op, expected during normal
+			// operation) from "already past target" (issue moved on
+			// without us — refuse to rewind) so the operator audit log
+			// gives a faithful explanation.
+			if !isForwardMove(state.LastKnownStateType, target.Type) {
+				reason := db.LinearStateSkipAlreadyPastTarget
+				if state.LastKnownStateType == target.Type {
+					reason = db.LinearStateSkipAlreadyInTargetState
+				}
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, reason)
+			}
 
-	// Capture prior state, fire the transition, record the event.
-	priorID := state.LastKnownStateName
-	if err := client.UpdateIssueState(ctx, in.IssueID, target.ID); err != nil {
-		return fmt.Errorf("update linear issue state: %w", err)
-	}
-	_ = s.providerState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
-		PriorStateID:       priorID,
-		LastKnownStateName: target.Name,
-		LastKnownStateType: target.Type,
-	})
-	err = s.stateEvents.Insert(ctx, in.Session.OrgID, db.LinearStateEventInput{
-		SessionID:      in.Session.ID,
-		IssueID:        in.Link.IssueID,
-		EventKind:      eventKind,
-		TransitionFrom: priorID,
-		TransitionTo:   target.Name,
+			// Claim fire-once *before* hitting Linear: the unique
+			// constraint on (session_id, issue_id, event_kind) collapses a
+			// concurrent or post-crash retry into ErrLinearStateEventExists,
+			// so even if we crash mid-call the next retry observes the
+			// claim and returns without re-firing UpdateIssueState. The
+			// row commits with the API call inside the same tx — on
+			// rollback, the claim disappears too, leaving the next attempt
+			// free to retry.
+			priorID := state.LastKnownStateName
+			err = txEvents.Insert(ctx, in.Session.OrgID, db.LinearStateEventInput{
+				SessionID:      in.Session.ID,
+				IssueID:        in.Link.IssueID,
+				EventKind:      eventKind,
+				TransitionFrom: priorID,
+				TransitionTo:   target.Name,
+			})
+			if errors.Is(err, db.ErrLinearStateEventExists) {
+				// Already fired by an earlier attempt — replay is a no-op.
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("record state transition: %w", err)
+			}
+
+			if err := client.UpdateIssueState(ctx, in.IssueID, target.ID); err != nil {
+				return fmt.Errorf("update linear issue state: %w", err)
+			}
+			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+				PriorStateID:       priorID,
+				LastKnownStateName: target.Name,
+				LastKnownStateType: target.Type,
+			}); err != nil {
+				return fmt.Errorf("persist provider state after transition: %w", err)
+			}
+			return nil
+		})
+}
+
+// recordSkipInTx records a skip event using tx-bound stores so the skip
+// shares a transaction with any sibling provider_state writes inside
+// HandleStateTransition. Mirrors recordSkip but without re-acquiring the
+// row lock.
+func recordSkipInTx(
+	ctx context.Context,
+	txState providerStateStore,
+	txEvents stateEventStore,
+	in MilestoneInput,
+	kind db.LinearStateEventKind,
+	reason db.LinearStateSkipReason,
+) error {
+	err := txEvents.Insert(ctx, in.Session.OrgID, db.LinearStateEventInput{
+		SessionID:     in.Session.ID,
+		IssueID:       in.Link.IssueID,
+		EventKind:     kind,
+		SkippedReason: reason,
 	})
 	if err != nil && !errors.Is(err, db.ErrLinearStateEventExists) {
-		return fmt.Errorf("record state transition: %w", err)
+		return err
 	}
+	_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+		LastSkippedReason: string(reason),
+	})
 	return nil
 }
 

@@ -1005,6 +1005,7 @@ func buildServices(
 		IssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Orgs:         orgStore,
 		Jobs:         jobStore,
+		AppBaseURL:   cfg.FrontendURL,
 	})
 	prService.SetLinearMilestoneEnqueuer(linear.MilestoneEnqueuerFor(jobStore, logger))
 

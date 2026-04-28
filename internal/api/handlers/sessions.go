@@ -2049,7 +2049,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// primary Linear issue has its context snapshot captured — but the
 	// session-create response should still come back fast. The linker
 	// chooses inline vs queued based on a strict latency budget.
-	if h.linearLinker != nil && body.RepositoryID != "" {
+	//
+	// Repo-less sessions (issue-only start, design 62 §"Issue-only session
+	// start") still get linked: SessionIssueLinkStore.CreateAllowingNullRepo
+	// already accepts a NULL repository on the link row when the underlying
+	// session has no repo, so we don't pre-filter on body.RepositoryID here.
+	if h.linearLinker != nil {
 		userID := manualTriggeredByUserID
 		referenceText := ""
 		if len(body.References) > 0 {

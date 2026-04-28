@@ -2586,6 +2586,34 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
+	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+// enqueueLinearMilestone schedules a linear_milestone job for the terminal
+// session lifecycle states ("failed", "ended_no_pr"). The Linear linker is
+// the single owner of the attachment subtitle / rolling-comment / state
+// transition writes for these events; the orchestrator only fires the
+// signal. Best effort — a failed enqueue logs and moves on so terminal
+// session bookkeeping isn't held hostage by Linear-side hiccups.
+//
+// jobs may be nil in tests; in production it's always wired via
+// OrchestratorConfig.Jobs. The "linear" queue and priority 5 mirror
+// linear.MilestoneEnqueuerFor so retries and dead-letter behavior match
+// the PR-event path.
+func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.Session, event string) {
+	if o == nil || o.jobs == nil || run == nil {
+		return
+	}
+	dedupe := "linear_milestone:" + run.ID.String() + ":" + event
+	payload := map[string]any{
+		"org_id":     run.OrgID.String(),
+		"session_id": run.ID.String(),
+		"event":      event,
+		"pr_number":  0,
+	}
+	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "linear", "linear_milestone", payload, 5, &dedupe); err != nil {
+		o.logger.Warn().Err(err).Str("session_id", run.ID.String()).Str("event", event).Msg("failed to enqueue linear_milestone for terminal session state")
+	}
 }
 
 // failRunWithCategory marks a run as failed with a structured failure category,

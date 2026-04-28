@@ -27,6 +27,11 @@ type BuildDeps struct {
 	JobQueueName  string
 	JobPriority   int
 	ClientFactory ClientFactory
+	// AppBaseURL is the absolute origin (e.g. cfg.FrontendURL) we send to
+	// Linear inside attachment URLs and comment bodies. Empty falls back to
+	// a relative path which Linear renders as plain text — production
+	// callers must always set this.
+	AppBaseURL string
 }
 
 // Build constructs the Linear service plus its three side-table stores from
@@ -73,6 +78,8 @@ func Build(deps BuildDeps) *Service {
 		Sessions:          deps.Sessions,
 		ClientFactory:     clientFactory,
 		OrgSettingsLoader: loader,
+		Pool:              deps.Pool,
+		AppBaseURL:        deps.AppBaseURL,
 	})
 
 	if deps.Jobs != nil {

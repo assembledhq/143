@@ -1073,6 +1073,15 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
 		return fmt.Errorf("update PR status to closed: %w", err)
 	}
+	// Tell the Linear linker the session ended without a merge so the
+	// attachment subtitle stops saying "PR open" forever and the audit log
+	// records the terminal state. Coexistence + per-session disable guards
+	// inside the linker still apply. Event string must match
+	// linear.MilestoneEndedNoPR; we use a string literal to avoid importing
+	// the linear package and creating a cycle.
+	if pr.SessionID != nil && s.linearMilestones != nil {
+		s.linearMilestones(ctx, pr.OrgID, *pr.SessionID, "ended_no_pr", pr.GitHubPRNumber)
+	}
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
 	return nil

@@ -166,6 +166,12 @@ func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, sessionID, 
 // enqueueLinkWorker schedules link_linear_issue for follow-up work. The
 // worker dedupes on (session_id, source_inputs_hash) so re-detection is a
 // no-op.
+//
+// user_id is forwarded so the async link path can attribute the resulting
+// session_issue_links row to the human who triggered the session create.
+// Without it, an inline-failure → async-catch-up fallback silently drops
+// added_by_user_id, which downstream audit and "linked by you" filters
+// rely on.
 func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []Detected) {
 	if s.jobEnqueuer == nil {
 		return
@@ -180,6 +186,9 @@ func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []
 		"org_id":      in.OrgID.String(),
 		"session_id":  in.SessionID.String(),
 		"identifiers": identifiers,
+	}
+	if in.UserID != nil {
+		payload["user_id"] = in.UserID.String()
 	}
 	if err := s.jobEnqueuer(ctx, in.OrgID, "link_linear_issue", payload, &dedupeKey); err != nil {
 		s.logger.Warn().Err(err).Msg("failed to enqueue link_linear_issue job")
@@ -243,7 +252,11 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 
 // PostLink is called by HandleMilestone callers to fire the linked-event
 // attachment + comment + state move in one go. Convenience wrapper.
-func (s *Service) PostLink(ctx context.Context, sessionURL string, session *models.Session, link models.SessionIssueLink, identifier, issueID string) {
+//
+// The session URL sent to Linear is built inside the service from its
+// configured AppBaseURL — callers no longer pass a URL because two callers
+// disagreeing on the format produced split-brain comment bodies.
+func (s *Service) PostLink(ctx context.Context, session *models.Session, link models.SessionIssueLink, identifier, issueID string) {
 	if session == nil {
 		return
 	}
@@ -253,7 +266,6 @@ func (s *Service) PostLink(ctx context.Context, sessionURL string, session *mode
 		Link:       link,
 		IssueID:    issueID,
 		IssueIdent: identifier,
-		SessionURL: sessionURL,
 	}
 	if err := s.HandleMilestone(ctx, in); err != nil {
 		s.logger.Warn().Err(err).Msg("linear linked-milestone write failed")

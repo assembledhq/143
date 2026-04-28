@@ -217,6 +217,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		IssueLinks:   sessionIssueLinkStore,
 		Orgs:         orgStore,
 		Jobs:         jobStore,
+		AppBaseURL:   cfg.FrontendURL,
 	})
 	if sessionStreams != nil {
 		// Republish session status on every link change so the detail view
