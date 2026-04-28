@@ -358,6 +358,15 @@ d /var/run/143 0755 root root -
 d /var/run/143/sandbox-auth 0750 1000 1000 -
 TMPFILES
       systemd-tmpfiles --create /etc/tmpfiles.d/143-sandbox-auth.conf
+      # Belt-and-suspenders: if the directory already existed (e.g. Docker
+      # auto-created the bind-mount source as root:root 0755 before this
+      # provision step ran, or an older provision left it 0755), tmpfiles
+      # --create's adjustment isn't always reliable across systemd
+      # versions. Force the desired ownership and mode explicitly so the
+      # orchestrator's assertParentDirPerms check passes on first boot.
+      mkdir -p /var/run/143/sandbox-auth
+      chown 1000:1000 /var/run/143/sandbox-auth
+      chmod 0750 /var/run/143/sandbox-auth
 PULL_WORKER
     ;;
   db|logging|redis)
