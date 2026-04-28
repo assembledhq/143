@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,15 +24,20 @@ const reconcileIsAliveAttempts = 3
 // reconciler. Kept short because the reconciler blocks startup — we're
 // racing to get the server ready, not waiting minutes for a flaky daemon.
 //
-// var rather than const so unit tests can drop it to zero and not pay a
-// ~second per retry-exhaustion test. Production code never reassigns this.
-var reconcileIsAliveBackoff = 500 * time.Millisecond
+// Stored as an atomic so parallel tests calling SetIsAliveBackoffForTesting
+// don't race the production read at probeAliveWithRetry. Production code
+// never reassigns this.
+var reconcileIsAliveBackoff atomic.Int64
+
+func init() {
+	reconcileIsAliveBackoff.Store(int64(500 * time.Millisecond))
+}
 
 // SetIsAliveBackoffForTesting replaces the retry backoff used by the
 // reconciler's IsAlive probe. Test-only — the production setting is 500ms;
 // tests drop it to zero so exhaustion tests don't wait over a second.
 func SetIsAliveBackoffForTesting(d time.Duration) {
-	reconcileIsAliveBackoff = d
+	reconcileIsAliveBackoff.Store(int64(d))
 }
 
 // reconcileMaxBatches caps how many pages of 100 orphan rows the reconciler
@@ -216,7 +222,7 @@ func probeAliveWithRetry(
 			select {
 			case <-ctx.Done():
 				return false, ctx.Err()
-			case <-time.After(reconcileIsAliveBackoff):
+			case <-time.After(time.Duration(reconcileIsAliveBackoff.Load())):
 			}
 		}
 	}
