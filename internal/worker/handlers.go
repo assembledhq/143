@@ -132,6 +132,12 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
+	// snapshot uploads (spawned by CreatePR) have either promoted or
+	// cleared their pending_snapshot_key. Called by the server's graceful
+	// shutdown path so a worker exit doesn't strand sessions with the
+	// pending key set forever.
+	WaitForPostPRSnapshotUploads()
 }
 
 // Services holds the service dependencies needed by job handlers.
@@ -919,6 +925,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			Msg("starting continue_session job")
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session); err != nil {
+			// A pending post-PR snapshot upload is a transient state — wrap
+			// in RetryableError so the job is requeued without consuming an
+			// attempt. The session row is unchanged at this point.
+			if errors.Is(err, agent.ErrSnapshotPending) {
+				return &RetryableError{Err: err}
+			}
 			return err
 		}
 
