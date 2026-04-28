@@ -38,7 +38,7 @@ const CodingCredentialScopeOrg = "org"
 // user-scoped rows.
 const CodingCredentialScopePersonal = "personal"
 
-// ScopeLabel renders a Scope for telemetry and API responses.
+// Label renders a Scope for telemetry and API responses.
 func (s Scope) Label() string {
 	if s.IsPersonal() {
 		return CodingCredentialScopePersonal
@@ -326,49 +326,19 @@ func (c OpenAISubscriptionConfig) MaskedSummary() CredentialSummary {
 // AsOpenAIChatGPTConfig is a backwards-compat helper for code paths that
 // still expect the legacy struct shape. Removed in the cleanup PR.
 func (c OpenAISubscriptionConfig) AsOpenAIChatGPTConfig() OpenAIChatGPTConfig {
-	return OpenAIChatGPTConfig{
-		AccessToken:     c.AccessToken,
-		RefreshToken:    c.RefreshToken,
-		IDToken:         c.IDToken,
-		ExpiresAt:       c.ExpiresAt,
-		AccountType:     c.AccountType,
-		DeviceAuthID:    c.DeviceAuthID,
-		UserCode:        c.UserCode,
-		VerificationURI: c.VerificationURI,
-		PollInterval:    c.PollInterval,
-	}
+	return OpenAIChatGPTConfig(c)
 }
 
 // FromOpenAIChatGPTConfig is the inverse of AsOpenAIChatGPTConfig.
 func FromOpenAIChatGPTConfig(c OpenAIChatGPTConfig) OpenAISubscriptionConfig {
-	return OpenAISubscriptionConfig{
-		AccessToken:     c.AccessToken,
-		RefreshToken:    c.RefreshToken,
-		IDToken:         c.IDToken,
-		ExpiresAt:       c.ExpiresAt,
-		AccountType:     c.AccountType,
-		DeviceAuthID:    c.DeviceAuthID,
-		UserCode:        c.UserCode,
-		VerificationURI: c.VerificationURI,
-		PollInterval:    c.PollInterval,
-	}
+	return OpenAISubscriptionConfig(c)
 }
 
 // FromAnthropicSubscription extracts an AnthropicSubscriptionConfig from the
 // legacy AnthropicConfig.Subscription nested struct. Used by the Anthropic
 // split post-step migration.
 func FromAnthropicSubscription(s AnthropicSubscription) AnthropicSubscriptionConfig {
-	return AnthropicSubscriptionConfig{
-		AccessToken:   s.AccessToken,
-		RefreshToken:  s.RefreshToken,
-		ExpiresAt:     s.ExpiresAt,
-		AccountType:   s.AccountType,
-		RateLimitTier: s.RateLimitTier,
-		Scopes:        s.Scopes,
-		State:         s.State,
-		CodeVerifier:  s.CodeVerifier,
-		AuthorizeURL:  s.AuthorizeURL,
-	}
+	return AnthropicSubscriptionConfig(s)
 }
 
 // ParseCodingProviderConfig is the strict variant of ParseProviderConfig that

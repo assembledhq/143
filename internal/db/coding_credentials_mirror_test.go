@@ -295,6 +295,121 @@ func TestOrgCredentialStore_MirrorDisableMissingRowIsNoop(t *testing.T) {
 	require.Equal(t, otherID, got[0].ID)
 }
 
+func TestCodingCredentialStore_MirrorUserCredential(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		row            models.UserCredential
+		cfg            models.ProviderConfig
+		expectUserID   *uuid.UUID
+		expectLabel    string
+		expectPriority int
+		expectNoop     bool
+	}{
+		{
+			name: "personal api key",
+			row: models.UserCredential{
+				ID: uuid.New(), UserID: uuid.New(), OrgID: uuid.New(),
+				Provider: models.ProviderOpenAI, Status: "active", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			},
+			cfg:            models.OpenAIConfig{APIKey: "sk-openai-123456"},
+			expectPriority: 1,
+		},
+		{
+			name: "team default becomes org scoped",
+			row: models.UserCredential{
+				ID: uuid.New(), UserID: uuid.New(), OrgID: uuid.New(),
+				Provider: models.ProviderAnthropic, IsTeamDefault: true, Status: "active", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			},
+			cfg:            models.AnthropicConfig{APIKey: "sk-ant-123456789"},
+			expectLabel:    "team",
+			expectPriority: teamDefaultMirrorPriority,
+		},
+		{
+			name: "non coding provider is ignored",
+			row: models.UserCredential{
+				ID: uuid.New(), UserID: uuid.New(), OrgID: uuid.New(),
+				Provider: models.ProviderGitHubApp, Status: "active", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			},
+			cfg:        models.GitHubAppConfig{AppID: 1, PrivateKey: "key"},
+			expectNoop: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewCodingCredentialStore(mock, nil)
+			if !tt.expectNoop {
+				if tt.row.IsTeamDefault {
+					mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
+						WithArgs(codingAnyArgs(12)...).
+						WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				} else {
+					uid := tt.row.UserID
+					tt.expectUserID = &uid
+					mock.ExpectExec(`(?s)INSERT INTO coding_credentials.*ON CONFLICT \(id\) DO UPDATE`).
+						WithArgs(codingAnyArgs(12)...).
+						WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				}
+			}
+
+			err = store.MirrorUserCredential(context.Background(), tt.row, tt.cfg)
+
+			require.NoError(t, err, "MirrorUserCredential should not return an error")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestMirrorProviderHelpers(t *testing.T) {
+	t.Parallel()
+
+	orgTests := []struct {
+		name         string
+		provider     models.ProviderName
+		cfg          models.ProviderConfig
+		wantProvider models.ProviderName
+		wantOK       bool
+	}{
+		{name: "chatgpt renamed", provider: models.ProviderOpenAIChatGPT, cfg: models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "refresh"}, wantProvider: models.ProviderOpenAISubscription, wantOK: true},
+		{name: "chatgpt wrong type", provider: models.ProviderOpenAIChatGPT, cfg: models.OpenAIConfig{APIKey: "sk"}, wantOK: false},
+		{name: "anthropic api key cleaned", provider: models.ProviderAnthropic, cfg: models.AnthropicConfig{APIKey: "sk-ant", Subscription: nil}, wantProvider: models.ProviderAnthropic, wantOK: true},
+		{name: "anthropic wrong type", provider: models.ProviderAnthropic, cfg: models.OpenAIConfig{APIKey: "sk"}, wantOK: false},
+		{name: "openrouter unchanged", provider: models.ProviderOpenRouter, cfg: models.OpenRouterConfig{APIKey: "sk-or"}, wantProvider: models.ProviderOpenRouter, wantOK: true},
+		{name: "non coding skipped", provider: models.ProviderSlack, cfg: models.SlackConfig{AccessToken: "xoxb"}, wantOK: false},
+	}
+	for _, tt := range orgTests {
+		t.Run("org "+tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotProvider, _, ok := mirrorProviderForOrg(tt.provider, tt.cfg)
+
+			require.Equal(t, tt.wantOK, ok, "mirrorProviderForOrg ok should match expected")
+			require.Equal(t, tt.wantProvider, gotProvider, "mirrorProviderForOrg provider should match expected")
+		})
+	}
+
+	userProvider, _, ok := mirrorProviderForUser(models.ProviderGemini, models.GeminiConfig{APIKey: "gemini"})
+	require.True(t, ok, "mirrorProviderForUser should keep coding providers")
+	require.Equal(t, models.ProviderGemini, userProvider, "mirrorProviderForUser should preserve provider")
+	_, _, ok = mirrorProviderForUser(models.ProviderSlack, models.SlackConfig{AccessToken: "xoxb"})
+	require.False(t, ok, "mirrorProviderForUser should skip non-coding providers")
+
+	require.NoError(t, NoopMirror().MirrorOrgCredential(context.Background(), models.OrgCredential{}, models.OpenAIConfig{}), "noop mirror should ignore org upsert")
+	require.NoError(t, NoopMirror().MirrorOrgCredentialDelete(context.Background(), uuid.New()), "noop mirror should ignore org delete")
+	require.NoError(t, NoopMirror().MirrorOrgCredentialDisable(context.Background(), uuid.New()), "noop mirror should ignore org disable")
+	require.NoError(t, NoopMirror().MirrorUserCredential(context.Background(), models.UserCredential{}, models.OpenAIConfig{}), "noop mirror should ignore user upsert")
+	require.NoError(t, NoopMirror().MirrorUserCredentialDelete(context.Background(), uuid.New()), "noop mirror should ignore user delete")
+	require.NoError(t, NoopMirror().MirrorUserCredentialDisable(context.Background(), uuid.New()), "noop mirror should ignore user disable")
+}
+
 // captureBytes returns a pgxmock argument matcher that records the bytes
 // passed in this slot into out. Used by the mirror tests to inspect the
 // re-encrypted config without needing access to a fixed key.

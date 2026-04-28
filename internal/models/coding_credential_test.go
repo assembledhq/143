@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScopeLabel(t *testing.T) {
@@ -24,6 +25,22 @@ func TestScopeLabel(t *testing.T) {
 			t.Errorf("%s: Label()=%q want %q", tc.name, got, tc.want)
 		}
 	}
+}
+
+func TestScopeHelpers(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	orgID := uuid.New()
+	personal := Scope{OrgID: orgID, UserID: &userID}
+	org := Scope{OrgID: orgID}
+	cred := DecryptedCodingCredential{OrgID: orgID, UserID: &userID}
+
+	require.True(t, personal.IsPersonal(), "personal scope should report IsPersonal")
+	require.False(t, personal.IsOrg(), "personal scope should not report IsOrg")
+	require.True(t, org.IsOrg(), "org scope should report IsOrg")
+	require.False(t, org.IsPersonal(), "org scope should not report IsPersonal")
+	require.Equal(t, personal, cred.Scope(), "credential Scope should preserve org and user ids")
 }
 
 func TestAnthropicSubscriptionConfigValidate(t *testing.T) {
@@ -79,9 +96,60 @@ func TestOpenAISubscriptionConfigProvider(t *testing.T) {
 	}
 }
 
+func TestOpenAISubscriptionConfigValidateAndMetadata(t *testing.T) {
+	t.Parallel()
+
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	valid := OpenAISubscriptionConfig{
+		AccessToken:  "access-token-123456",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    future,
+		AccountType:  "pro",
+	}
+
+	require.NoError(t, valid.Validate(), "complete OpenAI subscription config should validate")
+	require.False(t, valid.IsExpired(), "future OpenAI subscription token should not be expired")
+	require.True(t, valid.NeedsRefresh(2*time.Hour), "OpenAI subscription token inside refresh window should need refresh")
+	require.Equal(t, ProviderOpenAISubscription, valid.MaskedSummary().Provider, "OpenAI subscription summary should use subscription provider")
+	require.Equal(t, "pro", valid.MaskedSummary().AccountType, "OpenAI subscription summary should preserve account type")
+	require.NotEmpty(t, valid.MaskedSummary().MaskedKey, "OpenAI subscription summary should mask the access token")
+
+	expired := valid
+	expired.ExpiresAt = past
+	require.True(t, expired.IsExpired(), "past OpenAI subscription token should be expired")
+
+	require.Error(t, (OpenAISubscriptionConfig{RefreshToken: "refresh"}).Validate(), "missing OpenAI access token should fail validation")
+	require.Error(t, (OpenAISubscriptionConfig{AccessToken: "access"}).Validate(), "missing OpenAI refresh token should fail validation")
+}
+
+func TestAnthropicSubscriptionConfigMetadata(t *testing.T) {
+	t.Parallel()
+
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	valid := AnthropicSubscriptionConfig{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    future,
+		AccountType:  "claude_max",
+	}
+
+	require.False(t, valid.IsExpired(), "future Anthropic subscription token should not be expired")
+	require.True(t, valid.NeedsRefresh(2*time.Hour), "Anthropic subscription token inside refresh window should need refresh")
+	require.Equal(t, ProviderAnthropicSubscription, valid.MaskedSummary().Provider, "Anthropic subscription summary should use subscription provider")
+	require.Equal(t, "claude_max", valid.MaskedSummary().AccountType, "Anthropic subscription summary should preserve account type")
+
+	expired := valid
+	expired.ExpiresAt = past
+	require.True(t, expired.IsExpired(), "past Anthropic subscription token should be expired")
+}
+
 func TestParseCodingProviderConfig(t *testing.T) {
 	t.Parallel()
 	t.Run("openai_subscription", func(t *testing.T) {
+		t.Parallel()
+
 		original := OpenAISubscriptionConfig{
 			AccessToken:  "tok",
 			RefreshToken: "rt",
@@ -106,6 +174,8 @@ func TestParseCodingProviderConfig(t *testing.T) {
 	})
 
 	t.Run("anthropic_subscription", func(t *testing.T) {
+		t.Parallel()
+
 		original := AnthropicSubscriptionConfig{
 			AccessToken:  "tok",
 			RefreshToken: "rt",
@@ -130,6 +200,8 @@ func TestParseCodingProviderConfig(t *testing.T) {
 	})
 
 	t.Run("falls back to ParseProviderConfig for non-coding", func(t *testing.T) {
+		t.Parallel()
+
 		// Anthropic API key path through the legacy struct still works via fallback.
 		original := AnthropicConfig{APIKey: "sk-ant-1234567890"}
 		data, _ := json.Marshal(original)
@@ -187,6 +259,7 @@ func TestOpenAISubscriptionConfigRoundTrip(t *testing.T) {
 
 func TestCreateCodingCredentialInputValidate(t *testing.T) {
 	t.Parallel()
+	validDefaults := map[string]string{"AMP_MODE": "deep"}
 	cases := []struct {
 		name string
 		in   CreateCodingCredentialInput
@@ -228,6 +301,31 @@ func TestCreateCodingCredentialInputValidate(t *testing.T) {
 			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeCodex, AuthType: CodingAuthTypeSubscription},
 			false,
 		},
+		{
+			"invalid agent",
+			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: "unknown", AuthType: CodingAuthTypeAPIKey, APIKey: "sk-1"},
+			false,
+		},
+		{
+			"invalid auth type",
+			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeCodex, AuthType: "magic", APIKey: "sk-1"},
+			false,
+		},
+		{
+			"valid amp defaults",
+			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeAmp, AuthType: CodingAuthTypeAPIKey, APIKey: "amp", AgentDefaults: validDefaults},
+			true,
+		},
+		{
+			"defaults reject unsupported agent",
+			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeCodex, AuthType: CodingAuthTypeAPIKey, APIKey: "sk-1", AgentDefaults: validDefaults},
+			false,
+		},
+		{
+			"defaults reject invalid model",
+			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeAmp, AuthType: CodingAuthTypeAPIKey, APIKey: "amp", AgentDefaults: map[string]string{"AMP_MODE": "turbo"}},
+			false,
+		},
 	}
 	for _, tc := range cases {
 		err := tc.in.Validate()
@@ -238,4 +336,64 @@ func TestCreateCodingCredentialInputValidate(t *testing.T) {
 			t.Errorf("%s: expected error", tc.name)
 		}
 	}
+}
+
+func TestMoveCodingCredentialInputValidateModel(t *testing.T) {
+	t.Parallel()
+
+	id := uuid.New()
+	tests := []struct {
+		name string
+		in   MoveCodingCredentialInput
+		ok   bool
+	}{
+		{name: "before", in: MoveCodingCredentialInput{BeforeID: &id}, ok: true},
+		{name: "after", in: MoveCodingCredentialInput{AfterID: &id}, ok: true},
+		{name: "top", in: MoveCodingCredentialInput{ToTop: true}, ok: true},
+		{name: "bottom", in: MoveCodingCredentialInput{ToBottom: true}, ok: true},
+		{name: "none", in: MoveCodingCredentialInput{}, ok: false},
+		{name: "multiple", in: MoveCodingCredentialInput{BeforeID: &id, ToBottom: true}, ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.in.Validate()
+			if tt.ok {
+				require.NoError(t, err, "valid move input should pass validation")
+			} else {
+				require.Error(t, err, "invalid move input should fail validation")
+			}
+		})
+	}
+}
+
+func TestParseSubscriptionProviderConfigLegacyEntrypoint(t *testing.T) {
+	t.Parallel()
+
+	openAI, err := ParseProviderConfig(ProviderOpenAISubscription, mustMarshal(t, OpenAISubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh"}))
+	require.NoError(t, err, "ParseProviderConfig should parse OpenAI subscription configs")
+	require.IsType(t, OpenAISubscriptionConfig{}, openAI, "ParseProviderConfig should return OpenAISubscriptionConfig")
+
+	anthropic, err := ParseProviderConfig(ProviderAnthropicSubscription, mustMarshal(t, AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh"}))
+	require.NoError(t, err, "ParseProviderConfig should parse Anthropic subscription configs")
+	require.IsType(t, AnthropicSubscriptionConfig{}, anthropic, "ParseProviderConfig should return AnthropicSubscriptionConfig")
+
+	_, err = ParseProviderConfig(ProviderOpenAISubscription, []byte("{"))
+	require.Error(t, err, "ParseProviderConfig should reject invalid OpenAI subscription JSON")
+	_, err = ParseProviderConfig(ProviderAnthropicSubscription, []byte("{"))
+	require.Error(t, err, "ParseProviderConfig should reject invalid Anthropic subscription JSON")
+	_, err = ParseCodingProviderConfig(ProviderOpenAISubscription, []byte("{"))
+	require.Error(t, err, "ParseCodingProviderConfig should reject invalid OpenAI subscription JSON")
+	_, err = ParseCodingProviderConfig(ProviderAnthropicSubscription, []byte("{"))
+	require.Error(t, err, "ParseCodingProviderConfig should reject invalid Anthropic subscription JSON")
+}
+
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(v)
+	require.NoError(t, err, "test value should marshal")
+	return data
 }

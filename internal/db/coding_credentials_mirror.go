@@ -90,11 +90,15 @@ func (s *CodingCredentialStore) MirrorOrgCredential(ctx context.Context, row mod
 	})
 }
 
+// MirrorOrgCredentialDelete removes a mirrored org credential by legacy id.
+//
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorOrgCredentialDelete(ctx context.Context, id uuid.UUID) error {
 	return s.mirrorDelete(ctx, id)
 }
 
+// MirrorOrgCredentialDisable disables a mirrored org credential by legacy id.
+//
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling OrgCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorOrgCredentialDisable(ctx context.Context, id uuid.UUID) error {
 	return s.mirrorDisable(ctx, id)
@@ -143,11 +147,15 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 	})
 }
 
+// MirrorUserCredentialDelete removes a mirrored user credential by legacy id.
+//
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling UserCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorUserCredentialDelete(ctx context.Context, id uuid.UUID) error {
 	return s.mirrorDelete(ctx, id)
 }
 
+// MirrorUserCredentialDisable disables a mirrored user credential by legacy id.
+//
 // lint:allow-no-orgid reason="legacy id was already scope-checked by the calling UserCredentialStore method; mirror loads scope back via RETURNING for cache invalidation"
 func (s *CodingCredentialStore) MirrorUserCredentialDisable(ctx context.Context, id uuid.UUID) error {
 	return s.mirrorDisable(ctx, id)

@@ -3,8 +3,12 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +31,17 @@ type mockCodingCredentialStore struct {
 	disableFn      func(ctx context.Context, scope models.Scope, id uuid.UUID) error
 	moveFn         func(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
 	reorderFn      func(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
+}
+
+type mockCodingCredentialOrgStore struct {
+	mergeFn func(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
+}
+
+func (m *mockCodingCredentialOrgStore) MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+	if m.mergeFn != nil {
+		return m.mergeFn(ctx, orgID, agent, defaults)
+	}
+	return nil
 }
 
 func (m *mockCodingCredentialStore) Get(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error) {
@@ -97,6 +112,414 @@ func (m *mockCodingCredentialStore) Reorder(ctx context.Context, scope models.Sc
 		return m.reorderFn(ctx, scope, orderedIDs)
 	}
 	return nil
+}
+
+func TestCodingCredentialHandlerList(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalID := uuid.New()
+	orgRowID := uuid.New()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name           string
+		target         string
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		expectedStatus int
+		expectedCount  int
+	}{
+		{
+			name:   "lists personal scope",
+			target: "/api/v1/coding-credentials?scope=personal",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					listByScopeFn: func(_ context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error) {
+						require.Equal(t, orgID, scope.OrgID, "List should scope personal reads to the active org")
+						require.NotNil(t, scope.UserID, "List should scope personal reads to the current user")
+						require.Equal(t, userID, *scope.UserID, "List should scope personal reads to the current user id")
+						return []models.DecryptedCodingCredential{{
+							ID:        personalID,
+							OrgID:     orgID,
+							UserID:    &userID,
+							Provider:  models.ProviderOpenAI,
+							Label:     "Codex",
+							Config:    models.OpenAIConfig{APIKey: "sk-openai-123456"},
+							Priority:  1,
+							Status:    models.CodingCredentialStatusActive,
+							CreatedAt: now,
+							UpdatedAt: now,
+						}}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+		},
+		{
+			name:   "lists resolved scope",
+			target: "/api/v1/coding-credentials?scope=resolved",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					listResolveFn: func(_ context.Context, gotOrgID uuid.UUID, gotUserID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+						require.Equal(t, orgID, gotOrgID, "List resolved should pass the active org to the resolver")
+						require.NotNil(t, gotUserID, "List resolved should pass the current user to the resolver")
+						require.Equal(t, userID, *gotUserID, "List resolved should pass the current user id")
+						if provider != models.ProviderAnthropicSubscription {
+							return nil, nil
+						}
+						return []models.DecryptedCodingCredential{{
+							ID:        orgRowID,
+							OrgID:     orgID,
+							Provider:  models.ProviderAnthropicSubscription,
+							Label:     "Claude",
+							Config:    models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"},
+							Priority:  1,
+							Status:    models.CodingCredentialStatusActive,
+							CreatedAt: now,
+							UpdatedAt: now,
+						}}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+		},
+		{
+			name:   "rejects invalid scope",
+			target: "/api/v1/coding-credentials?scope=team",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "propagates store errors",
+			target: "/api/v1/coding-credentials?scope=personal",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					listByScopeFn: func(context.Context, models.Scope) ([]models.DecryptedCodingCredential, error) {
+						return nil, errors.New("db down")
+					},
+				}
+			},
+			expectedStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			req = withAdminUser(req, userID, orgID)
+			rr := httptest.NewRecorder()
+
+			handler.List(rr, req)
+
+			require.Equal(t, tt.expectedStatus, rr.Code, "List should return the expected status code")
+			if tt.expectedStatus == http.StatusOK {
+				var resp models.ListResponse[models.CodingCredentialSummary]
+				require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "List response should be valid JSON")
+				require.Len(t, resp.Data, tt.expectedCount, "List should return the expected number of rows")
+			}
+		})
+	}
+}
+
+func TestCodingCredentialHandlerCreate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	createdID := uuid.New()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name           string
+		body           string
+		role           string
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		setupOrgStore  func(t *testing.T) codingAuthOrgStore
+		expectedStatus int
+	}{
+		{
+			name: "creates personal api key",
+			body: `{"scope":"personal","agent":"codex","auth_type":"api_key","api_key":"sk-openai-123456"}`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					createFn: func(_ context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error) {
+						require.Equal(t, models.CodingCredentialScopePersonal, scope.Label(), "Create should use the requested personal scope")
+						require.Equal(t, "Codex API key", label, "Create should apply the default label")
+						require.Equal(t, models.ProviderOpenAI, cfg.Provider(), "Create should map codex api_key to openai provider config")
+						require.NotNil(t, opts.CreatedBy, "Create should record the current user id")
+						return &createdID, nil
+					},
+					getFn: func(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error) {
+						return &models.DecryptedCodingCredential{
+							ID:        createdID,
+							OrgID:     orgID,
+							UserID:    &userID,
+							Provider:  models.ProviderOpenAI,
+							Config:    models.OpenAIConfig{APIKey: "sk-openai-123456"},
+							Status:    models.CodingCredentialStatusActive,
+							CreatedAt: now,
+							UpdatedAt: now,
+						}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name: "creates org api key and merges defaults",
+			body: `{"scope":"org","agent":"amp","auth_type":"api_key","api_key":"amp-token","agent_defaults":{"AMP_MODE":"deep"}}`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					createFn: func(_ context.Context, scope models.Scope, label string, cfg models.ProviderConfig, _ db.CreateOpts) (*uuid.UUID, error) {
+						require.True(t, scope.IsOrg(), "Create should use org scope for org credentials")
+						require.Equal(t, "Amp API key", label, "Create should apply the amp default label")
+						require.Equal(t, models.ProviderAmp, cfg.Provider(), "Create should map amp api_key to amp provider config")
+						return &createdID, nil
+					},
+					getFn: func(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error) {
+						return &models.DecryptedCodingCredential{
+							ID:        createdID,
+							OrgID:     orgID,
+							Provider:  models.ProviderAmp,
+							Config:    models.AmpConfig{APIKey: "amp-token"},
+							Status:    models.CodingCredentialStatusActive,
+							CreatedAt: now,
+							UpdatedAt: now,
+						}, nil
+					},
+				}
+			},
+			setupOrgStore: func(t *testing.T) codingAuthOrgStore {
+				return &mockCodingCredentialOrgStore{
+					mergeFn: func(_ context.Context, gotOrgID uuid.UUID, agent models.AgentType, defaults map[string]string) error {
+						require.Equal(t, orgID, gotOrgID, "Create should merge defaults for the active org")
+						require.Equal(t, models.AgentTypeAmp, agent, "Create should merge defaults for the requested agent")
+						require.Equal(t, "deep", defaults["AMP_MODE"], "Create should pass agent defaults through")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name: "rejects member org mutation",
+			body: `{"scope":"org","agent":"codex","auth_type":"api_key","api_key":"sk-openai-123456"}`,
+			role: "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name: "maps duplicate label to conflict",
+			body: `{"scope":"personal","agent":"codex","auth_type":"api_key","label":"Codex","api_key":"sk-openai-123456"}`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					createFn: func(context.Context, models.Scope, string, models.ProviderConfig, db.CreateOpts) (*uuid.UUID, error) {
+						return nil, &db.ErrCodingCredentialLabelTaken{Label: "Codex", ExistingStatus: models.CodingCredentialStatusActive}
+					},
+				}
+			},
+			expectedStatus: http.StatusConflict,
+		},
+		{
+			name: "rejects invalid json",
+			body: `{`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var orgStore codingAuthOrgStore
+			if tt.setupOrgStore != nil {
+				orgStore = tt.setupOrgStore(t)
+			}
+			handler := NewCodingCredentialHandler(tt.setupStore(t), orgStore)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/coding-credentials", bytes.NewBufferString(tt.body))
+			req = withUserAndOrg(req, userID, orgID, tt.role)
+			rr := httptest.NewRecorder()
+
+			handler.Create(rr, req)
+
+			require.Equal(t, tt.expectedStatus, rr.Code, "Create should return the expected status code")
+		})
+	}
+}
+
+func TestCodingCredentialHandlerDeleteMoveAndReorder(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	rowID := uuid.New()
+	beforeID := uuid.New()
+
+	tests := []struct {
+		name           string
+		method         string
+		target         string
+		body           string
+		invoke         func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request)
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		expectedStatus int
+	}{
+		{
+			name:   "delete disables credential",
+			method: http.MethodDelete,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "?scope=personal",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Delete(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					disableFn: func(_ context.Context, scope models.Scope, id uuid.UUID) error {
+						require.Equal(t, rowID, id, "Delete should disable the requested credential id")
+						require.Equal(t, models.CodingCredentialScopePersonal, scope.Label(), "Delete should use the requested scope")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusNoContent,
+		},
+		{
+			name:   "move sends position",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "/move",
+			body:   fmt.Sprintf(`{"scope":"personal","before_id":"%s"}`, beforeID),
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Move(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					moveFn: func(_ context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error {
+						require.Equal(t, rowID, id, "Move should move the requested credential id")
+						require.Equal(t, models.CodingCredentialScopePersonal, scope.Label(), "Move should use the requested scope")
+						require.Equal(t, beforeID, *pos.BeforeID, "Move should pass the requested before_id")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusNoContent,
+		},
+		{
+			name:   "reorder sends ids",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/reorder",
+			body:   fmt.Sprintf(`{"scope":"personal","ordered_ids":["%s","%s"]}`, rowID, beforeID),
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Reorder(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					reorderFn: func(_ context.Context, scope models.Scope, orderedIDs []uuid.UUID) error {
+						require.Equal(t, models.CodingCredentialScopePersonal, scope.Label(), "Reorder should use the requested scope")
+						require.Equal(t, []uuid.UUID{rowID, beforeID}, orderedIDs, "Reorder should pass ordered ids through")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusNoContent,
+		},
+		{
+			name:   "delete maps not found",
+			method: http.MethodDelete,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "?scope=personal",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Delete(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					disableFn: func(context.Context, models.Scope, uuid.UUID) error {
+						return db.ErrCodingCredentialNotFound
+					},
+				}
+			},
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
+			req := httptest.NewRequest(tt.method, tt.target, bytes.NewBufferString(tt.body))
+			req = withAdminUser(req, userID, orgID)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("id", rowID.String())
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+
+			tt.invoke(handler, rr, req)
+
+			require.Equal(t, tt.expectedStatus, rr.Code, "handler should return the expected status code")
+		})
+	}
+}
+
+func TestCodingCredentialSummaryHelpers(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	userID := uuid.New()
+	orgID := uuid.New()
+	verifiedAt := now.Add(-time.Hour)
+	rows := []models.DecryptedCodingCredential{
+		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Codex", Config: models.OpenAIConfig{APIKey: "sk-openai-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAIChatGPT, Config: models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"}, Priority: 1, Status: models.CodingCredentialStatusActive, LastVerifiedAt: &verifiedAt, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gemini-key"}, Priority: 2, Status: models.CodingCredentialStatusPendingAuth, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-key"}, Priority: 3, Status: "disabled", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderPi, Config: models.PiConfig{APIKey: "pi-key"}, Priority: 4, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
+	}
+
+	personal := summariesForScope(rows, models.Scope{OrgID: orgID, UserID: &userID})
+	orgRows := summariesForScope(rows, models.Scope{OrgID: orgID})
+
+	require.Len(t, personal, 2, "summariesForScope should keep only personal rows for a personal scope")
+	require.True(t, personal[0].IsDefault, "first runnable personal row should be marked default")
+	require.False(t, personal[1].IsDefault, "invalid personal row should not be marked default")
+	require.Len(t, orgRows, 4, "summariesForScope should keep only org rows for org scope")
+	require.True(t, orgRows[0].IsDefault, "first runnable org row should be marked default")
+	require.Equal(t, models.AgentTypeClaudeCode, orgRows[0].Agent, "anthropic subscription should map to Claude Code")
+	require.Equal(t, models.CodingAuthTypeSubscription, orgRows[0].AuthType, "subscription provider should map to subscription auth")
+	require.Equal(t, models.CodingAuthStatusHealthy, orgRows[0].Status, "verified active row should be healthy")
+	require.Equal(t, models.CodingAuthStatusNeedsReauth, orgRows[1].Status, "pending_auth row should need reauth")
+	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
+	require.Equal(t, "Gemini CLI API key", defaultLabelFor(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover gemini")
+	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
+	require.Equal(t, "Coding auth", defaultLabelFor("", ""), "defaultLabelFor should cover unknown agents")
+
+	cfg, provider, err := codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeClaudeCode, AuthType: models.CodingAuthTypeAPIKey, APIKey: "sk-ant", BaseURL: "https://anthropic.test"})
+	require.NoError(t, err, "codingCredentialConfigFromInput should accept Claude Code api keys")
+	require.Equal(t, models.ProviderAnthropic, provider, "Claude Code api keys should map to anthropic provider")
+	require.Equal(t, models.ProviderAnthropic, cfg.Provider(), "Claude Code config should report anthropic provider")
+
+	cfg, provider, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeGeminiCLI, AuthType: models.CodingAuthTypeAPIKey, APIKey: "gemini-key"})
+	require.NoError(t, err, "codingCredentialConfigFromInput should accept Gemini api keys")
+	require.Equal(t, models.ProviderGemini, provider, "Gemini api keys should map to gemini provider")
+	require.Equal(t, models.ProviderGemini, cfg.Provider(), "Gemini config should report gemini provider")
+
+	_, _, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: "unknown", AuthType: models.CodingAuthTypeAPIKey, APIKey: "key"})
+	require.Error(t, err, "codingCredentialConfigFromInput should reject unsupported agents")
 }
 
 func TestCodingCredentialHandlerUpdateRejectsPendingAuthPromotion(t *testing.T) {
@@ -195,4 +618,273 @@ func TestCodingCredentialHandlerUpdateAllowsInvalidToActive(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "Update should allow active status for non-pending credentials")
 	require.Equal(t, models.CodingCredentialStatusActive, statusWritten, "Update should write the requested active status")
 	require.Equal(t, 2, getCalls, "Update should read before status validation and read back after the write")
+}
+
+func TestCodingCredentialHandlerUpdateBranches(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	rowID := uuid.New()
+	now := time.Now().UTC()
+	label := "Renamed"
+	disabled := models.CodingCredentialStatusDisabled
+
+	tests := []struct {
+		name           string
+		targetID       string
+		body           string
+		role           string
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		expectedStatus int
+	}{
+		{
+			name:           "rejects invalid id",
+			targetID:       "not-a-uuid",
+			body:           `{"scope":"personal"}`,
+			role:           "admin",
+			setupStore:     func(t *testing.T) *mockCodingCredentialStore { return &mockCodingCredentialStore{} },
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects invalid json",
+			targetID:       rowID.String(),
+			body:           `{`,
+			role:           "admin",
+			setupStore:     func(t *testing.T) *mockCodingCredentialStore { return &mockCodingCredentialStore{} },
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "rejects org mutation for member",
+			targetID:       rowID.String(),
+			body:           `{"scope":"org","label":"Renamed"}`,
+			role:           "member",
+			setupStore:     func(t *testing.T) *mockCodingCredentialStore { return &mockCodingCredentialStore{} },
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:     "renames and disables",
+			targetID: rowID.String(),
+			body:     `{"scope":"personal","label":"Renamed","status":"disabled"}`,
+			role:     "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					renameFn: func(_ context.Context, _ models.Scope, id uuid.UUID, gotLabel string) error {
+						require.Equal(t, rowID, id, "Update should rename the requested id")
+						require.Equal(t, label, gotLabel, "Update should pass the requested label")
+						return nil
+					},
+					updateStatusFn: func(_ context.Context, _ models.Scope, id uuid.UUID, status string) error {
+						require.Equal(t, rowID, id, "Update should update the requested id")
+						require.Equal(t, disabled, status, "Update should pass the requested status")
+						return nil
+					},
+					getFn: func(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error) {
+						return &models.DecryptedCodingCredential{
+							ID: rowID, OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI,
+							Label: label, Config: models.OpenAIConfig{APIKey: "sk-openai-123456"},
+							Status: models.CodingCredentialStatusDisabled, CreatedAt: now, UpdatedAt: now,
+						}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:     "rejects pending auth status from client",
+			targetID: rowID.String(),
+			body:     `{"scope":"personal","status":"pending_auth"}`,
+			role:     "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:     "maps rename conflict",
+			targetID: rowID.String(),
+			body:     `{"scope":"personal","label":"Taken"}`,
+			role:     "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					renameFn: func(context.Context, models.Scope, uuid.UUID, string) error {
+						return &db.ErrCodingCredentialLabelTaken{Label: "Taken", ExistingStatus: models.CodingCredentialStatusActive}
+					},
+				}
+			},
+			expectedStatus: http.StatusConflict,
+		},
+		{
+			name:     "maps read back not found",
+			targetID: rowID.String(),
+			body:     `{"scope":"personal"}`,
+			role:     "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{getFn: func(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error) {
+					return nil, db.ErrCodingCredentialNotFound
+				}}
+			},
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/coding-credentials/"+tt.targetID, bytes.NewBufferString(tt.body))
+			req = withUserAndOrg(req, userID, orgID, tt.role)
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("id", tt.targetID)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+
+			handler.Update(rr, req)
+
+			require.Equal(t, tt.expectedStatus, rr.Code, "Update should return the expected status code")
+		})
+	}
+}
+
+func TestCodingCredentialHandlerDeleteMoveReorderErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	rowID := uuid.New()
+
+	tests := []struct {
+		name           string
+		method         string
+		target         string
+		body           string
+		role           string
+		invoke         func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request)
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		expectedStatus int
+	}{
+		{
+			name:   "delete rejects invalid id",
+			method: http.MethodDelete,
+			target: "/api/v1/coding-credentials/not-a-uuid?scope=personal",
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Delete(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "delete rejects member org mutation",
+			method: http.MethodDelete,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "?scope=org",
+			role:   "member",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Delete(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:   "move rejects invalid json",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "/move",
+			body:   `{`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Move(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "move rejects invalid input",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "/move",
+			body:   `{"scope":"personal"}`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Move(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "move maps store error",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/" + rowID.String() + "/move",
+			body:   `{"scope":"personal","to_top":true}`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Move(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{moveFn: func(context.Context, models.Scope, uuid.UUID, models.MoveCodingCredentialInput) error {
+					return errors.New("db down")
+				}}
+			},
+			expectedStatus: http.StatusInternalServerError,
+		},
+		{
+			name:   "reorder rejects invalid json",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/reorder",
+			body:   `{`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Reorder(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "reorder maps store error",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/reorder",
+			body:   `{"scope":"personal","ordered_ids":[]}`,
+			role:   "admin",
+			invoke: func(handler *CodingCredentialHandler, rr *httptest.ResponseRecorder, req *http.Request) {
+				handler.Reorder(rr, req)
+			},
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{reorderFn: func(context.Context, models.Scope, []uuid.UUID) error {
+					return db.ErrCodingCredentialNotFound
+				}}
+			},
+			expectedStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
+			req := httptest.NewRequest(tt.method, tt.target, bytes.NewBufferString(tt.body))
+			req = withUserAndOrg(req, userID, orgID, tt.role)
+			routeCtx := chi.NewRouteContext()
+			routeID := rowID.String()
+			if strings.Contains(tt.target, "not-a-uuid") {
+				routeID = "not-a-uuid"
+			}
+			routeCtx.URLParams.Add("id", routeID)
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+
+			tt.invoke(handler, rr, req)
+
+			require.Equal(t, tt.expectedStatus, rr.Code, "handler should return the expected status code")
+		})
+	}
 }

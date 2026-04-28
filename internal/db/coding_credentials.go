@@ -86,10 +86,9 @@ type CodingCredentialStore struct {
 
 	// rng is injectable for deterministic tests of the same-priority
 	// distribution path.
-	rng        *rand.Rand
-	rngMu      sync.Mutex
-	clock      func() time.Time
-	usePending bool // tests can disable pending_auth resurrection
+	rng   *rand.Rand
+	rngMu sync.Mutex
+	clock func() time.Time
 
 	// mirrorLogf surfaces structural drift detected during a mirror write
 	// (e.g. a legacy anthropic row with both APIKey and Subscription set).
@@ -121,7 +120,7 @@ func NewCodingCredentialStore(dbtx DBTX, cryptoSvc *crypto.Service) *CodingCrede
 		crypto:        cryptoSvc,
 		resolverCache: newResolverCache(30 * time.Second),
 		health:        newHealthCache(75 * time.Second),
-		rng:           rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)),
+		rng:           rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)), // #nosec G404,G115 -- non-security load distribution jitter; not used for secrets or authorization
 		clock:         time.Now,
 	}
 }
