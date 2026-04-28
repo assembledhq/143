@@ -87,4 +87,28 @@ describe("AutopilotProposalCard", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("renders the proposal icon without a filled purple background", async () => {
+    server.use(
+      http.get("/api/v1/projects/proposals/summary", () =>
+        HttpResponse.json({ data: { count: 1 } }),
+      ),
+      http.get("/api/v1/projects", () =>
+        HttpResponse.json({
+          data: [{ id: "p-1", title: "Fix billing", status: "draft" }],
+        }),
+      ),
+    );
+
+    const { container } = renderWithProviders(<AutopilotProposalCard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("PM found 1 strategic opportunity"),
+      ).toBeInTheDocument();
+    });
+
+    expect(container.querySelector(".bg-purple-100")).not.toBeInTheDocument();
+    expect(container.querySelector(".text-purple-600")).toBeInTheDocument();
+  });
 });
