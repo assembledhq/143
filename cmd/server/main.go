@@ -435,6 +435,7 @@ func main() {
 		)
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+		scheduler.SetSessionStore(sessionStore)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -486,29 +487,13 @@ func main() {
 		// uploads spawned by CreatePR to finish. These run in detached
 		// goroutines (the worker job has returned) and own a temp file +
 		// pending_snapshot_key state; if we exit before they land the
-		// session is stuck with pending_snapshot_key set forever and no
-		// in-flight uploader to clear it. The drainCtx deadline still
-		// applies — if uploads can't finish within budget we log and let
-		// the next worker start a reconcile cycle.
-		//
-		// Wrapped in a func literal so its declarations are scoped under
-		// the goto-over-declaration rule (drained: above can be jumped to
-		// from inside the for loop).
-		func() {
-			if workerServices == nil || workerServices.PR == nil {
-				return
-			}
-			uploadsDone := make(chan struct{})
-			go func() {
-				defer close(uploadsDone)
-				workerServices.PR.WaitForPostPRSnapshotUploads()
-			}()
-			select {
-			case <-uploadsDone:
-			case <-drainCtx.Done():
-				logger.Warn().Msg("post-PR snapshot upload drain timed out; sessions may have stale pending_snapshot_key until reconcile")
-			}
-		}()
+		// session is stuck with pending_snapshot_key set with no in-flight
+		// uploader to clear it. The drainCtx deadline still applies — if
+		// uploads can't finish within budget the cluster.Scheduler's
+		// reapStrandedPendingSnapshots pass clears those rows on the next
+		// tick (within strandedPendingSnapshotThreshold), so the worst-case
+		// outcome is a delayed resume rather than a permanently stuck row.
+		drainPostPRUploads(drainCtx, workerServices, logger)
 	drained:
 		drainCancel()
 
@@ -646,6 +631,28 @@ func totalActiveRunAgentJobs(workers []*worker.Worker) int {
 		total += w.ActiveRunAgentCount()
 	}
 	return total
+}
+
+// drainPostPRUploads blocks until the workerServices PRService has finished
+// all in-flight post-PR snapshot uploads, or until drainCtx expires. A
+// timeout here is non-fatal: cluster.Scheduler.reapStrandedPendingSnapshots
+// will recover any pending_snapshot_key rows whose owning upload was killed
+// when this drain timed out, so worst-case is a delayed (not permanent)
+// resume for affected sessions.
+func drainPostPRUploads(drainCtx context.Context, workerServices *worker.Services, logger zerolog.Logger) {
+	if workerServices == nil || workerServices.PR == nil {
+		return
+	}
+	uploadsDone := make(chan struct{})
+	go func() {
+		defer close(uploadsDone)
+		workerServices.PR.WaitForPostPRSnapshotUploads()
+	}()
+	select {
+	case <-uploadsDone:
+	case <-drainCtx.Done():
+		logger.Warn().Msg("post-PR snapshot upload drain timed out; cluster.Scheduler reaper will clear stranded pending_snapshot_key rows")
+	}
 }
 
 // canBuildServices checks whether the runtime dependencies for Phase 3+

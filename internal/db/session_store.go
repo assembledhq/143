@@ -117,7 +117,7 @@ const sessionSelectColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -135,7 +135,7 @@ const sessionListColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, pending_snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -1319,9 +1319,13 @@ func (s *SessionStore) ClearSnapshotKey(ctx context.Context, orgID, sessionID uu
 // before the upload to object storage begins. Hydration paths must check this
 // column and wait until it is NULL before resuming a session — see
 // PromotePendingSnapshot.
+//
+// Also stamps pending_snapshot_set_at = NOW() so the stranded-pending reaper
+// can identify rows whose owning upload goroutine died.
 func (s *SessionStore) SetPendingSnapshotKey(ctx context.Context, orgID, sessionID uuid.UUID, key string) error {
 	query := `UPDATE sessions
-		SET pending_snapshot_key = @key
+		SET pending_snapshot_key = @key,
+		    pending_snapshot_set_at = NOW()
 		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
@@ -1339,11 +1343,13 @@ func (s *SessionStore) SetPendingSnapshotKey(ctx context.Context, orgID, session
 // newer one does not clobber the newer key — if pending_snapshot_key has
 // already been changed (or cleared), this is a no-op. sandbox_state is also
 // set to 'snapshotted' to mirror the invariant maintained by
-// UpdateSnapshotInfo.
+// UpdateSnapshotInfo. pending_snapshot_set_at is cleared in lockstep so the
+// stranded-pending reaper does not see a phantom timestamp.
 func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, expectedKey string) error {
 	query := `UPDATE sessions
 		SET snapshot_key = pending_snapshot_key,
 		    pending_snapshot_key = NULL,
+		    pending_snapshot_set_at = NULL,
 		    sandbox_state = 'snapshotted'
 		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -1354,19 +1360,50 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 	return err
 }
 
-// ClearPendingSnapshot NULLs pending_snapshot_key without touching
-// snapshot_key. Called when an in-flight upload fails — the session falls
-// back to its previous (pre-PR) snapshot, which is degraded but recoverable
-// (the user can retry the action; the agent itself can re-fetch state).
+// ClearPendingSnapshot NULLs pending_snapshot_key (and pending_snapshot_set_at
+// in lockstep) without touching snapshot_key. Called when an in-flight upload
+// fails — the session falls back to its previous (pre-PR) snapshot, which is
+// degraded but recoverable (the user can retry the action; the agent itself
+// can re-fetch state).
 func (s *SessionStore) ClearPendingSnapshot(ctx context.Context, orgID, sessionID uuid.UUID) error {
 	query := `UPDATE sessions
-		SET pending_snapshot_key = NULL
+		SET pending_snapshot_key = NULL,
+		    pending_snapshot_set_at = NULL
 		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 	})
 	return err
+}
+
+// ReapStrandedPendingSnapshots clears pending_snapshot_key (and
+// pending_snapshot_set_at) for any session whose pending upload was set
+// before olderThan. A row is considered stranded when its owning upload
+// goroutine cannot finish — the worker hard-crashed, the graceful drain
+// timed out, or some bug left the row inconsistent. Callers should pass an
+// olderThan that comfortably exceeds postPRSnapshotUploadTimeout so a
+// legitimately slow upload is never reaped out from under itself.
+//
+// Returns the number of rows cleared so the caller can log/meter.
+//
+// The WHERE clause uses pending_snapshot_set_at <= @older_than rather than
+// "<", so a clock with second-level resolution can still reap a row whose
+// timestamp is exactly equal to the threshold instant.
+//
+// lint:allow-no-orgid reason="cross-org sweep run by the leader-elected cluster.Scheduler — per-org fanout adds no security since the reaper takes no external input, and would force enumerating every org each tick"
+func (s *SessionStore) ReapStrandedPendingSnapshots(ctx context.Context, olderThan time.Time) (int64, error) {
+	query := `UPDATE sessions
+		SET pending_snapshot_key = NULL,
+		    pending_snapshot_set_at = NULL
+		WHERE pending_snapshot_key IS NOT NULL
+		  AND pending_snapshot_set_at IS NOT NULL
+		  AND pending_snapshot_set_at <= @older_than`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{"older_than": olderThan})
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // AcquireTurnHold marks the agent turn as a holder of the sandbox container.

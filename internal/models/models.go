@@ -226,7 +226,13 @@ type Session struct {
 	// object-storage key has no meaning to API consumers. The frontend
 	// surfaces "finalizing" via session status, not by inspecting this
 	// column.
-	PendingSnapshotKey          *string                 `db:"pending_snapshot_key" json:"-"`
+	PendingSnapshotKey *string `db:"pending_snapshot_key" json:"-"`
+	// PendingSnapshotSetAt records when PendingSnapshotKey was set, so the
+	// stranded-pending reaper can identify uploads whose owning goroutine
+	// died (worker crash, drain timeout) and clear the key. Set to NOW() by
+	// SetPendingSnapshotKey, cleared in lockstep by Promote/Clear. Hidden
+	// from JSON for the same reason as PendingSnapshotKey.
+	PendingSnapshotSetAt        *time.Time              `db:"pending_snapshot_set_at" json:"-"`
 	RuntimeSoftDeadlineAt       *time.Time              `db:"runtime_soft_deadline_at" json:"runtime_soft_deadline_at,omitempty"`
 	RuntimeHardDeadlineAt       *time.Time              `db:"runtime_hard_deadline_at" json:"runtime_hard_deadline_at,omitempty"`
 	RuntimeLastProgressAt       *time.Time              `db:"runtime_last_progress_at" json:"runtime_last_progress_at,omitempty"`

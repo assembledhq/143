@@ -577,8 +577,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			s.logger.Warn().Err(setErr).Str("session_id", run.ID.String()).Msg("failed to set pending snapshot key")
 		} else {
 			s.dispatchPostPRSnapshotUpload(run.OrgID, run.ID, newSnapshotKey, pushed.CapturedSnapshotPath, pushed.CapturedSnapshotSize)
-			// The goroutine now owns the temp file; clear the path so the
-			// deferred cleanup at function entry does not race-remove it.
+			// Ownership invariant: from this point on, the goroutine
+			// spawned by dispatchPostPRSnapshotUpload solely owns the temp
+			// file at pushed.CapturedSnapshotPath. Clearing the path here
+			// prevents the deferred cleanup at function entry from
+			// double-removing it. Anything that needs the file (re-upload,
+			// recovery) must coordinate via pending_snapshot_key, not by
+			// re-reading the path.
 			pushed.CapturedSnapshotPath = ""
 		}
 	}
@@ -596,12 +601,21 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	return pr, nil
 }
 
+// postPRSnapshotUploadTimeout bounds a single upload attempt. Deliberately
+// kept under the worker package's maxRetryableDuration (8m) so that a
+// continue_session job blocked on ErrSnapshotPending will outlast the upload
+// window — i.e. when the gate finally lifts (Promote or Clear), the job is
+// still alive to retry, not already dead-lettered. If you raise this, raise
+// maxRetryableDuration in lockstep or expect resumes to dead-letter under
+// load (large sandbox tar + slow object storage).
+const postPRSnapshotUploadTimeout = 6 * time.Minute
+
 // dispatchPostPRSnapshotUpload streams the captured push-sandbox tar to
 // object storage in the background, then atomically promotes
 // pending_snapshot_key into snapshot_key on success or clears it on failure.
 // The goroutine uses a fresh background context (the worker job's ctx is
-// likely cancelled by the time we return here), bounded by a generous
-// timeout to keep upload retries from leaking forever.
+// likely cancelled by the time we return here), bounded by
+// postPRSnapshotUploadTimeout to keep upload retries from leaking forever.
 //
 // Owns the temp file at tarPath: removes it on completion regardless of
 // outcome. tarSize is logged for observability so spikes in PR-creation
@@ -611,7 +625,7 @@ func (s *PRService) dispatchPostPRSnapshotUpload(orgID, sessionID uuid.UUID, key
 	s.postPRSnapshotUploads.Add(1)
 	go func() {
 		defer s.postPRSnapshotUploads.Done()
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		bgCtx, cancel := context.WithTimeout(context.Background(), postPRSnapshotUploadTimeout)
 		defer cancel()
 		defer func() { _ = os.Remove(tarPath) }()
 

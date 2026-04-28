@@ -34,7 +34,7 @@ var workerSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key", "pending_snapshot_set_at",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -166,22 +166,23 @@ func workerSessionTestRow(values ...any) []any {
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
 // workerSessionTestRowDispatch with nil values for columns added after the
-// fixture conventions were settled: pending_snapshot_key (index 42, between
-// snapshot_key and runtime_soft_deadline_at) and the trailing
-// git_identity_source / git_identity_user_id pair (immediately before
-// created_at). Existing fixtures emit a 76-column "pre-identity" row; we pad
-// it to the current 79-column layout without touching every call site.
+// fixture conventions were settled: the pending-snapshot pair
+// (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
+// runtime_soft_deadline_at) and the trailing git_identity_source /
+// git_identity_user_id pair (immediately before created_at). Existing
+// fixtures emit a "pre-pending, pre-identity" row; we pad it to the
+// current layout without touching every call site.
 func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-3 {
+	if len(row) != len(workerSessionColumns)-4 {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
-	withPending := make([]any, 0, len(row)+1)
+	withPending := make([]any, 0, len(row)+2)
 	withPending = append(withPending, row[:pendingSnapshotKeyIndex]...)
-	withPending = append(withPending, nil)
+	withPending = append(withPending, nil, nil) // pending_snapshot_key, pending_snapshot_set_at
 	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
 
 	padded := make([]any, 0, len(workerSessionColumns))

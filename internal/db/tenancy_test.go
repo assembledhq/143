@@ -61,11 +61,12 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
-		{"sessions", "where status = 'idle'"},      // ListStaleIdleSessions: system-wide cleanup across all orgs
-		{"sessions", "where s.status = 'pending'"}, // ListStalePendingSessions: system-wide cleanup across all orgs
-		{"sessions", "where s.status = 'running'"}, // ListStaleRunningSessions: system-wide cleanup across all orgs
-		{"sessions", "where sandbox_state"},        // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
-		{"sessions", "diff_history"},               // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
+		{"sessions", "where status = 'idle'"},                  // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where s.status = 'pending'"},             // ListStalePendingSessions: system-wide cleanup across all orgs
+		{"sessions", "where s.status = 'running'"},             // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where sandbox_state"},                    // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
+		{"sessions", "where pending_snapshot_key is not null"}, // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
+		{"sessions", "diff_history"},                           // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
 		{"jobs", "where status = 'pending' and run_at <= now()"},        // ClaimNextRunnable: cross-org worker queue consumer

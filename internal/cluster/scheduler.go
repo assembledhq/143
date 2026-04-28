@@ -49,6 +49,13 @@ type schedulerAutomationRunStore interface {
 	ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error)
 }
 
+// schedulerSessionStore is the narrow surface the scheduler needs for the
+// stranded-pending-snapshot reaper. Kept as an interface so tests can inject
+// a mock without depending on db.SessionStore directly.
+type schedulerSessionStore interface {
+	ReapStrandedPendingSnapshots(ctx context.Context, olderThan time.Time) (int64, error)
+}
+
 // stuckAutomationRunThreshold is how long a pending/running automation_run
 // can sit before the reaper marks it failed. A crashed worker would otherwise
 // leave the row forever and saturate max_concurrent for the parent automation.
@@ -61,6 +68,13 @@ type schedulerAutomationRunStore interface {
 const stuckAutomationRunThreshold = 1 * time.Hour
 
 const pullRequestReconcileBatch = 50
+
+// strandedPendingSnapshotThreshold is the wall-clock age past which a row's
+// pending_snapshot_key is presumed stranded. Must comfortably exceed the
+// PRService's per-upload timeout (currently 6 minutes) so a legitimately
+// slow upload is never reaped out from under itself. Tune up if real uploads
+// ever push past this; tune down only after the upload timeout drops too.
+const strandedPendingSnapshotThreshold = 15 * time.Minute
 
 // schedulerTxBeginner is the narrow transaction-starter surface the scheduler
 // needs from a pgx pool. Declared as an interface so tests can inject a mock
@@ -89,6 +103,7 @@ type Scheduler struct {
 	pmDocs         schedulerPMDocStore         // nil-safe: context refresh scheduling disabled if nil
 	automations    schedulerAutomationStore    // nil-safe: automation scheduling disabled if nil
 	automationRuns schedulerAutomationRunStore // nil-safe: automation scheduling disabled if nil
+	sessions       schedulerSessionStore       // nil-safe: stranded-pending reaper disabled if nil
 	pool           schedulerTxBeginner         // needed for automation scheduling transactions
 	logger         zerolog.Logger
 
@@ -127,6 +142,13 @@ func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, ru
 	s.automations = automations
 	s.automationRuns = runs
 	s.pool = pool
+}
+
+// SetSessionStore injects the session store used by the stranded-pending
+// snapshot reaper. If unset, the reaper pass is a no-op (e.g. in tests that
+// don't exercise it).
+func (s *Scheduler) SetSessionStore(sessions schedulerSessionStore) {
+	s.sessions = sessions
 }
 
 func (s *Scheduler) Start(ctx context.Context, interval time.Duration) {
@@ -263,6 +285,13 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 
 	// Fifth pass: periodically reconcile stale PR health for open pull requests.
 	s.schedulePullRequestReconciliation(ctx, orgIDs, now)
+
+	// Sixth pass: clear pending_snapshot_key on sessions whose owning upload
+	// goroutine died (worker OOM, drain timeout, etc). Without this, the
+	// orchestrator's gate would block continue_session forever for that
+	// session. Idempotent across schedulers — concurrent reapers update the
+	// same rows with the same NULL value.
+	s.reapStrandedPendingSnapshots(ctx, now)
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
@@ -329,6 +358,33 @@ func (s *Scheduler) scheduleContextRefreshes(ctx context.Context, orgIDs []uuid.
 		if _, err := s.jobs.Enqueue(ctx, orgID, "default", models.JobTypePMContextRefresh, payload, 3, &dedupeKey); err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue pm_context_refresh job")
 		}
+	}
+}
+
+// reapStrandedPendingSnapshots clears pending_snapshot_key on sessions whose
+// owning upload goroutine cannot finish — most often a worker hard-crash
+// (OOM, container kill) that left the row with no live uploader, or a
+// graceful drain that timed out. Without this pass, the orchestrator's gate
+// in ContinueSession would refuse to resume those sessions forever.
+//
+// The reaper uses the strandedPendingSnapshotThreshold age guard, which is
+// chosen to comfortably exceed PRService.postPRSnapshotUploadTimeout: a
+// legitimately slow upload that's still in flight will not match.
+func (s *Scheduler) reapStrandedPendingSnapshots(ctx context.Context, now time.Time) {
+	if s.sessions == nil {
+		return
+	}
+	cutoff := now.Add(-strandedPendingSnapshotThreshold)
+	cleared, err := s.sessions.ReapStrandedPendingSnapshots(ctx, cutoff)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to reap stranded pending_snapshot_key rows")
+		return
+	}
+	if cleared > 0 {
+		s.logger.Warn().
+			Int64("cleared", cleared).
+			Dur("threshold", strandedPendingSnapshotThreshold).
+			Msg("cleared stranded pending_snapshot_key rows; sessions can resume")
 	}
 }
 
