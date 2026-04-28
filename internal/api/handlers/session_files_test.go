@@ -77,7 +77,7 @@ var sessionColumnsForFiles = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -86,17 +86,22 @@ var sessionColumnsForFiles = []string{
 }
 
 func sessionFileTestRow(values ...interface{}) []interface{} {
-	// Tests written before the git_identity_source / git_identity_user_id
-	// columns existed pass values whose count is two short. Inject the
-	// policy-defaults (3 values at the front) and the trailing identity
-	// nils (2 values just before created_at) here so the fixtures don't
-	// have to be rewritten.
-	if len(values) == len(sessionColumnsForFiles)-3-2 {
-		row := make([]interface{}, 0, len(values)+5)
+	// Tests written before three column additions pass values whose count
+	// is six short of the current schema. Inject the missing pieces here so
+	// the fixtures don't have to be rewritten:
+	//   - 3 policy defaults (origin/interaction_mode/validation_policy) at the front
+	//   - 1 pending_snapshot_key nil right after snapshot_key
+	//   - 2 trailing identity nils (git_identity_source/git_identity_user_id) just before created_at
+	if len(values) == len(sessionColumnsForFiles)-3-1-2 {
+		row := make([]interface{}, 0, len(values)+6)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
-		row = append(row, values[3:len(values)-1]...)
-		row = append(row, nil, nil)
+		// Legacy values[3..38] = agent_type through snapshot_key (36 values).
+		row = append(row, values[3:39]...)
+		row = append(row, nil) // pending_snapshot_key
+		// Legacy values[39..len-2] = runtime through deleted_at.
+		row = append(row, values[39:len(values)-1]...)
+		row = append(row, nil, nil) // git_identity_source, git_identity_user_id
 		row = append(row, values[len(values)-1])
 		return row
 	}

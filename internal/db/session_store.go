@@ -117,7 +117,7 @@ const sessionSelectColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, snapshot_key, pending_snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -135,7 +135,7 @@ const sessionListColumns = `id,
 	parent_session_id, revision_context, error, result_summary, diff,
 	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
-	sandbox_state, snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
+	sandbox_state, snapshot_key, pending_snapshot_key, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
@@ -1307,6 +1307,61 @@ func (s *SessionStore) ClearSnapshotKey(ctx context.Context, orgID, sessionID uu
 	query := `UPDATE sessions
 		SET snapshot_key = NULL, sandbox_state = 'destroyed'
 		WHERE id = @id AND org_id = @org_id AND snapshot_key IS NOT NULL`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	})
+	return err
+}
+
+// SetPendingSnapshotKey records that an async upload is in progress for the
+// given key. Called immediately after CreatePR captures the post-push tar but
+// before the upload to object storage begins. Hydration paths must check this
+// column and wait until it is NULL before resuming a session — see
+// PromotePendingSnapshot.
+func (s *SessionStore) SetPendingSnapshotKey(ctx context.Context, orgID, sessionID uuid.UUID, key string) error {
+	query := `UPDATE sessions
+		SET pending_snapshot_key = @key
+		WHERE id = @id AND org_id = @org_id`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+		"key":    key,
+	})
+	return err
+}
+
+// PromotePendingSnapshot atomically advances snapshot_key to the value of
+// pending_snapshot_key and clears pending_snapshot_key. Called by the upload
+// goroutine once snapshots.Save returns success.
+//
+// The expectedKey guard ensures that a stale upload that lost a race with a
+// newer one does not clobber the newer key — if pending_snapshot_key has
+// already been changed (or cleared), this is a no-op. sandbox_state is also
+// set to 'snapshotted' to mirror the invariant maintained by
+// UpdateSnapshotInfo.
+func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, expectedKey string) error {
+	query := `UPDATE sessions
+		SET snapshot_key = pending_snapshot_key,
+		    pending_snapshot_key = NULL,
+		    sandbox_state = 'snapshotted'
+		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key`
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":           sessionID,
+		"org_id":       orgID,
+		"expected_key": expectedKey,
+	})
+	return err
+}
+
+// ClearPendingSnapshot NULLs pending_snapshot_key without touching
+// snapshot_key. Called when an in-flight upload fails — the session falls
+// back to its previous (pre-PR) snapshot, which is degraded but recoverable
+// (the user can retry the action; the agent itself can re-fetch state).
+func (s *SessionStore) ClearPendingSnapshot(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	query := `UPDATE sessions
+		SET pending_snapshot_key = NULL
+		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,

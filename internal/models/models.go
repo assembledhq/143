@@ -211,9 +211,22 @@ type Session struct {
 	// LastActivityAt is the timestamp of the last write to this session — used
 	// as the MRU sort key in ListByOrg. NOT NULL since migration 000077;
 	// previously it could be NULL for first-turn sessions.
-	LastActivityAt              time.Time               `db:"last_activity_at" json:"last_activity_at"`
-	SandboxState                string                  `db:"sandbox_state" json:"sandbox_state"`
-	SnapshotKey                 *string                 `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	LastActivityAt time.Time `db:"last_activity_at" json:"last_activity_at"`
+	SandboxState   string    `db:"sandbox_state" json:"sandbox_state"`
+	SnapshotKey    *string   `db:"snapshot_key" json:"snapshot_key,omitempty"`
+	// PendingSnapshotKey, when non-nil, is the storage key for a post-PR
+	// snapshot whose upload is still in flight. Hydration paths
+	// (continue_session / Fix tests) must wait until this is NULL before
+	// resuming — otherwise they restore the stale pre-PR snapshot.
+	// Promoted into SnapshotKey (and cleared) by PromotePendingSnapshot
+	// once the upload completes; cleared by ClearPendingSnapshot on
+	// upload failure.
+	//
+	// Hidden from JSON: this is internal orchestrator state, and the raw
+	// object-storage key has no meaning to API consumers. The frontend
+	// surfaces "finalizing" via session status, not by inspecting this
+	// column.
+	PendingSnapshotKey          *string                 `db:"pending_snapshot_key" json:"-"`
 	RuntimeSoftDeadlineAt       *time.Time              `db:"runtime_soft_deadline_at" json:"runtime_soft_deadline_at,omitempty"`
 	RuntimeHardDeadlineAt       *time.Time              `db:"runtime_hard_deadline_at" json:"runtime_hard_deadline_at,omitempty"`
 	RuntimeLastProgressAt       *time.Time              `db:"runtime_last_progress_at" json:"runtime_last_progress_at,omitempty"`

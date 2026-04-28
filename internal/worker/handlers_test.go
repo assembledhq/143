@@ -34,7 +34,7 @@ var workerSessionColumns = []string{
 	"parent_session_id", "revision_context", "error", "result_summary", "diff",
 	"pm_plan_id", "title", "pm_approach", "pm_reasoning",
 	"project_task_id", "model_override", "reasoning_effort", "triggered_by_user_id",
-	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key",
+	"agent_session_id", "current_turn", "last_activity_at", "sandbox_state", "snapshot_key", "pending_snapshot_key",
 	"runtime_soft_deadline_at", "runtime_hard_deadline_at", "runtime_last_progress_at", "runtime_last_progress_type", "runtime_last_progress_strength",
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
@@ -165,22 +165,29 @@ func workerSessionTestRow(values ...any) []any {
 }
 
 // padWorkerIdentityNils retrofits a session row built by the legacy
-// workerSessionTestRowDispatch with nil values for the new
-// git_identity_source / git_identity_user_id columns. Inserts the nils
-// immediately before created_at so existing fixtures (which were written
-// against the pre-identity column count) keep working without touching
-// every call site.
+// workerSessionTestRowDispatch with nil values for columns added after the
+// fixture conventions were settled: pending_snapshot_key (index 42, between
+// snapshot_key and runtime_soft_deadline_at) and the trailing
+// git_identity_source / git_identity_user_id pair (immediately before
+// created_at). Existing fixtures emit a 76-column "pre-identity" row; we pad
+// it to the current 79-column layout without touching every call site.
 func padWorkerIdentityNils(row []any) []any {
 	if len(row) >= len(workerSessionColumns) {
 		return row
 	}
-	if len(row) != len(workerSessionColumns)-2 {
+	if len(row) != len(workerSessionColumns)-3 {
 		return row
 	}
+	const pendingSnapshotKeyIndex = 42
+	withPending := make([]any, 0, len(row)+1)
+	withPending = append(withPending, row[:pendingSnapshotKeyIndex]...)
+	withPending = append(withPending, nil)
+	withPending = append(withPending, row[pendingSnapshotKeyIndex:]...)
+
 	padded := make([]any, 0, len(workerSessionColumns))
-	padded = append(padded, row[:len(row)-1]...)
+	padded = append(padded, withPending[:len(withPending)-1]...)
 	padded = append(padded, nil, nil)
-	padded = append(padded, row[len(row)-1])
+	padded = append(padded, withPending[len(withPending)-1])
 	return padded
 }
 
@@ -802,6 +809,11 @@ func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pull
 	}
 	return nil
 }
+
+// WaitForPostPRSnapshotUploads is a no-op in the worker tests — there are
+// no real upload goroutines to drain, the method exists only to satisfy
+// the prCreator interface used by the server's shutdown path.
+func (s *stubPRService) WaitForPostPRSnapshotUploads() {}
 
 func (m *mockPMService) Analyze(ctx context.Context, orgID uuid.UUID, trigger models.PMTrigger, repoID *uuid.UUID, agentTypeOverride *models.AgentType) (*pm.Plan, error) {
 	m.calledOrgID = orgID

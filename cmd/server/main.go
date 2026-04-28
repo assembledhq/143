@@ -270,6 +270,10 @@ func main() {
 	// in api-only mode where buildServices never runs.
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
+	// Hoisted so the shutdown goroutine below (declared at main scope) can
+	// reach the PR service for draining post-PR snapshot uploads. Stays nil
+	// in api-only mode where buildServices never runs.
+	var workerServices *worker.Services
 	if cfg.Mode == "all" || cfg.Mode == "worker" {
 		workerCount := cfg.WorkerProcessCount
 		if workerCount <= 0 {
@@ -339,6 +343,9 @@ func main() {
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
+		// Assigns to the hoisted workerServices var so the shutdown
+		// goroutine can drive post-PR snapshot upload draining via
+		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
 			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
@@ -348,6 +355,7 @@ func main() {
 				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, orgSettingsCache)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				workerServices = services
 			}
 		}
 		// Refuse to start an anemic worker. Without agent services (GitHub App,
@@ -474,6 +482,33 @@ func main() {
 			case <-time.After(500 * time.Millisecond):
 			}
 		}
+		// After all jobs have completed, wait for any post-PR snapshot
+		// uploads spawned by CreatePR to finish. These run in detached
+		// goroutines (the worker job has returned) and own a temp file +
+		// pending_snapshot_key state; if we exit before they land the
+		// session is stuck with pending_snapshot_key set forever and no
+		// in-flight uploader to clear it. The drainCtx deadline still
+		// applies — if uploads can't finish within budget we log and let
+		// the next worker start a reconcile cycle.
+		//
+		// Wrapped in a func literal so its declarations are scoped under
+		// the goto-over-declaration rule (drained: above can be jumped to
+		// from inside the for loop).
+		func() {
+			if workerServices == nil || workerServices.PR == nil {
+				return
+			}
+			uploadsDone := make(chan struct{})
+			go func() {
+				defer close(uploadsDone)
+				workerServices.PR.WaitForPostPRSnapshotUploads()
+			}()
+			select {
+			case <-uploadsDone:
+			case <-drainCtx.Done():
+				logger.Warn().Msg("post-PR snapshot upload drain timed out; sessions may have stale pending_snapshot_key until reconcile")
+			}
+		}()
 	drained:
 		drainCancel()
 

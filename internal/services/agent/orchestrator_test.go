@@ -2077,6 +2077,28 @@ func TestRunAgent_BaseCommitCaptureNonZeroExitDoesNotFailRun(t *testing.T) {
 	require.Empty(t, d.sessions.getBaseCommitSHAs(), "RunAgent should not persist a base commit when capture fails")
 }
 
+func TestContinueSession_GatesOnPendingSnapshotKey(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusPRCreated)
+	session.SnapshotKey = strPtr("snapshots/test/old-pre-pr.tar.zst")
+	session.PendingSnapshotKey = strPtr("snapshots/test/post-pr.tar.zst")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	// Snapshot data deliberately empty so any attempt to actually hydrate
+	// would fail loudly — proving the gate fires before hydrate.
+	d.snapshots.data = nil
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session)
+	require.ErrorIs(t, err, agent.ErrSnapshotPending, "ContinueSession should bail with ErrSnapshotPending when PendingSnapshotKey is set")
+	require.Empty(t, d.sessions.getStatusUpdates(), "ContinueSession must not mutate session state before the gate fires")
+}
+
 func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	t.Parallel()
 
