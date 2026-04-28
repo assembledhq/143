@@ -1159,7 +1159,17 @@ func TestUserFacingPRError(t *testing.T) {
 		{
 			name: "snapshot expired",
 			err:  ghservice.ErrSnapshotExpired,
-			want: "Session state expired — re-run to create a PR.",
+			want: "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.",
+		},
+		{
+			name: "snapshot not captured",
+			err:  ghservice.ErrSnapshotNotCaptured,
+			want: "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.",
+		},
+		{
+			name: "snapshot unavailable",
+			err:  ghservice.ErrSnapshotUnavailable,
+			want: "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again.",
 		},
 		{
 			name: "no changes",
@@ -1190,6 +1200,8 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 		want bool
 	}{
 		{name: "snapshot expired is terminal", err: ghservice.ErrSnapshotExpired, want: true},
+		{name: "snapshot not captured is terminal", err: ghservice.ErrSnapshotNotCaptured, want: true},
+		{name: "snapshot unavailable is terminal", err: ghservice.ErrSnapshotUnavailable, want: true},
 		{name: "no changes is terminal", err: ghservice.ErrNoChanges, want: true},
 		{name: "generic error retries", err: errors.New("boom"), want: false},
 	}

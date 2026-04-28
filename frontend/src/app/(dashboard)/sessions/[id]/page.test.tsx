@@ -1395,12 +1395,13 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
-  it('shows snapshot expiry notice when diff exists but snapshot is missing', async () => {
+  it('shows checkpoint-missing notice when diff exists but no reusable snapshot was saved', async () => {
     const sessionWithMissingSnapshot: Session = {
       ...mockSessions[0],
       status: 'completed',
       diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'none',
       snapshot_key: undefined,
     };
 
@@ -1420,9 +1421,39 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('PR snapshot unavailable');
-    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
+    expect(alert).toHaveTextContent('No reusable checkpoint saved');
+    expect(alert).toHaveTextContent('This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.');
     expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('shows snapshot-expired notice when the saved checkpoint was reaped', async () => {
+    const expiredSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'destroyed',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: expiredSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Session snapshot expired');
+    expect(alert).toHaveTextContent('This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.');
   });
 
   it('matches the snapshot expiry notice horizontal margins to overview cards', async () => {
@@ -1969,8 +2000,8 @@ describe('SessionDetailPage', () => {
         return HttpResponse.json(
           {
             error: {
-              code: 'SNAPSHOT_EXPIRED',
-              message: 'session state expired — re-run to create a PR',
+              code: 'SNAPSHOT_NOT_CAPTURED',
+              message: 'This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.',
             },
           },
           { status: 400 },
@@ -1992,8 +2023,8 @@ describe('SessionDetailPage', () => {
     );
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('PR snapshot unavailable');
-    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
+    expect(alert).toHaveTextContent('No reusable checkpoint saved');
+    expect(alert).toHaveTextContent('This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.');
     expect(within(alert).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 

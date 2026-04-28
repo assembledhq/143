@@ -1195,7 +1195,11 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 func userFacingPRError(err error) string {
 	switch {
 	case errors.Is(err, ghservice.ErrSnapshotExpired):
-		return "Session state expired — re-run to create a PR."
+		return ghservice.SnapshotExpiredPRMessage
+	case errors.Is(err, ghservice.ErrSnapshotNotCaptured):
+		return ghservice.SnapshotNotCapturedPRMessage
+	case errors.Is(err, ghservice.ErrSnapshotUnavailable):
+		return ghservice.SnapshotUnavailablePRMessage
 	case errors.Is(err, ghservice.ErrNoChanges):
 		return "No changes to push."
 	default:
@@ -1206,6 +1210,10 @@ func userFacingPRError(err error) string {
 func shouldDeadLetterPRError(err error) bool {
 	switch {
 	case errors.Is(err, ghservice.ErrSnapshotExpired):
+		return true
+	case errors.Is(err, ghservice.ErrSnapshotNotCaptured):
+		return true
+	case errors.Is(err, ghservice.ErrSnapshotUnavailable):
 		return true
 	case errors.Is(err, ghservice.ErrNoChanges):
 		return true
