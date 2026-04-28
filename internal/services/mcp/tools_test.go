@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/stretchr/testify/require"
 )
 
 // mockErrorTracker is a minimal ErrorTracker for testing tool dispatch.
@@ -85,15 +86,15 @@ func TestListToolsWithIntegrations(t *testing.T) {
 
 	// Verify error tracker tools are prefixed correctly.
 	expected := map[string]bool{
-		"sentry_list_errors":        false,
-		"sentry_get_error":          false,
-		"sentry_get_error_trend":    false,
+		"sentry_list_errors":         false,
+		"sentry_get_error":           false,
+		"sentry_get_error_trend":     false,
 		"sentry_find_related_errors": false,
-		"linear_list_tasks":         false,
-		"linear_get_task":           false,
-		"linear_find_related_tasks": false,
-		"linear_update_task":        false,
-		"linear_create_task":        false,
+		"linear_list_tasks":          false,
+		"linear_get_task":            false,
+		"linear_find_related_tasks":  false,
+		"linear_update_task":         false,
+		"linear_create_task":         false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; !ok {
@@ -115,6 +116,23 @@ func TestListToolsEmptyRegistry(t *testing.T) {
 	if len(tools) != 0 {
 		t.Errorf("expected 0 tools, got %d", len(tools))
 	}
+}
+
+func TestListToolsCodeReviewDescriptionsUseCapitalizedPullRequest(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	tools := tr.ListTools()
+
+	descriptions := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		descriptions[tool.Name] = tool.Description
+	}
+
+	require.Contains(t, descriptions["github_list_recent_prs"], "Pull Requests", "github_list_recent_prs should describe Pull Requests with capitalized output")
+	require.NotContains(t, descriptions["github_list_recent_prs"], "pull requests", "github_list_recent_prs should not describe pull requests in lowercase")
+	require.Contains(t, descriptions["github_get_pr_reviews"], "Pull Request", "github_get_pr_reviews should describe Pull Request with capitalized output")
+	require.NotContains(t, descriptions["github_get_pr_reviews"], "pull request", "github_get_pr_reviews should not describe pull request in lowercase")
 }
 
 func TestCallToolErrorTrackerListErrors(t *testing.T) {
@@ -240,8 +258,8 @@ func TestParseDuration(t *testing.T) {
 		{"7d", 7 * 24 * time.Hour},
 		{"14d", 14 * 24 * time.Hour},
 		{"30m", 30 * time.Minute},
-		{"", 14 * 24 * time.Hour},           // default
-		{"invalid", 14 * 24 * time.Hour},     // default
+		{"", 14 * 24 * time.Hour},        // default
+		{"invalid", 14 * 24 * time.Hour}, // default
 	}
 
 	for _, tt := range tests {
