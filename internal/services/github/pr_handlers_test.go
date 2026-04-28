@@ -765,7 +765,7 @@ func TestPRServiceMaybeAutoArchiveSessionOnPRCloseHandlesSnapshotFailures(t *tes
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				snapshotKey := "snap-key"
 				row := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
-				row[42] = &snapshotKey
+				setPRHealthSessionRowValue(row, "snapshot_key", &snapshotKey)
 
 				mock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -847,58 +847,17 @@ func TestPRServiceRunMergedPullRequestFollowUpsHandlesWarningPaths(t *testing.T)
 			setupSession: func(mock pgxmock.PgxPoolIface) {
 				issueID := uuid.New()
 				snapshotKey := "snap-key"
+				sessionRow := newPRHealthSessionRow(sessionID, orgID, now, string(models.SessionStatusCompleted))
+				setPRHealthSessionRowValue(sessionRow, "primary_issue_id", &issueID)
+				setPRHealthSessionRowValue(sessionRow, "agent_type", "claude-code")
+				setPRHealthSessionRowValue(sessionRow, "autonomy_level", "full")
+				setPRHealthSessionRowValue(sessionRow, "sandbox_state", "snapshot")
+				setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+
 				mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows(sessionColumns).AddRow(
-							sessionID, &issueID, orgID, "", "", "", "claude-code", "completed", "full", "low",
-							nil, nil, nil, nil,
-							nil, nil, false, nil, nil, nil,
-							nil, nil, nil, false,
-							nil, nil, nil, nil, nil,
-							nil, nil, nil, nil, nil,
-							nil,
-							nil,
-							nil,
-							nil, 0, now, "snapshot", &snapshotKey,
-							nil, // pending_snapshot_key
-							nil, // pending_snapshot_set_at
-							nil,
-							nil,
-							nil,
-							"",
-							"",
-							0,
-							0,
-							"",
-							nil,
-							nil,
-							"",
-							"",
-							int64(0),
-							nil,
-							"",
-							nil,
-							nil,
-							0,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							nil, nil,
-							nil,
-							"idle",
-							(*string)(nil),
-							nil,
-							nil,
-							nil,
-							nil,
-							nil,
-							now,
-						),
+						pgxmock.NewRows(sessionColumns).AddRow(sessionRow...),
 					)
 			},
 			setupIssue: func(mock pgxmock.PgxPoolIface) {

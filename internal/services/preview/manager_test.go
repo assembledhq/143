@@ -165,26 +165,6 @@ var sessionTestCols = []string{
 	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
-func previewManagerSessionRow(values ...any) []any {
-	// Tests written before migrations 102 (linear_*) and 100 (git_identity_*)
-	// pass shorter value lists. Inject the policy-defaults (3 values at the
-	// front), four linear_* nils just before deleted_at, and two
-	// git_identity nils between deleted_at and created_at so each fixture
-	// call site stays oblivious to the new columns.
-	if len(values) == len(sessionTestCols)-3-4-2 {
-		row := make([]any, 0, len(values)+9)
-		row = append(row, values[:3]...)
-		row = append(row, "", "", "")
-		row = append(row, values[3:len(values)-2]...)
-		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
-		row = append(row, values[len(values)-2])
-		row = append(row, nil, nil)
-		row = append(row, values[len(values)-1])
-		return row
-	}
-	return values
-}
-
 func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, handle string, now time.Time) []any {
 	return []any{
 		id, sessionID, orgID, userID, "bootstrap", "my-preview", string(status),
@@ -204,42 +184,50 @@ func newAccessSessionRow(id, orgID, userID, previewID uuid.UUID, tokenHash strin
 
 func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Time) []any {
 	issueID := uuid.New()
-	return previewManagerSessionRow(
-		sessionID, &issueID, orgID, "claude-code", "running", "supervised", "low",
-		nil, nil, nil, nil,
-		containerID, nil, false, &now, nil, nil,
-		nil, nil, nil, false,
-		nil, nil, nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, nil, nil, nil,
-		nil, 0, now, "running", nil,
-		nil,      // pending_snapshot_key
-		nil,      // pending_snapshot_set_at
-		nil,      // runtime_soft_deadline_at
-		nil,      // runtime_hard_deadline_at
-		nil,      // runtime_last_progress_at
-		"",       // runtime_last_progress_type
-		"",       // runtime_last_progress_strength
-		0,        // runtime_extension_count
-		0,        // runtime_extension_seconds
-		"",       // runtime_stop_reason
-		nil,      // runtime_graceful_stop_at
-		nil,      // checkpointed_at
-		"",       // checkpoint_kind
-		"",       // checkpoint_capability
-		int64(0), // checkpoint_size_bytes
-		nil,      // checkpoint_error
-		"",       // recovery_state
-		nil,      // recovery_queued_at
-		nil,      // recovery_started_at
-		0,        // recovery_attempt_count
-		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), nil, nil,
-		// Migration 102 — Linear session-linking flags. Defaults match a
-		// session created without any Linear ref.
-		false, false, (*string)(nil), "none",
-		nil, now,
-	)
+	byColumn := map[string]any{
+		"id":                             sessionID,
+		"primary_issue_id":               &issueID,
+		"org_id":                         orgID,
+		"origin":                         string(models.SessionOriginManual),
+		"interaction_mode":               string(models.SessionInteractionModeInteractive),
+		"validation_policy":              string(models.SessionValidationPolicyOnTurnComplete),
+		"agent_type":                     "claude-code",
+		"status":                         "running",
+		"autonomy_level":                 "supervised",
+		"token_mode":                     "low",
+		"container_id":                   containerID,
+		"turn_holding_container":         false,
+		"started_at":                     &now,
+		"failure_retry_advised":          false,
+		"current_turn":                   0,
+		"last_activity_at":               now,
+		"sandbox_state":                  "running",
+		"runtime_last_progress_type":     "",
+		"runtime_last_progress_strength": "",
+		"runtime_extension_count":        0,
+		"runtime_extension_seconds":      0,
+		"runtime_stop_reason":            "",
+		"checkpoint_kind":                "",
+		"checkpoint_capability":          "",
+		"checkpoint_size_bytes":          int64(0),
+		"recovery_state":                 "",
+		"recovery_attempt_count":         0,
+		"pr_creation_state":              "idle",
+		"pr_creation_error":              (*string)(nil),
+		"linear_private":                 false,
+		"linear_state_sync_disabled":     false,
+		"linear_identifier_hint":         (*string)(nil),
+		"linear_prepare_state":           string(models.LinearPrepareStateNone),
+		"deleted_at":                     nil,
+		"git_identity_source":            nil,
+		"git_identity_user_id":           nil,
+		"created_at":                     now,
+	}
+	row := make([]any, len(sessionTestCols))
+	for i, col := range sessionTestCols {
+		row[i] = byColumn[col]
+	}
+	return row
 }
 
 func newTestManager(mock pgxmock.PgxPoolIface, provider PreviewCapableProvider) *Manager {

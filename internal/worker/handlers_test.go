@@ -403,8 +403,13 @@ func workerSessionRow(sessionID, issueID, orgID uuid.UUID, status string, curren
 // position so the row matches the post-migration column shape.
 func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID, status string, prepareState string) []any {
 	now := time.Now()
+	var primaryIssueID any
+	if issueID != uuid.Nil {
+		issueIDCopy := issueID
+		primaryIssueID = &issueIDCopy
+	}
 	row := workerSessionTestRow(
-		sessionID, issueID, orgID, "claude_code", status, "semi", "low",
+		sessionID, primaryIssueID, orgID, "claude_code", status, "semi", "low",
 		nil, nil, nil, nil,
 		nil, nil, false, nil, nil, nil,
 		nil, nil, nil, false,
@@ -419,12 +424,18 @@ func workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID uuid.UUID,
 		nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, now,
 	)
-	// Override linear_prepare_state with the test-supplied value. The
-	// dispatcher already padded the four linear_* columns with defaults;
-	// we just swap the last linear_* slot in.
-	idx := len(row) - 3 // linear_prepare_state position (deleted_at is -2, created_at is -1)
-	row[idx] = prepareState
+	setWorkerSessionColumnValue(row, "linear_prepare_state", prepareState)
 	return row
+}
+
+func setWorkerSessionColumnValue(row []any, column string, value any) {
+	for i, col := range workerSessionColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown worker session column: " + column)
 }
 
 // TestRunAgentHandler_LinearPrepareStateGatesTurnOne locks the design 62

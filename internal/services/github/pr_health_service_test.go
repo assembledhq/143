@@ -1607,6 +1607,16 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status str
 	}
 }
 
+func setPRHealthSessionRowValue(row []any, column string, value any) {
+	for i, col := range prHealthSessionColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown PR health session column: " + column)
+}
+
 func strPtr(value string) *string {
 	return &value
 }
