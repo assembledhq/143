@@ -147,7 +147,7 @@ Each adapter is the single owner of how its agent does review. Sketches of the f
 #### Codex (`adapters/codex.go`)
 
 - `ReviewModes()` returns `["default"]` (extend if/when Codex adds more).
-- On a review turn, the adapter invokes Codex's native review entry point for the current diff. Output streams through the existing Codex parser.
+- On a review turn, the adapter invokes Codex's native `/review` entry point for the current diff. Output streams through the existing Codex parser.
 
 #### Gemini CLI (`adapters/gemini_cli.go`)
 
@@ -207,9 +207,9 @@ No frontend changes. No migrations. No new endpoints.
 
 ## Phasing
 
-1. **Phase 1** — Backend: add `SessionReviewMode`, session-scoped endpoint/service, and `RevisionContext.ReviewContext`. Update Claude Code adapter to invoke its native review affordances when review context is present. ✅ shipped
+1. **Phase 1** — Backend: add `SessionReviewMode`, session-scoped endpoint/service, and `RevisionContext.ReviewContext`. Update Claude Code and Codex adapters to invoke their native review affordances when review context is present. ✅ shipped
 2. **Phase 2** — Frontend: add the button + spinner state in the session detail header, gated on capability check. ✅ shipped
-3. **Phase 3** — Per-agent rollout: Codex, Amp, then any future agents. Each is independent and lands in its own PR. ⏳ deferred — Codex / Amp do not yet ship a curated CLI review surface; the button correctly hides for those sessions until upstream lands one.
+3. **Phase 3** — Per-agent rollout: Codex, Amp, then any future agents. Each is independent and lands in its own PR. 🚧 in progress — Codex now routes review turns through native `/review`; Amp and future agents remain gated on upstream-native review support.
 
 ## What shipped
 
@@ -218,5 +218,6 @@ No frontend changes. No migrations. No new endpoints.
 - `sessionreview.Service` owning validation + claim/enqueue, decoupled from PR repair (`internal/services/sessionreview/service.go`).
 - `POST /api/v1/sessions/{id}/review` and `GET /api/v1/sessions/{id}/review-capabilities` (`internal/api/handlers/session_review.go`).
 - `ClaudeCodeAdapter.ReviewModes()` + `claudeCodeReviewSlashCommand` so review turns route to `/review` and `/security-review`.
+- `CodexAdapter.ReviewModes()` + `codexReviewSlashCommand` so review turns route to Codex's native `/review`.
 - `<ReviewButton>` in the session detail header, single-mode button or 2+ mode dropdown, spinner mirroring PR health repair affordances (`frontend/src/components/review-button.tsx`, `session-detail-content.tsx`).
 - Audit action `session.review.requested` recorded on every successful start.
