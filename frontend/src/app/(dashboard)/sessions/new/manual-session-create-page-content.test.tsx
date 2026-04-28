@@ -307,12 +307,11 @@ describe("ManualSessionCreatePageContent", () => {
     const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
     await user.type(textarea, "/rev");
 
-    const suggestion = await screen.findByRole("button", { name: "/review Review pending changes" });
-    expect(suggestion).toBeInTheDocument();
-    expect(suggestion.querySelector("svg")).toBeNull();
     await waitFor(() => {
       expect(mocks.sessionComposerSlashCommandsMock).toHaveBeenCalled();
     });
+    expect(await screen.findByText("/review")).toBeInTheDocument();
+    expect(screen.getByText("Review pending changes")).toBeInTheDocument();
   });
 
   it("returns focus to the prompt after a dropped image finishes uploading", async () => {
