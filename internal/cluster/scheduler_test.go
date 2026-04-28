@@ -128,6 +128,17 @@ func TestScheduler_SetPMDocStore(t *testing.T) {
 	require.NotNil(t, s.pmDocs, "pmDocs should be set after SetPMDocStore")
 }
 
+func TestScheduler_SetSessionStore(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	require.Nil(t, s.sessions, "sessions should be nil before SetSessionStore (stranded-pending reaper disabled)")
+
+	store := &mockSchedulerSessionStore{}
+	s.SetSessionStore(store)
+	require.NotNil(t, s.sessions, "sessions should be set after SetSessionStore so the reaper pass runs")
+}
+
 func TestScheduler_ScheduleContextRefreshes_NilStore(t *testing.T) {
 	t.Parallel()
 

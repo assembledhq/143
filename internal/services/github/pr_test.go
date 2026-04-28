@@ -3530,6 +3530,73 @@ func TestDispatchPostPRSnapshotUpload_ClearsOnSaveFailure(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "ClearPendingSnapshot should be the only DB call on the failure path")
 }
 
+// TestDispatchPostPRSnapshotUpload_ClearsOnOpenFailure pins the
+// open-error branch of the upload goroutine: if the captured tar can't be
+// reopened (e.g. it was reaped by another process between capture and
+// dispatch), the goroutine still has to clear pending_snapshot_key so
+// continue_session can resume rather than blocking forever on the gate.
+func TestDispatchPostPRSnapshotUpload_ClearsOnOpenFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	// ClearPendingSnapshot is the only DB call expected — Save is never
+	// reached because the tar can't be opened.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: &prTestSnapshotStore{},
+		logger:    zerolog.Nop(),
+	}
+
+	// A path that does not exist forces os.Open to fail. /dev/null/missing
+	// is portable: the open syscall returns ENOTDIR on every Unix.
+	svc.dispatchPostPRSnapshotUpload(uuid.New(), uuid.New(), "snapshots/whatever", "/dev/null/does-not-exist", 0)
+	svc.WaitForPostPRSnapshotUploads()
+
+	require.NoError(t, mock.ExpectationsWereMet(), "open failure must trigger ClearPendingSnapshot exactly once")
+}
+
+// TestDispatchPostPRSnapshotUpload_LogsPromoteFailure pins the
+// promote-error branch: when Save succeeds but the atomic promote write
+// fails, the goroutine logs and returns without falling through to a
+// success log. The pending_snapshot_key stays set; the reaper handles it.
+func TestDispatchPostPRSnapshotUpload_LogsPromoteFailure(t *testing.T) {
+	t.Parallel()
+
+	tarFile, err := os.CreateTemp("", "143-pr-snapshot-test-*.tar.zst")
+	require.NoError(t, err, "test setup: create temp tar file")
+	require.NoError(t, tarFile.Close(), "test setup: close temp tar file")
+	tarPath := tarFile.Name()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created without error")
+	defer mock.Close()
+
+	// Promote returns an error from the DB; no follow-up Clear call.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("connection reset"))
+
+	svc := &PRService{
+		sessions:  db.NewSessionStore(mock),
+		snapshots: &prTestSnapshotStore{},
+		logger:    zerolog.Nop(),
+	}
+
+	svc.dispatchPostPRSnapshotUpload(uuid.New(), uuid.New(), "snapshots/whatever", tarPath, 42)
+	svc.WaitForPostPRSnapshotUploads()
+
+	_, statErr := os.Stat(tarPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "the temp tar file must still be removed when Promote fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "Promote-failure path must not retry or fall through to extra DB calls")
+}
+
 func TestCreatePR_ConfigChecks(t *testing.T) {
 	t.Parallel()
 
