@@ -2017,11 +2017,21 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 		return truncatePRTitle(title, maxPRTitleLen)
 	}
 
+	// Cap prefix consumption so a session linked to many Linear issues
+	// doesn't push the descriptive subject out of the title. The primary
+	// (identifiers[0]) is always kept — Linear's GitHub integration only
+	// needs that one to claim the PR — and additional related identifiers
+	// are appended only while the running prefix fits the budget. Anything
+	// that doesn't fit is silently dropped from the title; users still see
+	// the full link set in the session detail header chips.
+	const prefixBudget = maxPRTitleLen / 2
 	bracketPrefix := strings.Builder{}
-	for _, id := range identifiers {
-		bracketPrefix.WriteString("[")
-		bracketPrefix.WriteString(id)
-		bracketPrefix.WriteString("] ")
+	for i, id := range identifiers {
+		next := "[" + id + "] "
+		if i > 0 && bracketPrefix.Len()+len(next) > prefixBudget {
+			break
+		}
+		bracketPrefix.WriteString(next)
 	}
 
 	// Conventional commit prefix preserved: place Linear prefixes after it.

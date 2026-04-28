@@ -29,11 +29,18 @@ export function LinkedIssueChips({ session }: { session: Session }) {
       {prepareFailed && (
         <span
           key="linear-prepare-failed"
+          role="status"
           className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
-          title="Linear context preparation failed; turn 1 ran without the primary issue snapshot. Check the operator debug surface or re-link the issue manually."
-          aria-label="Linear context preparation failed"
+          aria-describedby="linear-prepare-failed-detail"
         >
           Linear: prepare failed
+          {/* sr-only sibling instead of `title=…`: most screen readers ignore
+              title attributes, so the detail goes through aria-describedby. */}
+          <span id="linear-prepare-failed-detail" className="sr-only">
+            Linear context preparation failed; turn 1 ran without the primary
+            issue snapshot. Check the operator debug surface or re-link the
+            issue manually.
+          </span>
         </span>
       )}
       {links.map((link) => {

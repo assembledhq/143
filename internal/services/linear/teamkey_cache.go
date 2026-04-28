@@ -47,9 +47,18 @@ func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) {
 	if c.entries == nil {
 		c.entries = make(map[uuid.UUID]teamKeyCacheEntry)
 	}
+	// Sweep expired entries opportunistically so abandoned orgs don't leak
+	// indefinitely. The TTL window is short and put() is cold (cache miss
+	// path), so the O(n) walk is fine.
+	now := time.Now()
+	for id, entry := range c.entries {
+		if now.After(entry.expiresAt) {
+			delete(c.entries, id)
+		}
+	}
 	c.entries[orgID] = teamKeyCacheEntry{
 		allow:     allow,
-		expiresAt: time.Now().Add(teamKeyCacheTTL),
+		expiresAt: now.Add(teamKeyCacheTTL),
 	}
 }
 

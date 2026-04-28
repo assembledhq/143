@@ -3028,6 +3028,16 @@ func TestApplyLinearKeyPrefixes_OverlongPrefixSetDoesNotPanic(t *testing.T) {
 		require.NotEmpty(t, got, "overlong Linear prefixes should still produce a PR title")
 		require.LessOrEqual(t, len(got), maxPRTitleLen, "overlong Linear prefixes should be clamped to the GitHub title budget")
 		require.Contains(t, got, "[ACS-1]", "overlong Linear prefixes should keep the primary identifier")
+		// Subject must survive: with the half-budget cap on prefixes the
+		// descriptive title body keeps room. The conventional-commit path
+		// places brackets between `feat: ` and the rest, so check for both
+		// landmarks separately.
+		require.True(t, strings.HasPrefix(got, "feat: "), "conventional commit prefix must be preserved: %q", got)
+		require.True(t, strings.HasSuffix(got, " x"), "subject must remain at the tail: %q", got)
+		// Sanity: at least one related identifier must be dropped — the
+		// 30-link input cannot fit inside a 120-char title with budget left
+		// for the subject.
+		require.NotContains(t, got, "[ACS-30]", "tail identifiers must be dropped under the prefix-budget cap")
 	}, "overlong Linear prefix sets should not panic when the subject budget is exhausted")
 }
 

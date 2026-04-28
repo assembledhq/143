@@ -390,7 +390,11 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 		return map[string]bool{}, nil
 	}
 	if cached, ok := s.teamKeyCache.get(orgID); ok {
-		return cached, nil
+		// Defensive copy: callers iterate this map during detection but the
+		// cache shares the underlying storage across requests, so a mutation
+		// here would silently corrupt every future caller's allowlist for the
+		// org. Cheap relative to the DB hit it replaces.
+		return copyAllowlist(cached), nil
 	}
 	keys, err := s.teamKeys.ListByOrg(ctx, orgID)
 	if err != nil {
@@ -401,7 +405,15 @@ func (s *Service) TeamKeyAllowlist(ctx context.Context, orgID uuid.UUID) (map[st
 		allow[k.TeamKey] = true
 	}
 	s.teamKeyCache.put(orgID, allow)
-	return allow, nil
+	return copyAllowlist(allow), nil
+}
+
+func copyAllowlist(src map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }
 
 // RefreshTeamKeys pulls the team list from Linear and replaces the cache.
