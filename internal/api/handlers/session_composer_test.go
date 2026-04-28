@@ -475,6 +475,7 @@ func TestSessionComposerHandler_ListSlashCommands_BuiltinOnly(t *testing.T) {
 	require.Len(t, resp.Groups, 1)
 	require.Equal(t, models.SessionInputCommandSourceBuiltin, resp.Groups[0].Source)
 	require.Equal(t, "Claude Code commands", resp.Groups[0].Label)
+	require.Len(t, resp.Groups[0].Items, sessionComposerSlashCommandLimit, "unfiltered builtin command results should be capped at the picker limit")
 
 	names := make([]string, 0, len(resp.Groups[0].Items))
 	for _, item := range resp.Groups[0].Items {
@@ -483,8 +484,8 @@ func TestSessionComposerHandler_ListSlashCommands_BuiltinOnly(t *testing.T) {
 		require.Equal(t, "/"+item.Name, item.Token)
 		names = append(names, item.Name)
 	}
-	require.Contains(t, names, "review")
-	require.Contains(t, names, "init")
+	require.Contains(t, names, "init", "short built-in commands should remain visible in the capped default results")
+	require.Contains(t, names, "help", "core built-in commands should remain visible in the capped default results")
 }
 
 func TestSessionComposerHandler_ListSlashCommands_FiltersByQuery(t *testing.T) {
