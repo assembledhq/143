@@ -23,6 +23,15 @@ func TestCodexAdapter_Name(t *testing.T) {
 	}
 }
 
+func TestCodexAdapter_ReviewModes(t *testing.T) {
+	t.Parallel()
+
+	a := NewCodexAdapter(zerolog.Nop())
+	require.Equal(t, []models.SessionReviewMode{models.SessionReviewModeDefault}, a.ReviewModes(), "Codex should advertise its native review mode")
+	require.Equal(t, "/review", codexReviewSlashCommand(models.SessionReviewModeDefault), "default Codex review should map to /review")
+	require.Equal(t, "", codexReviewSlashCommand(models.SessionReviewModeSecurity), "unsupported Codex review modes should resolve to the empty command")
+}
+
 func TestCodexAdapter_PreparePrompt(t *testing.T) {
 	t.Parallel()
 
@@ -778,6 +787,47 @@ func TestCodexAdapter_Execute_ContinuationWithoutSessionIDUsesResumeLast(t *test
 	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last --dangerously-bypass-approvals-and-sandbox", "continuation without a session ID should resume the latest restored Codex session")
 	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "continuation should not write a fresh prompt file")
+}
+
+func TestCodexAdapter_Execute_ReviewTurnInvokesNativeReviewCommand(t *testing.T) {
+	t.Parallel()
+
+	provider := testutil.NewMockSandboxProvider()
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "codex exec resume") {
+			_, _ = stdout.Write([]byte(`{"type":"message","content":"reviewing"}`))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git rev-parse") {
+			_, _ = stdout.Write([]byte("true\n"))
+			return 0, nil
+		}
+		if strings.HasPrefix(cmd, "git diff") {
+			_, _ = stdout.Write([]byte("diff --git a/main.go b/main.go\n"))
+			return 0, nil
+		}
+		return 0, nil
+	}
+
+	adapter := NewCodexAdapter(zerolog.Nop())
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	prompt := &agent.AgentPrompt{
+		UserMessage:  "Please review your changes.",
+		MaxTokens:    50_000,
+		Continuation: true,
+		RevisionContext: &agent.RevisionContext{
+			ReviewContext: &agent.SessionReviewContext{Mode: models.SessionReviewModeDefault},
+		},
+	}
+	logCh := make(chan agent.LogEntry, 10)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	_, err := adapter.Execute(ctx, sandbox, prompt, logCh)
+	require.NoError(t, err, "review continuation should succeed")
+	require.NotEmpty(t, provider.ExecCalls, "review continuation should invoke Codex")
+	require.Contains(t, provider.ExecCalls[0], "codex exec resume --last", "review turn should reuse Codex continuation mode")
+	require.Contains(t, provider.ExecCalls[0], `"/review"`, "review turn should invoke Codex's native review command")
+	require.NotContains(t, provider.ExecCalls[0], "Please review your changes.", "review turn should not pass through the persisted user-facing review prompt")
 }
 
 func TestCodexAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {
