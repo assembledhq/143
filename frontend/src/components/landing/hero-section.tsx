@@ -14,7 +14,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
   return (
     <div
       className="relative h-screen"
-      style={{ background: isDark ? DARK.bg : "#FAFAFB" }}
+      style={{ background: isDark ? DARK.bg : "#87BBDF" }}
     >
       <HeroCanvas isDark={isDark} />
 
