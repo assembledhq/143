@@ -668,8 +668,8 @@ func TestLinearJobHandlers(t *testing.T) {
 func TestMapLinearWriteErrorToRetry(t *testing.T) {
 	t.Parallel()
 
-	sevenSeconds := 7 * time.Second
-	thirtySeconds := 30 * time.Second
+	parsedRetryAfter := 7 * time.Second
+	defaultRetryDelay := 30 * time.Second
 	tests := []struct {
 		name          string
 		err           error
@@ -678,12 +678,12 @@ func TestMapLinearWriteErrorToRetry(t *testing.T) {
 		{
 			name:          "rate limit uses retry after header",
 			err:           &linearservice.RateLimitError{RetryAfter: "7"},
-			expectedDelay: &sevenSeconds,
+			expectedDelay: &parsedRetryAfter,
 		},
 		{
 			name:          "rate limit falls back for invalid retry after",
 			err:           &linearservice.RateLimitError{RetryAfter: "bad"},
-			expectedDelay: &thirtySeconds,
+			expectedDelay: &defaultRetryDelay,
 		},
 		{
 			name: "unauthorized retries with default backoff",
