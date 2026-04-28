@@ -3744,6 +3744,155 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	_ = body
 }
 
+// TestCreatePR_SuccessDispatchesPostPRSnapshotUpload covers the end-to-end
+// wiring that the sibling TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR
+// deliberately short-circuits via snapshotErr: that on the happy path
+// CreatePR persists pending_snapshot_key, hands the captured tar to the
+// upload goroutine, and the goroutine eventually promotes the key into
+// snapshot_key. Mock expectations run with MatchExpectationsInOrder(false)
+// because the goroutine's PromotePendingSnapshot interleaves with the
+// post-Create UpdateStatus calls from the main flow.
+func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	now := time.Now()
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	integrationID := uuid.New()
+	snapshotKey := "snapshots/session.tar"
+	wantPendingKey := fmt.Sprintf("snapshots/%s/%s/post-pr.tar.zst", orgID, runID)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+	mock.ExpectQuery("SELECT .+ FROM issues").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestIssueColumns).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, &repoID,
+				"Broken button", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 1, "high", []string{"bug"}, "fp",
+				now, now, nil,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(12345), "owner/repo", "main",
+				false, nil, nil, "https://github.com/owner/repo.git", int64(99),
+				"active", nil, nil, json.RawMessage(`{}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM organizations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+				orgID, "Test Org", json.RawMessage(`{"pr_authorship":"app_only","pr_draft_default":true}`), now, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestUserColumns).AddRow(
+				userID, orgID, "alice@example.com", "Alice", "member", nil, nil, nil, nil, nil, nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	// SetPendingSnapshotKey: the synchronous write that records the
+	// post-PR upload in flight. pgx NamedArgs expand to positional args by
+	// @-placeholder order: SET pending_snapshot_key = @key first, then
+	// WHERE id = @id, org_id = @org_id, so the key is arg #0.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*pending_snapshot_key = @key").
+		WithArgs(wantPendingKey, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// PromotePendingSnapshot: the async write fired by the upload
+	// goroutine after Save() succeeds. SQL order is @id, @org_id,
+	// @expected_key, so the key guard is arg #2.
+	mock.ExpectExec("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), wantPendingKey).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "org_id", "primary_issue_id", "created_at", "last_activity_at"}).
+				AddRow(runID, orgID, &issueID, now, now),
+		)
+	mock.ExpectExec("UPDATE issues SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls":
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+				"number":   42,
+				"html_url": "https://github.com/owner/repo/pull/42",
+			}), "mock server should encode the created PR")
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/issues/42/labels":
+			require.NoError(t, json.NewEncoder(w).Encode([]map[string]string{{"name": "143-generated"}}), "mock server should encode label response")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// Real success path: no snapshotErr, real Snapshot reader. The
+	// dispatch goroutine spools an empty tar, calls
+	// prTestSnapshotStore.Save (no-op success), and promotes.
+	provider := &prTestSandboxProvider{
+		execStdout: pushHeadSHASentinel + "abc1234567890abcdef1234567890abcdef12345\n",
+	}
+	svc := &PRService{
+		tokenProvider: &Service{
+			cache: map[int64]*cachedToken{
+				99: {Token: "app-token", ExpiresAt: time.Now().Add(time.Hour)},
+			},
+		},
+		pullRequests:    db.NewPullRequestStore(mock),
+		sessions:        db.NewSessionStore(mock),
+		issues:          db.NewIssueStore(mock),
+		repos:           db.NewRepositoryStore(mock),
+		users:           db.NewUserStore(mock),
+		orgs:            db.NewOrganizationStore(mock),
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		baseURL:         server.URL,
+		httpClient:      server.Client(),
+		logger:          zerolog.Nop(),
+	}
+
+	run := &models.Session{
+		ID:                runID,
+		OrgID:             orgID,
+		PrimaryIssueID:    &issueID,
+		RepositoryID:      &repoID,
+		TriggeredByUserID: &userID,
+		SnapshotKey:       &snapshotKey,
+		ResultSummary:     func() *string { s := "Implemented the fix"; return &s }(),
+	}
+
+	pr, err := svc.CreatePR(context.Background(), run)
+	require.NoError(t, err, "CreatePR should succeed for a snapshot-backed session")
+	require.Equal(t, 42, pr.GitHubPRNumber, "CreatePR should store the returned PR number")
+
+	// Drain the upload goroutine before checking expectations — Promote
+	// is async and would otherwise race the assertion.
+	svc.WaitForPostPRSnapshotUploads()
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations (including async PromotePendingSnapshot) should be met")
+}
+
 func TestCreatePR_NoCommitsBetweenMapsToErrNoChanges(t *testing.T) {
 	t.Parallel()
 

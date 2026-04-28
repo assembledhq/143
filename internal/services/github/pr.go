@@ -257,8 +257,9 @@ const (
 //     Session state (snapshot_key / pending_snapshot_key).
 //
 // The wait respects only the goroutines' own per-upload timeout
-// (10 minutes); callers that need a shorter budget should run this in a
-// separate goroutine and select on their own ctx.
+// (postPRSnapshotUploadTimeout, currently 6 minutes); callers that need a
+// shorter budget should run this in a separate goroutine and select on
+// their own ctx.
 func (s *PRService) WaitForPostPRSnapshotUploads() {
 	s.postPRSnapshotUploads.Wait()
 }
@@ -491,10 +492,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if err != nil {
 		return nil, err
 	}
-	// Ensure the captured tar is removed if we bail out before dispatching
-	// the upload goroutine. The goroutine takes ownership of the file and
-	// removes it on completion; clearing the path here prevents a
-	// double-remove.
+	// Ensure the captured tar is removed on every error path between here
+	// and the dispatch site below — including PR-content generation, label
+	// attachment, pullRequests.Create, and SetPendingSnapshotKey failures.
+	// On the success path, dispatchPostPRSnapshotUpload zeroes
+	// pushed.CapturedSnapshotPath to transfer ownership to the goroutine,
+	// and this defer becomes a no-op (intentional asymmetry: the goroutine
+	// removes the file on completion; double-removing would race a future
+	// caller's tempfile if pid recycled the inode).
 	defer func() {
 		if pushed != nil && pushed.CapturedSnapshotPath != "" {
 			_ = os.Remove(pushed.CapturedSnapshotPath)

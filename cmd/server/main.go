@@ -488,12 +488,20 @@ func main() {
 		// goroutines (the worker job has returned) and own a temp file +
 		// pending_snapshot_key state; if we exit before they land the
 		// session is stuck with pending_snapshot_key set with no in-flight
-		// uploader to clear it. The drainCtx deadline still applies — if
-		// uploads can't finish within budget the cluster.Scheduler's
-		// reapStrandedPendingSnapshots pass clears those rows on the next
-		// tick (within strandedPendingSnapshotThreshold), so the worst-case
-		// outcome is a delayed resume rather than a permanently stuck row.
-		drainPostPRUploads(drainCtx, workerServices, logger)
+		// uploader to clear it.
+		//
+		// This drain is best-effort by design: the shared 110s drainCtx is
+		// well below postPRSnapshotUploadTimeout (6 minutes), so a real
+		// upload that has only just started at shutdown will not finish
+		// within budget. That is acceptable — cluster.Scheduler's
+		// reapStrandedPendingSnapshots pass clears stranded rows on the
+		// next tick (within strandedPendingSnapshotThreshold = 15m), so
+		// the worst-case outcome is a delayed resume rather than a
+		// permanently stuck row. The drain still pays for itself when
+		// uploads happen to be near completion (the common case under
+		// light load), and gives the goroutines a chance to call
+		// Promote/Clear before the process exits.
+		drainPostPRUploads(drainCtx, resolvePostPRSnapshotDrainer(workerServices), logger)
 	drained:
 		drainCancel()
 
@@ -633,20 +641,39 @@ func totalActiveRunAgentJobs(workers []*worker.Worker) int {
 	return total
 }
 
-// drainPostPRUploads blocks until the workerServices PRService has finished
-// all in-flight post-PR snapshot uploads, or until drainCtx expires. A
-// timeout here is non-fatal: cluster.Scheduler.reapStrandedPendingSnapshots
-// will recover any pending_snapshot_key rows whose owning upload was killed
-// when this drain timed out, so worst-case is a delayed (not permanent)
-// resume for affected sessions.
-func drainPostPRUploads(drainCtx context.Context, workerServices *worker.Services, logger zerolog.Logger) {
+// postPRSnapshotDrainer is the narrow surface drainPostPRUploads needs from
+// the PR service. Declared here (rather than reusing worker.prCreator, which
+// is unexported) so the drain function can be unit-tested with a tiny stub
+// instead of a full PR service mock.
+type postPRSnapshotDrainer interface {
+	WaitForPostPRSnapshotUploads()
+}
+
+// resolvePostPRSnapshotDrainer extracts the drainer from workerServices,
+// returning nil in api-only mode (where workerServices is unset). Kept as a
+// helper so the call site doesn't have to introduce a local variable that
+// would conflict with the surrounding for/select+goto control flow.
+func resolvePostPRSnapshotDrainer(workerServices *worker.Services) postPRSnapshotDrainer {
 	if workerServices == nil || workerServices.PR == nil {
+		return nil
+	}
+	return workerServices.PR
+}
+
+// drainPostPRUploads blocks until the PR service has finished all in-flight
+// post-PR snapshot uploads, or until drainCtx expires. A timeout here is
+// non-fatal: cluster.Scheduler.reapStrandedPendingSnapshots will recover any
+// pending_snapshot_key rows whose owning upload was killed when this drain
+// timed out, so worst-case is a delayed (not permanent) resume for affected
+// sessions.
+func drainPostPRUploads(drainCtx context.Context, drainer postPRSnapshotDrainer, logger zerolog.Logger) {
+	if drainer == nil {
 		return
 	}
 	uploadsDone := make(chan struct{})
 	go func() {
 		defer close(uploadsDone)
-		workerServices.PR.WaitForPostPRSnapshotUploads()
+		drainer.WaitForPostPRSnapshotUploads()
 	}()
 	select {
 	case <-uploadsDone:
