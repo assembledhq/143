@@ -67,7 +67,6 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
 
 type DictationResult = {
   transcript: string;
@@ -380,7 +379,6 @@ export function ManualSessionCreatePageContent() {
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: slashTriggerIcon,
         })),
       }));
     }
