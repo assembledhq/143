@@ -36,7 +36,7 @@ export function AutopilotProposalCard() {
       <CardContent className="py-3 px-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="flex items-center justify-center h-8 w-8 rounded-full bg-purple-100 dark:bg-purple-900/50 shrink-0">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center">
               <Lightbulb className="h-4 w-4 text-purple-600 dark:text-purple-400" />
             </div>
             <div className="min-w-0">
