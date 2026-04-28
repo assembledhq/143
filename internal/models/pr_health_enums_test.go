@@ -93,6 +93,34 @@ func TestPullRequestHealthEnrichmentStatusValidate(t *testing.T) {
 	}
 }
 
+func TestPullRequestCheckStatusValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    PullRequestCheckStatus
+		expectErr bool
+	}{
+		{name: "passed", status: PullRequestCheckStatusPassed},
+		{name: "failed", status: PullRequestCheckStatusFailed},
+		{name: "pending", status: PullRequestCheckStatusPending},
+		{name: "invalid", status: PullRequestCheckStatus("oops"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.status.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported check statuses")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported check statuses")
+		})
+	}
+}
+
 func TestPullRequestRepairActionTypeValidate(t *testing.T) {
 	t.Parallel()
 

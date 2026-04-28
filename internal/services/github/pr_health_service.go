@@ -131,6 +131,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 	if err == nil {
 		var summary models.PullRequestHealthSummary
 		if unmarshalErr := json.Unmarshal(current.SummaryJSON, &summary); unmarshalErr == nil {
+			normalizeStoredCheckSummaries(&summary)
 			resp.MergeState = summary.MergeState
 			resp.HasConflicts = summary.HasConflicts
 			resp.FailingTestCount = summary.FailingTestCount
@@ -163,13 +164,19 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
 	resp.CanFixTests = resp.FailingTestCount > 0
+	hasBlockingChecks := false
+	for _, check := range resp.Checks {
+		if classifyStoredCheckStatus(check) != models.PullRequestCheckStatusPassed {
+			hasBlockingChecks = true
+			break
+		}
+	}
 	// CanMerge is the green-light counterpart to the repair flags: GitHub has
-	// confirmed the branch is mergeable, no non-success checks remain (the
-	// sync loop excludes success/neutral/skipped, so any entry here is either
-	// failing or still in flight), and the PR is still open.
+	// confirmed the branch is mergeable, all checks are passing, and the PR is
+	// still open.
 	resp.CanMerge = resp.Status == "open" &&
 		resp.MergeState == models.PullRequestMergeStateClean &&
-		len(resp.Checks) == 0
+		!hasBlockingChecks
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -202,16 +209,15 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 	summary.MergeState, summary.HasConflicts = normalizeMergeState(details.Mergeable, details.MergeableState)
 	for _, check := range checkRuns {
-		if strings.EqualFold(check.Conclusion, "success") || strings.EqualFold(check.Conclusion, "neutral") || strings.EqualFold(check.Conclusion, "skipped") {
-			continue
-		}
 		category := classifyCheckRunCategory(check.Name)
-		if category == models.PullRequestCheckCategoryTest {
+		status := normalizeCheckRunStatus(check)
+		if category == models.PullRequestCheckCategoryTest && status == models.PullRequestCheckStatusFailed {
 			summary.FailingTestCount++
 		}
 		summary.Checks = append(summary.Checks, models.PullRequestCheckSummary{
 			Name:       check.Name,
 			Category:   category,
+			Status:     status,
 			Provider:   check.App.Slug,
 			DetailsURL: firstNonEmpty(check.DetailsURL, check.HTMLURL),
 			Summary:    firstNonEmpty(check.Output.Title, truncateText(stripWhitespace(check.Output.Summary), 240)),
@@ -238,10 +244,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		return err
 	}
 
-	ciStatus := "success"
-	if len(summary.Checks) > 0 {
-		ciStatus = "failure"
-	}
+	ciStatus := deriveAggregateCIStatus(summary.Checks)
 	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, ciStatus); err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during pull request health sync")
 	}
@@ -317,7 +320,7 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 		if category != models.PullRequestCheckCategoryTest {
 			continue
 		}
-		if strings.EqualFold(check.Conclusion, "success") || strings.EqualFold(check.Conclusion, "neutral") || strings.EqualFold(check.Conclusion, "skipped") {
+		if normalizeCheckRunStatus(check) != models.PullRequestCheckStatusFailed {
 			continue
 		}
 		annotations, annErr := s.fetchCheckRunAnnotations(ctx, token, owner, repoName, check.ID)
