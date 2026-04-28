@@ -120,23 +120,37 @@ SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 if [ "$ROLE" = "worker" ]; then
   if [ -z "${WORKER_PRIVATE_IP:-}" ]; then
     echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
-    # Pick the first private IPv4 on a real network interface, deliberately
+    # Enumerate every private IPv4 on a real network interface, deliberately
     # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
     # filter would silently return 172.17.0.1 (docker0) on hosts where the
     # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
     # the *public* IP because the default route goes through the public NIC.
-    WORKER_PRIVATE_IP="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-      'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1]; exit }"')"
-    if [ -z "$WORKER_PRIVATE_IP" ]; then
+    # We collect candidates (no awk `exit`) so multi-homed hosts surface as
+    # an error rather than silently picking whichever NIC enumerates first.
+    WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+      'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+    CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
+    if [ "$CANDIDATE_COUNT" -eq 0 ]; then
       echo "ERROR: could not auto-detect WORKER_PRIVATE_IP on $HOST."
       echo "       Set WORKER_PRIVATE_IP=<ip> and re-run."
       exit 1
+    elif [ "$CANDIDATE_COUNT" -gt 1 ]; then
+      # Multi-homed hosts (e.g. cluster NIC + storage VLAN) need the operator
+      # to disambiguate — the worker registers exactly one preview URL, and
+      # silently picking the wrong NIC would make app→worker traffic dead.
+      echo "ERROR: $HOST has $CANDIDATE_COUNT private IPv4 addresses on real interfaces:"
+      printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | sed 's/^/         /'
+      echo "       Pick the one app nodes will reach and re-run with WORKER_PRIVATE_IP=<ip>."
+      exit 1
     fi
+    WORKER_PRIVATE_IP="$WORKER_PRIVATE_IP_CANDIDATES"
   fi
-  # Default NODE_ID to "worker-<last octet of private IP>" — stable because
-  # the private IP is stable across reboots, and unique within a /24 fleet.
+  # Default NODE_ID to "worker-<dotted-to-dash private IP>" — stable because
+  # the private IP is stable across reboots, and unique across the full
+  # RFC1918 space (a last-octet-only default would collide whenever the
+  # fleet spans more than one /24, e.g. 10.0.0.4 and 10.0.1.4).
   if [ -z "${NODE_ID:-}" ]; then
-    NODE_ID="worker-${WORKER_PRIVATE_IP##*.}"
+    NODE_ID="worker-${WORKER_PRIVATE_IP//./-}"
   fi
   if [ -z "${PREVIEW_INTERNAL_BASE_URL:-}" ]; then
     PREVIEW_INTERNAL_BASE_URL="http://${WORKER_PRIVATE_IP}:8080"

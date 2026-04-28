@@ -301,8 +301,13 @@ secrets-rotate:
 #
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
-#   WORKER_PRIVATE_IP            — auto-detected via SSH if unset
-#   NODE_ID                      — defaults to "worker-<last octet of WORKER_PRIVATE_IP>"
+#   WORKER_PRIVATE_IP            — auto-detected via SSH if unset. Multi-homed
+#                                  hosts (cluster NIC + storage VLAN, etc.)
+#                                  abort with the candidate list so you can
+#                                  pick the one app nodes will reach.
+#   NODE_ID                      — defaults to "worker-<WORKER_PRIVATE_IP with
+#                                  dots replaced by dashes>" (e.g. worker-10-0-0-4),
+#                                  unique across the full RFC1918 space.
 #   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
 #
 # Example with overrides:
