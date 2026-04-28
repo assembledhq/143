@@ -17,6 +17,7 @@ function makeSession(overrides: Partial<Session>): Session {
     current_turn: 0,
     last_activity_at: '2026-04-28T00:00:00Z',
     sandbox_state: 'idle',
+    created_at: '2026-04-28T00:00:00Z',
     ...overrides,
   };
 }
