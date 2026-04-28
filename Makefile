@@ -299,10 +299,41 @@ secrets-rotate:
 #   make provision-db     HOST=87.99.157.55
 #   make provision-redis  HOST=10.0.0.50
 #
+# Worker-only env vars (per-host identity, written to /opt/143/.env.local
+# and preserved across deploys):
+#   WORKER_PRIVATE_IP            — auto-detected via SSH if unset
+#   NODE_ID                      — defaults to "worker-<last octet of WORKER_PRIVATE_IP>"
+#   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
+#
+# Example with overrides:
+#   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
+#
+# Migration note for fleets provisioned before /opt/143/.env.local existed:
+# `make deploy-worker` against such a host fails loudly at the secrets step
+# with "ERROR: /opt/143/.env.local is missing on this host." To recover,
+# either run `make provision-worker HOST=<host> REPROVISION=true` (tears
+# down the worker container — drains active jobs first) or seed .env.local
+# manually:
+#   ssh deploy@<host> 'cat > /opt/143/.env.local <<EOF
+#   NODE_ID=worker-N
+#   WORKER_PRIVATE_IP=10.0.0.N
+#   PREVIEW_INTERNAL_BASE_URL=http://10.0.0.N:8080
+#   EOF
+#   chmod 600 /opt/143/.env.local'
 
 REPROVISION ?=
+
+# Per-host worker identity (forwarded as env vars to provision.sh / deploy.sh
+# so users can write `make provision-worker HOST=… WORKER_PRIVATE_IP=…` instead
+# of prefixing the env var on the command line). Empty by default; provision.sh
+# auto-detects WORKER_PRIVATE_IP via SSH when unset and derives NODE_ID and
+# PREVIEW_INTERNAL_BASE_URL from it.
+export WORKER_PRIVATE_IP
+export NODE_ID
+export PREVIEW_INTERNAL_BASE_URL
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
