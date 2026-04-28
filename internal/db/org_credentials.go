@@ -72,35 +72,35 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 	}
 
 	if isCodingAuthProvider(provider) {
-		nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
+		var id uuid.UUID
+		err := s.withCodingAuthPriority(ctx, orgID, func(tx pgx.Tx, nextPriority int) error {
+			query := `
+				INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
+				VALUES (@org_id, @provider, @label, @config, 'active', @created_by, @priority)
+				ON CONFLICT (org_id, provider, label)
+				DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now(),
+					priority = CASE
+						WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
+						ELSE org_credentials.priority
+					END
+				RETURNING id`
+
+			args := pgx.NamedArgs{
+				"org_id":     orgID,
+				"provider":   string(provider),
+				"label":      label,
+				"config":     encrypted,
+				"created_by": createdBy,
+				"priority":   nextPriority,
+			}
+
+			if err := tx.QueryRow(ctx, query, args).Scan(&id); err != nil {
+				return fmt.Errorf("upsert %s credential: %w", provider, err)
+			}
+			return nil
+		})
 		if err != nil {
 			return nil, err
-		}
-
-		query := `
-			INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
-			VALUES (@org_id, @provider, @label, @config, 'active', @created_by, @priority)
-			ON CONFLICT (org_id, provider, label)
-			DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now(),
-				priority = CASE
-					WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
-					ELSE org_credentials.priority
-				END
-			RETURNING id`
-
-		args := pgx.NamedArgs{
-			"org_id":     orgID,
-			"provider":   string(provider),
-			"label":      label,
-			"config":     encrypted,
-			"created_by": createdBy,
-			"priority":   nextPriority,
-		}
-
-		var id uuid.UUID
-		err = s.db.QueryRow(ctx, query, args).Scan(&id)
-		if err != nil {
-			return nil, fmt.Errorf("upsert %s credential: %w", provider, err)
 		}
 		return &id, nil
 	}
@@ -147,64 +147,66 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 		return nil, fmt.Errorf("%s: %w", provider, err)
 	}
 
-	nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
-
 	// ON CONFLICT only updates if the existing row is pending_auth or disabled —
 	// never stomps on a credential that holds a real access token (active) or one
 	// that's still mid-rotation in the user's mental model (invalid). When
 	// resurrecting a disabled row we bump its priority to the next slot so it
 	// appears at the bottom of the fallback stack rather than carrying over an
 	// old position the user may not remember.
-	query := `
-		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
-		VALUES (@org_id, @provider, @label, @config, 'pending_auth', @created_by, @priority)
-		ON CONFLICT (org_id, provider, label)
-		DO UPDATE SET config = EXCLUDED.config, status = 'pending_auth', updated_at = now(),
-			priority = CASE
-				WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
-				ELSE org_credentials.priority
-			END
-		WHERE org_credentials.status IN ('pending_auth', 'disabled')
-		RETURNING id`
-
-	args := pgx.NamedArgs{
-		"org_id":     orgID,
-		"provider":   string(provider),
-		"label":      label,
-		"config":     encrypted,
-		"created_by": createdBy,
-		"priority":   nextPriority,
-	}
-
 	var id uuid.UUID
-	err = s.db.QueryRow(ctx, query, args).Scan(&id)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Conflict on (org, provider, label) but the existing row is
-			// active/invalid. Look up the actual status to surface a useful error.
-			existingStatus, lookupErr := s.lookupCredentialStatus(ctx, orgID, provider, label)
-			if lookupErr != nil {
-				return nil, &ErrCredentialLabelTaken{Label: label, ExistingStatus: "unknown"}
-			}
-			return nil, &ErrCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
+	var labelTakenErr *ErrCredentialLabelTaken
+	err = s.withCodingAuthPriority(ctx, orgID, func(tx pgx.Tx, nextPriority int) error {
+		query := `
+			INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
+			VALUES (@org_id, @provider, @label, @config, 'pending_auth', @created_by, @priority)
+			ON CONFLICT (org_id, provider, label)
+			DO UPDATE SET config = EXCLUDED.config, status = 'pending_auth', updated_at = now(),
+				priority = CASE
+					WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
+					ELSE org_credentials.priority
+				END
+			WHERE org_credentials.status IN ('pending_auth', 'disabled')
+			RETURNING id`
+
+		args := pgx.NamedArgs{
+			"org_id":     orgID,
+			"provider":   string(provider),
+			"label":      label,
+			"config":     encrypted,
+			"created_by": createdBy,
+			"priority":   nextPriority,
 		}
-		return nil, fmt.Errorf("insert pending %s credential: %w", provider, err)
+
+		scanErr := tx.QueryRow(ctx, query, args).Scan(&id)
+		if scanErr == nil {
+			return nil
+		}
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			// Conflict on (org, provider, label) but the existing row is
+			// active/invalid. Look up the actual status (still inside the
+			// transaction so the read is consistent with the failed insert)
+			// to surface a useful error to the caller.
+			var existingStatus string
+			lookupErr := tx.QueryRow(ctx,
+				`SELECT status FROM org_credentials WHERE org_id = @org_id AND provider = @provider AND label = @label`,
+				pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
+			).Scan(&existingStatus)
+			if lookupErr != nil {
+				labelTakenErr = &ErrCredentialLabelTaken{Label: label, ExistingStatus: "unknown"}
+			} else {
+				labelTakenErr = &ErrCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
+			}
+			return labelTakenErr
+		}
+		return fmt.Errorf("insert pending %s credential: %w", provider, scanErr)
+	})
+	if labelTakenErr != nil {
+		return nil, labelTakenErr
+	}
+	if err != nil {
+		return nil, err
 	}
 	return &id, nil
-}
-
-// lookupCredentialStatus returns the raw status string for a (org, provider, label)
-// row. Used by InsertPendingAuth to disambiguate conflict cases.
-func (s *OrgCredentialStore) lookupCredentialStatus(ctx context.Context, orgID uuid.UUID, provider models.ProviderName, label string) (string, error) {
-	var status string
-	err := s.db.QueryRow(ctx,
-		`SELECT status FROM org_credentials WHERE org_id = @org_id AND provider = @provider AND label = @label`,
-		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "label": label},
-	).Scan(&status)
-	return status, err
 }
 
 // UpsertByID updates an existing credential's config by ID, scoped to org.
@@ -738,32 +740,60 @@ func isCodingAuthProvider(provider models.ProviderName) bool {
 	return false
 }
 
-// nextCodingAuthPriority returns the next priority slot for a new coding-auth row
-// in the org's fallback stack. Disabled rows are excluded so a user who removed
-// an entry can re-add at the bottom without leaving gaps from old positions.
-func (s *OrgCredentialStore) nextCodingAuthPriority(ctx context.Context, orgID uuid.UUID) (int, error) {
+// withCodingAuthPriority runs fn inside a transaction guarded by a per-org
+// advisory lock so that the priority lookup + INSERT pair is serialized
+// across concurrent callers in the same org. Without this, two simultaneous
+// "Add auth" calls could read the same MAX(priority) and end up with
+// duplicate priority numbers — harmless for sorting (created_at breaks ties)
+// but confusing in the UI.
+//
+// fn receives the next priority slot and the active transaction; it must
+// perform its INSERT/UPDATE on tx so the work happens under the same lock.
+// The lock is held until tx commits or rolls back.
+func (s *OrgCredentialStore) withCodingAuthPriority(
+	ctx context.Context,
+	orgID uuid.UUID,
+	fn func(tx pgx.Tx, nextPriority int) error,
+) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("org credential store db does not support transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin priority transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Per-org advisory lock keyed on a stable namespaced string. Hashed to
+	// the bigint argument pg_advisory_xact_lock expects.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"coding_auth_priority:"+orgID.String(),
+	); err != nil {
+		return fmt.Errorf("acquire priority lock: %w", err)
+	}
+
 	var nextPriority int
-	err := s.db.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(priority), 0) + 1
 		FROM org_credentials
 		WHERE org_id = @org_id
 		  AND provider IN ('anthropic', 'openai', 'openai_chatgpt', 'gemini', 'amp', 'pi')
 		  AND status != 'disabled'`,
 		pgx.NamedArgs{"org_id": orgID},
-	).Scan(&nextPriority)
-	if err != nil {
-		return 0, fmt.Errorf("get next coding auth priority: %w", err)
+	).Scan(&nextPriority); err != nil {
+		return fmt.Errorf("get next coding auth priority: %w", err)
 	}
-	return nextPriority, nil
+
+	if err := fn(tx, nextPriority); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UUID, createdBy *uuid.UUID, input models.CreateCodingAuthInput) (*models.CodingAuth, error) {
 	cfg, provider, err := providerConfigForCodingAuthInput(input)
-	if err != nil {
-		return nil, err
-	}
-
-	nextPriority, err := s.nextCodingAuthPriority(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -773,26 +803,35 @@ func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UU
 		return nil, err
 	}
 
-	query := `
-		INSERT INTO org_credentials (org_id, provider, label, config, status, priority, created_by)
-		VALUES (@org_id, @provider, @label, @config, 'active', @priority, @created_by)
-		RETURNING id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at`
+	var row models.OrgCredential
+	err = s.withCodingAuthPriority(ctx, orgID, func(tx pgx.Tx, nextPriority int) error {
+		query := `
+			INSERT INTO org_credentials (org_id, provider, label, config, status, priority, created_by)
+			VALUES (@org_id, @provider, @label, @config, 'active', @priority, @created_by)
+			RETURNING id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":     orgID,
-		"provider":   string(provider),
-		"label":      input.Label,
-		"config":     encrypted,
-		"priority":   nextPriority,
-		"created_by": createdBy,
+		rows, qerr := tx.Query(ctx, query, pgx.NamedArgs{
+			"org_id":     orgID,
+			"provider":   string(provider),
+			"label":      input.Label,
+			"config":     encrypted,
+			"priority":   nextPriority,
+			"created_by": createdBy,
+		})
+		if qerr != nil {
+			return fmt.Errorf("create coding auth: %w", qerr)
+		}
+		collected, cerr := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+		if cerr != nil {
+			return fmt.Errorf("create coding auth: %w", cerr)
+		}
+		row = collected
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create coding auth: %w", err)
+		return nil, err
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
-	if err != nil {
-		return nil, fmt.Errorf("create coding auth: %w", err)
-	}
+
 	cred, err := s.decryptRow(row)
 	if err != nil {
 		return nil, err

@@ -31,36 +31,51 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			name: "upserts anthropic config",
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test", BaseURL: ""},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBegin()
+				mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(1))
 				mock.ExpectQuery("INSERT INTO org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectCommit()
 			},
 		},
 		{
 			name: "upserts openai config",
 			cfg:  models.OpenAIConfig{APIKey: "sk-test", APIType: "chat"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBegin()
+				mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(1))
 				mock.ExpectQuery("INSERT INTO org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				mock.ExpectCommit()
 			},
 		},
 		{
 			name: "db error",
 			cfg:  models.AnthropicConfig{APIKey: "sk-ant-test"},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectBegin()
+				mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(1))
 				mock.ExpectQuery("INSERT INTO org_credentials").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
+				mock.ExpectRollback()
 			},
 			expectErr: true,
 		},
@@ -101,12 +116,17 @@ func TestOrgCredentialStore_InsertPendingAuth(t *testing.T) {
 
 		orgID := uuid.New()
 		newID := uuid.New()
+		mock.ExpectBegin()
+		mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
 			WithArgs(orgID).
 			WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(3))
 		mock.ExpectQuery(`INSERT INTO org_credentials`).
 			WithArgs(orgID, "openai_chatgpt", "team-a", pgxmock.AnyArg(), pgxmock.AnyArg(), 3).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(newID))
+		mock.ExpectCommit()
 
 		store := NewOrgCredentialStore(mock, nil)
 		id, err := store.InsertPendingAuth(context.Background(), orgID, nil, "team-a", models.OpenAIChatGPTConfig{DeviceAuthID: "dev-1"})
@@ -116,30 +136,64 @@ func TestOrgCredentialStore_InsertPendingAuth(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
-	t.Run("does not assign priority for non-coding providers", func(t *testing.T) {
+	t.Run("bumps priority when resurrecting a disabled row", func(t *testing.T) {
 		t.Parallel()
 
-		// UpsertWithLabel must skip the MAX(priority) lookup for non-coding
-		// providers — priority is meaningful only for the coding-agent
-		// fallback stack. The mock is configured to fail loudly if an
-		// unexpected query arrives (no MAX(priority) expectation set).
+		// The ON CONFLICT clause includes a CASE that uses EXCLUDED.priority
+		// when the existing row's status is 'disabled'. This test verifies the
+		// SQL still passes the new priority through so the row appears at the
+		// bottom of the stack on resurrection rather than reusing a stale slot.
 		mock, err := pgxmock.NewPool()
 		require.NoError(t, err, "creating mock pool should not error")
 		defer mock.Close()
 
 		orgID := uuid.New()
-		mock.ExpectQuery(`INSERT INTO org_credentials`).
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		existingID := uuid.New()
+		mock.ExpectBegin()
+		mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
+		mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
+			WithArgs(orgID).
+			WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(5))
+		mock.ExpectQuery(`(?s)INSERT INTO org_credentials.*EXCLUDED\.priority`).
+			WithArgs(orgID, "openai_chatgpt", "team-a", pgxmock.AnyArg(), pgxmock.AnyArg(), 5).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(existingID))
+		mock.ExpectCommit()
 
 		store := NewOrgCredentialStore(mock, nil)
-		_, err = store.UpsertWithLabel(context.Background(), orgID, nil, "github-oauth", models.GitHubOAuthConfig{
-			ClientID:    "client",
-			AccessToken: "gho_test",
-		})
-		require.NoError(t, err, "UpsertWithLabel should not return an error for non-coding providers")
-		require.NoError(t, mock.ExpectationsWereMet(), "no MAX(priority) query should be issued for non-coding providers")
+		id, err := store.InsertPendingAuth(context.Background(), orgID, nil, "team-a", models.OpenAIChatGPTConfig{DeviceAuthID: "dev-2"})
+		require.NoError(t, err, "InsertPendingAuth should not return an error on resurrection")
+		require.NotNil(t, id, "InsertPendingAuth should return the resurrected row id")
+		require.Equal(t, existingID, *id, "InsertPendingAuth should return the existing id on resurrection")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+}
+
+// TestOrgCredentialStore_UpsertWithLabel_NonCodingProvider verifies the
+// priority gating: priority is meaningful only for the coding-agent fallback
+// stack, so non-coding providers (GitHub/Sentry/Linear/Notion) must skip the
+// MAX(priority) lookup entirely. The mock fails loudly if an unexpected
+// SELECT fires.
+func TestOrgCredentialStore_UpsertWithLabel_NonCodingProvider(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectQuery(`INSERT INTO org_credentials`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	store := NewOrgCredentialStore(mock, nil)
+	_, err = store.UpsertWithLabel(context.Background(), orgID, nil, "github-oauth", models.GitHubOAuthConfig{
+		ClientID:    "client",
+		AccessToken: "gho_test",
+	})
+	require.NoError(t, err, "UpsertWithLabel should not return an error for non-coding providers")
+	require.NoError(t, mock.ExpectationsWereMet(), "no MAX(priority) query should be issued for non-coding providers")
 }
 
 func TestOrgCredentialStore_Get(t *testing.T) {
@@ -907,6 +961,10 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 		defer mock.Close()
 
 		configData := crypto.DevEncrypt([]byte(`{"api_key":"sk-test-123","api_type":"responses"}`))
+		mock.ExpectBegin()
+		mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("SELECT", 1))
 		mock.ExpectQuery(`(?s)SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
 			WithArgs(orgID).
 			WillReturnRows(pgxmock.NewRows([]string{"next_priority"}).AddRow(4))
@@ -914,6 +972,7 @@ func TestOrgCredentialStore_CodingAuthCRUDAndHelpers(t *testing.T) {
 			WithArgs(orgID, "openai", "Codex backup", pgxmock.AnyArg(), 4, &userID).
 			WillReturnRows(pgxmock.NewRows(codingAuthColumns).
 				AddRow(rowID, orgID, "openai", "Codex backup", configData, "active", 4, nil, nil, &userID, now, now))
+		mock.ExpectCommit()
 
 		store := NewOrgCredentialStore(mock, nil)
 		row, err := store.CreateCodingAuth(context.Background(), orgID, &userID, models.CreateCodingAuthInput{

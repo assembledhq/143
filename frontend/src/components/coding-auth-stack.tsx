@@ -128,13 +128,12 @@ export function CodingAuthStack({
                 className={cn(
                   selectedId === row.id ? "bg-muted/40" : "",
                   draggingId === row.id ? "opacity-40" : "",
-                  showDropAbove ? "shadow-[inset_0_2px_0_0_var(--color-primary)]" : "",
-                  showDropBelow ? "shadow-[inset_0_-2px_0_0_var(--color-primary)]" : "",
-                  "cursor-grab active:cursor-grabbing",
+                  showDropAbove ? "border-t-2 border-t-primary" : "",
+                  showDropBelow ? "border-b-2 border-b-primary" : "",
                 )}
               >
                 <TableCell>
-                  <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground">
+                  <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground cursor-grab active:cursor-grabbing">
                     <span>{row.priority}</span>
                     <GripVertical className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                   </div>
