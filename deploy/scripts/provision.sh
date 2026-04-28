@@ -110,6 +110,46 @@ fi
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
+# Per-host identity for workers. These are written to /opt/143/.env.local and
+# preserved across deploys (deploy.sh never overwrites .env.local). Auto-detect
+# WORKER_PRIVATE_IP from the host's outbound source address if the caller
+# didn't supply one. NODE_ID and PREVIEW_INTERNAL_BASE_URL get sensible
+# defaults derived from WORKER_PRIVATE_IP — override either via env var if
+# needed. Resolved values are echoed before writing so the operator can
+# eyeball them and Ctrl-C if something looks wrong.
+if [ "$ROLE" = "worker" ]; then
+  if [ -z "${WORKER_PRIVATE_IP:-}" ]; then
+    echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
+    # Pick the first private IPv4 on a real network interface, deliberately
+    # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+    # filter would silently return 172.17.0.1 (docker0) on hosts where the
+    # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
+    # the *public* IP because the default route goes through the public NIC.
+    WORKER_PRIVATE_IP="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
+      'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1]; exit }"')"
+    if [ -z "$WORKER_PRIVATE_IP" ]; then
+      echo "ERROR: could not auto-detect WORKER_PRIVATE_IP on $HOST."
+      echo "       Set WORKER_PRIVATE_IP=<ip> and re-run."
+      exit 1
+    fi
+  fi
+  # Default NODE_ID to "worker-<last octet of private IP>" — stable because
+  # the private IP is stable across reboots, and unique within a /24 fleet.
+  if [ -z "${NODE_ID:-}" ]; then
+    NODE_ID="worker-${WORKER_PRIVATE_IP##*.}"
+  fi
+  if [ -z "${PREVIEW_INTERNAL_BASE_URL:-}" ]; then
+    PREVIEW_INTERNAL_BASE_URL="http://${WORKER_PRIVATE_IP}:8080"
+  fi
+  # Echo resolved values before writing so the operator can eyeball them
+  # and Ctrl-C if a stray env var (e.g. NODE_ID leaked from a dev shell)
+  # is about to land on a production worker.
+  echo "Worker per-host identity for $HOST:"
+  echo "  WORKER_PRIVATE_IP         = $WORKER_PRIVATE_IP"
+  echo "  NODE_ID                   = $NODE_ID"
+  echo "  PREVIEW_INTERNAL_BASE_URL = $PREVIEW_INTERNAL_BASE_URL"
+fi
+
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
 if [ -n "$RUNNING" ]; then
@@ -222,6 +262,18 @@ elif [ "$ROLE" = "worker" ]; then
     "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
+
+  # Per-host identity (NODE_ID, WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL)
+  # lives in .env.local and survives every deploy — the secret refresh in
+  # deploy.sh only rewrites /opt/143/.env, then re-appends .env.local.
+  printf 'NODE_ID=%s\nWORKER_PRIVATE_IP=%s\nPREVIEW_INTERNAL_BASE_URL=%s\n' \
+    "$NODE_ID" "$WORKER_PRIVATE_IP" "$PREVIEW_INTERNAL_BASE_URL" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env.local && chown deploy:deploy /opt/143/.env.local && chmod 600 /opt/143/.env.local'
+
+  # Concatenate so docker compose can interpolate ${WORKER_PRIVATE_IP} etc.
+  # when parsing docker-compose.worker.yml. deploy.sh repeats this on every
+  # deploy.
+  ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat /opt/143/.env.local >> /opt/143/.env'
 else
   # App nodes get the full secret set for SOPS decryption
   printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" \
