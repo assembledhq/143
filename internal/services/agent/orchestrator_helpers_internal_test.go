@@ -357,6 +357,28 @@ func TestPromptSeedForSession(t *testing.T) {
 		require.Contains(t, *issue.Description, reasoning, "promptSeedForSession should preserve the PM reasoning in the description")
 		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
 	})
+
+	t.Run("uses pm approach as the fallback title when the session title is blank", func(t *testing.T) {
+		t.Parallel()
+
+		approach := "Inspect the retry path."
+		reasoning := "Timeouts started after the last deploy."
+		orchestrator := &Orchestrator{}
+		issue, gotLinkedIssues := orchestrator.promptSeedForSession(
+			&models.Session{
+				Title:       strPtr("   "),
+				PMApproach:  &approach,
+				PMReasoning: &reasoning,
+			},
+			nil,
+			nil,
+		)
+
+		require.NotNil(t, issue, "promptSeedForSession should synthesize an issue from PM context even when the title is blank")
+		require.Equal(t, approach, issue.Title, "promptSeedForSession should use the PM approach as the fallback title before the generic session-task label")
+		require.NotNil(t, issue.Description, "promptSeedForSession should still include PM context in the description when using a fallback title")
+		require.Empty(t, gotLinkedIssues, "promptSeedForSession should not synthesize linked issues when no snapshot exists")
+	})
 }
 
 func TestResolvePromptSeed_FallsBackToPrimaryIssueStore(t *testing.T) {

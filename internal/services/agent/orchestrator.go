@@ -831,7 +831,11 @@ func (o *Orchestrator) promptSeedForSession(session *models.Session, latestMessa
 
 	title := "Session task"
 	if session.Title != nil && strings.TrimSpace(*session.Title) != "" {
-		title = *session.Title
+		title = strings.TrimSpace(*session.Title)
+	} else if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
+		title = strings.TrimSpace(*session.PMApproach)
+	} else if session.PMReasoning != nil && strings.TrimSpace(*session.PMReasoning) != "" {
+		title = strings.TrimSpace(*session.PMReasoning)
 	}
 	var descriptionParts []string
 	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
