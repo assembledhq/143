@@ -108,6 +108,7 @@ import { PRHealthBanner } from "@/components/pr-health-banner";
 import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet } from "@/lib/session-status-groups";
 
@@ -2309,67 +2310,66 @@ export function SessionDetailContent({ id }: { id: string }) {
       className="flex flex-col flex-1 min-h-0 gap-0"
     >
       <div className="border-b border-border px-2 py-2 shrink-0">
-        <div className="flex items-center gap-2">
-          <TabsList variant="line" size="sm" className="border-b-0 flex-1">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="changes">
-              Changes
-              {changesCount != null && changesCount > 0 && (
-                <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                  {changesCount}
-                </Badge>
+        <div className="flex items-center gap-2 min-w-0">
+          <div aria-label="Session detail tabs" className="min-w-0 flex-1 overflow-x-auto scrollbar-hide">
+            <TabsList variant="line" size="sm" className="border-b-0 min-w-max">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="changes">
+                Changes
+                {changesCount != null && changesCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                    {changesCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              {showValidationTab && (
+                <TabsTrigger value="validation">Validation</TabsTrigger>
               )}
-            </TabsTrigger>
-            {showValidationTab && (
-              <TabsTrigger value="validation">Validation</TabsTrigger>
+              <TabsTrigger value="preview">Preview</TabsTrigger>
+            </TabsList>
+          </div>
+          <div aria-label="Session detail actions" className="flex items-center gap-2 shrink-0 pl-2">
+            {canRequestReview && (
+              <ReviewButton
+                capabilities={reviewCapabilities}
+                pendingMode={pendingReviewMode}
+                onReview={(mode) => startReviewMutation.mutate(mode)}
+              />
             )}
-            <TabsTrigger value="preview">Preview</TabsTrigger>
-          </TabsList>
-          {canRequestReview && (
-            <ReviewButton
-              capabilities={reviewCapabilities}
-              pendingMode={pendingReviewMode}
-              onReview={(mode) => startReviewMutation.mutate(mode)}
-            />
-          )}
-          {hasPR && prData?.data?.github_pr_url ? (
-            <>
-              {prStatus === "closed" && (
-                <Badge variant="secondary" className="h-7 px-2 text-xs">
-                  PR closed
-                </Badge>
-              )}
-              {prStatus === "merged" && (
-                <Badge variant="secondary" className="h-7 px-2 text-xs">
-                  PR merged
-                </Badge>
-              )}
-              <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                  <ExternalLink className="h-3 w-3" />
-                  View PR
-                </Button>
-              </a>
-            </>
-          ) : showPRAction && !prErrorNotice ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1.5"
-              disabled={prActionDisabled}
-              title={prActionTitle}
-              onClick={() => createPRMutation.mutate(undefined)}
-            >
-              {prActionSpinning ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : prState === "failed" || localPRActionError ? (
-                <AlertTriangle className="h-3 w-3" />
-              ) : (
-                <GitPullRequest className="h-3 w-3" />
-              )}
-              {prActionLabel}
-            </Button>
-          ) : null}
+            {hasPR && prData?.data?.github_pr_url ? (
+              <>
+                {prStatus === "closed" && (
+                  <Badge variant="secondary" className="h-7 px-2 text-xs">
+                    PR closed
+                  </Badge>
+                )}
+                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                    <ExternalLink className="h-3 w-3" />
+                    View PR
+                  </Button>
+                </a>
+              </>
+            ) : showPRAction && !prErrorNotice ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                disabled={prActionDisabled}
+                title={prActionTitle}
+                onClick={() => createPRMutation.mutate(undefined)}
+              >
+                {prActionSpinning ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : prState === "failed" || localPRActionError ? (
+                  <AlertTriangle className="h-3 w-3" />
+                ) : (
+                  <GitPullRequest className="h-3 w-3" />
+                )}
+                {prActionLabel}
+              </Button>
+            ) : null}
+          </div>
         </div>
         {prErrorNotice && (
           <ErrorNotice
@@ -2443,7 +2443,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <Card className="border-border/60">
               <CardContent className="p-4">
                 <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
+                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">

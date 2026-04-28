@@ -34,6 +34,7 @@ import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { useSessionUserFilter } from "@/hooks/use-session-user-filter";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import { SessionOwnerToggle } from "./session-owner-toggle";
 import type { Session, SessionListItem, User } from "@/lib/types";
 import {
@@ -53,7 +54,7 @@ const statusConfig: Record<string, { dot: string; text: string; bg: string; labe
   awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
   needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
   completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
-  pr_created: { dot: "bg-violet-500", text: "text-violet-700 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-950/30", label: "PR created" },
+  pr_created: { dot: prMergedAccent.dot, text: prMergedAccent.text, bg: prMergedAccent.bg, label: "PR created" },
   failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
   cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
   skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
