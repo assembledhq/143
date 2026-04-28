@@ -17,8 +17,8 @@ const { routerPush } = vi.hoisted(() => ({
   routerPush: vi.fn(),
 }));
 
-vi.mock('sonner', () => ({
-  toast,
+vi.mock('@/lib/notify', () => ({
+  notify: toast,
 }));
 
 vi.mock('next/navigation', () => ({
@@ -965,6 +965,17 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('View PR')).toBeInTheDocument();
   });
 
+  it('keeps the tab rail scrollable while separating top-right actions', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const tabRail = await screen.findByLabelText('Session detail tabs');
+    const actions = screen.getByLabelText('Session detail actions');
+
+    expect(tabRail).toHaveClass('overflow-x-auto');
+    expect(actions).toHaveClass('shrink-0');
+    expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+  });
+
   it('renders the PR health banner at the top of Overview when a linked PR is open', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
@@ -1091,9 +1102,11 @@ describe('SessionDetailPage', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect((await screen.findAllByText('PR merged')).length).toBeGreaterThanOrEqual(2);
+    expect(await screen.findByText('PR merged')).toBeInTheDocument();
+    expect(screen.queryAllByText('PR merged')).toHaveLength(1);
     expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-violet-700', 'dark:text-violet-400');
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
   });
 
@@ -1105,7 +1118,7 @@ describe('SessionDetailPage', () => {
             ...mockPRHealth,
             can_merge: false,
             checks: [
-              { name: 'unit tests', category: 'test' as const, summary: 'running' },
+              { name: 'unit tests', category: 'test' as const, status: 'pending' as const, summary: 'running' },
             ],
             summary: 'PR #42 has 1 failing test job.',
           },
@@ -1382,12 +1395,13 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
-  it('shows snapshot expiry notice when diff exists but snapshot is missing', async () => {
+  it('shows checkpoint-missing notice when diff exists but no reusable snapshot was saved', async () => {
     const sessionWithMissingSnapshot: Session = {
       ...mockSessions[0],
       status: 'completed',
       diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
       diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'none',
       snapshot_key: undefined,
     };
 
@@ -1407,9 +1421,39 @@ describe('SessionDetailPage', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('PR snapshot unavailable');
-    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
+    expect(alert).toHaveTextContent('No reusable checkpoint saved');
+    expect(alert).toHaveTextContent('This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.');
     expect(within(alert).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('shows snapshot-expired notice when the saved checkpoint was reaped', async () => {
+    const expiredSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'destroyed',
+      snapshot_key: undefined,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: expiredSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Session snapshot expired');
+    expect(alert).toHaveTextContent('This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.');
   });
 
   it('matches the snapshot expiry notice horizontal margins to overview cards', async () => {
@@ -1956,8 +2000,8 @@ describe('SessionDetailPage', () => {
         return HttpResponse.json(
           {
             error: {
-              code: 'SNAPSHOT_EXPIRED',
-              message: 'session state expired — re-run to create a PR',
+              code: 'SNAPSHOT_NOT_CAPTURED',
+              message: 'This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.',
             },
           },
           { status: 400 },
@@ -1979,8 +2023,8 @@ describe('SessionDetailPage', () => {
     );
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('PR snapshot unavailable');
-    expect(alert).toHaveTextContent('This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.');
+    expect(alert).toHaveTextContent('No reusable checkpoint saved');
+    expect(alert).toHaveTextContent('This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.');
     expect(within(alert).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 
@@ -2908,6 +2952,41 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('positions the jump-to-latest affordance close to the composer', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    const scroller = getChatScroller(container);
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+
+    const jumpButton = await screen.findByRole('button', { name: /Jump to latest/i });
+    const jumpContainer = jumpButton.parentElement;
+
+    expect(jumpContainer).not.toBeNull();
+    expect(jumpContainer).toHaveClass('bottom-4');
+    expect(jumpContainer).not.toHaveClass('bottom-24');
+  });
+
   it('opens review mode when clicking diff stats badge in footer', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
@@ -3334,6 +3413,102 @@ describe('SessionDetailPage', () => {
     await screen.findByPlaceholderText('Send a follow-up message...');
     // Model override selector should be present
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
+  });
+
+  it('matches both trigger menus to the continue-session input width', async () => {
+    const resumableSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'codex',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      repository_id: 'repo-1',
+      target_branch: 'main',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: resumableSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/session-composer/files', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              kind: 'directory',
+              token: '@internal/services',
+              path: 'internal/services',
+              display: 'internal/services',
+            },
+          ],
+          meta: {},
+        } satisfies ListResponse<{ kind: 'file' | 'directory'; token?: string; path?: string; id?: string; display: string }>);
+      }),
+      http.get('/api/v1/session-composer/slash-commands', () => {
+        return HttpResponse.json({
+          groups: [
+            {
+              source: 'builtin',
+              label: 'Codex commands',
+              items: [
+                {
+                  kind: 'command',
+                  agent_type: 'codex',
+                  name: 'review',
+                  token: '/review',
+                  display: '/review',
+                  description: 'Review pending changes',
+                  source: 'builtin',
+                },
+              ],
+            },
+          ],
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
+    const composerShell = screen.getByTestId('session-composer-shell');
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+
+    vi.spyOn(composerShell, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 680,
+      width: 760,
+      height: 132,
+      top: 680,
+      right: 760,
+      bottom: 812,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(inputSurface, 'getBoundingClientRect').mockReturnValue({
+      x: 48,
+      y: 692,
+      width: 640,
+      height: 108,
+      top: 692,
+      right: 688,
+      bottom: 800,
+      left: 48,
+      toJSON: () => ({}),
+    });
+
+    await user.type(composer, 'Inspect @serv');
+
+    const mentionOverlay = await screen.findByTestId('trigger-picker-overlay');
+    expect(mentionOverlay).toHaveStyle({ left: '48px', width: '640px' });
+
+    await user.clear(composer);
+    await user.type(composer, '/rev');
+
+    expect(await screen.findByText('/review')).toBeInTheDocument();
+
+    const commandOverlay = screen.getByTestId('trigger-picker-overlay');
+    expect(commandOverlay).toHaveStyle({ left: '48px', width: '640px' });
   });
 
   it('shows Gemini CLI agent type label', async () => {

@@ -6081,8 +6081,8 @@ func TestSessionHandler_CreatePR_SnapshotExpired(t *testing.T) {
 	issueID := uuid.New()
 	handler := newSessionHandler(t, mock)
 
-	// Mock session lookup — session has no snapshot_key, simulating an
-	// expired sandbox that can no longer be restored for push.
+	// Mock session lookup — sandbox_state=destroyed simulates true retention
+	// expiry after the saved snapshot was reaped.
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -6095,7 +6095,7 @@ func TestSessionHandler_CreatePR_SnapshotExpired(t *testing.T) {
 				nil, nil, nil, nil,
 				nil, nil,
 				nil,
-				nil, 0, now, "none", nil, // snapshot_key is nil
+				nil, 0, now, "destroyed", nil,
 				nil, nil, nil, nil, nil,
 				nil,      // input_manifest
 				nil, nil, // archived_at, archived_by_user_id
@@ -6117,8 +6117,65 @@ func TestSessionHandler_CreatePR_SnapshotExpired(t *testing.T) {
 
 	handler.CreatePR(w, req)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "should return 400 when snapshot has expired")
+	require.Equal(t, http.StatusGone, w.Code, "should return 410 when snapshot retention has expired")
 	require.Contains(t, w.Body.String(), "SNAPSHOT_EXPIRED", "error code should indicate snapshot expiry")
+	require.Contains(t, w.Body.String(), "This session snapshot expired before a PR could be created.", "response should explain that the reusable checkpoint aged out")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreatePR_SnapshotNotCaptured(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	// Mock session lookup — terminal session finished without a reusable
+	// checkpoint ever being persisted, so the UX should explain that this is
+	// a missing save, not an age-based expiry.
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", nil,
+				nil, nil, nil, nil, nil,
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "should return 409 when the session never saved a reusable checkpoint")
+	require.Contains(t, w.Body.String(), "SNAPSHOT_NOT_CAPTURED", "error code should distinguish a missing checkpoint from retention expiry")
+	require.Contains(t, w.Body.String(), "This session finished without saving a reusable checkpoint for PR creation.", "response should explain that the checkpoint was never saved")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

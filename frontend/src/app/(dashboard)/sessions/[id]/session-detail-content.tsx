@@ -17,10 +17,10 @@ import {
   RefreshCw,
   CheckCircle2,
   Check,
+  Slash,
   XCircle,
   X,
   MinusCircle,
-  Slash,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -30,7 +30,7 @@ import {
   Paperclip,
   Pencil,
 } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { MarkdownContent } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
@@ -108,6 +108,7 @@ import { PRHealthBanner } from "@/components/pr-health-banner";
 import { ReviewButton } from "@/components/review-button";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { useAuth } from "@/hooks/use-auth";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { activeSet } from "@/lib/session-status-groups";
 
@@ -154,7 +155,6 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -200,8 +200,14 @@ type PRActionErrorState = {
 };
 
 const terminalSessionStatuses = new Set(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+const SNAPSHOT_EXPIRED_PR_MESSAGE =
+  "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.";
+const SNAPSHOT_NOT_CAPTURED_PR_MESSAGE =
+  "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again.";
 const SNAPSHOT_UNAVAILABLE_PR_MESSAGE =
-  "This session snapshot is unavailable. Send a new message to rebuild the sandbox, then create the PR again.";
+  "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again.";
+
+type PRSnapshotState = "expired" | "not_captured" | "unavailable";
 
 function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetails {
   if (!value || typeof value !== "object") return false;
@@ -211,16 +217,55 @@ function isPRAuthInterceptDetails(value: unknown): value is PRAuthInterceptDetai
     typeof details.can_fallback_to_app === "boolean";
 }
 
-function normalizeSnapshotPRMessage(message?: string | null): string {
-  if (!message || /^session state expired\b/i.test(message)) {
-    return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+function classifyPRSnapshotState({
+  sessionSnapshotKey,
+  sessionSandboxState,
+  serverMessage,
+  localCode,
+}: {
+  sessionSnapshotKey?: string | null;
+  sessionSandboxState?: string | null;
+  serverMessage?: string | null;
+  localCode?: string;
+}): PRSnapshotState | null {
+  if (localCode === "SNAPSHOT_EXPIRED") return "expired";
+  if (localCode === "SNAPSHOT_NOT_CAPTURED") return "not_captured";
+  if (localCode === "SNAPSHOT_UNAVAILABLE") return "unavailable";
+  if (serverMessage === SNAPSHOT_EXPIRED_PR_MESSAGE) return "expired";
+  if (serverMessage === SNAPSHOT_NOT_CAPTURED_PR_MESSAGE) return "not_captured";
+  if (serverMessage === SNAPSHOT_UNAVAILABLE_PR_MESSAGE) return "unavailable";
+  if (/^session state expired\b/i.test(serverMessage || "")) return "unavailable";
+  if (!sessionSnapshotKey) {
+    return sessionSandboxState === "destroyed" ? "expired" : "not_captured";
   }
-  return message;
+  return null;
 }
 
-function prErrorTitle(snapshotUnavailable: boolean, errorCode?: string): string {
-  if (snapshotUnavailable || errorCode === "SNAPSHOT_EXPIRED") {
-    return "PR snapshot unavailable";
+function snapshotPRMessage(state: PRSnapshotState | null, message?: string | null): string {
+  if (message && !/^session state expired\b/i.test(message)) {
+    return message;
+  }
+  switch (state) {
+    case "expired":
+      return SNAPSHOT_EXPIRED_PR_MESSAGE;
+    case "not_captured":
+      return SNAPSHOT_NOT_CAPTURED_PR_MESSAGE;
+    case "unavailable":
+      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+    default:
+      return SNAPSHOT_UNAVAILABLE_PR_MESSAGE;
+  }
+}
+
+function prErrorTitle(snapshotState: PRSnapshotState | null, errorCode?: string): string {
+  if (snapshotState === "expired" || errorCode === "SNAPSHOT_EXPIRED") {
+    return "Session snapshot expired";
+  }
+  if (snapshotState === "not_captured" || errorCode === "SNAPSHOT_NOT_CAPTURED") {
+    return "No reusable checkpoint saved";
+  }
+  if (snapshotState === "unavailable" || errorCode === "SNAPSHOT_UNAVAILABLE") {
+    return "Saved checkpoint unavailable";
   }
   if (errorCode === "PR_RESUME_EXPIRED") {
     return "Couldn't resume PR creation";
@@ -679,6 +724,7 @@ function SessionComposer({
   }, [message, textareaRef]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
+  const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
   const [caretPosition, setCaretPosition] = useState(message.length);
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
@@ -741,7 +787,6 @@ function SessionComposer({
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: slashTriggerIcon,
         })),
       }));
     }
@@ -762,9 +807,9 @@ function SessionComposer({
       return;
     }
     function update() {
-      const card = composerCardRef.current;
-      if (!card) return;
-      const rect = card.getBoundingClientRect();
+      const anchor = composerInputSurfaceRef.current ?? composerCardRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
       const spacing = 8;
       const viewportHeight = window.innerHeight;
       const availableHeight = Math.max(rect.top - spacing, 120);
@@ -927,7 +972,11 @@ function SessionComposer({
         }}
       />
 
-      <div className="border-t border-border p-3 bg-background shrink-0" ref={composerCardRef}>
+      <div
+        className="border-t border-border p-3 bg-background shrink-0"
+        ref={composerCardRef}
+        data-testid="session-composer-shell"
+      >
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
@@ -945,7 +994,11 @@ function SessionComposer({
           </div>
         )}
 
-        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
+        <div
+          ref={composerInputSurfaceRef}
+          data-testid="session-composer-input-surface"
+          className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}
+        >
           {openComments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
               {openComments.map((c) => {
@@ -1527,7 +1580,7 @@ function ChatPanel({
   return (
     <div className="relative flex flex-col h-full">
       {showJumpToLatest && (
-        <div className="absolute bottom-24 right-4 z-20">
+        <div className="absolute bottom-4 right-4 z-20">
           <Button
             type="button"
             size="sm"
@@ -2225,19 +2278,23 @@ export function SessionDetailContent({ id }: { id: string }) {
   const changesCount = diffStats?.filesChanged;
   const showValidationTab = !session.triggered_by_user_id;
   const prState = session.pr_creation_state;
-  const snapshotExpired = !session.snapshot_key;
-  const serverSnapshotUnavailable = /^session state expired\b/i.test(session.pr_creation_error || "");
-  const localSnapshotUnavailable = localPRActionError?.code === "SNAPSHOT_EXPIRED";
-  const snapshotUnavailable = snapshotExpired || localSnapshotUnavailable || serverSnapshotUnavailable;
-  const snapshotExpiredMessage = normalizeSnapshotPRMessage(
-    localSnapshotUnavailable ? localPRActionError.message : session.pr_creation_error
+  const snapshotState = classifyPRSnapshotState({
+    sessionSnapshotKey: session.snapshot_key,
+    sessionSandboxState: session.sandbox_state,
+    serverMessage: session.pr_creation_error,
+    localCode: localPRActionError?.code,
+  });
+  const snapshotUnavailable = snapshotState !== null;
+  const snapshotMessage = snapshotPRMessage(
+    snapshotState,
+    localPRActionError?.code ? localPRActionError.message : session.pr_creation_error,
   );
   const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
   const succeededButNoPR = prState === "succeeded" && !hasPR;
   const prActionError = hasPR
     ? null
-    : (localSnapshotUnavailable ? snapshotExpiredMessage : localPRActionError?.message) ||
-      (snapshotUnavailable ? snapshotExpiredMessage : null) ||
+    : (localPRActionError?.code && snapshotState ? snapshotMessage : localPRActionError?.message) ||
+      (snapshotUnavailable ? snapshotMessage : null) ||
       (prState === "failed" ? session.pr_creation_error || PR_ERROR_TOAST_MESSAGE : null);
   const showPRAction =
     canCreatePR ||
@@ -2265,7 +2322,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     prActionTitle = "Pushing changes and opening the pull request";
   } else if (snapshotUnavailable) {
     prActionDisabled = true;
-    prActionTitle = snapshotExpiredMessage;
+    prActionTitle = snapshotMessage;
   } else if (localPRActionError) {
     prActionLabel = "Retry";
     prActionTitle = localPRActionError.message;
@@ -2290,7 +2347,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const prErrorNotice = prActionError ? {
-    title: prErrorTitle(snapshotUnavailable, localPRActionError?.code),
+    title: prErrorTitle(snapshotState, localPRActionError?.code),
     description: prActionError,
     action: prActionDisabled ? undefined : {
       label: prActionLabel,
@@ -2309,67 +2366,66 @@ export function SessionDetailContent({ id }: { id: string }) {
       className="flex flex-col flex-1 min-h-0 gap-0"
     >
       <div className="border-b border-border px-2 py-2 shrink-0">
-        <div className="flex items-center gap-2">
-          <TabsList variant="line" size="sm" className="border-b-0 flex-1">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="changes">
-              Changes
-              {changesCount != null && changesCount > 0 && (
-                <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
-                  {changesCount}
-                </Badge>
+        <div className="flex items-center gap-2 min-w-0">
+          <div aria-label="Session detail tabs" className="min-w-0 flex-1 overflow-x-auto scrollbar-hide">
+            <TabsList variant="line" size="sm" className="border-b-0 min-w-max">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="changes">
+                Changes
+                {changesCount != null && changesCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 min-w-[18px] h-[18px] rounded-full px-1 text-xs font-semibold leading-none">
+                    {changesCount}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              {showValidationTab && (
+                <TabsTrigger value="validation">Validation</TabsTrigger>
               )}
-            </TabsTrigger>
-            {showValidationTab && (
-              <TabsTrigger value="validation">Validation</TabsTrigger>
+              <TabsTrigger value="preview">Preview</TabsTrigger>
+            </TabsList>
+          </div>
+          <div aria-label="Session detail actions" className="flex items-center gap-2 shrink-0 pl-2">
+            {canRequestReview && (
+              <ReviewButton
+                capabilities={reviewCapabilities}
+                pendingMode={pendingReviewMode}
+                onReview={(mode) => startReviewMutation.mutate(mode)}
+              />
             )}
-            <TabsTrigger value="preview">Preview</TabsTrigger>
-          </TabsList>
-          {canRequestReview && (
-            <ReviewButton
-              capabilities={reviewCapabilities}
-              pendingMode={pendingReviewMode}
-              onReview={(mode) => startReviewMutation.mutate(mode)}
-            />
-          )}
-          {hasPR && prData?.data?.github_pr_url ? (
-            <>
-              {prStatus === "closed" && (
-                <Badge variant="secondary" className="h-7 px-2 text-xs">
-                  PR closed
-                </Badge>
-              )}
-              {prStatus === "merged" && (
-                <Badge variant="secondary" className="h-7 px-2 text-xs">
-                  PR merged
-                </Badge>
-              )}
-              <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
-                <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
-                  <ExternalLink className="h-3 w-3" />
-                  View PR
-                </Button>
-              </a>
-            </>
-          ) : showPRAction && !prErrorNotice ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1.5"
-              disabled={prActionDisabled}
-              title={prActionTitle}
-              onClick={() => createPRMutation.mutate(undefined)}
-            >
-              {prActionSpinning ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : prState === "failed" || localPRActionError ? (
-                <AlertTriangle className="h-3 w-3" />
-              ) : (
-                <GitPullRequest className="h-3 w-3" />
-              )}
-              {prActionLabel}
-            </Button>
-          ) : null}
+            {hasPR && prData?.data?.github_pr_url ? (
+              <>
+                {prStatus === "closed" && (
+                  <Badge variant="secondary" className="h-7 px-2 text-xs">
+                    PR closed
+                  </Badge>
+                )}
+                <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                  <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                    <ExternalLink className="h-3 w-3" />
+                    View PR
+                  </Button>
+                </a>
+              </>
+            ) : showPRAction && !prErrorNotice ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                disabled={prActionDisabled}
+                title={prActionTitle}
+                onClick={() => createPRMutation.mutate(undefined)}
+              >
+                {prActionSpinning ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : prState === "failed" || localPRActionError ? (
+                  <AlertTriangle className="h-3 w-3" />
+                ) : (
+                  <GitPullRequest className="h-3 w-3" />
+                )}
+                {prActionLabel}
+              </Button>
+            ) : null}
+          </div>
         </div>
         {prErrorNotice && (
           <ErrorNotice
@@ -2443,7 +2499,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <Card className="border-border/60">
               <CardContent className="p-4">
                 <div className="flex items-start gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
+                  <div aria-label="Merged PR status" className={cn("flex h-8 w-8 items-center justify-center rounded-full", prMergedAccent.bg, prMergedAccent.text)}>
                     <CheckCircle2 className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 space-y-1">

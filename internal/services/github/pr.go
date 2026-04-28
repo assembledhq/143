@@ -226,10 +226,30 @@ func (s *PRService) SnapshotStore() storage.SnapshotStore {
 	return s.snapshots
 }
 
-// ErrSnapshotExpired is returned by CreatePR when the session's sandbox
-// snapshot is missing (reaped, merged/archived cleanup, or never captured).
-// The UI translates this into "session state expired — re-run to create a PR".
+const (
+	// SnapshotExpiredPRMessage is shown when a previously-saved checkpoint was
+	// legitimately reaped and can no longer be restored.
+	SnapshotExpiredPRMessage = "This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again."
+	// SnapshotNotCapturedPRMessage is shown when the run completed but never
+	// saved a reusable checkpoint for the PR flow.
+	SnapshotNotCapturedPRMessage = "This session finished without saving a reusable checkpoint for PR creation. Send a new message to rebuild the sandbox, then create the PR again."
+	// SnapshotUnavailablePRMessage is shown when the DB points at a checkpoint
+	// that is no longer present in storage.
+	SnapshotUnavailablePRMessage = "This session had a saved checkpoint, but it is no longer available in storage. Send a new message to rebuild the sandbox, then create the PR again."
+)
+
+// ErrSnapshotExpired is returned by CreatePR when the session's saved
+// snapshot has truly expired (reaped or cleaned up after retention).
 var ErrSnapshotExpired = errors.New("session snapshot expired")
+
+// ErrSnapshotNotCaptured is returned by CreatePR when the session has no
+// saved snapshot key at all, meaning the run never persisted a reusable
+// checkpoint for PR creation.
+var ErrSnapshotNotCaptured = errors.New("session snapshot not captured")
+
+// ErrSnapshotUnavailable is returned by CreatePR when the session points at a
+// saved snapshot key but the underlying blob is missing from storage.
+var ErrSnapshotUnavailable = errors.New("session snapshot unavailable")
 
 // ErrGitHubUserAuthRequired and ErrGitHubUserAuthRepoAccessDenied are
 // re-exports of the identity-package sentinels so handlers in the api/handlers
@@ -360,7 +380,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
-		return nil, ErrSnapshotExpired
+		return nil, ErrSnapshotNotCaptured
 	}
 
 	// Issue lookup is optional — sessions may not have an associated issue.
@@ -589,7 +609,7 @@ func (s *PRService) pushSessionBranch(
 	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, s.sandboxProvider, s.snapshots, snapshotKey, cfg)
 	if err != nil {
 		if errors.Is(err, agent.ErrSnapshotMissing) {
-			return ErrSnapshotExpired
+			return ErrSnapshotUnavailable
 		}
 		return fmt.Errorf("hydrate sandbox: %w", err)
 	}

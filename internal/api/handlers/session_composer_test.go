@@ -477,6 +477,8 @@ func TestSessionComposerHandler_ListSlashCommands_BuiltinOnly(t *testing.T) {
 	require.Equal(t, "Claude Code commands", resp.Groups[0].Label)
 	require.Len(t, resp.Groups[0].Items, sessionComposerSlashCommandLimit, "unfiltered builtin command results should be capped at the picker limit")
 
+	expectedGroup := buildBuiltinSlashCommandGroup(models.AgentTypeClaudeCode, "")
+	expectedNames := make([]string, 0, len(expectedGroup.Items))
 	names := make([]string, 0, len(resp.Groups[0].Items))
 	for _, item := range resp.Groups[0].Items {
 		require.Equal(t, models.AgentTypeClaudeCode, item.AgentType)
@@ -486,10 +488,17 @@ func TestSessionComposerHandler_ListSlashCommands_BuiltinOnly(t *testing.T) {
 	}
 	require.Contains(t, names, "init", "short built-in commands should remain visible in the capped default results")
 	require.Contains(t, names, "help", "core built-in commands should remain visible in the capped default results")
+	for _, item := range expectedGroup.Items {
+		expectedNames = append(expectedNames, item.Name)
+	}
+	require.Equal(t, expectedNames, names)
 }
 
 func TestSessionComposerHandler_ListSlashCommands_FiltersByQuery(t *testing.T) {
 	t.Parallel()
+
+	expectedGroup := buildBuiltinSlashCommandGroup(models.AgentTypeClaudeCode, "rev")
+	require.NotEmpty(t, expectedGroup.Items)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
@@ -507,7 +516,16 @@ func TestSessionComposerHandler_ListSlashCommands_FiltersByQuery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Len(t, resp.Groups, 1)
 	require.NotEmpty(t, resp.Groups[0].Items)
-	require.Equal(t, "review", resp.Groups[0].Items[0].Name, "name-prefix matches should rank first")
+
+	actualNames := make([]string, 0, len(resp.Groups[0].Items))
+	expectedNames := make([]string, 0, len(expectedGroup.Items))
+	for _, item := range resp.Groups[0].Items {
+		actualNames = append(actualNames, item.Name)
+	}
+	for _, item := range expectedGroup.Items {
+		expectedNames = append(expectedNames, item.Name)
+	}
+	require.Equal(t, expectedNames, actualNames, "query filtering should return ranked builtin command matches")
 }
 
 func TestSessionComposerHandler_ListSlashCommands_EmptyForAgentWithoutCatalog(t *testing.T) {

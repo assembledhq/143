@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -1138,8 +1139,12 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if session.SandboxState == string(models.SandboxStateDestroyed) {
+		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
+		return
+	}
 	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-		writeError(w, r, http.StatusBadRequest, "SNAPSHOT_EXPIRED", "session state expired — re-run to create a PR")
+		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
@@ -21,6 +21,7 @@ import { useOptimisticSessions, type OptimisticSession } from "@/contexts/optimi
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { SessionListItem } from "@/lib/types";
+import { prMergedAccent } from "@/lib/pr-status-styles";
 import {
   workingSet,
   filterToStatusParam,
@@ -80,7 +81,7 @@ function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"
   let label: string;
 
   if (prSummary.status === "merged") {
-    dotColor = "bg-violet-500";
+    dotColor = prMergedAccent.dot;
     label = "Merged";
   } else if (prSummary.status === "closed") {
     dotColor = "bg-muted-foreground";
