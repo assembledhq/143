@@ -17,7 +17,6 @@ import {
   RefreshCw,
   CheckCircle2,
   Check,
-  Slash,
   XCircle,
   X,
   MinusCircle,
@@ -1080,7 +1079,6 @@ function SessionComposer({
                     data-invalid={isInvalid || undefined}
                     title={isInvalid ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.` : undefined}
                   >
-                    <Slash className="h-3 w-3" />
                     <span className="max-w-[14rem] truncate">{command.token}</span>
                     <Button
                       type="button"
