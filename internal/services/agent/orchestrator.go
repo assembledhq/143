@@ -184,6 +184,16 @@ type UserCredentialProvider interface {
 	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 }
 
+// CodingCredentialProvider abstracts the unified coding-credentials resolver.
+// Returns the ordered (personal-then-org, priority-within-scope) list of
+// runnable credentials for a (orgID, userID, provider) triple. The unified
+// store is the source of truth post-migration; AgentEnv.resolveProviderConfig
+// prefers this when wired, falling back to the legacy 3-step cascade only if
+// nothing comes back.
+type CodingCredentialProvider interface {
+	ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+}
+
 // UserLookup fetches a user record. Used by the orchestrator to materialize
 // the triggering user for the Co-authored-by trailer when the resolver
 // returns the App-token fallback. Defined as an interface so the
@@ -432,12 +442,13 @@ type OrchestratorConfig struct {
 	CodexAuth         CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
 	ClaudeCodeAuth    ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials       CredentialProvider
-	Memory            MemoryService          // optional — injects learned memories into agent prompts
-	UserCredentials   UserCredentialProvider // optional — enables personal/team credential resolution
-	Snapshots         storage.SnapshotStore  // optional — enables multi-turn snapshot/restore
-	UsageTracker      UsageRecorder          // optional — enables billing observability
-	Cancels           *CancelRegistry        // optional — enables session cancellation from API
-	OrgSettingsCache  *OrgSettingsCache      // optional — caches Amp/Pi agent_config lookups across session starts
+	Memory            MemoryService            // optional — injects learned memories into agent prompts
+	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team credential resolution
+	CodingCredentials CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots         storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	UsageTracker      UsageRecorder            // optional — enables billing observability
+	Cancels           *CancelRegistry          // optional — enables session cancellation from API
+	OrgSettingsCache  *OrgSettingsCache        // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -480,13 +491,14 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	env := cfg.Env
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
-			Credentials:      cfg.Credentials,
-			UserCredentials:  cfg.UserCredentials,
-			Orgs:             cfg.Orgs,
-			OrgSettingsCache: cfg.OrgSettingsCache,
-			CodexAuth:        cfg.CodexAuth,
-			Provider:         cfg.Provider,
-			Logger:           cfg.Logger,
+			Credentials:       cfg.Credentials,
+			UserCredentials:   cfg.UserCredentials,
+			CodingCredentials: cfg.CodingCredentials,
+			Orgs:              cfg.Orgs,
+			OrgSettingsCache:  cfg.OrgSettingsCache,
+			CodexAuth:         cfg.CodexAuth,
+			Provider:          cfg.Provider,
+			Logger:            cfg.Logger,
 		})
 	}
 

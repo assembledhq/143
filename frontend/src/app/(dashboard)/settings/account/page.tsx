@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
@@ -13,7 +13,7 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -25,38 +25,97 @@ import {
   getCodingAgentReasoningDefaultsFromSettings,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import type { ListResponse, UserCredentialSummary, UserSettingsUpdateRequest } from "@/lib/types";
+import type {
+  CodingAuthAgent,
+  CodingAuthStatus,
+  CodingCredentialSummary,
+  ListResponse,
+  UserSettingsUpdateRequest,
+} from "@/lib/types";
 
-function providerLabel(provider: string) {
-  switch (provider) {
-    case "openai":
+// agentLabel renders the human-readable agent name. The unified API exposes
+// rows tagged by agent (codex / claude_code / gemini_cli / amp / pi) so the
+// translation from provider strings the legacy personal page used is no
+// longer needed.
+function agentLabel(agent: CodingAuthAgent | string) {
+  switch (agent) {
+    case "codex":
       return "Codex";
-    case "anthropic":
+    case "claude_code":
       return "Claude Code";
-    case "gemini":
+    case "gemini_cli":
       return "Gemini CLI";
     case "amp":
       return "Amp";
     case "pi":
       return "Pi";
-    case "openrouter":
-      return "OpenRouter";
     default:
-      return provider;
+      return agent;
   }
 }
 
-function statusLabel(status?: string) {
+function authTypeLabel(authType: string) {
+  return authType === "subscription" ? "Subscription" : "API key";
+}
+
+function statusLabel(status: CodingAuthStatus | string | undefined) {
   switch (status) {
-    case "active":
+    case "healthy":
       return "Healthy";
+    case "rate_limited":
+      return "Rate limited";
+    case "needs_reauth":
+      return "Needs reauth";
     case "invalid":
       return "Invalid";
-    case "pending_auth":
-      return "Needs reauth";
-    default:
+    case "never_verified":
       return "Never verified";
+    default:
+      return "Unknown";
   }
+}
+
+// personalProviderToAgent maps the dialog's provider key (which matches
+// historical user_credentials.provider strings) to the unified API's agent
+// field. Subscription flows still go through their dedicated /codex-auth and
+// /claude-code-auth endpoints; this mapping is API-key-only.
+function personalProviderToAgent(provider: PersonalProvider): CodingAuthAgent {
+  switch (provider) {
+    case "openai":
+      return "codex";
+    case "anthropic":
+      return "claude_code";
+    case "gemini":
+      return "gemini_cli";
+    case "amp":
+      return "amp";
+    case "pi":
+      return "pi";
+  }
+}
+
+// effectiveResolutionLine renders the ordered list as a one-line "Personal #1
+// → Personal #2 → Org #1" string. Mirrors the design doc's "Effective
+// resolution for you" hint and is the single most-asked support question, so
+// surfacing it ambient on the page eliminates the round-trip.
+//
+// `rows` comes from /api/v1/coding-credentials?scope=resolved, which is
+// backed by ListResolvable (status='active' rows only). Counting is
+// therefore safe: every row counted is one the resolver would actually walk.
+function effectiveResolutionLine(rows: CodingCredentialSummary[]): string {
+  const personalCount = rows.filter((r) => r.scope === "personal").length;
+  const orgCount = rows.filter((r) => r.scope === "org").length;
+  const segments: string[] = [];
+  for (let i = 0; i < personalCount; i++) {
+    segments.push(`Personal #${i + 1}`);
+  }
+  for (let i = 0; i < orgCount; i++) {
+    segments.push(`Org #${i + 1}`);
+  }
+  if (segments.length === 0) {
+    return "No credentials configured.";
+  }
+  return segments.join(" → ");
 }
 
 export default function AccountPage() {
@@ -69,18 +128,47 @@ export default function AccountPage() {
   const reasoningSaveInFlightRef = useRef(false);
   const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
 
-  const { data: personalResp } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: ["user-credentials", "personal"],
-    queryFn: () => api.userCredentials.listPersonal(),
+  // Personal stack — the user's own credentials, ordered by priority.
+  const { data: personalResp } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "personal"],
+    queryFn: () => api.codingCredentials.list("personal"),
   });
-  const personalCreds = personalResp?.data ?? [];
-  const personalRows = personalCreds.filter((row) => row.configured);
+  // Org fallback — read-only here; the admin manages it on /settings/agent.
+  const { data: orgResp } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "org"],
+    queryFn: () => api.codingCredentials.list("org"),
+  });
+  // Resolved — the merged ordered list (personal-then-org) the runtime uses.
+  // Drives the "Effective resolution" line at the bottom of the page.
+  const { data: resolvedResp } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: ["coding-credentials", "resolved"],
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
+
+  const personalRows = personalResp?.data ?? [];
+  const orgRows = orgResp?.data ?? [];
+
+  const resolutionLine = useMemo(
+    () => effectiveResolutionLine(resolvedResp?.data ?? []),
+    [resolvedResp?.data],
+  );
+
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
 
   const createMutation = useMutation({
-    mutationFn: () => api.userCredentials.upsertPersonal(provider, { api_key: apiKey }),
+    mutationFn: () =>
+      api.codingCredentials.create({
+        scope: "personal",
+        agent: personalProviderToAgent(provider),
+        auth_type: "api_key",
+        api_key: apiKey,
+      }),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+      // TODO(unified-credentials cleanup PR): drop the legacy invalidations
+      // once /settings/agent and other surfaces stop reading user-credentials
+      // / credentials.resolved.
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
@@ -94,8 +182,10 @@ export default function AccountPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (targetProvider: string) => api.userCredentials.deletePersonal(targetProvider),
+    mutationFn: (id: string) => api.codingCredentials.delete(id, "personal"),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
+      // TODO(unified-credentials cleanup PR): drop the legacy invalidations.
       void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
       void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       toast.success("Personal auth removed");
@@ -153,7 +243,7 @@ export default function AccountPage() {
       <div className="space-y-8 pt-2">
         <PageHeader
           title="My settings"
-          description="Manage your personal coding agent auths and appearance."
+          description="Manage your personal coding agent auths and appearance. Personal auths run before any organization fallback."
           action={(
             <Button onClick={() => setAddOpen(true)}>
               <Plus className="mr-2 h-4 w-4" />
@@ -164,12 +254,16 @@ export default function AccountPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Configured personal auths</CardTitle>
+            <CardTitle>My coding agents</CardTitle>
+            <CardDescription>
+              Your personal stack runs ahead of any organization fallback. Add as many as you need — the resolver picks the highest-priority active row.
+            </CardDescription>
           </CardHeader>
           <CardContent className="pb-6">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-12">#</TableHead>
                   <TableHead>Agent</TableHead>
                   <TableHead>Auth type</TableHead>
                   <TableHead>Notes</TableHead>
@@ -178,16 +272,22 @@ export default function AccountPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {personalRows.length > 0 ? personalRows.map((row) => (
-                  <TableRow key={row.provider}>
-                    <TableCell>{providerLabel(row.provider)}</TableCell>
-                    <TableCell>API key</TableCell>
-                    <TableCell>{row.masked_key ?? "Masked key unavailable"}</TableCell>
+                {personalRows.length > 0 ? personalRows.map((row, idx) => (
+                  <TableRow key={row.id}>
+                    <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                    <TableCell>
+                      {agentLabel(row.agent)}
+                      {row.is_default ? (
+                        <Badge variant="secondary" className="ml-2">Default</Badge>
+                      ) : null}
+                    </TableCell>
+                    <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
+                    <TableCell>{row.usage_note ?? row.label}</TableCell>
                     <TableCell>
                       <Badge variant="outline">{statusLabel(row.status)}</Badge>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(row.provider)}>
+                      <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(row.id)}>
                         <Trash2 className="mr-2 h-4 w-4" />
                         Disable
                       </Button>
@@ -195,13 +295,58 @@ export default function AccountPage() {
                   </TableRow>
                 )) : (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-muted-foreground">
+                    <TableCell colSpan={6} className="text-muted-foreground">
                       No personal auth configured. Click &ldquo;Add auth&rdquo; above to enable sessions to use your own subscription. Org-wide credentials are used as a fallback.
                     </TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Org fallback</CardTitle>
+            <CardDescription>
+              Read-only. Contact an admin to change org auths.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pb-6">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-12">#</TableHead>
+                  <TableHead>Agent</TableHead>
+                  <TableHead>Auth type</TableHead>
+                  <TableHead>Notes</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {orgRows.length > 0 ? orgRows.map((row, idx) => (
+                  <TableRow key={row.id}>
+                    <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                    <TableCell>{agentLabel(row.agent)}</TableCell>
+                    <TableCell>{authTypeLabel(row.auth_type)}</TableCell>
+                    <TableCell>{row.usage_note ?? row.label}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{statusLabel(row.status)}</Badge>
+                    </TableCell>
+                  </TableRow>
+                )) : (
+                  <TableRow>
+                    <TableCell colSpan={5} className="text-muted-foreground">
+                      No org-level fallback configured.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+            <div className="mt-4 rounded-md border border-dashed border-muted bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">Effective resolution for you:</span>{" "}
+              {resolutionLine}
+            </div>
           </CardContent>
         </Card>
 

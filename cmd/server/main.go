@@ -163,6 +163,23 @@ func main() {
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
+	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
+	// Wire the unified coding-credentials mirror into both legacy stores so
+	// every existing write path (OAuth services, /settings/coding-auths,
+	// /settings/credentials/personal, /settings/credentials/team) lands in
+	// `coding_credentials` as well as the legacy table. Reads come from the
+	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
+	// the unified-credentials cleanup PR.
+	credentialStore.SetCodingMirror(codingCredentialStore)
+	userCredentialStore.SetCodingMirror(codingCredentialStore)
+	// Pipe mirror failures into the application logger so a drift between
+	// the legacy and unified tables is visible in production telemetry.
+	mirrorLog := func(format string, args ...any) {
+		logger.Warn().Msgf(format, args...)
+	}
+	credentialStore.SetMirrorLogger(mirrorLog)
+	userCredentialStore.SetMirrorLogger(mirrorLog)
+	codingCredentialStore.SetMirrorLogger(mirrorLog)
 	codexAuthSvc := codexauth.NewService(credentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(credentialStore, logger)
 
@@ -370,7 +387,7 @@ func main() {
 		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, issueStore, sessionStore,
+			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, validationStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
@@ -781,6 +798,7 @@ func buildServices(
 	claudeCodeAuthSvc *claudecodeauth.Service,
 	credentialStore *db.OrgCredentialStore,
 	userCredentialStore *db.UserCredentialStore,
+	codingCredentialStore *db.CodingCredentialStore,
 	issueStore *db.IssueStore,
 	sessionStore *db.SessionStore,
 	jobStore *db.JobStore,
@@ -867,13 +885,14 @@ func buildServices(
 	// and the PM service so both paths resolve provider credentials, Codex
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
-		Credentials:      credentialStore,
-		UserCredentials:  userCredentialStore,
-		Orgs:             orgStore,
-		OrgSettingsCache: orgSettingsCache,
-		CodexAuth:        codexAuthSvc,
-		Provider:         sandboxProvider,
-		Logger:           logger,
+		Credentials:       credentialStore,
+		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
+		Orgs:              orgStore,
+		OrgSettingsCache:  orgSettingsCache,
+		CodexAuth:         codexAuthSvc,
+		Provider:          sandboxProvider,
+		Logger:            logger,
 	})
 
 	// Orchestrator.
@@ -930,6 +949,7 @@ func buildServices(
 		ClaudeCodeAuth:    claudeCodeAuthSvc,
 		Credentials:       credentialStore,
 		UserCredentials:   userCredentialStore,
+		CodingCredentials: codingCredentialStore,
 		Snapshots:         snapshotStore,
 		UsageTracker:      usageTracker,
 		Cancels:           cancelRegistry,

@@ -148,6 +148,12 @@ migrate-up:
 migrate-down:
 	go run cmd/migrate/main.go down
 
+# 65-unified-coding-credentials encrypted-blob post-step. Splits Anthropic
+# subscription rows out of AnthropicConfig into AnthropicSubscriptionConfig.
+# Idempotent; writes a sentinel to coding_credentials_migrations on success.
+migrate-coding-credentials-anthropic-split:
+	go run cmd/migrate-coding-credentials-anthropic-split/main.go
+
 BUILD_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
 

@@ -479,6 +479,45 @@ export const api = {
     listResolved: () =>
       get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
   },
+  // Unified coding-credentials API — replaces the split userCredentials +
+  // codingAuths surface. See docs/design/future/65-unified-coding-credentials.md.
+  // The legacy `codingAuths` and `userCredentials` clients below still work
+  // (their writes are mirrored into coding_credentials by the backend) and
+  // remain in use by /settings/agent until the cleanup PR.
+  codingCredentials: {
+    list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
+      get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
+        `/api/v1/coding-credentials?scope=${scope}`,
+      ),
+    create: (body: {
+      scope: 'org' | 'personal';
+      agent: string;
+      auth_type: 'api_key';
+      label?: string;
+      api_key?: string;
+      api_type?: string;
+      base_url?: string;
+      agent_defaults?: Record<string, string>;
+    }) =>
+      post<import('./types').CodingCredentialSummary>('/api/v1/coding-credentials', body),
+    update: (id: string, body: { scope: 'org' | 'personal'; label?: string; status?: string }) =>
+      request<import('./types').CodingCredentialSummary>(`/api/v1/coding-credentials/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    delete: (id: string, scope: 'org' | 'personal' = 'personal') =>
+      del(`/api/v1/coding-credentials/${id}?scope=${scope}`),
+    move: (id: string, body: { scope: 'org' | 'personal'; before_id?: string; after_id?: string; to_top?: boolean; to_bottom?: boolean }) =>
+      request(`/api/v1/coding-credentials/${id}/move`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    reorder: (scope: 'org' | 'personal', orderedIDs: string[]) =>
+      request('/api/v1/coding-credentials/reorder', {
+        method: 'PATCH',
+        body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
+      }),
+  },
   codingAuths: {
     list: () =>
       get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),

@@ -43,13 +43,14 @@ func (e *AuthError) Error() string {
 // agent runs) depend on AgentEnv so that any change to agent auth lives in
 // exactly one place — no more "PM works for Claude Code but breaks for Codex".
 type AgentEnv struct {
-	credentials      CredentialProvider
-	userCredentials  UserCredentialProvider
-	orgs             OrgStore
-	orgSettingsCache *OrgSettingsCache
-	codexAuth        CodexAuthProvider
-	provider         SandboxProvider
-	logger           zerolog.Logger
+	credentials       CredentialProvider
+	userCredentials   UserCredentialProvider
+	codingCredentials CodingCredentialProvider
+	orgs              OrgStore
+	orgSettingsCache  *OrgSettingsCache
+	codexAuth         CodexAuthProvider
+	provider          SandboxProvider
+	logger            zerolog.Logger
 }
 
 // AgentEnvDeps holds the dependencies for constructing an AgentEnv. Named
@@ -57,13 +58,14 @@ type AgentEnv struct {
 // models.AgentEnvConfig, which is a per-org override map consumed by this
 // helper.
 type AgentEnvDeps struct {
-	Credentials      CredentialProvider
-	UserCredentials  UserCredentialProvider // optional — enables personal/team resolution
-	Orgs             OrgStore               // optional — enables agent_config overrides
-	OrgSettingsCache *OrgSettingsCache      // optional — caches agent_config lookups
-	CodexAuth        CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex
-	Provider         SandboxProvider        // required for InjectCodexAuth
-	Logger           zerolog.Logger
+	Credentials       CredentialProvider
+	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team fallback (used only if CodingCredentials is nil or returns nothing)
+	CodingCredentials CodingCredentialProvider // preferred — unified resolver. Reads `coding_credentials` and is the source of truth post-migration.
+	Orgs              OrgStore                 // optional — enables agent_config overrides
+	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
+	CodexAuth         CodexAuthProvider        // optional — enables ChatGPT OAuth for Codex
+	Provider          SandboxProvider          // required for InjectCodexAuth
+	Logger            zerolog.Logger
 }
 
 // NewAgentEnv constructs an AgentEnv. The Provider is required; all other
@@ -72,13 +74,14 @@ type AgentEnvDeps struct {
 // org-scoped credentials are consulted).
 func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 	return &AgentEnv{
-		credentials:      deps.Credentials,
-		userCredentials:  deps.UserCredentials,
-		orgs:             deps.Orgs,
-		orgSettingsCache: deps.OrgSettingsCache,
-		codexAuth:        deps.CodexAuth,
-		provider:         deps.Provider,
-		logger:           deps.Logger,
+		credentials:       deps.Credentials,
+		userCredentials:   deps.UserCredentials,
+		codingCredentials: deps.CodingCredentials,
+		orgs:              deps.Orgs,
+		orgSettingsCache:  deps.OrgSettingsCache,
+		codexAuth:         deps.CodexAuth,
+		provider:          deps.Provider,
+		logger:            deps.Logger,
 	}
 }
 
@@ -330,28 +333,107 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 	return orgSettings.AgentConfig, true
 }
 
-// resolveProviderConfig returns the best ProviderConfig for a provider,
-// checking in order: user personal → team default → org credential.
+// resolveProviderConfig returns the best ProviderConfig for a provider.
+//
+// Post-unification (see docs/design/future/65-unified-coding-credentials.md):
+// the unified `coding_credentials` table is the source of truth. We try
+// CodingCredentialProvider.ListResolvable first, which returns one ordered
+// list (personal-then-org, priority-within-scope) covering both API-key and
+// subscription rows. If that returns a runnable row, we use it.
+//
+// Fallback: if CodingCredentials is unwired (older test rigs) OR returns
+// nothing for an api-key provider AND a subscription has been set up under
+// the legacy split provider name, we fall through to the legacy 3-step
+// cascade. This fallback is here for migration safety only — the cleanup PR
+// will delete it once we've confirmed no traffic resolves through the
+// legacy path.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	// 1. Check user's personal credential.
+	if cfg := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil {
+		return cfg
+	}
+	return e.resolveFromLegacy(ctx, orgID, userID, provider)
+}
+
+// resolveFromCodingCredentials walks the unified resolver result, plus its
+// subscription twin for providers that have one. The twin lookup is what
+// lets a Claude Code subscription row (provider=anthropic_subscription) be
+// found when a caller asks for a `claude_code` agent that today resolves to
+// ProviderAnthropic — the legacy code matched by ProviderAnthropic and
+// inferred subscription status from the embedded field; the unified shape
+// uses two distinct provider names.
+func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+	if e.codingCredentials == nil {
+		return nil
+	}
+
+	if cfg := e.pickFromCodingProvider(ctx, orgID, userID, provider); cfg != nil {
+		return cfg
+	}
+	if twin := unifiedSubscriptionTwin(provider); twin != "" {
+		if cfg := e.pickFromCodingProvider(ctx, orgID, userID, twin); cfg != nil {
+			return cfg
+		}
+	}
+	return nil
+}
+
+func (e *AgentEnv) pickFromCodingProvider(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
+	creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
+	if err != nil {
+		e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed; falling back to legacy")
+		return nil
+	}
+	for _, cred := range creds {
+		if cred.Status != models.CodingCredentialStatusActive {
+			continue
+		}
+		// Skip rows whose decrypted config is unusable for this provider —
+		// e.g. a legacy AnthropicConfig with Subscription set but APIKey ==
+		// "" is a subscription-only row that the API-key resolver path
+		// can't consume. Without this gate, the unified resolver would
+		// short-circuit the legacy fallback and the env-var path would
+		// silently produce no auth. The subscription twin lookup separately
+		// finds the subscription flavor.
+		if cfg := compatibleCodingProviderConfig(provider, cred.Config); cfg != nil {
+			return cfg
+		}
+	}
+	return nil
+}
+
+// unifiedSubscriptionTwin returns the new subscription provider name for an
+// API-key provider, or "" if there is no subscription flavor. Lets the
+// resolver answer "give me an Anthropic config" with either an API key
+// (provider=anthropic) or a subscription token (provider=anthropic_subscription).
+func unifiedSubscriptionTwin(provider models.ProviderName) models.ProviderName {
+	switch provider {
+	case models.ProviderAnthropic:
+		return models.ProviderAnthropicSubscription
+	case models.ProviderOpenAI:
+		return models.ProviderOpenAISubscription
+	default:
+		return ""
+	}
+}
+
+// resolveFromLegacy is the pre-unification 3-step cascade kept as a safety
+// net during the migration window. It is consulted only when the unified
+// resolver returns nothing, so once `coding_credentials` is fully populated
+// this code path produces no work.
+func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
 	if userID != nil && e.userCredentials != nil {
 		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil {
 			return cred.Config
 		}
 	}
-
-	// 2. Check team default credential.
 	if e.userCredentials != nil {
 		if cred, err := e.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil {
 			return cred.Config
 		}
 	}
-
-	// 3. Fall back to org credential.
 	if cfg := e.resolveOrgProviderConfig(ctx, orgID, provider); cfg != nil {
 		return cfg
 	}
-
 	return nil
 }
 

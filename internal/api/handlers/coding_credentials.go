@@ -1,0 +1,578 @@
+// Package handlers — coding_credentials.
+//
+// API surface for the unified coding-credentials store. Replaces the split
+// /settings/credentials/personal + /settings/coding-auths surfaces with one
+// scope-aware endpoint. See docs/design/future/65-unified-coding-credentials.md.
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+)
+
+// codingCredentialStore is the narrow surface this handler depends on. Defined
+// at the handler layer so tests can wire a fake; production passes the real
+// *db.CodingCredentialStore.
+type codingCredentialStore interface {
+	Get(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error)
+	ListByScope(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
+	ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+	ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error)
+	Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error)
+	Rename(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error
+	UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error
+	Disable(ctx context.Context, scope models.Scope, id uuid.UUID) error
+	Move(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
+	Reorder(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
+}
+
+// CodingCredentialHandler exposes the unified API.
+type CodingCredentialHandler struct {
+	store    codingCredentialStore
+	orgStore codingAuthOrgStore // reused: invalidates org-settings on agent_config writes
+}
+
+// NewCodingCredentialHandler constructs the handler.
+func NewCodingCredentialHandler(store codingCredentialStore, orgStore codingAuthOrgStore) *CodingCredentialHandler {
+	return &CodingCredentialHandler{store: store, orgStore: orgStore}
+}
+
+// resolveScopeFromQuery decides which scope to operate on based on the `scope`
+// query param + the requesting user. "org" requires admin (when requireAdmin
+// is true); "personal" always operates on the requester's own user_id;
+// "resolved" returns the unified resolver order for the caller.
+//
+// The orgID is passed in by the caller (via middleware.OrgIDFromContext at
+// the handler entry point) so the multi-tenancy lint sees the call inline.
+func (h *CodingCredentialHandler) resolveScopeFromQuery(r *http.Request, orgID uuid.UUID, requireAdmin bool) (models.Scope, string, error) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return models.Scope{}, "", fmt.Errorf("unauthenticated")
+	}
+	scopeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	if scopeParam == "" {
+		scopeParam = models.CodingCredentialScopePersonal
+	}
+	switch scopeParam {
+	case models.CodingCredentialScopeOrg:
+		if requireAdmin && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
+			return models.Scope{}, "", fmt.Errorf("admin role required for scope=org mutations")
+		}
+		return models.Scope{OrgID: orgID}, scopeParam, nil
+	case "resolved":
+		// "resolved" returns the caller's effective ordered list (personal
+		// then org). UserID must be set so ListResolvable walks the personal
+		// half — without it, the response degrades to org-only and the
+		// /settings/account "Effective resolution" line never shows personal
+		// rows.
+		uid := user.ID
+		return models.Scope{OrgID: orgID, UserID: &uid}, scopeParam, nil
+	case models.CodingCredentialScopePersonal:
+		uid := user.ID
+		return models.Scope{OrgID: orgID, UserID: &uid}, scopeParam, nil
+	}
+	return models.Scope{}, "", fmt.Errorf("invalid scope: %q", scopeParam)
+}
+
+// resolveScope materialises a Scope from a scope-name string the handler has
+// already parsed (from a request body OR the query string). Personal scope is
+// always coerced to the caller's own user_id — never trust the client to
+// assert which user owns a personal row.
+func (h *CodingCredentialHandler) resolveScope(r *http.Request, orgID uuid.UUID, scopeParam string, requireAdmin bool) (models.Scope, error) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return models.Scope{}, fmt.Errorf("unauthenticated")
+	}
+	switch scopeParam {
+	case models.CodingCredentialScopeOrg:
+		if requireAdmin && middleware.ActiveRoleFromContext(r.Context()) != "admin" {
+			return models.Scope{}, fmt.Errorf("admin role required")
+		}
+		return models.Scope{OrgID: orgID}, nil
+	case models.CodingCredentialScopePersonal:
+		uid := user.ID
+		return models.Scope{OrgID: orgID, UserID: &uid}, nil
+	default:
+		return models.Scope{}, fmt.Errorf("invalid scope: %q", scopeParam)
+	}
+}
+
+// List handles GET /api/v1/coding-credentials?scope=...
+//
+// scope=org → list every org row (admin or member can read; only admin mutates)
+// scope=personal → list the caller's own personal rows
+// scope=resolved → ordered list (personal then org) the runtime would resolve
+func (h *CodingCredentialHandler) List(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	scope, scopeParam, err := h.resolveScopeFromQuery(r, orgID, false)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", err.Error())
+		return
+	}
+
+	if scopeParam == "resolved" {
+		out, err := h.listResolved(r.Context(), scope)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list resolved credentials", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, models.ListResponse[models.CodingCredentialSummary]{Data: out})
+		return
+	}
+
+	creds, err := h.store.ListByScope(r.Context(), scope)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list credentials", err)
+		return
+	}
+	out := summariesForScope(creds, scope)
+	writeJSON(w, http.StatusOK, models.ListResponse[models.CodingCredentialSummary]{Data: out})
+}
+
+// listResolved walks the personal-then-org resolved list across every coding
+// provider and returns the merged set tagged with scope. Used by the personal
+// settings page to render the "effective resolution" block under the personal
+// stack and the read-only org fallback section.
+func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models.Scope) ([]models.CodingCredentialSummary, error) {
+	seen := map[uuid.UUID]struct{}{}
+	out := make([]models.CodingCredentialSummary, 0)
+	for _, provider := range models.CodingAgentProviders {
+		creds, err := h.store.ListResolvable(ctx, scope.OrgID, scope.UserID, provider)
+		if err != nil {
+			return nil, err
+		}
+		for _, cred := range creds {
+			if _, dup := seen[cred.ID]; dup {
+				continue
+			}
+			seen[cred.ID] = struct{}{}
+			out = append(out, summaryFromDecryptedCoding(cred))
+		}
+	}
+	// Mark the first runnable in each (scope, agent) tier as default. The
+	// resolver picks tier-by-tier; the API hint mirrors that.
+	markDefaults(out)
+	return out, nil
+}
+
+// Create handles POST /api/v1/coding-credentials.
+//
+// API-key flows go through this endpoint. Subscription flows live behind the
+// dedicated provider-specific OAuth endpoints (codex-auth, claude-code-auth)
+// since they need device-code / PKCE state machines.
+func (h *CodingCredentialHandler) Create(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var input models.CreateCodingCredentialInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := input.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+
+	cfg, _, err := codingCredentialConfigFromInput(input)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	var createdBy *uuid.UUID
+	if user != nil {
+		uid := user.ID
+		createdBy = &uid
+	}
+	label := input.Label
+	if label == "" {
+		label = defaultLabelFor(input.Agent, input.AuthType)
+	}
+
+	id, err := h.store.Create(r.Context(), scope, label, cfg, db.CreateOpts{CreatedBy: createdBy})
+	if err != nil {
+		var taken *db.ErrCodingCredentialLabelTaken
+		if errors.As(err, &taken) {
+			writeError(w, r, http.StatusConflict, "LABEL_TAKEN", err.Error())
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create credential", err)
+		return
+	}
+
+	// Apply optional agent_config overrides at the org level (Amp/Pi default
+	// model). Skipped for personal scope — there is no per-user agent_config.
+	if scope.IsOrg() && len(input.AgentDefaults) > 0 && h.orgStore != nil {
+		if err := h.orgStore.MergeCodingAgentDefaults(r.Context(), scope.OrgID, input.Agent, input.AgentDefaults); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "AGENT_DEFAULTS_FAILED", "failed to merge agent defaults", err)
+			return
+		}
+	}
+
+	cred, err := h.store.Get(r.Context(), scope, *id)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "READ_BACK_FAILED", "credential created but read-back failed", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, summaryFromDecryptedCoding(*cred))
+}
+
+// Update handles PATCH /api/v1/coding-credentials/{id}.
+func (h *CodingCredentialHandler) Update(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "id must be a valid UUID")
+		return
+	}
+	var input models.UpdateCodingCredentialInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+
+	if input.Label != nil {
+		if err := h.store.Rename(r.Context(), scope, id, *input.Label); err != nil {
+			h.handleStoreError(w, r, err, "RENAME_FAILED")
+			return
+		}
+	}
+	if input.Status != nil {
+		// The handler whitelist deliberately excludes pending_auth and forbids
+		// promoting a pending row to active — that path lives in PromotePending,
+		// which is reachable only from the OAuth-completion services. Without
+		// this gate, a user could PATCH {"status":"active"} on their own
+		// pending_auth row and the resolver would start picking a credential
+		// that holds PKCE state instead of real tokens.
+		if !isAllowedHandlerStatus(*input.Status) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS",
+				"status must be one of: active, disabled, invalid (pending_auth is set by the OAuth flow)")
+			return
+		}
+		if err := h.store.UpdateStatus(r.Context(), scope, id, *input.Status); err != nil {
+			h.handleStoreError(w, r, err, "STATUS_FAILED")
+			return
+		}
+	}
+
+	cred, err := h.store.Get(r.Context(), scope, id)
+	if err != nil {
+		h.handleStoreError(w, r, err, "READ_BACK_FAILED")
+		return
+	}
+	writeJSON(w, http.StatusOK, summaryFromDecryptedCoding(*cred))
+}
+
+// Delete handles DELETE /api/v1/coding-credentials/{id}. Soft-delete (status='disabled').
+func (h *CodingCredentialHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "id must be a valid UUID")
+		return
+	}
+	scopeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	if scopeParam == "" {
+		scopeParam = models.CodingCredentialScopePersonal
+	}
+	scope, err := h.resolveScope(r, orgID, scopeParam, true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.store.Disable(r.Context(), scope, id); err != nil {
+		h.handleStoreError(w, r, err, "DELETE_FAILED")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Move handles PATCH /api/v1/coding-credentials/{id}/move (drag-drop hot path).
+func (h *CodingCredentialHandler) Move(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "id must be a valid UUID")
+		return
+	}
+	var input models.MoveCodingCredentialInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := input.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.store.Move(r.Context(), scope, id, input); err != nil {
+		h.handleStoreError(w, r, err, "MOVE_FAILED")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Reorder handles PATCH /api/v1/coding-credentials/reorder (bulk reset).
+func (h *CodingCredentialHandler) Reorder(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var input models.ReorderCodingCredentialsInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	scope, err := h.resolveScope(r, orgID, input.Scope, true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.store.Reorder(r.Context(), scope, input.OrderedIDs); err != nil {
+		h.handleStoreError(w, r, err, "REORDER_FAILED")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *CodingCredentialHandler) handleStoreError(w http.ResponseWriter, r *http.Request, err error, code string) {
+	if errors.Is(err, db.ErrCodingCredentialNotFound) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "credential not found")
+		return
+	}
+	var taken *db.ErrCodingCredentialLabelTaken
+	if errors.As(err, &taken) {
+		writeError(w, r, http.StatusConflict, "LABEL_TAKEN", err.Error())
+		return
+	}
+	writeError(w, r, http.StatusInternalServerError, code, "store error", err)
+}
+
+// summariesForScope builds CodingCredentialSummary objects from a scope-bounded
+// list, marking the first runnable per (agent, auth_type) tier as default.
+func summariesForScope(creds []models.DecryptedCodingCredential, scope models.Scope) []models.CodingCredentialSummary {
+	out := make([]models.CodingCredentialSummary, 0, len(creds))
+	for _, cred := range creds {
+		if cred.UserID == nil && scope.UserID != nil {
+			continue // safety belt
+		}
+		if cred.UserID != nil && scope.UserID == nil {
+			continue
+		}
+		out = append(out, summaryFromDecryptedCoding(cred))
+	}
+	markDefaults(out)
+	return out
+}
+
+// markDefaults flips IsDefault=true on the first runnable row in each
+// (scope, agent) tier. Mirrors the resolver's pick semantics for the UI.
+//
+// On a scope=resolved response that mixes personal and org rows, both the
+// top personal row and the top org row for the same agent get the badge —
+// that's intentional: the personal row is "the one that runs first," the
+// org row is "the one that would run if the personal rows are exhausted."
+// The /settings/account page shows them in two visually separate cards, so
+// the dual badge reads naturally as "default within each section." Single-
+// scope responses get exactly one default per agent.
+func markDefaults(rows []models.CodingCredentialSummary) {
+	defaulted := map[string]bool{}
+	for i := range rows {
+		row := &rows[i]
+		key := row.Scope + "|" + string(row.Agent)
+		if defaulted[key] {
+			continue
+		}
+		if !isRunnableCodingStatus(row.Status) {
+			continue
+		}
+		row.IsDefault = true
+		defaulted[key] = true
+	}
+}
+
+func isRunnableCodingStatus(s models.CodingAuthStatus) bool {
+	return s == models.CodingAuthStatusHealthy || s == models.CodingAuthStatusNeverVerified
+}
+
+// isAllowedHandlerStatus enumerates the status values the API surface accepts
+// from a client. pending_auth is intentionally excluded — it is set by the
+// OAuth-initiate endpoints and cleared by PromotePending; any other path that
+// flips a row to active is bypassing the OAuth completion check.
+func isAllowedHandlerStatus(s string) bool {
+	switch s {
+	case models.CodingCredentialStatusActive,
+		models.CodingCredentialStatusDisabled,
+		models.CodingCredentialStatusInvalid:
+		return true
+	}
+	return false
+}
+
+func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.CodingCredentialSummary {
+	agent := codingAgentForProvider(cred.Provider)
+	authType := authTypeForProvider(cred.Provider, cred.Config)
+	scope := models.CodingCredentialScopeOrg
+	if cred.UserID != nil {
+		scope = models.CodingCredentialScopePersonal
+	}
+	return models.CodingCredentialSummary{
+		ID:             cred.ID,
+		OrgID:          cred.OrgID,
+		UserID:         cred.UserID,
+		Scope:          scope,
+		Priority:       cred.Priority,
+		Agent:          agent,
+		AuthType:       authType,
+		Provider:       cred.Provider,
+		Label:          coalesce(cred.Label, defaultLabelFor(agent, authType)),
+		Status:         codingStatusFor(cred),
+		UsageNote:      usageNoteFor(cred),
+		LastVerifiedAt: cred.LastVerifiedAt,
+		CreatedBy:      cred.CreatedBy,
+		CreatedAt:      cred.CreatedAt,
+		UpdatedAt:      cred.UpdatedAt,
+	}
+}
+
+func codingAgentForProvider(p models.ProviderName) models.AgentType {
+	switch p {
+	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
+		return models.AgentTypeClaudeCode
+	case models.ProviderOpenAI, models.ProviderOpenAIChatGPT, models.ProviderOpenAISubscription:
+		return models.AgentTypeCodex
+	case models.ProviderGemini:
+		return models.AgentTypeGeminiCLI
+	case models.ProviderAmp:
+		return models.AgentTypeAmp
+	case models.ProviderPi:
+		return models.AgentTypePi
+	default:
+		return ""
+	}
+}
+
+func authTypeForProvider(p models.ProviderName, _ models.ProviderConfig) models.CodingAuthType {
+	switch p {
+	case models.ProviderAnthropicSubscription, models.ProviderOpenAISubscription, models.ProviderOpenAIChatGPT:
+		return models.CodingAuthTypeSubscription
+	default:
+		return models.CodingAuthTypeAPIKey
+	}
+}
+
+func codingStatusFor(cred models.DecryptedCodingCredential) models.CodingAuthStatus {
+	switch cred.Status {
+	case models.CodingCredentialStatusInvalid:
+		return models.CodingAuthStatusInvalid
+	case models.CodingCredentialStatusPendingAuth:
+		return models.CodingAuthStatusNeedsReauth
+	case models.CodingCredentialStatusActive:
+		if cred.LastVerifiedAt == nil {
+			return models.CodingAuthStatusNeverVerified
+		}
+		return models.CodingAuthStatusHealthy
+	default:
+		return models.CodingAuthStatusNeedsReauth
+	}
+}
+
+func usageNoteFor(cred models.DecryptedCodingCredential) string {
+	switch cfg := cred.Config.(type) {
+	case models.AnthropicSubscriptionConfig:
+		return coalesce(cfg.AccountType, "Claude subscription")
+	case models.OpenAISubscriptionConfig:
+		return coalesce(cfg.AccountType, "ChatGPT subscription")
+	case models.OpenAIChatGPTConfig:
+		return coalesce(cfg.AccountType, "ChatGPT subscription")
+	case models.AnthropicConfig:
+		if cfg.Subscription != nil {
+			return coalesce(cfg.Subscription.AccountType, "Claude subscription")
+		}
+		return cfg.MaskedSummary().MaskedKey
+	case models.OpenAIConfig:
+		return cfg.MaskedSummary().MaskedKey
+	case models.GeminiConfig, models.AmpConfig, models.PiConfig, models.OpenRouterConfig:
+		return cred.Config.MaskedSummary().MaskedKey
+	}
+	return ""
+}
+
+func defaultLabelFor(agent models.AgentType, authType models.CodingAuthType) string {
+	switch {
+	case agent == models.AgentTypeCodex && authType == models.CodingAuthTypeSubscription:
+		return "Codex subscription"
+	case agent == models.AgentTypeCodex && authType == models.CodingAuthTypeAPIKey:
+		return "Codex API key"
+	case agent == models.AgentTypeClaudeCode && authType == models.CodingAuthTypeSubscription:
+		return "Claude Code subscription"
+	case agent == models.AgentTypeClaudeCode && authType == models.CodingAuthTypeAPIKey:
+		return "Claude Code API key"
+	case agent == models.AgentTypeGeminiCLI:
+		return "Gemini CLI API key"
+	case agent == models.AgentTypeAmp:
+		return "Amp API key"
+	case agent == models.AgentTypePi:
+		return "Pi API key"
+	}
+	return "Coding auth"
+}
+
+// codingCredentialConfigFromInput maps a CreateCodingCredentialInput to a
+// strongly-typed ProviderConfig + provider name for the unified store. Only
+// API-key auth lands here; subscription credentials come in via dedicated
+// /codex-auth and /claude-code-auth endpoints.
+func codingCredentialConfigFromInput(input models.CreateCodingCredentialInput) (models.ProviderConfig, models.ProviderName, error) {
+	switch input.Agent {
+	case models.AgentTypeCodex:
+		return models.OpenAIConfig{
+			APIKey:  input.APIKey,
+			BaseURL: input.BaseURL,
+			APIType: coalesce(input.APIType, "responses"),
+		}, models.ProviderOpenAI, nil
+	case models.AgentTypeClaudeCode:
+		return models.AnthropicConfig{
+			APIKey:  input.APIKey,
+			BaseURL: input.BaseURL,
+		}, models.ProviderAnthropic, nil
+	case models.AgentTypeGeminiCLI:
+		return models.GeminiConfig{
+			APIKey: input.APIKey,
+			Model:  coalesce(input.APIType, models.GeminiCLIModelGemini25Pro),
+		}, models.ProviderGemini, nil
+	case models.AgentTypeAmp:
+		return models.AmpConfig{APIKey: input.APIKey}, models.ProviderAmp, nil
+	case models.AgentTypePi:
+		return models.PiConfig{APIKey: input.APIKey}, models.ProviderPi, nil
+	}
+	return nil, "", fmt.Errorf("unsupported agent: %s", input.Agent)
+}
+
+func coalesce(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}

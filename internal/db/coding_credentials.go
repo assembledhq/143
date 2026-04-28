@@ -1,0 +1,1196 @@
+// Package db — coding_credentials store.
+//
+// CodingCredentialStore is the single source of truth for coding-agent
+// credentials at every scope. See docs/design/future/65-unified-coding-credentials.md.
+//
+// Anchors:
+//   - One row per credential. user_id IS NULL means org-scoped.
+//   - Every mutation takes Scope; the store re-asserts in transaction that
+//     the loaded row's (org_id, user_id) matches Scope and returns
+//     ErrCodingCredentialNotFound on mismatch.
+//   - ListResolvable is the entire fallback algorithm: personal stack first
+//     (when UserID != nil), then org stack, ordered by priority within each.
+package db
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/assembledhq/143/internal/crypto"
+	"github.com/assembledhq/143/internal/models"
+)
+
+const codingCredentialsColumns = "id, org_id, user_id, provider, label, config, priority, status, created_by, last_verified_at, created_at, updated_at" // #nosec G101 -- SQL column list
+
+// ErrCodingCredentialNotFound is returned by every Get/mutation method when
+// either no row matches or the row matches but lives in a different scope.
+// We deliberately conflate the two cases so id enumeration cannot distinguish
+// "exists in another user's stack" from "does not exist".
+var ErrCodingCredentialNotFound = errors.New("coding credential not found")
+
+// ErrCodingCredentialLabelTaken is returned when a row already exists at
+// (org_id, user_id, provider, label) and is not eligible to be overwritten
+// (i.e. it is active or invalid). The embedded ExistingStatus tells the
+// caller which.
+type ErrCodingCredentialLabelTaken struct {
+	Label          string
+	ExistingStatus string
+}
+
+func (e *ErrCodingCredentialLabelTaken) Error() string {
+	switch e.ExistingStatus {
+	case models.CodingCredentialStatusActive:
+		return fmt.Sprintf("a credential with label %q is already connected", e.Label)
+	case models.CodingCredentialStatusInvalid:
+		return fmt.Sprintf("a credential with label %q is invalid — disconnect it first", e.Label)
+	case "":
+		// Lookup-after-conflict failed (transaction snapshot, race, etc.) so
+		// we don't know the existing row's status. Surface a friendly message
+		// rather than the raw "status \"\"" debug string.
+		return fmt.Sprintf("a credential with label %q already exists", e.Label)
+	default:
+		return fmt.Sprintf("a credential with label %q already exists (status %q)", e.Label, e.ExistingStatus)
+	}
+}
+
+// CreateOpts groups the optional knobs on a Create call. Most callers only set
+// CreatedBy; reorderHook is exposed for tests that want to inspect the
+// just-allocated priority.
+type CreateOpts struct {
+	CreatedBy *uuid.UUID
+	Status    string // defaults to "active"
+}
+
+// CodingCredentialStore is the unified credential store.
+type CodingCredentialStore struct {
+	db     DBTX
+	crypto *crypto.Service // nil = dev mode
+
+	// resolverCache memoizes ListResolvable for 30s. Hot path on every session
+	// start; an org with a stable stack and 1k sessions/min produces 1k
+	// identical reads otherwise.
+	resolverCache *resolverCache
+
+	// health caches short-TTL "do not pick" markers per credential id. Written
+	// when an upstream call returns 429 or auth-rejected; consulted by
+	// PickRunnable to skip a credential without a DB write.
+	health *healthCache
+
+	// rng is injectable for deterministic tests of the same-priority
+	// distribution path.
+	rng        *rand.Rand
+	rngMu      sync.Mutex
+	clock      func() time.Time
+	usePending bool // tests can disable pending_auth resurrection
+
+	// mirrorLogf surfaces structural drift detected during a mirror write
+	// (e.g. a legacy anthropic row with both APIKey and Subscription set).
+	// Production wires the application logger via SetMirrorLogger; nil is
+	// treated as a silent no-op for tests.
+	mirrorLogf func(format string, args ...any)
+}
+
+// SetMirrorLogger installs the structured-log hook used when the mirror
+// detects drift in a legacy row. Production wires the application logger;
+// tests usually leave it nil.
+//
+// lint:allow-no-orgid reason="process-wide logger configuration; not tenant data"
+func (s *CodingCredentialStore) SetMirrorLogger(logf func(format string, args ...any)) {
+	s.mirrorLogf = logf
+}
+
+func (s *CodingCredentialStore) mirrorWarn(format string, args ...any) {
+	if s == nil || s.mirrorLogf == nil {
+		return
+	}
+	s.mirrorLogf(format, args...)
+}
+
+// NewCodingCredentialStore constructs a store with default cache TTLs.
+func NewCodingCredentialStore(dbtx DBTX, cryptoSvc *crypto.Service) *CodingCredentialStore {
+	return &CodingCredentialStore{
+		db:            dbtx,
+		crypto:        cryptoSvc,
+		resolverCache: newResolverCache(30 * time.Second),
+		health:        newHealthCache(75 * time.Second),
+		rng:           rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)),
+		clock:         time.Now,
+	}
+}
+
+// SetRNG overrides the internal RNG for deterministic tests of PickRunnable.
+//
+// lint:allow-no-orgid reason="process-wide RNG configuration; not tenant data"
+func (s *CodingCredentialStore) SetRNG(r *rand.Rand) {
+	s.rngMu.Lock()
+	defer s.rngMu.Unlock()
+	s.rng = r
+}
+
+// SetClock overrides the internal clock for cache-expiry tests.
+//
+// lint:allow-no-orgid reason="process-wide clock injection; not tenant data"
+func (s *CodingCredentialStore) SetClock(now func() time.Time) {
+	s.clock = now
+	s.resolverCache.clock = now
+	s.health.clock = now
+}
+
+// MarkRateLimited records a short-TTL "do not pick" marker for a credential.
+// Called by the agent runtime when an upstream call returns 429. The id is
+// already org-scoped because it can only be obtained through a prior scoped
+// PickRunnable; the in-process health cache keys by id alone.
+//
+// lint:allow-no-orgid reason="id was obtained from a scoped Pick; in-process cache keys by id only"
+func (s *CodingCredentialStore) MarkRateLimited(id uuid.UUID) {
+	s.health.shed(id)
+}
+
+// MarkAuthRejected records a "do not pick" marker following an auth failure.
+// In practice the runtime should also flip the credential's persisted status
+// to "invalid"; the in-memory marker prevents repeat picks before that write
+// reaches the cache layer.
+//
+// lint:allow-no-orgid reason="id was obtained from a scoped Pick; in-process cache keys by id only"
+func (s *CodingCredentialStore) MarkAuthRejected(id uuid.UUID) {
+	s.health.shed(id)
+}
+
+// ----- Lookup -----
+
+// Get returns a single credential by id, scoped to (org_id, user_id) so that
+// id enumeration cannot reach into another user's or another org's stack.
+func (s *CodingCredentialStore) Get(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error) {
+	row, err := s.fetchRowByID(ctx, scope, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.decryptRow(*row)
+}
+
+// GetByProviderAndLabel returns the (provider, label) credential within scope.
+func (s *CodingCredentialStore) GetByProviderAndLabel(ctx context.Context, scope models.Scope, provider models.ProviderName, label string) (*models.DecryptedCodingCredential, error) {
+	args := pgx.NamedArgs{
+		"org_id":   scope.OrgID,
+		"provider": string(provider),
+		"label":    label,
+	}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query credential by provider+label: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrCodingCredentialNotFound
+		}
+		return nil, fmt.Errorf("get credential by provider+label: %w", err)
+	}
+	return s.decryptRow(row)
+}
+
+// ListByScope returns every active+disabled+pending row in the given scope.
+// Used by both settings pages.
+func (s *CodingCredentialStore) ListByScope(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error) {
+	args := pgx.NamedArgs{"org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'
+			ORDER BY priority, created_at`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'
+			ORDER BY priority, created_at`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query credentials by scope: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect credentials by scope: %w", err)
+	}
+	return s.decryptRows(dbRows)
+}
+
+// ListByProvider lists every active+pending row within scope for one provider.
+func (s *CodingCredentialStore) ListByProvider(ctx context.Context, scope models.Scope, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	args := pgx.NamedArgs{"org_id": scope.OrgID, "provider": string(provider)}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND status != 'disabled'
+			ORDER BY priority, created_at`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND status != 'disabled'
+			ORDER BY priority, created_at`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query credentials by provider: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect credentials by provider: %w", err)
+	}
+	return s.decryptRows(dbRows)
+}
+
+// ListResolvable is the resolver hot path. Returns the ordered list a
+// runtime caller would walk: personal rows for the user (when userID != nil)
+// then org rows, each tier ordered by priority then created_at. Filters to
+// status='active' rows — disabled/invalid/pending_auth do not enter the
+// runnable stack.
+//
+// Implementation issues two narrow lookups against the partial index. Both
+// halves return rows in their final concatenated order, so app-side
+// concatenation costs no sort step.
+func (s *CodingCredentialStore) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if cached, ok := s.resolverCache.get(orgID, userID, provider); ok {
+		return cached, nil
+	}
+
+	resolved := make([]models.DecryptedCodingCredential, 0, 4)
+
+	if userID != nil {
+		personal, err := s.queryResolverHalf(ctx, orgID, userID, provider)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, personal...)
+	}
+
+	org, err := s.queryResolverHalf(ctx, orgID, nil, provider)
+	if err != nil {
+		return nil, err
+	}
+	resolved = append(resolved, org...)
+
+	s.resolverCache.put(orgID, userID, provider, resolved)
+	return resolved, nil
+}
+
+// queryResolverHalf hits the partial resolver index for one (scope, provider)
+// half. userID nil → org rows; userID != nil → that user's personal rows.
+func (s *CodingCredentialStore) queryResolverHalf(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	args := pgx.NamedArgs{"org_id": orgID, "provider": string(provider)}
+	var query string
+	if userID != nil {
+		args["user_id"] = *userID
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND provider = @provider AND user_id = @user_id AND status = 'active'
+			ORDER BY priority, created_at`
+	} else {
+		query = `SELECT ` + codingCredentialsColumns + `
+			FROM coding_credentials
+			WHERE org_id = @org_id AND provider = @provider AND user_id IS NULL AND status = 'active'
+			ORDER BY priority, created_at`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query resolver half: %w", err)
+	}
+	dbRows, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		return nil, fmt.Errorf("collect resolver half: %w", err)
+	}
+	return s.decryptRows(dbRows)
+}
+
+// PickRunnable is the runtime selection path. ListResolvable + tier-walking
+// + random-with-shedding within each tier (priority group). Returns
+// ErrCodingCredentialNotFound when no tier has any unsh-edged candidate.
+//
+// Random selection avoids the per-(scope, provider, priority) hotspot that
+// strict round-robin would introduce — see design doc § "Same-priority
+// distribution".
+func (s *CodingCredentialStore) PickRunnable(ctx context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	creds, err := s.ListResolvable(ctx, scope.OrgID, scope.UserID, provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(creds) == 0 {
+		return nil, ErrCodingCredentialNotFound
+	}
+
+	for _, tier := range groupByPriorityAndScope(creds) {
+		eligible := s.health.filter(tier)
+		if len(eligible) == 0 {
+			continue
+		}
+		s.rngMu.Lock()
+		idx := s.rng.IntN(len(eligible))
+		s.rngMu.Unlock()
+		picked := eligible[idx]
+		return &picked, nil
+	}
+	return nil, ErrCodingCredentialNotFound
+}
+
+// groupByPriorityAndScope walks an already-sorted ListResolvable result and
+// emits contiguous tiers. Two rows belong to the same tier iff they have the
+// same scope (both personal-for-this-user or both org) AND the same priority.
+// Crossing scope is always a new tier so personal #N never blurs into org #N.
+func groupByPriorityAndScope(creds []models.DecryptedCodingCredential) [][]models.DecryptedCodingCredential {
+	if len(creds) == 0 {
+		return nil
+	}
+	out := make([][]models.DecryptedCodingCredential, 0, 2)
+	cur := []models.DecryptedCodingCredential{creds[0]}
+	for i := 1; i < len(creds); i++ {
+		prev := cur[len(cur)-1]
+		next := creds[i]
+		samePriority := prev.Priority == next.Priority
+		sameScope := (prev.UserID == nil) == (next.UserID == nil)
+		if samePriority && sameScope {
+			cur = append(cur, next)
+			continue
+		}
+		out = append(out, cur)
+		cur = []models.DecryptedCodingCredential{next}
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// ----- Mutation -----
+
+// Create inserts a new credential at the bottom of the scope's stack and
+// returns the new id.
+func (s *CodingCredentialStore) Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts CreateOpts) (*uuid.UUID, error) {
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return nil, err
+	}
+	status := opts.Status
+	if status == "" {
+		status = models.CodingCredentialStatusActive
+	}
+
+	var id uuid.UUID
+	err = s.withScopeLock(ctx, scope, func(tx pgx.Tx, nextPriority int) error {
+		args := pgx.NamedArgs{
+			"org_id":     scope.OrgID,
+			"user_id":    scope.UserID,
+			"provider":   string(cfg.Provider()),
+			"label":      label,
+			"config":     encrypted,
+			"status":     status,
+			"created_by": opts.CreatedBy,
+			"priority":   nextPriority,
+		}
+		// On conflict (label collision) we surface a typed error so the API
+		// layer can render a meaningful message. Disabled rows are eligible
+		// for resurrection — INSERT … ON CONFLICT bumps the priority into the
+		// new tail slot so a previously-deleted credential reappears at the
+		// bottom of the stack rather than carrying a stale slot.
+		query := `
+			INSERT INTO coding_credentials
+				(org_id, user_id, provider, label, config, status, created_by, priority)
+			VALUES (@org_id, @user_id, @provider, @label, @config, @status, @created_by, @priority)
+			ON CONFLICT (org_id, user_id, provider, label) DO UPDATE
+			SET config = EXCLUDED.config,
+			    status = EXCLUDED.status,
+			    updated_at = now(),
+			    priority = CASE WHEN coding_credentials.status = 'disabled'
+			                    THEN EXCLUDED.priority
+			                    ELSE coding_credentials.priority END
+			WHERE coding_credentials.status IN ('disabled', 'pending_auth')
+			RETURNING id`
+
+		scanErr := tx.QueryRow(ctx, query, args).Scan(&id)
+		if scanErr == nil {
+			return nil
+		}
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			return fmt.Errorf("insert credential: %w", scanErr)
+		}
+		// Active or invalid row blocked the insert; report typed error.
+		var existingStatus string
+		lookupArgs := pgx.NamedArgs{
+			"org_id":   scope.OrgID,
+			"user_id":  scope.UserID,
+			"provider": string(cfg.Provider()),
+			"label":    label,
+		}
+		var lookupQuery string
+		if scope.IsPersonal() {
+			lookupQuery = `SELECT status FROM coding_credentials
+				WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
+		} else {
+			lookupQuery = `SELECT status FROM coding_credentials
+				WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
+		}
+		_ = tx.QueryRow(ctx, lookupQuery, lookupArgs).Scan(&existingStatus)
+		return &ErrCodingCredentialLabelTaken{Label: label, ExistingStatus: existingStatus}
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.invalidate(scope, cfg.Provider())
+	return &id, nil
+}
+
+// InsertPendingAuth inserts a credential in pending_auth status — used by the
+// initiate-OAuth flows. Refuses to overwrite an active or invalid row at the
+// same (scope, provider, label) and returns ErrCodingCredentialLabelTaken.
+func (s *CodingCredentialStore) InsertPendingAuth(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, createdBy *uuid.UUID) (*uuid.UUID, error) {
+	return s.Create(ctx, scope, label, cfg, CreateOpts{
+		CreatedBy: createdBy,
+		Status:    models.CodingCredentialStatusPendingAuth,
+	})
+}
+
+// PromotePending exchanges a pending_auth row for an active one with the
+// final config (e.g. real OAuth tokens). Scope-checked — calling with a
+// different Scope than the row's owner returns ErrCodingCredentialNotFound.
+//
+// The scope assertion + UPDATE run in one transaction with FOR UPDATE so a
+// concurrent re-parent or delete cannot race the write.
+func (s *CodingCredentialStore) PromotePending(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return err
+	}
+	var provider models.ProviderName
+	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
+		if rowProvider != cfg.Provider() {
+			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
+		}
+		provider = rowProvider
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials
+			 SET config = @config, status = 'active', last_verified_at = now(), updated_at = now()
+			 WHERE id = @id`,
+			pgx.NamedArgs{"id": id, "config": encrypted},
+		)
+		if execErr != nil {
+			return fmt.Errorf("promote pending: %w", execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// UpdateConfig overwrites the encrypted config for an active credential.
+func (s *CodingCredentialStore) UpdateConfig(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return err
+	}
+	var provider models.ProviderName
+	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
+		if rowProvider != cfg.Provider() {
+			return fmt.Errorf("provider mismatch: row is %q, config is %q", rowProvider, cfg.Provider())
+		}
+		provider = rowProvider
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials
+			 SET config = @config, status = 'active', updated_at = now()
+			 WHERE id = @id AND status != 'disabled'`,
+			pgx.NamedArgs{"id": id, "config": encrypted},
+		)
+		if execErr != nil {
+			return fmt.Errorf("update config: %w", execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// Rename updates the label.
+func (s *CodingCredentialStore) Rename(ctx context.Context, scope models.Scope, id uuid.UUID, label string) error {
+	var provider models.ProviderName
+	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
+		provider = rowProvider
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials SET label = @label, updated_at = now() WHERE id = @id`,
+			pgx.NamedArgs{"id": id, "label": label},
+		)
+		if execErr != nil {
+			return fmt.Errorf("rename credential: %w", execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// UpdateStatus moves a credential between active / disabled / pending_auth /
+// invalid. Disable() is a thin wrapper that calls UpdateStatus(disabled).
+func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.Scope, id uuid.UUID, status string) error {
+	switch status {
+	case models.CodingCredentialStatusActive,
+		models.CodingCredentialStatusDisabled,
+		models.CodingCredentialStatusPendingAuth,
+		models.CodingCredentialStatusInvalid:
+	default:
+		return fmt.Errorf("invalid status: %q", status)
+	}
+	var provider models.ProviderName
+	if err := s.withScopedRowTx(ctx, scope, id, func(tx pgx.Tx, rowProvider models.ProviderName) error {
+		provider = rowProvider
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials
+			 SET status = @status, last_verified_at = now(), updated_at = now()
+			 WHERE id = @id`,
+			pgx.NamedArgs{"id": id, "status": status},
+		)
+		if execErr != nil {
+			return fmt.Errorf("update status: %w", execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.invalidate(scope, provider)
+	return nil
+}
+
+// Disable soft-deletes a credential by flipping status to "disabled".
+func (s *CodingCredentialStore) Disable(ctx context.Context, scope models.Scope, id uuid.UUID) error {
+	return s.UpdateStatus(ctx, scope, id, models.CodingCredentialStatusDisabled)
+}
+
+// Reorder bulk-rewrites the priority of every row referenced in orderedIDs.
+// Used by the rare "reset stack" flow and by tests; the UI drag-drop path is
+// Move, which only touches the ids that actually shift.
+func (s *CodingCredentialStore) Reorder(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error {
+	if len(orderedIDs) == 0 {
+		return nil
+	}
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	for idx, id := range orderedIDs {
+		if err := s.assertScopeAndProviderTx(ctx, tx, scope, id); err != nil {
+			return err
+		}
+		tag, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials SET priority = @priority, updated_at = now() WHERE id = @id`,
+			pgx.NamedArgs{"priority": idx + 1, "id": id},
+		)
+		if execErr != nil {
+			return fmt.Errorf("reorder credential %s: %w", id, execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCodingCredentialNotFound
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit reorder: %w", err)
+	}
+	s.invalidateScope(scope)
+	return nil
+}
+
+// Move repositions one row within its scope's stack. Exactly one of
+// MovePosition's fields must be set. Recomputes contiguous priorities for
+// the affected rows in a single transaction.
+func (s *CodingCredentialStore) Move(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error {
+	if err := pos.Validate(); err != nil {
+		return err
+	}
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if err := s.assertScopeAndProviderTx(ctx, tx, scope, id); err != nil {
+		return err
+	}
+
+	// Snapshot current ordering for the scope, excluding disabled rows.
+	stack, err := s.fetchStackTx(ctx, tx, scope)
+	if err != nil {
+		return err
+	}
+
+	// Drop the moving id from the snapshot, then re-insert at the new index.
+	without := make([]uuid.UUID, 0, len(stack))
+	var movingFound bool
+	for _, sid := range stack {
+		if sid == id {
+			movingFound = true
+			continue
+		}
+		without = append(without, sid)
+	}
+	if !movingFound {
+		return ErrCodingCredentialNotFound
+	}
+
+	insertAt := len(without) // ToBottom by default
+	switch {
+	case pos.ToTop:
+		insertAt = 0
+	case pos.ToBottom:
+		insertAt = len(without)
+	case pos.BeforeID != nil:
+		idx := indexOf(without, *pos.BeforeID)
+		if idx < 0 {
+			return fmt.Errorf("before_id not found in scope")
+		}
+		insertAt = idx
+	case pos.AfterID != nil:
+		idx := indexOf(without, *pos.AfterID)
+		if idx < 0 {
+			return fmt.Errorf("after_id not found in scope")
+		}
+		insertAt = idx + 1
+	}
+
+	newOrder := make([]uuid.UUID, 0, len(stack))
+	newOrder = append(newOrder, without[:insertAt]...)
+	newOrder = append(newOrder, id)
+	newOrder = append(newOrder, without[insertAt:]...)
+
+	// Apply the new priorities. Only rewrite rows whose priority actually
+	// changed — keeps writes proportional to the number of rows that moved
+	// rather than stack size.
+	currentPriority := map[uuid.UUID]int{}
+	rows, err := tx.Query(ctx,
+		`SELECT id, priority FROM coding_credentials
+		 WHERE id = ANY(@ids) AND status != 'disabled'`,
+		pgx.NamedArgs{"ids": newOrder},
+	)
+	if err != nil {
+		return fmt.Errorf("fetch current priorities: %w", err)
+	}
+	for rows.Next() {
+		var rid uuid.UUID
+		var p int
+		if err := rows.Scan(&rid, &p); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan current priority: %w", err)
+		}
+		currentPriority[rid] = p
+	}
+	rows.Close()
+
+	for idx, rid := range newOrder {
+		newPriority := idx + 1
+		if currentPriority[rid] == newPriority {
+			continue
+		}
+		if _, execErr := tx.Exec(ctx,
+			`UPDATE coding_credentials SET priority = @priority, updated_at = now() WHERE id = @id`,
+			pgx.NamedArgs{"priority": newPriority, "id": rid},
+		); execErr != nil {
+			return fmt.Errorf("apply move priority: %w", execErr)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit move: %w", err)
+	}
+	s.invalidateScope(scope)
+	return nil
+}
+
+// JanitorDeletePendingAuthOlderThan drops pending_auth rows older than ttl.
+// Driven by an external cron — see design doc § "Pending-auth TTL".
+//
+// No resolver-cache invalidation: pending_auth rows are filtered out of
+// ListResolvable (status = 'active' only), so they never enter the cache to
+// begin with. The cache hit path is unaffected by this sweep.
+//
+// lint:allow-no-orgid reason="cross-org janitor sweep; runs as a system task with no caller scope"
+func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Context, ttl time.Duration) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM coding_credentials
+		 WHERE status = 'pending_auth' AND created_at < now() - @ttl::interval`,
+		pgx.NamedArgs{"ttl": fmt.Sprintf("%d seconds", int(ttl.Seconds()))},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("janitor sweep: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ----- Internals -----
+
+// withScopedRowTx begins a transaction, locks the row identified by id with
+// SELECT ... FOR UPDATE, asserts (org_id, user_id) matches scope, and invokes
+// fn with the tx and the row's provider. The fn must perform its UPDATE on tx
+// so the work happens under the same lock. Scope mismatch is conflated with
+// "row missing" so id enumeration cannot tell which is which.
+func (s *CodingCredentialStore) withScopedRowTx(ctx context.Context, scope models.Scope, id uuid.UUID, fn func(tx pgx.Tx, provider models.ProviderName) error) error {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	provider, err := s.lockAndAssertScope(ctx, tx, scope, id)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx, provider); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// lockAndAssertScope loads (org_id, user_id, provider) under a row lock and
+// returns the provider when the row matches scope. Returns
+// ErrCodingCredentialNotFound for any mismatch.
+func (s *CodingCredentialStore) lockAndAssertScope(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID) (models.ProviderName, error) {
+	var orgID uuid.UUID
+	var userID *uuid.UUID
+	var provider string
+	err := tx.QueryRow(ctx,
+		`SELECT org_id, user_id, provider FROM coding_credentials WHERE id = @id FOR UPDATE`,
+		pgx.NamedArgs{"id": id},
+	).Scan(&orgID, &userID, &provider)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrCodingCredentialNotFound
+		}
+		return "", fmt.Errorf("scope-check credential: %w", err)
+	}
+	if orgID != scope.OrgID || !sameUserPointer(userID, scope.UserID) {
+		return "", ErrCodingCredentialNotFound
+	}
+	return models.ProviderName(provider), nil
+}
+
+// assertScopeAndProviderTx is the legacy two-return-value variant kept for
+// the Reorder/Move callers that don't need the row's provider — they only
+// need to verify the row belongs to the scope before issuing per-row UPDATEs.
+func (s *CodingCredentialStore) assertScopeAndProviderTx(ctx context.Context, tx pgx.Tx, scope models.Scope, id uuid.UUID) error {
+	_, err := s.lockAndAssertScope(ctx, tx, scope, id)
+	return err
+}
+
+func sameUserPointer(a, b *uuid.UUID) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func (s *CodingCredentialStore) fetchRowByID(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.CodingCredential, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT `+codingCredentialsColumns+` FROM coding_credentials WHERE id = @id`,
+		pgx.NamedArgs{"id": id},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query credential: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.CodingCredential])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrCodingCredentialNotFound
+		}
+		return nil, fmt.Errorf("fetch credential: %w", err)
+	}
+	if row.OrgID != scope.OrgID {
+		return nil, ErrCodingCredentialNotFound
+	}
+	if !sameUserPointer(row.UserID, scope.UserID) {
+		return nil, ErrCodingCredentialNotFound
+	}
+	return &row, nil
+}
+
+func (s *CodingCredentialStore) fetchStackTx(ctx context.Context, tx pgx.Tx, scope models.Scope) ([]uuid.UUID, error) {
+	args := pgx.NamedArgs{"org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT id FROM coding_credentials
+			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'
+			ORDER BY priority, created_at`
+	} else {
+		query = `SELECT id FROM coding_credentials
+			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'
+			ORDER BY priority, created_at`
+	}
+	rows, err := tx.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("fetch stack: %w", err)
+	}
+	defer rows.Close()
+	out := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan stack id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// withScopeLock acquires a per-scope advisory lock to serialize stack-priority
+// updates inside the surrounding transaction. Without it, two concurrent
+// Create calls would read the same MAX(priority) and emit duplicate slot
+// numbers. Priority is per-stack (not per-provider), so the lock key omits
+// provider — two concurrent Creates for different providers in the same scope
+// must still serialize through the same lock.
+func (s *CodingCredentialStore) withScopeLock(ctx context.Context, scope models.Scope, fn func(tx pgx.Tx, nextPriority int) error) error {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	lockKey := fmt.Sprintf("coding_credentials:%s:%s", scope.OrgID, scopePtrKey(scope.UserID))
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		lockKey,
+	); err != nil {
+		return fmt.Errorf("acquire scope lock: %w", err)
+	}
+
+	args := pgx.NamedArgs{"org_id": scope.OrgID}
+	var query string
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT COALESCE(MAX(priority), 0) + 1 FROM coding_credentials
+			WHERE org_id = @org_id AND user_id = @user_id AND status != 'disabled'`
+	} else {
+		query = `SELECT COALESCE(MAX(priority), 0) + 1 FROM coding_credentials
+			WHERE org_id = @org_id AND user_id IS NULL AND status != 'disabled'`
+	}
+	var nextPriority int
+	if err := tx.QueryRow(ctx, query, args).Scan(&nextPriority); err != nil {
+		return fmt.Errorf("compute next priority: %w", err)
+	}
+
+	if err := fn(tx, nextPriority); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func scopePtrKey(u *uuid.UUID) string {
+	if u == nil {
+		return "org"
+	}
+	return u.String()
+}
+
+func (s *CodingCredentialStore) beginTx(ctx context.Context) (pgx.Tx, error) {
+	starter, ok := s.db.(TxStarter)
+	if !ok {
+		return nil, errors.New("coding credential store db does not support transactions")
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	return tx, nil
+}
+
+func (s *CodingCredentialStore) marshalAndEncrypt(cfg models.ProviderConfig) ([]byte, error) {
+	plaintext, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	if s.crypto != nil {
+		ct, encErr := s.crypto.Encrypt(plaintext)
+		if encErr != nil {
+			return nil, fmt.Errorf("encrypt config: %w", encErr)
+		}
+		return ct, nil
+	}
+	return crypto.DevEncrypt(plaintext), nil
+}
+
+func (s *CodingCredentialStore) decrypt(data []byte) ([]byte, error) {
+	if s.crypto != nil {
+		return s.crypto.Decrypt(data)
+	}
+	return crypto.DevDecrypt(data)
+}
+
+func (s *CodingCredentialStore) decryptRow(row models.CodingCredential) (*models.DecryptedCodingCredential, error) {
+	plaintext, err := s.decrypt(row.Config)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt %s config: %w", row.Provider, err)
+	}
+	cfg, err := models.ParseCodingProviderConfig(row.Provider, plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s config: %w", row.Provider, err)
+	}
+	return &models.DecryptedCodingCredential{
+		ID:             row.ID,
+		OrgID:          row.OrgID,
+		UserID:         row.UserID,
+		Provider:       row.Provider,
+		Label:          row.Label,
+		Config:         cfg,
+		Priority:       row.Priority,
+		Status:         row.Status,
+		CreatedBy:      row.CreatedBy,
+		LastVerifiedAt: row.LastVerifiedAt,
+		CreatedAt:      row.CreatedAt,
+		UpdatedAt:      row.UpdatedAt,
+	}, nil
+}
+
+func (s *CodingCredentialStore) decryptRows(rows []models.CodingCredential) ([]models.DecryptedCodingCredential, error) {
+	out := make([]models.DecryptedCodingCredential, 0, len(rows))
+	for _, row := range rows {
+		dec, err := s.decryptRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *dec)
+	}
+	return out, nil
+}
+
+func (s *CodingCredentialStore) invalidate(scope models.Scope, provider models.ProviderName) {
+	s.resolverCache.invalidate(scope.OrgID, scope.UserID, provider)
+	// An org-row mutation can affect every personal user's resolved view.
+	// We don't track individual user_ids in the cache key for invalidation,
+	// so a coarse scope-level wipe is the safe thing to do for org changes.
+	if scope.IsOrg() {
+		s.resolverCache.invalidateOrg(scope.OrgID, provider)
+	}
+}
+
+func (s *CodingCredentialStore) invalidateScope(scope models.Scope) {
+	s.resolverCache.invalidateAll(scope.OrgID)
+}
+
+func indexOf(s []uuid.UUID, target uuid.UUID) int {
+	for i, v := range s {
+		if v == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// ----- resolver cache -----
+
+type resolverCacheKey struct {
+	orgID    uuid.UUID
+	userKey  uuid.UUID // zero UUID for org-scoped
+	provider models.ProviderName
+}
+
+type resolverCacheEntry struct {
+	value  []models.DecryptedCodingCredential
+	expiry time.Time
+}
+
+type resolverCache struct {
+	mu    sync.RWMutex
+	ttl   time.Duration
+	data  map[resolverCacheKey]resolverCacheEntry
+	clock func() time.Time
+}
+
+func newResolverCache(ttl time.Duration) *resolverCache {
+	return &resolverCache{
+		ttl:   ttl,
+		data:  make(map[resolverCacheKey]resolverCacheEntry),
+		clock: time.Now,
+	}
+}
+
+func (c *resolverCache) keyFor(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) resolverCacheKey {
+	uk := uuid.Nil
+	if userID != nil {
+		uk = *userID
+	}
+	return resolverCacheKey{orgID: orgID, userKey: uk, provider: provider}
+}
+
+func (c *resolverCache) get(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, bool) {
+	if c == nil {
+		return nil, false
+	}
+	key := c.keyFor(orgID, userID, provider)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.data[key]
+	if !ok {
+		return nil, false
+	}
+	if c.clock().After(entry.expiry) {
+		return nil, false
+	}
+	// Return a copy so callers cannot mutate cached state.
+	out := make([]models.DecryptedCodingCredential, len(entry.value))
+	copy(out, entry.value)
+	return out, true
+}
+
+func (c *resolverCache) put(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, val []models.DecryptedCodingCredential) {
+	if c == nil {
+		return
+	}
+	stored := make([]models.DecryptedCodingCredential, len(val))
+	copy(stored, val)
+	key := c.keyFor(orgID, userID, provider)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[key] = resolverCacheEntry{value: stored, expiry: c.clock().Add(c.ttl)}
+}
+
+func (c *resolverCache) invalidate(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) {
+	if c == nil {
+		return
+	}
+	key := c.keyFor(orgID, userID, provider)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.data, key)
+}
+
+// invalidateOrg drops every cache entry in the org for one provider — a
+// coarse wipe used after org-row changes that can affect every user's
+// resolved view.
+func (c *resolverCache) invalidateOrg(orgID uuid.UUID, provider models.ProviderName) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.data {
+		if k.orgID == orgID && k.provider == provider {
+			delete(c.data, k)
+		}
+	}
+}
+
+// invalidateAll drops every cache entry in the org. Used when the entire
+// stack is reordered.
+func (c *resolverCache) invalidateAll(orgID uuid.UUID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.data {
+		if k.orgID == orgID {
+			delete(c.data, k)
+		}
+	}
+}
+
+// ----- health cache -----
+
+type healthCache struct {
+	mu    sync.RWMutex
+	ttl   time.Duration
+	data  map[uuid.UUID]time.Time
+	clock func() time.Time
+}
+
+func newHealthCache(ttl time.Duration) *healthCache {
+	return &healthCache{
+		ttl:   ttl,
+		data:  make(map[uuid.UUID]time.Time),
+		clock: time.Now,
+	}
+}
+
+func (h *healthCache) shed(id uuid.UUID) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.data[id] = h.clock().Add(h.ttl)
+}
+
+func (h *healthCache) isShed(id uuid.UUID) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	expiry, ok := h.data[id]
+	h.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	if h.clock().After(expiry) {
+		// Lazy clean up expired entry.
+		h.mu.Lock()
+		if exp, ok := h.data[id]; ok && h.clock().After(exp) {
+			delete(h.data, id)
+		}
+		h.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (h *healthCache) filter(creds []models.DecryptedCodingCredential) []models.DecryptedCodingCredential {
+	if h == nil {
+		return creds
+	}
+	out := make([]models.DecryptedCodingCredential, 0, len(creds))
+	for _, c := range creds {
+		if !h.isShed(c.ID) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
