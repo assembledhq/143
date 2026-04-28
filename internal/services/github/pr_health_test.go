@@ -398,7 +398,30 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 				Status:     "open",
 				MergeState: models.PullRequestMergeStateClean,
 				Checks: []models.PullRequestCheckSummary{
-					{Name: "lint", Category: models.PullRequestCheckCategoryLint},
+					{Name: "lint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusFailed},
+				},
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "clean PR with only passed checks is still mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateClean,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+					{Name: "eslint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expectCanMerge: true,
+		},
+		{
+			name: "clean PR with pending checks is not mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:     "open",
+				MergeState: models.PullRequestMergeStateClean,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "playwright", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
 				},
 			},
 			expectCanMerge: false,
@@ -410,7 +433,7 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 				MergeState:       models.PullRequestMergeStateClean,
 				FailingTestCount: 2,
 				Checks: []models.PullRequestCheckSummary{
-					{Name: "vitest", Category: models.PullRequestCheckCategoryTest},
+					{Name: "vitest", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed},
 				},
 			},
 			expectCanFixTests: true,
@@ -469,6 +492,53 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 			require.Equal(t, tt.expectCanResolveConfli, resp.CanResolveConflicts, "CanResolveConflicts should match")
 			require.Equal(t, tt.expectCanFixTests, resp.CanFixTests, "CanFixTests should match")
 			require.Equal(t, tt.expectCanMerge, resp.CanMerge, "CanMerge should match")
+		})
+	}
+}
+
+func TestDeriveAggregateCIStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		checks   []models.PullRequestCheckSummary
+		expected string
+	}{
+		{
+			name:     "no checks means success",
+			checks:   nil,
+			expected: "success",
+		},
+		{
+			name: "pending checks mean pending",
+			checks: []models.PullRequestCheckSummary{
+				{Name: "playwright", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
+			},
+			expected: "pending",
+		},
+		{
+			name: "failed checks mean failure",
+			checks: []models.PullRequestCheckSummary{
+				{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed},
+			},
+			expected: "failure",
+		},
+		{
+			name: "failure wins over pending",
+			checks: []models.PullRequestCheckSummary{
+				{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed},
+				{Name: "e2e", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
+			},
+			expected: "failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			status := deriveAggregateCIStatus(tt.checks)
+			require.Equal(t, tt.expected, status, "deriveAggregateCIStatus should return the expected CI state")
 		})
 	}
 }

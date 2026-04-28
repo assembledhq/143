@@ -134,4 +134,66 @@ describe("PRHealthBanner", () => {
 
     expect(screen.getByText("Connect your GitHub account to merge this pull request as yourself.")).toBeInTheDocument();
   });
+
+  it("shows CI job statuses when hovering the failing tests badge", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          failing_test_count: 1,
+          checks: [
+            { name: "Unit tests", category: "test", status: "failed" },
+            { name: "E2E tests", category: "test", status: "pending" },
+            { name: "Lint", category: "lint", status: "passed" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.hover(screen.getByText("1/3 failed"));
+
+    expect(await screen.findByText("CI jobs")).toBeInTheDocument();
+    expect(screen.getByText("Unit tests")).toBeInTheDocument();
+    expect(screen.getByText("E2E tests")).toBeInTheDocument();
+    expect(screen.getByText("Lint")).toBeInTheDocument();
+    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("passed").length).toBeGreaterThan(0);
+  });
+
+  it("shows failed-over-total summary and normalizes missing legacy statuses to pending", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          failing_test_count: 1,
+          checks: [
+            { name: "Unit tests", category: "test", status: "failed" },
+            { name: "E2E tests", category: "test", status: "pending" },
+            { name: "Legacy check", category: "lint" } as unknown as NonNullable<PullRequestHealthResponse["checks"]>[number],
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.hover(screen.getByText("1/3 failed"));
+
+    expect(await screen.findByText("CI jobs")).toBeInTheDocument();
+    expect(screen.getByText("Legacy check")).toBeInTheDocument();
+    expect(screen.getAllByText("pending").length).toBeGreaterThanOrEqual(2);
+  });
 });

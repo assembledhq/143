@@ -1118,7 +1118,7 @@ describe('SessionDetailPage', () => {
             ...mockPRHealth,
             can_merge: false,
             checks: [
-              { name: 'unit tests', category: 'test' as const, summary: 'running' },
+              { name: 'unit tests', category: 'test' as const, status: 'pending' as const, summary: 'running' },
             ],
             summary: 'PR #42 has 1 failing test job.',
           },

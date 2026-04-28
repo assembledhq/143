@@ -198,6 +198,57 @@ func TestPRServiceBuildPullRequestHealthResponseLoadsSnapshotDetails(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all health snapshot expectations should be met")
 }
 
+func TestPRServiceBuildPullRequestHealthResponseNormalizesLegacyCheckStatuses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	now := time.Now().UTC()
+	legacySummaryJSON := []byte(`{
+		"merge_state":"clean",
+		"has_conflicts":false,
+		"failing_test_count":1,
+		"needs_agent_action":true,
+		"checks":[
+			{"name":"unit tests","category":"test"},
+			{"name":"e2e","category":"test"},
+			{"name":"eslint","category":"lint"}
+		]
+	}`)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(4), "head-ready", "base-ready", legacySummaryJSON, legacySummaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	resp, err := service.buildPullRequestHealthResponse(context.Background(), models.PullRequest{
+		ID:             pullRequestID,
+		OrgID:          orgID,
+		GitHubPRNumber: 52,
+		GitHubRepo:     "assembledhq/143",
+		GitHubPRURL:    "https://github.com/assembledhq/143/pull/52",
+		Status:         "open",
+		MergeState:     models.PullRequestMergeStateUnknown,
+		HealthVersion:  2,
+	})
+	require.NoError(t, err, "buildPullRequestHealthResponse should succeed")
+	require.Len(t, resp.Checks, 3, "response should include all legacy checks")
+	require.Equal(t, models.PullRequestCheckStatusFailed, resp.Checks[0].Status, "response should infer the first failing legacy test check as failed")
+	require.Equal(t, models.PullRequestCheckStatusPending, resp.Checks[1].Status, "response should infer remaining legacy test checks as pending")
+	require.Equal(t, models.PullRequestCheckStatusPending, resp.Checks[2].Status, "response should keep legacy non-test checks pending when no explicit failure signal exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all health current queries should be executed")
+}
+
 func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	t.Parallel()
 
