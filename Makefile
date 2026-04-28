@@ -328,6 +328,17 @@ secrets-rotate:
 #   PREVIEW_INTERNAL_BASE_URL=http://10.0.0.N:8080
 #   EOF
 #   chmod 600 /opt/143/.env.local'
+#
+# Reprovisioning leaves the old `nodes` row behind. nodes.id stores NODE_ID,
+# so a host that was provisioned as e.g. "worker-4" and later reprovisioned
+# under the new dotted-to-dash default ("worker-10-0-0-4") registers a fresh
+# row instead of updating the old one. The MarkStaleNodesDead reaper flips
+# the orphan to status='dead' once heartbeats stop, and ListActive filters
+# 'active'/'draining' only — so the orphan does NOT route preview traffic.
+# It just sits in the table until cleaned up. To delete it explicitly:
+#   psql "$DATABASE_URL" -c "DELETE FROM nodes WHERE id = 'worker-4' AND status = 'dead';"
+# Preserve old NODE_IDs across reprovision instead by passing the old value:
+#   make provision-worker HOST=<host> REPROVISION=true NODE_ID=worker-4
 
 REPROVISION ?=
 
