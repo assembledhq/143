@@ -364,7 +364,7 @@ func (h *IntegrationHandler) StartLinearOAuth(w http.ResponseWriter, r *http.Req
 		"client_id":     {h.linearClientID},
 		"redirect_uri":  {h.linearRedirectURL()},
 		"response_type": {"code"},
-		"scope":         {"read"},
+		"scope":         {"read,write"},
 		"state":         {state},
 	}
 
@@ -1135,22 +1135,19 @@ func (h *IntegrationHandler) slackRedirectURL() string {
 // --- Linear token exchange ---
 
 func (h *IntegrationHandler) exchangeLinearCode(ctx context.Context, code string) (*linearTokenResponse, error) {
-	body, err := json.Marshal(map[string]string{
-		"grant_type":    "authorization_code",
-		"code":          code,
-		"redirect_uri":  h.linearRedirectURL(),
-		"client_id":     h.linearClientID,
-		"client_secret": h.linearSecret,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal linear oauth request: %w", err)
+	data := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {h.linearRedirectURL()},
+		"client_id":     {h.linearClientID},
+		"client_secret": {h.linearSecret},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearTokenURL, bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, linearTokenURL, bytes.NewBufferString(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("create linear oauth request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := h.client.Do(req)
 	if err != nil {
