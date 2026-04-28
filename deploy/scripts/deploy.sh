@@ -97,10 +97,28 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for worker role (set it or add to .env.production.enc)}"
+    # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
+    # identity from /opt/143/.env.local (NODE_ID, WORKER_PRIVATE_IP,
+    # PREVIEW_INTERNAL_BASE_URL) so docker compose can still interpolate them
+    # when it parses the compose file. .env.local is owned by provisioning
+    # and we abort if it's missing instead of silently coming up with an
+    # empty NODE_ID and WORKER_PRIVATE_IP=0.0.0.0 (would expose worker to
+    # the public internet).
     printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       "${WORKER_PROCESS_COUNT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
-      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
+          set -euo pipefail
+          cat > /opt/143/.env
+          chmod 600 /opt/143/.env
+          if [ ! -f /opt/143/.env.local ]; then
+            echo "ERROR: /opt/143/.env.local is missing on this host." >&2
+            echo "       It holds NODE_ID, WORKER_PRIVATE_IP, and PREVIEW_INTERNAL_BASE_URL." >&2
+            echo "       Re-run: make provision-worker HOST=<this-host>" >&2
+            exit 1
+          fi
+          cat /opt/143/.env.local >> /opt/143/.env
+        '
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
   else
