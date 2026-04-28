@@ -307,7 +307,9 @@ describe("ManualSessionCreatePageContent", () => {
     const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
     await user.type(textarea, "/rev");
 
-    expect(await screen.findByText("/review")).toBeInTheDocument();
+    const suggestion = await screen.findByRole("button", { name: "/review Review pending changes" });
+    expect(suggestion).toBeInTheDocument();
+    expect(suggestion.querySelector("svg")).toBeNull();
     await waitFor(() => {
       expect(mocks.sessionComposerSlashCommandsMock).toHaveBeenCalled();
     });

@@ -20,7 +20,6 @@ import {
   XCircle,
   X,
   MinusCircle,
-  Slash,
   Square,
   PanelRightOpen,
   PanelRightClose,
@@ -154,7 +153,6 @@ export function formatDuration(startedAt?: string, completedAt?: string): string
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
 
 const validationChecks: { key: string; label: string }[] = [
   { key: "direction_check", label: "Direction check" },
@@ -741,7 +739,6 @@ function SessionComposer({
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: slashTriggerIcon,
         })),
       }));
     }

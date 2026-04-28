@@ -2,7 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X } from "lucide-react";
+import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,7 +67,6 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
 const directoryTriggerIcon = <FolderTree className={triggerPickerIconClassName} />;
 const fileTriggerIcon = <FileCode2 className={triggerPickerIconClassName} />;
-const slashTriggerIcon = <Slash className={triggerPickerIconClassName} />;
 
 type DictationResult = {
   transcript: string;
@@ -380,7 +379,6 @@ export function ManualSessionCreatePageContent() {
           id: command.name,
           primary: command.token,
           secondary: command.description,
-          icon: slashTriggerIcon,
         })),
       }));
     }
