@@ -138,6 +138,22 @@ func NewClient(socketPath string) *Client {
 	return &Client{SocketPath: socketPath}
 }
 
+// GetAPIToken asks the host for a fresh API-scoped GitHub token and returns
+// just the token string. Wraps Get(ctx, ActionAPI) with the response-error
+// check that every API caller has to do anyway, so consumers (e.g. the
+// 143-tools GitHub source) can pass this method directly as a token-getter
+// callback without re-implementing the same boilerplate at every site.
+func (c *Client) GetAPIToken(ctx context.Context) (string, error) {
+	resp, err := c.Get(ctx, ActionAPI)
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("auth socket: %s", resp.Error)
+	}
+	return resp.Token, nil
+}
+
 // Get asks the host to resolve a fresh GitHub credential for the given
 // action. Returns the response payload (which may carry a non-empty Error
 // field) and any transport error.
