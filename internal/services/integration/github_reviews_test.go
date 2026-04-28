@@ -3,9 +3,11 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -185,13 +187,13 @@ func TestGitHubCodeReviewSource_GetPRReviews(t *testing.T) {
 	mux.HandleFunc("/repos/octocat/hello-world/pulls/42/comments", func(w http.ResponseWriter, r *http.Request) {
 		resp := []map[string]any{
 			{
-				"id":                      int64(200),
-				"pull_request_review_id":  int64(101),
-				"path":                    "main.go",
-				"line":                    42,
-				"body":                    "This needs error handling",
+				"id":                     int64(200),
+				"pull_request_review_id": int64(101),
+				"path":                   "main.go",
+				"line":                   42,
+				"body":                   "This needs error handling",
 				"diff_hunk":              "@@ -40,3 +40,5 @@",
-				"user":                    map[string]any{"login": "reviewer2"},
+				"user":                   map[string]any{"login": "reviewer2"},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -477,4 +479,111 @@ func TestReviewDecision(t *testing.T) {
 	require.Equal(t, "has_reviews", reviewDecision(5))
 	require.Equal(t, "has_reviews", reviewDecision(1))
 	require.Equal(t, "pending", reviewDecision(0))
+}
+
+func TestGitHubCodeReviewSource_TokenFunc_CachedAcrossCalls(t *testing.T) {
+	t.Parallel()
+
+	var authHeaders []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/o/r/pulls", func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	})
+	mux.HandleFunc("/repos/o/r/pulls/1/reviews", func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	})
+	mux.HandleFunc("/repos/o/r/pulls/1/comments", func(w http.ResponseWriter, r *http.Request) {
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	var resolveCount atomic.Int32
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		BaseURL: server.URL,
+		Owner:   "o",
+		Repo:    "r",
+		TokenFunc: func(ctx context.Context) (string, error) {
+			resolveCount.Add(1)
+			return "dynamic-token", nil
+		},
+	})
+
+	_, err := src.ListRecentPRs(context.Background(), PRFilter{State: "open"})
+	require.NoError(t, err)
+
+	_, err = src.GetPRReviews(context.Background(), 1)
+	require.NoError(t, err, "second call (with paginated GET) should reuse cached token")
+
+	require.Equal(t, int32(1), resolveCount.Load(),
+		"TokenFunc should be invoked once and cached for the lifetime of the source")
+	require.NotEmpty(t, authHeaders, "expected the test server to have received requests")
+	for _, h := range authHeaders {
+		require.Equal(t, "Bearer dynamic-token", h, "all requests should carry the resolved token")
+	}
+}
+
+func TestGitHubCodeReviewSource_TokenFunc_ErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		Owner: "o",
+		Repo:  "r",
+		TokenFunc: func(ctx context.Context) (string, error) {
+			return "", errors.New("socket unavailable")
+		},
+	})
+
+	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "socket unavailable")
+}
+
+func TestGitHubCodeReviewSource_TokenFunc_EmptyTokenIsError(t *testing.T) {
+	t.Parallel()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		Owner: "o",
+		Repo:  "r",
+		TokenFunc: func(ctx context.Context) (string, error) {
+			return "", nil
+		},
+	})
+
+	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
+	require.Error(t, err, "an empty token from TokenFunc must surface as an error, not be cached as a hit")
+	require.Contains(t, err.Error(), "empty token")
+}
+
+func TestGitHubCodeReviewSource_StaticTokenWinsOverFunc(t *testing.T) {
+	t.Parallel()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "Bearer static-token", r.Header.Get("Authorization"),
+			"static Token should be used when both Token and TokenFunc are set")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
+		BaseURL: server.URL,
+		Token:   "static-token",
+		Owner:   "o",
+		Repo:    "r",
+		TokenFunc: func(ctx context.Context) (string, error) {
+			t.Fatal("TokenFunc should not be called when static Token is set")
+			return "", nil
+		},
+	})
+
+	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
+	require.NoError(t, err)
 }

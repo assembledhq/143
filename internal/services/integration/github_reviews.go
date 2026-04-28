@@ -3,11 +3,13 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -25,21 +27,38 @@ var linkNextRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 // It uses the GitHub REST API to list recent PRs and their review comments.
 //
 // The token is a GitHub installation token (short-lived, generated from the
-// GitHub App credentials). It's injected as GITHUB_TOKEN in the sandbox env.
+// GitHub App credentials). It can be supplied two ways:
+//
+//   - Token (static) — used when a long-lived PAT or pre-resolved installation
+//     token is available in the env (legacy GITHUB_TOKEN sandbox path).
+//   - TokenFunc (deferred) — used when the sandbox reaches its token through
+//     the per-session host auth socket. The func is invoked lazily on first
+//     API call and the resolved value is cached for the lifetime of the
+//     source. Each `143-tools` invocation builds a fresh source, so the cache
+//     never outlives a single CLI process.
 type GitHubCodeReviewSource struct {
 	httpClient *http.Client
 	baseURL    string
-	token      string
 	owner      string
 	repo       string
+
+	staticToken string
+	tokenFunc   func(context.Context) (string, error)
+
+	tokenMu     sync.Mutex
+	cachedToken string
 }
 
 // GitHubCodeReviewConfig holds the connection details for a GitHub CodeReviewSource.
 type GitHubCodeReviewConfig struct {
 	BaseURL string // defaults to "https://api.github.com"
-	Token   string // installation token or PAT
-	Owner   string // repository owner
-	Repo    string // repository name
+	Token   string // installation token or PAT (mutually exclusive with TokenFunc)
+	// TokenFunc resolves a token on first use. Used when the token comes from
+	// a per-session source (e.g. host auth socket) rather than a static env
+	// var. If both Token and TokenFunc are set, Token wins.
+	TokenFunc func(context.Context) (string, error)
+	Owner     string // repository owner
+	Repo      string // repository name
 }
 
 // NewGitHubCodeReviewSource creates a GitHub CodeReviewSource from the given config.
@@ -50,12 +69,40 @@ func NewGitHubCodeReviewSource(cfg GitHubCodeReviewConfig) *GitHubCodeReviewSour
 	}
 
 	return &GitHubCodeReviewSource{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		baseURL:    baseURL,
-		token:      cfg.Token,
-		owner:      cfg.Owner,
-		repo:       cfg.Repo,
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		baseURL:     baseURL,
+		owner:       cfg.Owner,
+		repo:        cfg.Repo,
+		staticToken: cfg.Token,
+		tokenFunc:   cfg.TokenFunc,
 	}
+}
+
+// resolveToken returns the GitHub token to use for an API call. A static token
+// is returned directly; otherwise TokenFunc is invoked once and the result is
+// cached for the lifetime of the source so all HTTP calls in a single
+// `143-tools` invocation share one resolution.
+func (g *GitHubCodeReviewSource) resolveToken(ctx context.Context) (string, error) {
+	if g.staticToken != "" {
+		return g.staticToken, nil
+	}
+	g.tokenMu.Lock()
+	defer g.tokenMu.Unlock()
+	if g.cachedToken != "" {
+		return g.cachedToken, nil
+	}
+	if g.tokenFunc == nil {
+		return "", errors.New("github: no token configured")
+	}
+	tok, err := g.tokenFunc(ctx)
+	if err != nil {
+		return "", err
+	}
+	if tok == "" {
+		return "", errors.New("github: token func returned empty token")
+	}
+	g.cachedToken = tok
+	return tok, nil
 }
 
 func (g *GitHubCodeReviewSource) Name() string { return "github" }
@@ -170,11 +217,15 @@ func (g *GitHubCodeReviewSource) GetPRReviews(ctx context.Context, prNumber int)
 
 // doGet performs an authenticated GET request and decodes the JSON response.
 func (g *GitHubCodeReviewSource) doGet(ctx context.Context, url string, target any) error {
+	token, err := g.resolveToken(ctx)
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
@@ -196,6 +247,10 @@ func (g *GitHubCodeReviewSource) doGet(ctx context.Context, url string, target a
 // runaway pagination. On mid-pagination errors it returns whatever was
 // collected so far along with a nil error (logging a warning instead).
 func doGetPaginated[T any](ctx context.Context, g *GitHubCodeReviewSource, initialURL string) ([]T, error) {
+	token, err := g.resolveToken(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var all []T
 	nextURL := initialURL
 
@@ -208,7 +263,7 @@ func doGetPaginated[T any](ctx context.Context, g *GitHubCodeReviewSource, initi
 			}
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+g.token)
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
@@ -280,17 +335,17 @@ func reviewDecision(reviewComments int) string {
 // GitHub API response types — minimal structs for the fields we need.
 
 type ghPullRequest struct {
-	Number         int       `json:"number"`
-	Title          string    `json:"title"`
-	State          string    `json:"state"`
-	HTMLURL        string    `json:"html_url"`
-	User           ghUser    `json:"user"`
-	CreatedAt      time.Time `json:"created_at"`
+	Number         int        `json:"number"`
+	Title          string     `json:"title"`
+	State          string     `json:"state"`
+	HTMLURL        string     `json:"html_url"`
+	User           ghUser     `json:"user"`
+	CreatedAt      time.Time  `json:"created_at"`
 	MergedAt       *time.Time `json:"merged_at"`
-	Additions      int       `json:"additions"`
-	Deletions      int       `json:"deletions"`
-	ChangedFiles   int       `json:"changed_files"`
-	ReviewComments int       `json:"review_comments"`
+	Additions      int        `json:"additions"`
+	Deletions      int        `json:"deletions"`
+	ChangedFiles   int        `json:"changed_files"`
+	ReviewComments int        `json:"review_comments"`
 }
 
 type ghReview struct {
@@ -302,13 +357,13 @@ type ghReview struct {
 }
 
 type ghReviewComment struct {
-	ID                    int64  `json:"id"`
-	PullRequestReviewID   int64  `json:"pull_request_review_id"`
-	Path                  string `json:"path"`
-	Line                  int    `json:"line"`
-	Body                  string `json:"body"`
-	DiffHunk              string `json:"diff_hunk"`
-	User                  ghUser `json:"user"`
+	ID                  int64  `json:"id"`
+	PullRequestReviewID int64  `json:"pull_request_review_id"`
+	Path                string `json:"path"`
+	Line                int    `json:"line"`
+	Body                string `json:"body"`
+	DiffHunk            string `json:"diff_hunk"`
+	User                ghUser `json:"user"`
 }
 
 type ghUser struct {

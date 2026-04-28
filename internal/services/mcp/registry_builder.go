@@ -1,11 +1,13 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
 
 // BuildRegistryFromEnv creates an integration registry from environment variables.
@@ -59,10 +61,18 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		}
 	}
 
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		owner := os.Getenv("GITHUB_REPO_OWNER")
-		repo := os.Getenv("GITHUB_REPO_NAME")
-		if owner != "" && repo != "" {
+	owner := os.Getenv("GITHUB_REPO_OWNER")
+	repo := os.Getenv("GITHUB_REPO_NAME")
+	if owner != "" && repo != "" {
+		// Two credential paths, mutually exclusive in practice (the orchestrator
+		// only injects one — see prepareSandboxGitHubAuth):
+		//   1. GITHUB_TOKEN env var: legacy fallback or PAT-based setups. Token
+		//      sits in the env for the container's lifetime.
+		//   2. _143_AUTH_SOCK: GitHub App identity flow. The socket vends fresh,
+		//      short-lived tokens per request. We resolve once per `143-tools`
+		//      invocation and cache inside the source for the life of that
+		//      single CLI process.
+		if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
 				Token: token,
 				Owner: owner,
@@ -70,6 +80,25 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 			})
 			reg.RegisterCodeReviewSource(source)
 			fmt.Fprintf(logger, "143-tools: registered github (%s/%s)\n", owner, repo)
+		} else if sockPath := os.Getenv(sandboxauth.SocketEnvVar); sockPath != "" {
+			client := sandboxauth.NewClient(sockPath)
+			tokenFunc := func(ctx context.Context) (string, error) {
+				resp, err := client.Get(ctx, sandboxauth.ActionAPI)
+				if err != nil {
+					return "", err
+				}
+				if resp.Error != "" {
+					return "", fmt.Errorf("auth socket: %s", resp.Error)
+				}
+				return resp.Token, nil
+			}
+			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
+				TokenFunc: tokenFunc,
+				Owner:     owner,
+				Repo:      repo,
+			})
+			reg.RegisterCodeReviewSource(source)
+			fmt.Fprintf(logger, "143-tools: registered github (%s/%s) via host auth socket\n", owner, repo)
 		}
 	}
 
