@@ -3215,10 +3215,10 @@ func TestPushSessionBranch(t *testing.T) {
 		wantDestroyCnt int
 	}{
 		{
-			name:           "missing snapshot maps to expired",
+			name:           "missing snapshot object maps to unavailable",
 			snapshots:      &prTestSnapshotStore{loadErr: storage.ErrSnapshotNotFound},
 			provider:       &prTestSandboxProvider{},
-			wantErrIs:      ErrSnapshotExpired,
+			wantErrIs:      ErrSnapshotUnavailable,
 			wantDestroyCnt: 1,
 		},
 		{
@@ -3327,7 +3327,7 @@ func TestCreatePR_ConfigChecks(t *testing.T) {
 			wantErrSubstr: "sandbox push dependencies not configured",
 		},
 		{
-			name: "missing snapshot key maps to expired",
+			name: "missing snapshot key maps to not captured",
 			run: &models.Session{
 				ID:    uuid.New(),
 				OrgID: uuid.New(),
@@ -3336,7 +3336,7 @@ func TestCreatePR_ConfigChecks(t *testing.T) {
 				svc.sandboxProvider = &prTestSandboxProvider{}
 				svc.snapshots = &prTestSnapshotStore{}
 			},
-			wantErrIs: ErrSnapshotExpired,
+			wantErrIs: ErrSnapshotNotCaptured,
 		},
 		{
 			name: "missing repository returns error",
