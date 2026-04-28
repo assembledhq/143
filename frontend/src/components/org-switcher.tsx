@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Check, ChevronsUpDown, Mail, Plus, Settings } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 
 import { Button } from "@/components/ui/button";
 import {

@@ -2,11 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
-import { toast } from "sonner";
+import { notify as toast } from "@/lib/notify";
 import { useAutosave, __resetAutosaveQueuesForTests } from "./useAutosave";
 
-vi.mock("sonner", () => ({
-  toast: {
+vi.mock("@/lib/notify", () => ({
+  notify: {
     error: vi.fn(),
     success: vi.fn(),
   },
