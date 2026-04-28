@@ -1563,6 +1563,99 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByRole('button', { name: /Create PR/ })).not.toBeInTheDocument();
   });
 
+  it('does not show a checkpoint-missing notice for an active run before a checkpoint is expected', async () => {
+    const runningSession: Session = {
+      ...mockSessions[0],
+      status: 'running',
+      completed_at: undefined,
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'running',
+      snapshot_key: undefined,
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: runningSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText('Agent is working...');
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('No reusable checkpoint saved')).not.toBeInTheDocument();
+  });
+
+  it('does not show a checkpoint-missing notice for an idle interactive session before PR creation starts', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'snapshotted',
+      snapshot_key: undefined,
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('No reusable checkpoint saved')).not.toBeInTheDocument();
+  });
+
+  it('does not show a checkpoint-missing notice while awaiting user input', async () => {
+    const awaitingInputSession: Session = {
+      ...mockSessions[0],
+      status: 'awaiting_input',
+      completed_at: undefined,
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'snapshotted',
+      snapshot_key: undefined,
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: awaitingInputSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText('Fixed TypeError by adding null check');
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('No reusable checkpoint saved')).not.toBeInTheDocument();
+  });
+
   it('calls createPR API when Create PR button is clicked', async () => {
     let createPRCalled = false;
 
