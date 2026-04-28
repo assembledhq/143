@@ -3349,6 +3349,102 @@ describe('SessionDetailPage', () => {
     expect(screen.getByLabelText('Model override')).toBeInTheDocument();
   });
 
+  it('matches both trigger menus to the continue-session input width', async () => {
+    const resumableSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'codex',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      repository_id: 'repo-1',
+      target_branch: 'main',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: resumableSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/session-composer/files', () => {
+        return HttpResponse.json({
+          data: [
+            {
+              kind: 'directory',
+              token: '@internal/services',
+              path: 'internal/services',
+              display: 'internal/services',
+            },
+          ],
+          meta: {},
+        } satisfies ListResponse<{ kind: 'file' | 'directory'; token?: string; path?: string; id?: string; display: string }>);
+      }),
+      http.get('/api/v1/session-composer/slash-commands', () => {
+        return HttpResponse.json({
+          groups: [
+            {
+              source: 'builtin',
+              label: 'Codex commands',
+              items: [
+                {
+                  kind: 'command',
+                  agent_type: 'codex',
+                  name: 'review',
+                  token: '/review',
+                  display: '/review',
+                  description: 'Review pending changes',
+                  source: 'builtin',
+                },
+              ],
+            },
+          ],
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
+    const composerShell = screen.getByTestId('session-composer-shell');
+    const inputSurface = screen.getByTestId('session-composer-input-surface');
+
+    vi.spyOn(composerShell, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 680,
+      width: 760,
+      height: 132,
+      top: 680,
+      right: 760,
+      bottom: 812,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(inputSurface, 'getBoundingClientRect').mockReturnValue({
+      x: 48,
+      y: 692,
+      width: 640,
+      height: 108,
+      top: 692,
+      right: 688,
+      bottom: 800,
+      left: 48,
+      toJSON: () => ({}),
+    });
+
+    await user.type(composer, 'Inspect @serv');
+
+    const mentionOverlay = await screen.findByTestId('trigger-picker-overlay');
+    expect(mentionOverlay).toHaveStyle({ left: '48px', width: '640px' });
+
+    await user.clear(composer);
+    await user.type(composer, '/rev');
+
+    expect(await screen.findByText('/review')).toBeInTheDocument();
+
+    const commandOverlay = screen.getByTestId('trigger-picker-overlay');
+    expect(commandOverlay).toHaveStyle({ left: '48px', width: '640px' });
+  });
+
   it('shows Gemini CLI agent type label', async () => {
     const geminiSession: Session = {
       ...mockSessions[0],
