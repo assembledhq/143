@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
+import { forwardRef, useImperativeHandle, useState } from "react";
 import { ReviewDiffView } from "./review-diff-view";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
 import type { SessionReviewComment } from "@/lib/types";
+
+const mockDiffPaneRender = vi.fn();
+const mockScrollToFile = vi.fn();
+const mockScrollToNextHunk = vi.fn();
+const mockScrollToPrevHunk = vi.fn();
 
 // Mock child components to isolate unit under test
 vi.mock("./diff-toolbar", () => ({
@@ -22,14 +28,26 @@ vi.mock("./diff-toolbar", () => ({
 }));
 
 vi.mock("./diff-pane", () => ({
-  DiffPane: vi.fn().mockImplementation((props: Record<string, unknown>) => (
-    <div data-testid="diff-pane">
-      <span data-testid="pane-view-mode">{String(props.viewMode)}</span>
-      <button onClick={() => (props.onBrowseFile as (p: string) => void)("test.ts")}>
-        BrowseFile
-      </button>
-    </div>
-  )),
+  DiffPane: forwardRef(function MockDiffPane(props: Record<string, unknown>, ref) {
+    mockDiffPaneRender(props);
+    useImperativeHandle(ref, () => ({
+      scrollToFile: mockScrollToFile,
+      scrollToNextHunk: mockScrollToNextHunk,
+      scrollToPrevHunk: mockScrollToPrevHunk,
+    }));
+
+    return (
+      <div data-testid="diff-pane">
+        <span data-testid="pane-view-mode">{String(props.viewMode)}</span>
+        <button onClick={() => (props.onBrowseFile as (p: string) => void)("test.ts")}>
+          BrowseFile
+        </button>
+        <button onClick={() => (props.onActiveFileChange as (index: number) => void)(1)}>
+          ReportActiveFile
+        </button>
+      </div>
+    );
+  }),
 }));
 
 vi.mock("./repo-explorer", () => ({
@@ -99,6 +117,11 @@ function defaultProps(overrides: Partial<Parameters<typeof ReviewDiffView>[0]> =
 describe("ReviewDiffView", () => {
   beforeEach(() => {
     localStorage.clear();
+    mockScrollToFile.mockReset();
+    mockScrollToNextHunk.mockReset();
+    mockScrollToPrevHunk.mockReset();
+    mockDiffPaneRender.mockReset();
+    mockUseDiffKeyboardNav.mockReset();
   });
 
   it("renders DiffToolbar, DiffPane, and KeyboardHelpOverlay when files exist", () => {
@@ -106,6 +129,37 @@ describe("ReviewDiffView", () => {
     expect(screen.getByTestId("diff-toolbar")).toBeInTheDocument();
     expect(screen.getByTestId("diff-pane")).toBeInTheDocument();
     expect(screen.getByTestId("keyboard-help")).toBeInTheDocument();
+  });
+
+  it("passes an active file change handler to DiffPane", () => {
+    const props = defaultProps();
+    render(<ReviewDiffView {...props} />);
+
+    const lastProps = mockDiffPaneRender.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+
+    expect(lastProps.onActiveFileChange).toEqual(expect.any(Function));
+  });
+
+  it("does not re-scroll the diff pane when the active file changes from passive scroll sync", () => {
+    function Harness() {
+      const [activeFileIndex, setActiveFileIndex] = useState(0);
+
+      return (
+        <ReviewDiffView
+          {...defaultProps()}
+          activeFileIndex={activeFileIndex}
+          onFileChange={setActiveFileIndex}
+        />
+      );
+    }
+
+    render(<Harness />);
+    expect(mockScrollToFile).toHaveBeenCalledWith(0);
+
+    mockScrollToFile.mockClear();
+    fireEvent.click(screen.getByText("ReportActiveFile"));
+
+    expect(mockScrollToFile).not.toHaveBeenCalled();
   });
 
   it("renders empty state when files is empty", () => {
@@ -226,13 +280,10 @@ describe("ReviewDiffView", () => {
     render(<ReviewDiffView {...defaultProps()} />);
     const lastCall = mockUseDiffKeyboardNav.mock.calls.at(-1)![0] as Record<string, unknown>;
     const toggleExplorer = lastCall.onToggleExplorer as () => void;
-    // Call the toggle to enter explorer mode
-    toggleExplorer();
-    // Triggering toggleExplorer should cause a re-render, but since useDiffKeyboardNav
-    // is mocked we need to check via the rendered output: explorer should now show
-    // We can't easily test this since the toggle happens via state, but we can
-    // verify the function was captured and is callable.
-    // After toggle, explorer mode should render RepoExplorer
+    act(() => {
+      toggleExplorer();
+    });
+    expect(screen.getByTestId("repo-explorer")).toBeInTheDocument();
   });
 
   it("handleAddCommentOnSelectedLine adds comment on first add line", () => {

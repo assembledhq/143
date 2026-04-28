@@ -53,6 +53,7 @@ export function ReviewDiffView({
   onDiffSearchChange,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
+  const skipNextScrollToFileRef = useRef(false);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [explorerMode, setExplorerMode] = useState(false);
   const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
@@ -102,8 +103,20 @@ export function ReviewDiffView({
 
   // activeFileIndex can change from outside (sidebar file-tree click), so scroll via effect rather than only inside handleFileSelect.
   useEffect(() => {
+    if (skipNextScrollToFileRef.current) {
+      skipNextScrollToFileRef.current = false;
+      return;
+    }
     diffPaneRef.current?.scrollToFile(activeFileIndex);
   }, [activeFileIndex]);
+
+  const handleVisibleFileChange = useCallback(
+    (index: number) => {
+      skipNextScrollToFileRef.current = true;
+      onFileChange(index);
+    },
+    [onFileChange]
+  );
 
   const toggleViewMode = useCallback(() => {
     handleViewModeChange(viewMode === "unified" ? "split" : "unified");
@@ -233,6 +246,7 @@ export function ReviewDiffView({
         viewMode={viewMode}
         sessionId={sessionId}
         activeFileIndex={activeFileIndex}
+        onActiveFileChange={handleVisibleFileChange}
         commentsByLine={commentsByLine}
         activeCommentLine={activeCommentLine}
         onAddComment={onAddComment}

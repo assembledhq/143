@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useImperativeHandle, forwardRef } from "react";
+import { useRef, useCallback, useImperativeHandle, forwardRef, useEffect } from "react";
 import type { DiffFile } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
@@ -18,6 +18,7 @@ interface DiffPaneProps {
   viewMode: ViewMode;
   sessionId?: string;
   activeFileIndex?: number;
+  onActiveFileChange?: (index: number) => void;
   commentsByLine?: Map<CommentLineKey, SessionReviewComment[]>;
   activeCommentLine?: ActiveCommentLine | null;
   onAddComment?: (filePath: string, lineNumber: number, side: "old" | "new") => void;
@@ -40,6 +41,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     viewMode,
     sessionId,
     activeFileIndex,
+    onActiveFileChange,
     commentsByLine,
     activeCommentLine,
     onAddComment,
@@ -51,6 +53,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
   }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const fileRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+    const lastReportedActiveFileIndexRef = useRef<number | null>(activeFileIndex ?? null);
 
     const setFileRef = useCallback(
       (index: number) => (el: HTMLDivElement | null) => {
@@ -103,6 +106,35 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
       []
     );
 
+    const reportVisibleActiveFile = useCallback(() => {
+      const container = containerRef.current;
+      if (!container || !onActiveFileChange || fileRefs.current.size === 0) return;
+
+      const containerTop = container.getBoundingClientRect().top;
+      const activationOffset = 96;
+      const sortedEntries = [...fileRefs.current.entries()].sort((a, b) => a[0] - b[0]);
+
+      let nextActiveIndex = sortedEntries[0][0];
+
+      for (const [index, element] of sortedEntries) {
+        const topDelta = element.getBoundingClientRect().top - containerTop;
+        if (topDelta <= activationOffset) {
+          nextActiveIndex = index;
+          continue;
+        }
+        break;
+      }
+
+      if (lastReportedActiveFileIndexRef.current === nextActiveIndex) return;
+
+      lastReportedActiveFileIndexRef.current = nextActiveIndex;
+      onActiveFileChange(nextActiveIndex);
+    }, [onActiveFileChange]);
+
+    useEffect(() => {
+      lastReportedActiveFileIndexRef.current = activeFileIndex ?? null;
+    }, [activeFileIndex]);
+
     useImperativeHandle(ref, () => ({
       scrollToFile: (index: number) => {
         const el = fileRefs.current.get(index);
@@ -127,7 +159,11 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
     }
 
     return (
-      <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div
+        ref={containerRef}
+        onScroll={reportVisibleActiveFile}
+        className="flex-1 overflow-y-auto p-4 space-y-4"
+      >
         {files.map((file, i) => (
           <FileDiffSection
             key={file.newPath}
