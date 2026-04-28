@@ -174,7 +174,7 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		tools = append(tools,
 			Tool{
 				Name:        prefix + "_list_recent_prs",
-				Description: fmt.Sprintf("List recently merged pull requests from %s. Returns PR summaries with titles, authors, review status, and change size.", prefix),
+				Description: fmt.Sprintf("List recently merged Pull Requests from %s. Returns PR summaries with titles, authors, review status, and change size.", prefix),
 				InputSchema: ToolSchema{
 					Type: "object",
 					Properties: map[string]SchemaProperty{
@@ -185,11 +185,11 @@ func (tr *ToolRegistry) ListTools() []Tool {
 			},
 			Tool{
 				Name:        prefix + "_get_pr_reviews",
-				Description: fmt.Sprintf("Get all reviews and inline review comments for a specific pull request from %s. Returns review decisions, comments, and code-level feedback.", prefix),
+				Description: fmt.Sprintf("Get all reviews and inline review comments for a specific Pull Request from %s. Returns review decisions, comments, and code-level feedback.", prefix),
 				InputSchema: ToolSchema{
 					Type: "object",
 					Properties: map[string]SchemaProperty{
-						"pr_number": {Type: "number", Description: "The pull request number"},
+						"pr_number": {Type: "number", Description: "The Pull Request number"},
 					},
 					Required: []string{"pr_number"},
 				},
@@ -230,7 +230,7 @@ func (tr *ToolRegistry) ListTools() []Tool {
 						"title":               {Type: "string", Description: "Project title (required)"},
 						"goal":                {Type: "string", Description: "What success looks like (required)"},
 						"scope":               {Type: "string", Description: "What is in and out of bounds (optional)"},
-						"completion_criteria":  {Type: "string", Description: "How to know when done (optional)"},
+						"completion_criteria": {Type: "string", Description: "How to know when done (optional)"},
 						"reasoning":           {Type: "string", Description: "Why this project should exist (required)"},
 						"source_issue_ids":    {Type: "string", Description: "Comma-separated motivating issue UUIDs (optional)"},
 						"priority":            {Type: "number", Description: "Priority 0-100, default 50 (optional)", Default: 50},
@@ -704,16 +704,16 @@ func (tr *ToolRegistry) callProjectProposer(ctx context.Context, pp integration.
 	switch method {
 	case "propose":
 		var p struct {
-			RepositoryID      string  `json:"repository_id"`
-			Title             string  `json:"title"`
-			Goal              string  `json:"goal"`
-			Scope             *string `json:"scope"`
+			RepositoryID       string  `json:"repository_id"`
+			Title              string  `json:"title"`
+			Goal               string  `json:"goal"`
+			Scope              *string `json:"scope"`
 			CompletionCriteria *string `json:"completion_criteria"`
-			Reasoning         string  `json:"reasoning"`
-			SourceIssueIDs    string  `json:"source_issue_ids"`
-			Priority          int     `json:"priority"`
-			Tasks             string  `json:"tasks"`
-			SimilarProjectIDs string  `json:"similar_project_ids"`
+			Reasoning          string  `json:"reasoning"`
+			SourceIssueIDs     string  `json:"source_issue_ids"`
+			Priority           int     `json:"priority"`
+			Tasks              string  `json:"tasks"`
+			SimilarProjectIDs  string  `json:"similar_project_ids"`
 		}
 		if err := json.Unmarshal(args, &p); err != nil {
 			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
@@ -748,16 +748,16 @@ func (tr *ToolRegistry) callProjectProposer(ctx context.Context, pp integration.
 		}
 
 		params := integration.ProposeProjectParams{
-			RepositoryID:      p.RepositoryID,
-			Title:             p.Title,
-			Goal:              p.Goal,
-			Scope:             p.Scope,
+			RepositoryID:       p.RepositoryID,
+			Title:              p.Title,
+			Goal:               p.Goal,
+			Scope:              p.Scope,
 			CompletionCriteria: p.CompletionCriteria,
-			Reasoning:         p.Reasoning,
-			SourceIssueIDs:    sourceIssueIDs,
-			Priority:          priority,
-			Tasks:             tasks,
-			SimilarProjectIDs: similarProjectIDs,
+			Reasoning:          p.Reasoning,
+			SourceIssueIDs:     sourceIssueIDs,
+			Priority:           priority,
+			Tasks:              tasks,
+			SimilarProjectIDs:  similarProjectIDs,
 		}
 		result, err := pp.ProposeProject(ctx, params)
 		if err != nil {
