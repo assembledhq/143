@@ -93,7 +93,7 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 	// every row literal:
 	//   - 3 policy defaults (origin/interaction_mode/validation_policy) at positions 3-5
 	//   - 2 nils right after snapshot_key (pending_snapshot_key, pending_snapshot_set_at)
-	//   - 4 linear_* defaults (migration 000102) just before deleted_at
+	//   - 4 linear_* defaults (migration 000103) just before deleted_at
 	//   - 2 git_identity nils between deleted_at and created_at
 	if len(values) == len(sessionColumnsForFiles)-3-2-4-2 {
 		row := make([]interface{}, 0, len(values)+11)

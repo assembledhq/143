@@ -215,7 +215,7 @@ const (
 	sessionDiffCollectedAtIndex = 72
 	sessionLatestDiffIndex      = 73
 	// preLinearSessionColumnsLen is the size of sessionColumns *before*
-	// migrations 102 (linear_*) and 100 (git_identity_*) added their
+	// migrations 103 (linear_*) and 100 (git_identity_*) added their
 	// columns. Test fixtures authored against the pre-migration shape pass
 	// rows of this length (or shorter); the dispatch routes them to the
 	// right pad helper, then sessionTestRow pads the four trailing linear
@@ -238,7 +238,7 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 }
 
 // linearSessionDefaults returns the placeholder values for the four
-// linear_* columns inserted by migration 102. Test rows that don't pass
+// linear_* columns inserted by migration 103. Test rows that don't pass
 // values for these get them auto-padded by sessionTestRow (one of the
 // length-difference cases below).
 func linearSessionDefaults() []interface{} {

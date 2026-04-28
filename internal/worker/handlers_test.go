@@ -163,7 +163,7 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 }
 
 // preLinearWorkerSessionColumnsLen is len(workerSessionColumns) before
-// migration 102 added the four linear_* fields. Test rows authored before
+// migration 103 added the four linear_* fields. Test rows authored before
 // that migration produce dispatch output that's exactly 4 short of the
 // current sessionColumns; we pad after dispatch so the shape matches.
 const preLinearWorkerSessionColumnsLen = 76
@@ -1841,7 +1841,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	// session back to the run it's servicing (without it, audit+stats joins
 	// on sessions.automation_run_id would silently miss every row). The
 	// trailing four AnyArgs are the linear_* policy columns added by
-	// migration 102.
+	// migration 103.
 	mock.ExpectBegin()
 	mock.ExpectQuery(`INSERT INTO sessions`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
