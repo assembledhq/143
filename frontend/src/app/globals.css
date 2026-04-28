@@ -136,6 +136,39 @@
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
 }
 
+/* Animated ellipsis used by <AnimatedEllipsis /> for "Running" / "Pending"
+   states. 1.6s full cycle: each dot fades in 400ms apart, all three fade out
+   together, then the cycle restarts. Calm-but-alive pacing — slower than a
+   loading spinner, faster than a pulse. */
+@keyframes ellipsis-dot-fade-1 {
+  0%, 80%, 100% { opacity: 0; }
+  5%, 75% { opacity: 1; }
+}
+@keyframes ellipsis-dot-fade-2 {
+  0%, 25%, 80%, 100% { opacity: 0; }
+  30%, 75% { opacity: 1; }
+}
+@keyframes ellipsis-dot-fade-3 {
+  0%, 50%, 80%, 100% { opacity: 0; }
+  55%, 75% { opacity: 1; }
+}
+
+.ellipsis-dot {
+  animation-duration: 1.6s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+.ellipsis-dot-1 { animation-name: ellipsis-dot-fade-1; }
+.ellipsis-dot-2 { animation-name: ellipsis-dot-fade-2; }
+.ellipsis-dot-3 { animation-name: ellipsis-dot-fade-3; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ellipsis-dot {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
