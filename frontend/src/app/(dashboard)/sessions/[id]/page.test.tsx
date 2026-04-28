@@ -2921,6 +2921,41 @@ describe('SessionDetailPage', () => {
     });
   });
 
+  it('positions the jump-to-latest affordance close to the composer', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(900);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={idleSession.id} />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    const scroller = getChatScroller(container);
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+
+    const jumpButton = await screen.findByRole('button', { name: /Jump to latest/i });
+    const jumpContainer = jumpButton.parentElement;
+
+    expect(jumpContainer).not.toBeNull();
+    expect(jumpContainer).toHaveClass('bottom-4');
+    expect(jumpContainer).not.toHaveClass('bottom-24');
+  });
+
   it('opens review mode when clicking diff stats badge in footer', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
