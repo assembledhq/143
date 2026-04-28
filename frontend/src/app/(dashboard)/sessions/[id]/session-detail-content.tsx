@@ -680,6 +680,7 @@ function SessionComposer({
   }, [message, textareaRef]);
 
   const composerCardRef = useRef<HTMLDivElement>(null);
+  const composerInputSurfaceRef = useRef<HTMLDivElement>(null);
   const [caretPosition, setCaretPosition] = useState(message.length);
   const [selectedTriggerIndex, setSelectedTriggerIndex] = useState(0);
   const [triggerDismissed, setTriggerDismissed] = useState(false);
@@ -763,9 +764,9 @@ function SessionComposer({
       return;
     }
     function update() {
-      const card = composerCardRef.current;
-      if (!card) return;
-      const rect = card.getBoundingClientRect();
+      const anchor = composerInputSurfaceRef.current ?? composerCardRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
       const spacing = 8;
       const viewportHeight = window.innerHeight;
       const availableHeight = Math.max(rect.top - spacing, 120);
@@ -928,7 +929,11 @@ function SessionComposer({
         }}
       />
 
-      <div className="border-t border-border p-3 bg-background shrink-0" ref={composerCardRef}>
+      <div
+        className="border-t border-border p-3 bg-background shrink-0"
+        ref={composerCardRef}
+        data-testid="session-composer-shell"
+      >
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
@@ -946,7 +951,11 @@ function SessionComposer({
           </div>
         )}
 
-        <div className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}>
+        <div
+          ref={composerInputSurfaceRef}
+          data-testid="session-composer-input-surface"
+          className={cn("rounded-xl border bg-muted/30 focus-within:border-ring focus-within:ring-1 focus-within:ring-ring", planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border")}
+        >
           {openComments.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
               {openComments.map((c) => {
