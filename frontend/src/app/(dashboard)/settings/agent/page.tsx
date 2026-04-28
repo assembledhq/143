@@ -84,6 +84,26 @@ function moveRowToTop(rows: CodingAuth[], id: string) {
   return next;
 }
 
+export function reorderRows(
+  rows: CodingAuth[],
+  sourceId: string,
+  targetId: string,
+  position: "before" | "after",
+) {
+  if (sourceId === targetId) return rows;
+  const sourceIdx = rows.findIndex((row) => row.id === sourceId);
+  const targetIdx = rows.findIndex((row) => row.id === targetId);
+  if (sourceIdx === -1 || targetIdx === -1) return rows;
+  const next = [...rows];
+  const [row] = next.splice(sourceIdx, 1);
+  // After removing the source, indices past it shift down by one.
+  const targetIdxAfterRemove = sourceIdx < targetIdx ? targetIdx - 1 : targetIdx;
+  const insertAt = position === "before" ? targetIdxAfterRemove : targetIdxAfterRemove + 1;
+  if (insertAt === sourceIdx) return rows;
+  next.splice(insertAt, 0, row);
+  return next;
+}
+
 function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   switch (provider) {
     case "codex":
@@ -231,11 +251,11 @@ export default function AgentPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       setSelectedId(null);
       setRenameValue("");
-      toast.success("Auth disabled");
+      toast.success("Auth removed");
     },
     onError: (error) => {
       captureError(error, { feature: "coding-auth-delete" });
-      toast.error("Could not disable auth");
+      toast.error("Could not remove auth");
     },
   });
 
@@ -267,10 +287,12 @@ export default function AgentPage() {
     if (effectiveAuthType === "subscription") {
       if (provider === "codex") {
         setShowCodexModal(true);
+        setAddOpen(false);
         return;
       }
       if (provider === "claude_code") {
         setShowClaudeModal(true);
+        setAddOpen(false);
         return;
       }
     }
@@ -390,14 +412,15 @@ export default function AgentPage() {
             selectedId={selectedId}
             onSelect={(id) => {
               setSelectedId(id);
-              setRenameValue("");
+              setRenameValue(rows.find((row) => row.id === id)?.label ?? "");
             }}
             onMove={(id, direction) => {
               const nextRows = moveRows(rows, id, direction);
               void reorderMutation.mutateAsync(nextRows);
             }}
-            onMoveToTop={(id) => {
-              const nextRows = moveRowToTop(rows, id);
+            onReorder={(sourceId, targetId, position) => {
+              const nextRows = reorderRows(rows, sourceId, targetId, position);
+              if (nextRows === rows) return;
               void reorderMutation.mutateAsync(nextRows);
             }}
           />
@@ -510,7 +533,7 @@ export default function AgentPage() {
                     </Button>
                     <Button variant="destructive" onClick={() => deleteMutation.mutate(selected.id)}>
                       <Trash2 className="mr-2 h-4 w-4" />
-                      Disable
+                      Remove
                     </Button>
                   </div>
                 </div>
@@ -655,7 +678,10 @@ export default function AgentPage() {
         {showCodexModal ? (
           <CodexDeviceCodeModal
             label={generatedLabel}
-            onClose={() => setShowCodexModal(false)}
+            onClose={() => {
+              setShowCodexModal(false);
+              closeAddModal();
+            }}
             onConnected={() => {
               setShowCodexModal(false);
               closeAddModal();
@@ -667,7 +693,10 @@ export default function AgentPage() {
         {showClaudeModal ? (
           <ClaudeCodeAuthModal
             label={generatedLabel}
-            onClose={() => setShowClaudeModal(false)}
+            onClose={() => {
+              setShowClaudeModal(false);
+              closeAddModal();
+            }}
             onConnected={() => {
               setShowClaudeModal(false);
               closeAddModal();

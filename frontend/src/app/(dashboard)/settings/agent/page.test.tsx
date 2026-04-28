@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import AgentPage from "./page";
+import type { CodingAuth } from "@/lib/types";
+import AgentPage, { reorderRows } from "./page";
 
 vi.mock("@/hooks/use-auth", () => ({
   useAuth: () => ({
@@ -271,5 +272,67 @@ describe("Agent settings page", () => {
     renderWithProviders(<AgentPage />);
 
     expect(screen.queryByText("Agent-specific access")).not.toBeInTheDocument();
+  });
+});
+
+describe("reorderRows", () => {
+  function makeRows(ids: string[]): CodingAuth[] {
+    return ids.map((id, index) => ({
+      id,
+      org_id: "org-1",
+      priority: index + 1,
+      agent: "codex",
+      auth_type: "subscription",
+      label: id,
+      scope: "organization",
+      provider: "openai_chatgpt",
+      status: "healthy",
+      is_default: index === 0,
+      created_at: "2026-04-22T10:00:00Z",
+      updated_at: "2026-04-22T10:00:00Z",
+    }));
+  }
+
+  function ids(rows: CodingAuth[]) {
+    return rows.map((row) => row.id);
+  }
+
+  it("returns the same array when source and target match", () => {
+    const rows = makeRows(["a", "b", "c"]);
+    expect(reorderRows(rows, "b", "b", "before")).toBe(rows);
+  });
+
+  it("drops 'before' an earlier target by inserting source above it", () => {
+    const rows = makeRows(["a", "b", "c", "d"]);
+    expect(ids(reorderRows(rows, "d", "b", "before"))).toEqual(["a", "d", "b", "c"]);
+  });
+
+  it("drops 'after' an earlier target by inserting source below it", () => {
+    const rows = makeRows(["a", "b", "c", "d"]);
+    expect(ids(reorderRows(rows, "d", "b", "after"))).toEqual(["a", "b", "d", "c"]);
+  });
+
+  it("drops 'before' a later target by inserting source above it", () => {
+    const rows = makeRows(["a", "b", "c", "d"]);
+    expect(ids(reorderRows(rows, "a", "c", "before"))).toEqual(["b", "a", "c", "d"]);
+  });
+
+  it("drops 'after' a later target by inserting source below it", () => {
+    const rows = makeRows(["a", "b", "c", "d"]);
+    expect(ids(reorderRows(rows, "a", "c", "after"))).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it("returns the same array when the move would not change positions", () => {
+    const rows = makeRows(["a", "b", "c"]);
+    // Dropping 'b' "after" 'a' leaves the array in the same order.
+    expect(reorderRows(rows, "b", "a", "after")).toBe(rows);
+    // Dropping 'b' "before" 'c' likewise.
+    expect(reorderRows(rows, "b", "c", "before")).toBe(rows);
+  });
+
+  it("returns the same array when source or target is missing", () => {
+    const rows = makeRows(["a", "b"]);
+    expect(reorderRows(rows, "missing", "a", "before")).toBe(rows);
+    expect(reorderRows(rows, "a", "missing", "before")).toBe(rows);
   });
 });
