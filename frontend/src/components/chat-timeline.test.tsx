@@ -136,6 +136,24 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("3 files changed")).toBeInTheDocument();
   });
 
+  it("renders diff summary below the working indicator when both are shown", () => {
+    render(
+      <ChatTimeline
+        entries={[]}
+        isRunning={true}
+        diffStats={{ added: 42, removed: 7, files_changed: 3 }}
+      />
+    );
+
+    const workingIndicator = screen.getByText("Agent is working...");
+    const diffSummary = screen.getByText("3 files changed");
+
+    expect(
+      workingIndicator.compareDocumentPosition(diffSummary) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("does not show diff summary when diffStats is null", () => {
     render(
       <ChatTimeline entries={[]} isRunning={false} diffStats={null} />
