@@ -27,6 +27,47 @@ func TestClient_Get_UsesEarlierContextDeadline(t *testing.T) {
 	require.Equal(t, "tok", resp.Token, "Get should still decode the host response")
 }
 
+func TestClient_GetAPIToken(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns token", func(t *testing.T) {
+		t.Parallel()
+
+		sock := startSocketServer(t, func(conn net.Conn) {
+			var req Request
+			require.NoError(t, json.NewDecoder(conn).Decode(&req))
+			require.Equal(t, ActionAPI, req.Action, "GetAPIToken must request the api scope")
+			require.NoError(t, json.NewEncoder(conn).Encode(&Response{Token: "ghs_api"}))
+		})
+
+		tok, err := NewClient(sock).GetAPIToken(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, "ghs_api", tok)
+	})
+
+	t.Run("transport error propagates", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := NewClient("/does/not/exist.sock").GetAPIToken(context.Background())
+		require.Error(t, err, "missing socket should surface as a transport error")
+	})
+
+	t.Run("host error becomes go error", func(t *testing.T) {
+		t.Parallel()
+
+		sock := startSocketServer(t, func(conn net.Conn) {
+			var req Request
+			require.NoError(t, json.NewDecoder(conn).Decode(&req))
+			require.NoError(t, json.NewEncoder(conn).Encode(&Response{Error: "no installation for repo"}))
+		})
+
+		tok, err := NewClient(sock).GetAPIToken(context.Background())
+		require.Error(t, err, "Response.Error must surface as a Go error so callers don't quietly use an empty token")
+		require.Empty(t, tok)
+		require.Contains(t, err.Error(), "auth socket: no installation for repo")
+	})
+}
+
 func TestClient_Get_TransportErrorBranches(t *testing.T) {
 	t.Parallel()
 
