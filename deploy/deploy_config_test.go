@@ -70,3 +70,22 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), "cat /opt/143/.env.local >> /opt/143/.env", "deploy.sh worker branch should re-append .env.local into .env on every deploy — without this, every secret refresh wipes the per-host identity")
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID and WORKER_PRIVATE_IP")
 }
+
+// The auto-default for NODE_ID must use the full IP (dotted-to-dash), not
+// just the last octet — otherwise a fleet that spans multiple /24s would
+// silently produce duplicate NODE_IDs (10.0.0.4 and 10.0.1.4 both mapping
+// to "worker-4"), and the worker registry would clobber one node's row
+// with the other's heartbeats.
+//
+// And auto-detection must refuse to guess on multi-homed hosts: picking
+// the wrong NIC's IP would publish a preview_internal_base_url that app
+// nodes can't reach, and start-preview would fail intermittently.
+func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	require.Contains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP//./-}`, "provision.sh's NODE_ID default should use the full dotted-to-dash IP so workers across multiple /24s don't collide on \"worker-<last-octet>\"")
+	require.NotContains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP##*.}`, "provision.sh should not fall back to the last-octet-only default — it collides across /24s")
+	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
+}

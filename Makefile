@@ -301,8 +301,13 @@ secrets-rotate:
 #
 # Worker-only env vars (per-host identity, written to /opt/143/.env.local
 # and preserved across deploys):
-#   WORKER_PRIVATE_IP            — auto-detected via SSH if unset
-#   NODE_ID                      — defaults to "worker-<last octet of WORKER_PRIVATE_IP>"
+#   WORKER_PRIVATE_IP            — auto-detected via SSH if unset. Multi-homed
+#                                  hosts (cluster NIC + storage VLAN, etc.)
+#                                  abort with the candidate list so you can
+#                                  pick the one app nodes will reach.
+#   NODE_ID                      — defaults to "worker-<WORKER_PRIVATE_IP with
+#                                  dots replaced by dashes>" (e.g. worker-10-0-0-4),
+#                                  unique across the full RFC1918 space.
 #   PREVIEW_INTERNAL_BASE_URL    — defaults to "http://${WORKER_PRIVATE_IP}:8080"
 #
 # Example with overrides:
@@ -323,6 +328,17 @@ secrets-rotate:
 #   PREVIEW_INTERNAL_BASE_URL=http://10.0.0.N:8080
 #   EOF
 #   chmod 600 /opt/143/.env.local'
+#
+# Reprovisioning leaves the old `nodes` row behind. nodes.id stores NODE_ID,
+# so a host that was provisioned as e.g. "worker-4" and later reprovisioned
+# under the new dotted-to-dash default ("worker-10-0-0-4") registers a fresh
+# row instead of updating the old one. The MarkStaleNodesDead reaper flips
+# the orphan to status='dead' once heartbeats stop, and ListActive filters
+# 'active'/'draining' only — so the orphan does NOT route preview traffic.
+# It just sits in the table until cleaned up. To delete it explicitly:
+#   psql "$DATABASE_URL" -c "DELETE FROM nodes WHERE id = 'worker-4' AND status = 'dead';"
+# Preserve old NODE_IDs across reprovision instead by passing the old value:
+#   make provision-worker HOST=<host> REPROVISION=true NODE_ID=worker-4
 
 REPROVISION ?=
 
