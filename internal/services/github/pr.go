@@ -634,6 +634,7 @@ func (s *PRService) dispatchPostPRSnapshotUpload(orgID, sessionID uuid.UUID, key
 		defer cancel()
 		defer func() { _ = os.Remove(tarPath) }()
 
+		// #nosec G304 -- tarPath was produced by os.CreateTemp inside captureSandboxSnapshot earlier in this same process; it is not user input.
 		f, openErr := os.Open(tarPath)
 		if openErr != nil {
 			s.logger.Warn().Err(openErr).Str("session_id", sessionID.String()).Msg("open post-PR snapshot tar failed")
