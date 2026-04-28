@@ -44,7 +44,7 @@ describe("CodingAuthStack", () => {
         selectedId={null}
         onSelect={vi.fn()}
         onMove={vi.fn()}
-        onMoveToTop={vi.fn()}
+        onReorder={vi.fn()}
       />,
     );
 
@@ -57,22 +57,22 @@ describe("CodingAuthStack", () => {
   it("supports keyboard-accessible move controls", async () => {
     const user = userEvent.setup();
     const onMove = vi.fn();
-    const onMoveToTop = vi.fn();
+    const onSelect = vi.fn();
 
     renderWithProviders(
       <CodingAuthStack
         rows={rows}
         selectedId={null}
-        onSelect={vi.fn()}
+        onSelect={onSelect}
         onMove={onMove}
-        onMoveToTop={onMoveToTop}
+        onReorder={vi.fn()}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "Move Pi backup up" }));
     expect(onMove).toHaveBeenCalledWith("auth-2", "up");
 
-    await user.click(screen.getByRole("button", { name: "Move Pi backup to top" }));
-    expect(onMoveToTop).toHaveBeenCalledWith("auth-2");
+    await user.click(screen.getByRole("button", { name: "Edit Pi backup" }));
+    expect(onSelect).toHaveBeenCalledWith("auth-2");
   });
 });
