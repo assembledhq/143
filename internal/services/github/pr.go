@@ -1936,6 +1936,13 @@ func formatPRTitle(session *models.Session, issue *models.Issue) string {
 // title so applyLinearKeyPrefixes can take over without duplicating the key.
 var linearColonPrefixRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-\d+\s*:\s*`)
 
+// linearKeyShapeRE matches a Linear human key like "ACS-1234". Used to gate
+// PR title prefixing — if a link's external_id is the Linear UUID (because
+// provider_state.identifier hasn't been written yet) we must not bake it
+// into the title; linearBracketPrefixRE only strips properly-shaped prefixes
+// on resync, so a UUID prefix would stick forever.
+var linearKeyShapeRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,9}-[0-9]+$`)
+
 func stripLinearColonPrefix(s string) string {
 	return linearColonPrefixRE.ReplaceAllString(s, "")
 }
@@ -2040,7 +2047,7 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 // primaryIssue is a fallback when LinkedIssues isn't populated.
 func collectLinearIdentifiers(session *models.Session, primaryIssue *models.Issue) []string {
 	if session == nil {
-		if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && primaryIssue.ExternalID != "" {
+		if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && linearKeyShapeRE.MatchString(primaryIssue.ExternalID) {
 			return []string{primaryIssue.ExternalID}
 		}
 		return nil
@@ -2057,6 +2064,14 @@ func collectLinearIdentifiers(session *models.Session, primaryIssue *models.Issu
 				continue
 			}
 			id := *link.ExternalID
+			// Drop links whose external_id isn't the human Linear key. The
+			// COALESCE in sessionIssueLinkSelectColumns falls through to the
+			// Linear UUID when provider_state.identifier hasn't been written,
+			// and a UUID baked into the PR title sticks across resyncs
+			// (linearBracketPrefixRE only strips KEY-N shaped prefixes).
+			if !linearKeyShapeRE.MatchString(id) {
+				continue
+			}
 			if seen[id] {
 				continue
 			}
@@ -2067,7 +2082,7 @@ func collectLinearIdentifiers(session *models.Session, primaryIssue *models.Issu
 			return out
 		}
 	}
-	if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && primaryIssue.ExternalID != "" {
+	if primaryIssue != nil && primaryIssue.Source == models.IssueSourceLinear && linearKeyShapeRE.MatchString(primaryIssue.ExternalID) {
 		return []string{primaryIssue.ExternalID}
 	}
 	return nil

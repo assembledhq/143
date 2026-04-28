@@ -4300,4 +4300,29 @@ func TestCollectLinearIdentifiers(t *testing.T) {
 		t.Parallel()
 		require.Nil(t, collectLinearIdentifiers(nil, nil))
 	})
+
+	t.Run("rejects non-key-shaped external_ids (UUID leak guard)", func(t *testing.T) {
+		t.Parallel()
+		// Simulates the COALESCE fall-through to issues.external_id when
+		// provider_state.identifier hasn't been written yet — the link
+		// row carries Linear's UUID instead of the human key. We must not
+		// emit it as a prefix; once baked in, linearBracketPrefixRE wouldn't
+		// strip it on resync.
+		s := &models.Session{
+			LinkedIssues: []models.SessionIssueLink{
+				link("ENG-1", models.SessionIssueLinkRolePrimary, 0),
+				link("01a2b3c4-d5e6-7890-abcd-ef1234567890", models.SessionIssueLinkRoleRelated, 1),
+			},
+		}
+		require.Equal(t, []string{"ENG-1"}, collectLinearIdentifiers(s, nil))
+	})
+
+	t.Run("rejects non-key-shaped primaryIssue fallback", func(t *testing.T) {
+		t.Parallel()
+		got := collectLinearIdentifiers(&models.Session{}, &models.Issue{
+			Source:     models.IssueSourceLinear,
+			ExternalID: "01a2b3c4-d5e6-7890-abcd-ef1234567890",
+		})
+		require.Nil(t, got)
+	})
 }

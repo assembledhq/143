@@ -115,9 +115,8 @@ func ScanInputs(inputs []string, teamKeys map[string]bool) []Detected {
 		// Allowlist gate. URL hits already passed because they came in via
 		// linear.app/<workspace>/issue/, which is its own evidence; the bare
 		// identifier needs the team-key cache.
-		if existing, ok := seen[key]; ok {
+		if _, ok := seen[key]; ok {
 			// Already detected via URL — keep URL provenance, don't downgrade.
-			_ = existing
 			continue
 		}
 		if !teamKeys[prefix] {

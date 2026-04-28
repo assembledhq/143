@@ -226,13 +226,23 @@ func (s *Service) linearAutomationSettingsOrFallback(ctx context.Context, orgID 
 	return settings.LinearAutomation
 }
 
+// defaultLinearAutomationOn is the shared *true used by the package-level
+// default settings below. Held in a var so we have a stable address to take
+// without re-allocating on every loader-failure path.
+var defaultLinearAutomationOn = true
+
+// defaultLinearAutomationSettingsValue is the design-62 default-on shape we
+// fall back to when the org row or settings parser is unavailable. Returned
+// by-value from defaultLinearAutomationSettings so callers can't mutate the
+// shared pointers.
+var defaultLinearAutomationSettingsValue = models.LinearAutomationSettings{
+	PostSessionLinks:           &defaultLinearAutomationOn,
+	MoveWorkflowStates:         &defaultLinearAutomationOn,
+	ReviewStateNamePreferences: models.DefaultLinearReviewStateNames,
+}
+
 func defaultLinearAutomationSettings() models.LinearAutomationSettings {
-	t := true
-	return models.LinearAutomationSettings{
-		PostSessionLinks:           &t,
-		MoveWorkflowStates:         &t,
-		ReviewStateNamePreferences: models.DefaultLinearReviewStateNames,
-	}
+	return defaultLinearAutomationSettingsValue
 }
 
 func attachmentTitle(session *models.Session) string {
@@ -266,6 +276,8 @@ func subtitleForMilestone(event MilestoneEvent, prNumber int) string {
 
 func outcomeForMilestone(event MilestoneEvent) db.LinearAttachmentOutcome {
 	switch event {
+	case MilestoneLinked:
+		return db.LinearAttachmentOutcomeRunning
 	case MilestonePROpened:
 		return db.LinearAttachmentOutcomePROpen
 	case MilestonePRMerged:
@@ -277,6 +289,14 @@ func outcomeForMilestone(event MilestoneEvent) db.LinearAttachmentOutcome {
 	default:
 		return db.LinearAttachmentOutcomeRunning
 	}
+}
+
+// isPRDrivenTransition reports whether the milestone is a PR-lifecycle
+// event that Linear's native GitHub integration also transitions on
+// (open → in_review, merged → completed). Coexistence-suppression
+// applies to both so we don't double-move an issue Linear already moved.
+func isPRDrivenTransition(event MilestoneEvent) bool {
+	return event == MilestonePROpened || event == MilestonePRMerged
 }
 
 func commentBodyForMilestone(event MilestoneEvent, issueIdent, sessionURL string, prNumber int) string {
@@ -370,14 +390,26 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 	return s.withProviderStateLocked(ctx, in.Session.OrgID, in.Link.ID,
 		func(ctx context.Context, txState providerStateStore, txEvents stateEventStore, state db.LinearProviderState) error {
 			// Coexistence with Linear's GitHub integration: if their
-			// attachments are already on the issue, suppress our merge-time
-			// writes to avoid double transitions and double cycle/sprint
-			// membership.
-			if in.Event == MilestonePRMerged {
+			// attachments are already on the issue, suppress our PR-driven
+			// transitions to avoid double moves and double cycle/sprint
+			// membership. Applies to BOTH `pr_opened` (their integration
+			// moves the issue to "In Review") and `pr_merged` (they move
+			// it to "Done"); either event firing on top of theirs is a
+			// double-transition.
+			//
+			// A lookup failure here is surfaced (not silently treated as
+			// "no integration") so the worker retries: if Linear's
+			// integration is in fact present and we transition anyway, we
+			// double-move the issue. The fire-once unique constraint isn't
+			// claimed yet, so a retry can re-enter cleanly.
+			if isPRDrivenTransition(in.Event) {
 				coexists := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
 				if !coexists {
 					detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)
-					if detectErr == nil && detected {
+					if detectErr != nil {
+						return fmt.Errorf("detect linear github integration attachment: %w", detectErr)
+					}
+					if detected {
 						coexists = true
 						_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
 							CoexistsWithGitHubIntegration: db.BoolPtr(true),
@@ -391,9 +423,17 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 
 			// Recent human edits: skip if a human moved the issue within
 			// the last 10 minutes. This protects manual workflows.
+			//
+			// A lookup failure surfaces as a retry rather than "no edits"
+			// — without this, a transient API hiccup could let us clobber a
+			// manual move the user just made. The fire-once claim hasn't
+			// been inserted yet, so the next retry re-enters cleanly.
 			since := time.Now().Add(-10 * time.Minute)
 			humanEdited, err := client.IssueRecentHumanEdits(ctx, in.IssueID, since)
-			if err == nil && humanEdited {
+			if err != nil {
+				return fmt.Errorf("check linear recent human edits: %w", err)
+			}
+			if humanEdited {
 				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipUserRecentEdit)
 			}
 

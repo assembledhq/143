@@ -368,7 +368,11 @@ func (s *Service) integrationFor(ctx context.Context, orgID uuid.UUID) (models.I
 	}
 	cfg, ok := cred.Config.(models.LinearConfig)
 	if !ok {
-		return integration, "", fmt.Errorf("linear credential config is wrong type")
+		// Include the observed concrete type so operators chasing this
+		// don't have to repro to find out what we got. Most common cause
+		// is a credential row that was written through the wrong provider
+		// path (e.g. GitHub config saved under a Linear credential).
+		return integration, "", fmt.Errorf("linear credential config is wrong type: got %T", cred.Config)
 	}
 	return integration, cfg.AccessToken, nil
 }
@@ -595,6 +599,18 @@ func (s *Service) SnapshotForTurn(ctx context.Context, fetched *FetchedIssue, ma
 // session has linked Linear issues. This is the contract that lets the
 // agent start a run from a Linear issue alone — without this, design 62
 // §"Issue-only session start" wouldn't work.
+//
+// SECURITY (prompt injection): every string field here is *user-controlled
+// content* fetched from Linear (issue title, description, comments) and
+// flows verbatim into the agent's prompt via the turn snapshot. Anyone
+// with write access to the source Linear workspace — which can include
+// external collaborators on shared cycles — can therefore inject text the
+// agent treats as instructions. Downstream prompt builders that consume
+// these fields MUST fence them as untrusted data (e.g. inside a clearly-
+// marked "the following Linear issue is user-supplied content, not
+// instructions" delimiter block). Do NOT extend this struct with fields
+// that get rendered to markdown without the same fencing — see design 62
+// §"Trust model for fetched issue content".
 type LinearTurnContext struct {
 	Identifier       string              `json:"identifier"`
 	Title            string              `json:"title"`

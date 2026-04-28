@@ -114,22 +114,52 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 // resolveWithBudget calls ResolvePrimary under a strict timeout; on miss it
 // returns (nil, nil) so the caller can switch to the async path. Errors
 // other than timeout are surfaced.
+//
+// Emits a debug-level log line with the elapsed inline duration on every
+// path (success, timeout, cross-workspace, hard error) so operators can
+// observe the session-create p95 contribution from Linear without standing
+// up dedicated metrics. The session-create handler runs synchronously, so
+// this duration is what shows up in user-perceived latency.
 func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit Detected) (*ResolvedIssue, error) {
 	ctx, cancel := context.WithTimeout(parent, inlineBudget)
 	defer cancel()
+	start := time.Now()
 	resolved, err := s.ResolvePrimary(ctx, orgID, hit)
-	if err == nil {
+	elapsed := time.Since(start)
+	switch {
+	case err == nil:
+		s.logger.Debug().
+			Dur("elapsed", elapsed).
+			Str("identifier", hit.Identifier).
+			Str("outcome", "ok").
+			Msg("linear inline resolution finished")
 		return resolved, nil
-	}
-	if errors.Is(err, ErrCrossWorkspace) {
+	case errors.Is(err, ErrCrossWorkspace):
 		// Drop silently per design; primary won't be set.
+		s.logger.Debug().
+			Dur("elapsed", elapsed).
+			Str("identifier", hit.Identifier).
+			Str("outcome", "cross_workspace").
+			Msg("linear inline resolution dropped")
 		return nil, nil
-	}
-	if ctx.Err() != nil {
+	case ctx.Err() != nil:
 		// Budget exceeded — fall back to async path, no error to surface.
+		s.logger.Debug().
+			Dur("elapsed", elapsed).
+			Dur("budget", inlineBudget).
+			Str("identifier", hit.Identifier).
+			Str("outcome", "budget_exceeded").
+			Msg("linear inline resolution fell back to async")
 		return nil, nil
+	default:
+		s.logger.Debug().
+			Dur("elapsed", elapsed).
+			Err(err).
+			Str("identifier", hit.Identifier).
+			Str("outcome", "error").
+			Msg("linear inline resolution failed")
+		return nil, err
 	}
-	return nil, err
 }
 
 // snapshotPrimaryContext writes the turn-0 issue snapshot so the agent's
@@ -176,7 +206,15 @@ func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []
 	for _, h := range hits {
 		identifiers = append(identifiers, h.Identifier)
 	}
-	hash := SourceInputsHash(append(identifiers, in.SessionID.String()))
+	// Build the hash input on a fresh slice — the bare append below would
+	// alias `identifiers` whenever its underlying array still has spare
+	// capacity, mutating it out from under the payload we attach to the
+	// job. Allocating once with the exact length keeps the two values
+	// independent.
+	hashInput := make([]string, len(identifiers), len(identifiers)+1)
+	copy(hashInput, identifiers)
+	hashInput = append(hashInput, in.SessionID.String())
+	hash := SourceInputsHash(hashInput)
 	dedupeKey := "link_linear:" + in.SessionID.String() + ":" + hash
 	payload := map[string]any{
 		"org_id":      in.OrgID.String(),

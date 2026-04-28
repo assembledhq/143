@@ -103,6 +103,8 @@ type fakeLinearClient struct {
 	updateStateErr      error
 	attachmentErr       error
 	createCommentErr    error
+	humanEditedErr      error
+	hasGitHubErr        error
 }
 
 func newFakeLinearClient() *fakeLinearClient {
@@ -160,11 +162,11 @@ func (f *fakeLinearClient) UpdateIssueState(_ context.Context, _, _ string) erro
 }
 
 func (f *fakeLinearClient) IssueRecentHumanEdits(context.Context, string, time.Time) (bool, error) {
-	return f.humanEdited, nil
+	return f.humanEdited, f.humanEditedErr
 }
 
 func (f *fakeLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
-	return f.hasGitHubAttachment, nil
+	return f.hasGitHubAttachment, f.hasGitHubErr
 }
 
 // fakeIntegrationReader / fakeCredentialReader return a stable "Linear is
@@ -593,6 +595,55 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipLinearGitHubIntegration {
 			t.Fatalf("expected github integration skip, got %q", got)
 		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT fire on coexistence skip (got %d)", client.updateStateCalls)
+		}
+	})
+
+	// PR-open coexistence: Linear's GitHub integration moves issues to
+	// "In Review" on PR open (mirror of the PR-merge → "Done" behavior).
+	// If we transition on top, the issue takes two state moves and gets
+	// double cycle/sprint membership. The guard must apply to BOTH events.
+	t.Run("PR open coexisting GitHub attachment records skip", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.hasGitHubAttachment = true
+		svc, _, events := buildTestService(t, client)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestonePROpened, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("coexistence skip should not error: %v", err)
+		}
+		if len(events.inserts) != 1 {
+			t.Fatalf("expected 1 skip event recorded, got %d", len(events.inserts))
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipLinearGitHubIntegration {
+			t.Fatalf("expected github integration skip on PR open, got %q", got)
+		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT fire when Linear's integration already handles PR open (got %d)", client.updateStateCalls)
+		}
+	})
+
+	// Linked-event must NOT trip the coexistence guard — Linear's GitHub
+	// integration only runs on PR-lifecycle events, so suppressing our
+	// own "started" move on session-link would silently lose the only
+	// transition we own.
+	t.Run("session linked does not trip coexistence guard", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.hasGitHubAttachment = true
+		svc, _, events := buildTestService(t, client)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("linked transition should not error: %v", err)
+		}
+		if client.updateStateCalls != 1 {
+			t.Fatalf("linked event must fire UpdateIssueState even when GitHub integration is present (got %d)", client.updateStateCalls)
+		}
+		if len(events.inserts) != 1 {
+			t.Fatalf("expected 1 transition event recorded, got %d", len(events.inserts))
+		}
+		if got := events.inserts[0].SkippedReason; got != "" {
+			t.Fatalf("linked event must record a real transition, not a skip (got SkippedReason=%q)", got)
+		}
 	})
 
 	t.Run("nil target records already-past skip", func(t *testing.T) {
@@ -607,6 +658,73 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 			t.Fatalf("expected already_past_target skip, got %q", got)
 		}
 	})
+}
+
+// TestHandleStateTransition_GuardLookupErrorsAreRetried verifies that
+// transient lookup failures from IssueRecentHumanEdits and
+// HasGitHubIntegrationAttachment surface as errors so the worker retries,
+// rather than being silently treated as "no edits / no integration". A
+// silent fall-through here would let us clobber a manual move the user
+// just made or double-transition an issue Linear's GitHub integration
+// already moved.
+func TestHandleStateTransition_GuardLookupErrorsAreRetried(t *testing.T) {
+	t.Parallel()
+
+	t.Run("IssueRecentHumanEdits failure surfaces error", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.humanEditedErr = errors.New("network hiccup")
+		svc, _, events := buildTestService(t, client)
+
+		err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event:      MilestoneLinked,
+			Session:    newSession(),
+			Link:       newPrimaryLink(),
+			IssueID:    "linear-issue-id",
+			IssueIdent: "ACS-1",
+		})
+		if err == nil {
+			t.Fatal("HandleStateTransition must surface IssueRecentHumanEdits errors so the worker retries")
+		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT be called when the recent-edits guard lookup failed (got %d)", client.updateStateCalls)
+		}
+		if len(events.inserts) != 0 {
+			t.Fatalf("no fire-once claim must be recorded when the guard lookup failed (got %d)", len(events.inserts))
+		}
+	})
+
+	// Both PR-driven events run through the coexistence guard, so a
+	// transient API failure on either must surface for a retry rather
+	// than silently treat as "no integration" — see writes.go
+	// isPRDrivenTransition. Sub-testing the same expectation across both
+	// events guards against a future change that drops one branch.
+	for _, ev := range []MilestoneEvent{MilestonePROpened, MilestonePRMerged} {
+		ev := ev
+		t.Run("HasGitHubIntegrationAttachment failure surfaces error on "+string(ev), func(t *testing.T) {
+			t.Parallel()
+			client := newFakeLinearClient()
+			client.hasGitHubErr = errors.New("network hiccup")
+			svc, _, events := buildTestService(t, client)
+
+			err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+				Event:      ev,
+				Session:    newSession(),
+				Link:       newPrimaryLink(),
+				IssueID:    "linear-issue-id",
+				IssueIdent: "ACS-1",
+			})
+			if err == nil {
+				t.Fatal("HandleStateTransition must surface HasGitHubIntegrationAttachment errors so the worker retries")
+			}
+			if client.updateStateCalls != 0 {
+				t.Fatalf("UpdateIssueState must NOT be called when the coexistence guard lookup failed (got %d)", client.updateStateCalls)
+			}
+			if len(events.inserts) != 0 {
+				t.Fatalf("no fire-once claim must be recorded when the guard lookup failed (got %d)", len(events.inserts))
+			}
+		})
+	}
 }
 
 // TestHandleStateTransition_FireOnceCollapseDuplicates locks down the
