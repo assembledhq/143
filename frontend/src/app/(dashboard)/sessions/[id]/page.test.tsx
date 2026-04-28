@@ -3511,6 +3511,57 @@ describe('SessionDetailPage', () => {
     expect(commandOverlay).toHaveStyle({ left: '48px', width: '640px' });
   });
 
+  it('renders slash command chips without a leading slash icon', async () => {
+    const resumableSession: Session = {
+      ...mockSessions[0],
+      agent_type: 'codex',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      repository_id: 'repo-1',
+      target_branch: 'main',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: resumableSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/session-composer/slash-commands', () => {
+        return HttpResponse.json({
+          groups: [
+            {
+              source: 'builtin',
+              label: 'Codex commands',
+              items: [
+                {
+                  kind: 'command',
+                  agent_type: 'codex',
+                  name: 'review',
+                  token: '/review',
+                  display: '/review',
+                  description: 'Review pending changes',
+                  source: 'builtin',
+                },
+              ],
+            },
+          ],
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...') as HTMLTextAreaElement;
+    await user.type(composer, '/rev');
+    await user.click((await screen.findByText('/review')).closest('button') as HTMLButtonElement);
+
+    const chips = screen.getByLabelText('Selected references and commands');
+    expect(within(chips).getByText('/review')).toBeInTheDocument();
+    expect(chips.querySelector('svg.lucide-slash')).toBeNull();
+  });
+
   it('shows Gemini CLI agent type label', async () => {
     const geminiSession: Session = {
       ...mockSessions[0],
