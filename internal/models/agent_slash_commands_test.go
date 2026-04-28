@@ -22,7 +22,7 @@ func TestSlashCommandsForAgent(t *testing.T) {
 		wantNames []string
 	}{
 		{name: "claude code", agentType: AgentTypeClaudeCode, wantNames: []string{"init", "review", "clear"}},
-		{name: "codex", agentType: AgentTypeCodex, wantNames: []string{"init", "diff"}},
+		{name: "codex", agentType: AgentTypeCodex, wantNames: []string{"init", "diff", "review"}},
 		{name: "gemini cli", agentType: AgentTypeGeminiCLI, wantNames: []string{"help", "compress"}},
 		{name: "amp", agentType: AgentTypeAmp, wantNames: []string{"agent", "mode"}},
 		{name: "pi (empty)", agentType: AgentTypePi},
@@ -46,6 +46,35 @@ func TestSlashCommandsForAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClaudeCodeSlashCommands_DocumentedCoverage(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		"add-dir", "agents", "autofix-pr", "batch", "branch", "btw", "chrome", "claude-api",
+		"clear", "color", "compact", "config", "context", "copy", "cost", "debug", "desktop",
+		"diff", "doctor", "effort", "exit", "export", "extra-usage", "fast", "feedback",
+		"fewer-permission-prompts", "focus", "heapdump", "help", "hooks", "ide", "init",
+		"insights", "install-github-app", "install-slack-app", "keybindings", "login", "logout",
+		"loop", "mcp", "memory", "mobile", "model", "passes", "permissions", "plan", "plugin",
+		"powerup", "pr-comments", "privacy-settings", "recap", "release-notes", "reload-plugins",
+		"remote-control", "remote-env", "rename", "resume", "review", "rewind", "sandbox",
+		"schedule", "security-review", "setup-bedrock", "setup-vertex", "simplify", "skills",
+		"status", "statusline", "stickers", "tasks", "team-onboarding", "teleport",
+		"terminal-setup", "theme", "tui", "ultraplan",
+	}
+
+	catalog := SlashCommandsForAgent(AgentTypeClaudeCode)
+	names := make(map[string]struct{}, len(catalog))
+	for _, cmd := range catalog {
+		names[cmd.Name] = struct{}{}
+	}
+
+	for _, want := range expected {
+		require.Contains(t, names, want, "Claude Code catalog should include %q", want)
+	}
+	require.Len(t, names, len(expected), "Claude Code catalog should match the documented command set covered by this test")
 }
 
 func TestSlashCommandAgentLabel(t *testing.T) {

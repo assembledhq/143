@@ -29,16 +29,16 @@ We **reuse the existing mention picker UI** rather than ship a parallel componen
 
 ### Claude Code
 
-- Built-in commands such as `/init`, `/clear`, `/compact`, `/cost`, `/help`, `/model`, `/review`, `/agents`, `/permissions`.
+- Built-in commands come from Claude Code's published commands table, using the full-form command names in the picker (`/review`, `/security-review`, `/diff`, `/plan`, `/tasks`, `/resume`, `/status`, `/mcp`, etc.).
 - **Custom project commands** discovered from `.claude/commands/*.md` in the repo.
 - **Custom user commands** discovered from `~/.claude/commands/*.md`.
 - **Plugin commands** namespaced as `/plugin:command`.
 - Commands are recognized when they appear at the start of a turn; arguments follow the command name.
-- Source: [Claude Code slash commands](https://code.claude.com/docs/en/slash-commands).
+- Source: [Claude Code commands](https://code.claude.com/docs/en/commands).
 
 ### Codex CLI / Codex app
 
-- Built-in commands such as `/init`, `/diff`, `/edit`, `/model`, `/clear`, `/compact`.
+- Built-in commands currently surfaced in 143 include `/init`, `/diff`, `/review`, `/edit`, `/model`, `/clear`, and `/compact`.
 - Codex's app-server protocol distinguishes structured `skill` ($-prefix) and `mention` items from free text — slash commands sit in the `skill` family.
 - Source: [Codex app-server README](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
