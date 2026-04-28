@@ -37,21 +37,6 @@ interface BackgroundStar {
   layer: number;
 }
 
-interface CloudBlob {
-  ox: number;
-  oy: number;
-  radius: number;
-  opacity: number;
-}
-
-interface Cloud {
-  x: number;
-  y: number;
-  vx: number;
-  layer: number;
-  blobs: CloudBlob[];
-}
-
 interface Formation {
   active: boolean;
   startTime: number;
@@ -72,7 +57,6 @@ function getResponsiveConfig(w: number) {
     return {
       maxPlanes: 3,
       starCount: 80,
-      cloudCount: 4,
       planeSizeMin: 14,
       planeSizeRange: 6,
     };
@@ -80,14 +64,12 @@ function getResponsiveConfig(w: number) {
     return {
       maxPlanes: 4,
       starCount: 130,
-      cloudCount: 5,
       planeSizeMin: 16,
       planeSizeRange: 8,
     };
   return {
     maxPlanes: 6,
     starCount: 200,
-    cloudCount: 6,
     planeSizeMin: 18,
     planeSizeRange: 10,
   };
@@ -112,40 +94,6 @@ function createBackgroundStar(w: number, h: number): BackgroundStar {
     twinkleSpeed: Math.random() * 0.02 + 0.003,
     twinklePhase: Math.random() * Math.PI * 2,
     layer,
-  };
-}
-
-function createCloud(w: number, h: number): Cloud {
-  const layer = Math.random() < 0.3 ? 0 : Math.random() < 0.5 ? 1 : 2;
-  const baseRadius = [120, 70, 40][layer];
-  const blobCount = [6, 5, 4][layer];
-  const baseOpacity = [0.08, 0.15, 0.28][layer];
-  const speed = [0.03, 0.08, 0.15][layer];
-
-  const blobs: CloudBlob[] = [];
-  for (let i = 0; i < blobCount; i++) {
-    const spread = baseRadius * 0.7;
-    blobs.push({
-      ox: (Math.random() - 0.5) * spread,
-      oy: (Math.random() - 0.5) * spread * 0.3,
-      radius: baseRadius * (0.5 + Math.random() * 0.5),
-      opacity: baseOpacity * (0.7 + Math.random() * 0.3),
-    });
-  }
-
-  const centerY = h / 2;
-  const exclusion = h * 0.22;
-  let y: number;
-  do {
-    y = Math.random() * h;
-  } while (Math.abs(y - centerY) < exclusion && Math.random() < 0.75);
-
-  return {
-    x: Math.random() * (w + 400) - 200,
-    y,
-    vx: speed * (0.8 + Math.random() * 0.4),
-    layer,
-    blobs,
   };
 }
 
@@ -205,24 +153,6 @@ function getFormationOffsets(
   return offsets;
 }
 
-// ── Draw cloud ──────────────────────────────────────────────────────────────────
-
-function drawCloudSoft(ctx: CanvasRenderingContext2D, cloud: Cloud) {
-  for (const b of cloud.blobs) {
-    const bx = cloud.x + b.ox;
-    const by = cloud.y + b.oy;
-    const r = b.radius;
-
-    const grad = ctx.createRadialGradient(bx, by, 0, bx, by, r);
-    grad.addColorStop(0, `rgba(255, 255, 255, ${b.opacity})`);
-    grad.addColorStop(0.3, `rgba(255, 255, 255, ${b.opacity * 0.7})`);
-    grad.addColorStop(0.6, `rgba(255, 255, 255, ${b.opacity * 0.3})`);
-    grad.addColorStop(1, `rgba(255, 255, 255, 0)`);
-    ctx.fillStyle = grad;
-    ctx.fillRect(bx - r, by - r, r * 2, r * 2);
-  }
-}
-
 // ── Draw sky gradient ──────────────────────────────────────────────────────────
 
 function drawSkyGradient(
@@ -230,11 +160,13 @@ function drawSkyGradient(
   w: number,
   h: number,
 ) {
+  // Monochrome off-white wash with the faintest hint of brand-purple at the
+  // top — color is carried by the contrails and the brand glow, not the sky.
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, "#87BBDF");
-  grad.addColorStop(0.4, "#A8CEE4");
-  grad.addColorStop(0.8, "#C9DFF0");
-  grad.addColorStop(1, "#DAE8F2");
+  grad.addColorStop(0, "#F4F2F8");
+  grad.addColorStop(0.4, "#F8F6FB");
+  grad.addColorStop(0.8, "#FAFAFB");
+  grad.addColorStop(1, "#FBFBFC");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
 }
@@ -248,7 +180,6 @@ interface HeroCanvasProps {
 export default function HeroCanvas({ isDark }: HeroCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgStarsRef = useRef<BackgroundStar[]>([]);
-  const cloudsRef = useRef<Cloud[]>([]);
   const planesRef = useRef<Plane[]>([]);
   const mouseRef = useRef({ x: -9999, y: -9999, active: false });
   const dimsRef = useRef({ w: 0, h: 0 });
@@ -297,9 +228,6 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
       const cfg = configRef.current;
       bgStarsRef.current = Array.from({ length: cfg.starCount }, () =>
         createBackgroundStar(w, h),
-      );
-      cloudsRef.current = Array.from({ length: cfg.cloudCount }, () =>
-        createCloud(w, h),
       );
     };
 
@@ -373,22 +301,39 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
       } else {
         drawSkyGradient(ctx, w, h);
 
+        // Soft brand-purple glow at top-right ties the hero to the in-app
+        // --gradient-primary; replaces the previous warm-yellow "sun" wash.
         const grad = ctx.createRadialGradient(
           w * 0.8,
           h * 0.05,
           0,
           w * 0.8,
           h * 0.05,
-          w * 0.3,
+          w * 0.45,
         );
-        grad.addColorStop(0, "rgba(255, 248, 220, 0.4)");
-        grad.addColorStop(0.5, "rgba(255, 248, 220, 0.1)");
+        grad.addColorStop(0, "rgba(125, 95, 220, 0.18)");
+        grad.addColorStop(0.5, "rgba(125, 95, 220, 0.06)");
         grad.addColorStop(1, "transparent");
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
+
+        // Secondary glow at bottom-left for asymmetric depth.
+        const grad2 = ctx.createRadialGradient(
+          w * 0.15,
+          h * 0.95,
+          0,
+          w * 0.15,
+          h * 0.95,
+          w * 0.35,
+        );
+        grad2.addColorStop(0, "rgba(95, 75, 200, 0.10)");
+        grad2.addColorStop(0.6, "rgba(95, 75, 200, 0.03)");
+        grad2.addColorStop(1, "transparent");
+        ctx.fillStyle = grad2;
+        ctx.fillRect(0, 0, w, h);
       }
 
-      // Stars (dark) or Clouds (light)
+      // Stars (dark only) — light mode is monochrome with brand glow.
       if (dark) {
         const mx = mouse.active ? mouse.x : w / 2;
         const my = mouse.active ? mouse.y : h / 2;
@@ -409,25 +354,9 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
           ctx.fillStyle = DARK.star(Math.max(0, opacity));
           ctx.fill();
         }
-      } else {
-        for (const c of cloudsRef.current) {
-          c.x += c.vx;
-          if (c.x - 250 > w) {
-            c.x = -300;
-            const centerY = h / 2;
-            const exclusion = h * 0.22;
-            let newY: number;
-            do {
-              newY = Math.random() * h;
-            } while (
-              Math.abs(newY - centerY) < exclusion &&
-              Math.random() < 0.75
-            );
-            c.y = newY;
-          }
-          drawCloudSoft(ctx, c);
-        }
       }
+      // Light mode renders no clouds: white blobs would vanish on the
+      // near-white background. Brand glow + contrails carry the depth.
 
       // Spawn new planes
       if (
