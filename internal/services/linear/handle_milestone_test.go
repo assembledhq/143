@@ -101,6 +101,7 @@ type fakeLinearClient struct {
 	attachmentToReturn  AttachmentResult
 	target              *WorkflowState
 	updateStateErr      error
+	attachmentErr       error
 	createCommentErr    error
 }
 
@@ -124,6 +125,9 @@ func (f *fakeLinearClient) CreateOrUpdateAttachment(_ context.Context, _ Attachm
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createOrUpdateCalls++
+	if f.attachmentErr != nil {
+		return AttachmentResult{}, f.attachmentErr
+	}
 	return f.attachmentToReturn, nil
 }
 
@@ -221,6 +225,113 @@ func newSession() *models.Session {
 	return &models.Session{ID: uuid.New(), OrgID: uuid.New()}
 }
 
+func TestMilestoneFormattingAndStateHelpers(t *testing.T) {
+	t.Parallel()
+
+	title := "Fix checkout"
+	session := &models.Session{Title: &title}
+	if got := attachmentTitle(session); got != "143: Fix checkout" {
+		t.Fatalf("attachmentTitle should include the session title, got %q", got)
+	}
+	if got := attachmentTitle(nil); got != "143 session" {
+		t.Fatalf("attachmentTitle should fall back for nil sessions, got %q", got)
+	}
+
+	subtitleCases := []struct {
+		event    MilestoneEvent
+		prNumber int
+		expected string
+	}{
+		{event: MilestonePROpened, prNumber: 42, expected: "PR #42 open"},
+		{event: MilestonePROpened, expected: "PR open"},
+		{event: MilestonePRMerged, prNumber: 42, expected: "PR #42 merged"},
+		{event: MilestonePRMerged, expected: "PR merged"},
+		{event: MilestoneEndedNoPR, expected: "Ended without PR"},
+		{event: MilestoneFailed, expected: "Failed"},
+		{event: MilestoneLinked, expected: "Running"},
+	}
+	for _, tt := range subtitleCases {
+		if got := subtitleForMilestone(tt.event, tt.prNumber); got != tt.expected {
+			t.Fatalf("subtitleForMilestone(%q, %d) = %q, want %q", tt.event, tt.prNumber, got, tt.expected)
+		}
+	}
+
+	outcomeCases := []struct {
+		event    MilestoneEvent
+		expected db.LinearAttachmentOutcome
+	}{
+		{event: MilestonePROpened, expected: db.LinearAttachmentOutcomePROpen},
+		{event: MilestonePRMerged, expected: db.LinearAttachmentOutcomeMerged},
+		{event: MilestoneEndedNoPR, expected: db.LinearAttachmentOutcomeEndedNoPR},
+		{event: MilestoneFailed, expected: db.LinearAttachmentOutcomeFailed},
+		{event: MilestoneLinked, expected: db.LinearAttachmentOutcomeRunning},
+	}
+	for _, tt := range outcomeCases {
+		if got := outcomeForMilestone(tt.event); got != tt.expected {
+			t.Fatalf("outcomeForMilestone(%q) = %q, want %q", tt.event, got, tt.expected)
+		}
+	}
+
+	commentCases := []struct {
+		event    MilestoneEvent
+		prNumber int
+		contains string
+	}{
+		{event: MilestoneLinked, contains: "Started a session"},
+		{event: MilestonePROpened, prNumber: 42, contains: "Pull request #42 opened"},
+		{event: MilestonePROpened, contains: "Pull request opened"},
+		{event: MilestonePRMerged, prNumber: 42, contains: "Pull request #42 merged"},
+		{event: MilestonePRMerged, contains: "Pull request merged"},
+		{event: MilestoneEndedNoPR, contains: "ended without opening"},
+		{event: MilestoneFailed, contains: "failed"},
+	}
+	for _, tt := range commentCases {
+		got := commentBodyForMilestone(tt.event, "ACS-1", "https://app.test/sessions/1", tt.prNumber)
+		if !strings.Contains(got, botCommentPrefix) || !strings.Contains(got, tt.contains) {
+			t.Fatalf("commentBodyForMilestone(%q, %d) = %q, want prefix and %q", tt.event, tt.prNumber, got, tt.contains)
+		}
+	}
+
+	if got := teamKeyFromIdentifier("ACS-123"); got != "ACS" {
+		t.Fatalf("teamKeyFromIdentifier should extract team key, got %q", got)
+	}
+	if got := teamKeyFromIdentifier("bad"); got != "" {
+		t.Fatalf("teamKeyFromIdentifier should return empty for malformed identifiers, got %q", got)
+	}
+
+	eventKindCases := []struct {
+		event    MilestoneEvent
+		expected db.LinearStateEventKind
+	}{
+		{event: MilestoneLinked, expected: db.LinearStateEventLinked},
+		{event: MilestonePROpened, expected: db.LinearStateEventPROpened},
+		{event: MilestonePRMerged, expected: db.LinearStateEventPRMerged},
+		{event: MilestoneEndedNoPR, expected: db.LinearStateEventEnded},
+		{event: MilestoneFailed, expected: db.LinearStateEventCanceled},
+		{event: MilestoneEvent("unknown"), expected: ""},
+	}
+	for _, tt := range eventKindCases {
+		if got := stateEventKindFor(tt.event); got != tt.expected {
+			t.Fatalf("stateEventKindFor(%q) = %q, want %q", tt.event, got, tt.expected)
+		}
+	}
+
+	stateTypeCases := []struct {
+		event    MilestoneEvent
+		expected string
+	}{
+		{event: MilestoneLinked, expected: "started"},
+		{event: MilestonePROpened, expected: "started"},
+		{event: MilestonePRMerged, expected: "completed"},
+		{event: MilestoneFailed, expected: ""},
+	}
+	for _, tt := range stateTypeCases {
+		if got := stateTypeFor(tt.event); got != tt.expected {
+			t.Fatalf("stateTypeFor(%q) = %q, want %q", tt.event, got, tt.expected)
+		}
+	}
+}
+
 // TestHandleMilestone_RollingCommentTakesUpdateBranchAfterFirstWrite pins
 // the rolling-comment idempotency contract: once provider_state.CommentID
 // is set, subsequent milestones must hit UpdateComment, not CreateComment.
@@ -299,6 +410,74 @@ func TestHandleMilestone_LinearPrivateShortCircuitsBeforeAnyAPICall(t *testing.T
 	}
 }
 
+func TestHandleMilestone_GuardsAndErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil session returns error", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _ := buildTestService(t, newFakeLinearClient())
+		if err := svc.HandleMilestone(context.Background(), MilestoneInput{}); err == nil {
+			t.Fatal("HandleMilestone must reject nil sessions")
+		}
+	})
+
+	t.Run("related link skips writes", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, _, _ := buildTestService(t, client)
+		link := newPrimaryLink()
+		link.Role = models.SessionIssueLinkRoleRelated
+		if err := svc.HandleMilestone(context.Background(), MilestoneInput{Session: newSession(), Link: link, IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("related link should skip without error: %v", err)
+		}
+		if client.createOrUpdateCalls != 0 || client.createCommentCalls != 0 {
+			t.Fatalf("related links must not write to Linear, got attachment=%d comment=%d", client.createOrUpdateCalls, client.createCommentCalls)
+		}
+	})
+
+	t.Run("per-team setting suppresses session links", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, _, _ := buildTestService(t, client)
+		f := false
+		svc.orgSettingsLoader = func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+			return models.OrgSettings{LinearAutomation: models.LinearAutomationSettings{
+				PerTeam: map[string]models.LinearTeamAutomationOverride{
+					"ACS": {PostSessionLinks: &f},
+				},
+			}}, nil
+		}
+		if err := svc.HandleMilestone(context.Background(), MilestoneInput{Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("disabled team setting should skip without error: %v", err)
+		}
+		if client.createOrUpdateCalls != 0 || client.createCommentCalls != 0 {
+			t.Fatalf("disabled team setting must not write to Linear, got attachment=%d comment=%d", client.createOrUpdateCalls, client.createCommentCalls)
+		}
+	})
+
+	t.Run("attachment write errors are wrapped", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.attachmentErr = errors.New("attachment failed")
+		svc, _, _ := buildTestService(t, client)
+		err := svc.HandleMilestone(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"})
+		if err == nil || !strings.Contains(err.Error(), "write linear attachment") {
+			t.Fatalf("attachment errors should be wrapped, got %v", err)
+		}
+	})
+
+	t.Run("comment create errors are wrapped", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.createCommentErr = errors.New("comment failed")
+		svc, _, _ := buildTestService(t, client)
+		err := svc.HandleMilestone(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"})
+		if err == nil || !strings.Contains(err.Error(), "create linear comment") {
+			t.Fatalf("comment errors should be wrapped, got %v", err)
+		}
+	})
+}
+
 // TestHandleStateTransition_LinearStateSyncDisabledRecordsSkip pins the
 // "user disabled state sync but kept comments" path: the audit trail
 // records `disabled_by_user`, no Linear API call fires, and HandleMilestone
@@ -332,6 +511,102 @@ func TestHandleStateTransition_LinearStateSyncDisabledRecordsSkip(t *testing.T) 
 	if got != db.LinearStateSkipDisabledByUser {
 		t.Fatalf("expected SkippedReason=%q, got %q", db.LinearStateSkipDisabledByUser, got)
 	}
+}
+
+func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil session returns error", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _ := buildTestService(t, newFakeLinearClient())
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{}); err == nil {
+			t.Fatal("HandleStateTransition must reject nil sessions")
+		}
+	})
+
+	t.Run("non-transition milestone records nothing", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, _, events := buildTestService(t, client)
+		err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneEvent("noop"), Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"})
+		if err != nil {
+			t.Fatalf("failed milestone should not transition: %v", err)
+		}
+		if len(events.inserts) != 0 || client.updateStateCalls != 0 {
+			t.Fatalf("failed milestone should not record or update, events=%d updates=%d", len(events.inserts), client.updateStateCalls)
+		}
+	})
+
+	t.Run("related link records not-primary skip", func(t *testing.T) {
+		t.Parallel()
+		svc, _, events := buildTestService(t, newFakeLinearClient())
+		link := newPrimaryLink()
+		link.Role = models.SessionIssueLinkRoleRelated
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: link, IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("related link skip should not error: %v", err)
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipNotPrimary {
+			t.Fatalf("expected not_primary skip, got %q", got)
+		}
+	})
+
+	t.Run("per-team setting records skip", func(t *testing.T) {
+		t.Parallel()
+		svc, _, events := buildTestService(t, newFakeLinearClient())
+		f := false
+		svc.orgSettingsLoader = func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+			return models.OrgSettings{LinearAutomation: models.LinearAutomationSettings{
+				PerTeam: map[string]models.LinearTeamAutomationOverride{
+					"ACS": {MoveWorkflowStates: &f},
+				},
+			}}, nil
+		}
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("per-team disabled skip should not error: %v", err)
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipPerTeamDisabled {
+			t.Fatalf("expected per_team_disabled skip, got %q", got)
+		}
+	})
+
+	t.Run("recent human edit records skip", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.humanEdited = true
+		svc, _, events := buildTestService(t, client)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("human edit skip should not error: %v", err)
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipUserRecentEdit {
+			t.Fatalf("expected user_recent_edit skip, got %q", got)
+		}
+	})
+
+	t.Run("PR merge coexisting GitHub attachment records skip", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.hasGitHubAttachment = true
+		svc, _, events := buildTestService(t, client)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestonePRMerged, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("coexistence skip should not error: %v", err)
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipLinearGitHubIntegration {
+			t.Fatalf("expected github integration skip, got %q", got)
+		}
+	})
+
+	t.Run("nil target records already-past skip", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.target = nil
+		svc, _, events := buildTestService(t, client)
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("nil target skip should not error: %v", err)
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipAlreadyPastTarget {
+			t.Fatalf("expected already_past_target skip, got %q", got)
+		}
+	})
 }
 
 // TestHandleStateTransition_FireOnceCollapseDuplicates locks down the

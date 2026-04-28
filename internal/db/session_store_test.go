@@ -2007,3 +2007,77 @@ func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 	require.NoError(t, err, "BeginRuntime should not clear recovering state when resuming from a checkpoint")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestSessionStore_LinearSessionFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		call      func(store *SessionStore, orgID, sessionID uuid.UUID) error
+		sql       string
+		rows      int64
+		errText   string
+		expectErr bool
+	}{
+		{
+			name: "sets prepare state",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
+			},
+			sql:  "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			rows: 1,
+		},
+		{
+			name: "prepare state missing session",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
+			},
+			sql:       "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			rows:      0,
+			errText:   "session not found",
+			expectErr: true,
+		},
+		{
+			name: "sets identifier hint",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
+			},
+			sql:  "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			rows: 1,
+		},
+		{
+			name: "identifier hint missing session",
+			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
+				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
+			},
+			sql:       "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			rows:      0,
+			errText:   "session not found",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			mock.ExpectExec(tt.sql).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			err = tt.call(NewSessionStore(mock), uuid.New(), uuid.New())
+			if tt.expectErr {
+				require.Error(t, err, "linear session field update should return expected error")
+				require.Contains(t, err.Error(), tt.errText, "linear session field update should include expected context")
+			} else {
+				require.NoError(t, err, "linear session field update should succeed")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}

@@ -94,6 +94,36 @@ func TestSessionValidationPolicy_Validate(t *testing.T) {
 	}
 }
 
+func TestLinearPrepareState_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     LinearPrepareState
+		expectErr bool
+	}{
+		{name: "none", value: LinearPrepareStateNone},
+		{name: "pending", value: LinearPrepareStatePending},
+		{name: "ready", value: LinearPrepareStateReady},
+		{name: "failed", value: LinearPrepareStateFailed},
+		{name: "invalid", value: LinearPrepareState("bogus"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unknown Linear prepare states")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known Linear prepare states")
+		})
+	}
+}
+
 func TestSessionIssueLinkRole_Validate(t *testing.T) {
 	t.Parallel()
 

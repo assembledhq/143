@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	"github.com/assembledhq/143/internal/services/validation"
@@ -25,6 +26,13 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+var workerIssueColumns = []string{
+	"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+	"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+	"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+	"created_at", "updated_at", "deleted_at",
+}
 
 var workerSessionColumns = []string{
 	"id", "primary_issue_id", "org_id", "origin", "interaction_mode", "validation_policy", "agent_type", "status", "autonomy_level", "token_mode",
@@ -513,6 +521,188 @@ func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
 	var fatal *FatalError
 	require.ErrorAs(t, err, &fatal, "failure to fetch primary Linear context must dead-letter the run")
 	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run after the prepare path failed")
+}
+
+func TestLinearJobHandlers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("prepare_linear_primary clears empty identifier state", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newPrepareLinearPrimaryHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[]}`)
+
+		err := handler(context.Background(), "prepare_linear_primary", payload)
+		require.NoError(t, err, "prepare_linear_primary should clear prepare state for empty identifier payloads")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("prepare_linear_primary validates payloads before service call", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newPrepareLinearPrimaryHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{bad json`)), "prepare_linear_primary should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "prepare_linear_primary should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "prepare_linear_primary should reject invalid session ids")
+	})
+
+	t.Run("link_linear_issue delegates to prepare path", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
+		handler := newLinkLinearIssueHandler(svc, zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
+
+		err := handler(context.Background(), "link_linear_issue", payload)
+		require.NoError(t, err, "link_linear_issue should use the shared prepare path")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("refresh_linear_team_keys validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newRefreshLinearTeamKeysHandler(linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{bad json`)), "refresh_linear_team_keys should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "refresh_linear_team_keys", json.RawMessage(`{"org_id":"not-a-uuid"}`)), "refresh_linear_team_keys should reject invalid org ids")
+	})
+
+	t.Run("linear_milestone skips sessions without primary link", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		now := time.Now()
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.NoError(t, err, "linear_milestone should no-op when no primary link exists")
+		require.NotZero(t, now, "test fixture should initialize a timestamp")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone hydrates links and skips non-linear primary issue", func(t *testing.T) {
+		t.Parallel()
+
+		stores, mock := newTestStores(t)
+		defer mock.Close()
+		stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		issueID := uuid.New()
+		linkID := uuid.New()
+		now := time.Now().UTC()
+		externalID := "SEN-1"
+		title := "Sentry issue"
+		source := models.IssueSourceSentry
+		status := "open"
+
+		mock.ExpectQuery("SELECT .* FROM sessions").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, string(models.SessionStatusCompleted), 1, nil, nil)...))
+		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
+				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug",
+			}).AddRow(
+				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
+				&title, &source, &externalID, nil, nil, &status, nil,
+			))
+		mock.ExpectQuery("SELECT .+ FROM issues WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerIssueColumns).AddRow(
+				issueID, orgID, "sentry-external-id", models.IssueSourceSentry, nil, nil,
+				"Sentry issue", nil, json.RawMessage(`{}`), "open", now, now,
+				1, 0, "medium", []string{"sentry"}, "sentry:fingerprint",
+				now, now, nil,
+			))
+
+		handler := newLinearMilestoneHandler(stores, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","event":"linked","pr_number":42}`)
+
+		err := handler(context.Background(), "linear_milestone", payload)
+		require.NoError(t, err, "linear_milestone should skip non-Linear primary issues after hydration")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("linear_milestone validates payloads", func(t *testing.T) {
+		t.Parallel()
+
+		handler := newLinearMilestoneHandler(&Stores{}, linearservice.NewService(linearservice.Config{}), zerolog.Nop())
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{bad json`)), "linear_milestone should reject invalid JSON")
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{"org_id":"not-a-uuid","session_id":"`+uuid.NewString()+`"}`)), "linear_milestone should reject invalid org ids")
+		require.Error(t, handler(context.Background(), "linear_milestone", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "linear_milestone should reject invalid session ids")
+	})
+}
+
+func TestMapLinearWriteErrorToRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		err           error
+		expectedDelay time.Duration
+	}{
+		{
+			name:          "rate limit uses retry after header",
+			err:           &linearservice.RateLimitError{RetryAfter: "7"},
+			expectedDelay: 7 * time.Second,
+		},
+		{
+			name:          "rate limit falls back for invalid retry after",
+			err:           &linearservice.RateLimitError{RetryAfter: "bad"},
+			expectedDelay: 30 * time.Second,
+		},
+		{
+			name: "unauthorized retries with default backoff",
+			err:  linearservice.ErrUnauthorized,
+		},
+		{
+			name: "generic errors retry with default backoff",
+			err:  errors.New("linear unavailable"),
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := mapLinearWriteErrorToRetry(tt.err)
+			var retryable *RetryableError
+			require.ErrorAs(t, err, &retryable, "mapLinearWriteErrorToRetry should always return a retryable wrapper")
+			require.ErrorIs(t, retryable.Err, tt.err, "retryable wrapper should preserve the original error")
+			require.Equal(t, tt.expectedDelay, retryable.RetryAfter, "retryable wrapper should set the expected delay")
+		})
+	}
 }
 
 func TestIngestWebhookHandler(t *testing.T) {
@@ -2222,6 +2412,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		Prioritization:  &prioritization.Service{},
 		Feedback:        feedback.NewService(&testFeedbackCommentStore{}, &testFeedbackMemoryStore{}, &testFeedbackJobStore{}, nil, zerolog.Nop()),
 		PM:              &mockPMService{},
+		Linear:          linearservice.NewService(linearservice.Config{}),
 	}
 
 	w := New(nil, logger, "test-node")
@@ -2240,6 +2431,10 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		"process_review_comment",
 		"update_memories",
 		"data_retention_cleanup",
+		"prepare_linear_primary",
+		"link_linear_issue",
+		"refresh_linear_team_keys",
+		"linear_milestone",
 	}
 	for _, name := range allExpected {
 		_, ok := w.handlers[name]
