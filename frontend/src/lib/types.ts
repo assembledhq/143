@@ -174,9 +174,11 @@ export interface Session {
   linear_identifier_hint?: string;
   // linear_prepare_state is the server-side gate that blocks turn 1 until
   // the primary Linear issue snapshot is captured. The backend emits it on
-  // every session payload; no UI affordance reads it yet, but exposing the
-  // type keeps a future "Preparing Linear context..." indicator one diff
-  // away rather than requiring an API contract change.
+  // every session payload. The 'failed' state surfaces in
+  // linked-issue-chips.tsx as a warning chip so dogfooders see the
+  // missing-context signal; 'pending'/'ready' are not yet rendered (the
+  // "Preparing Linear context..." indicator is one diff away when we want
+  // it).
   linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
   error?: string;
   result_summary?: string;

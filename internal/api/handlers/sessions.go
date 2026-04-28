@@ -2057,6 +2057,24 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// start") still get linked: SessionIssueLinkStore.CreateAllowingNullRepo
 	// already accepts a NULL repository on the link row when the underlying
 	// session has no repo, so we don't pre-filter on body.RepositoryID here.
+	if h.linearLinker == nil && (body.LinearPrivate || body.LinearStateSyncDisabled) {
+		// User asked for Linear-aware behavior but no Linear integration is
+		// wired into this handler. The flags are persisted (so a later
+		// install backfills the right policy), but nothing will read them
+		// until then — surface this to dogfooders rather than failing silently.
+		//
+		// Intentionally NOT a 4xx: the design treats these flags as policy
+		// hints captured at the moment of intent. Rejecting the request when
+		// the integration is absent would push operators to either re-create
+		// sessions after install or pollute clients with feature-flag
+		// branching. A future cleanup pass that "fixes" this by returning
+		// 422 should not — the persisted flags are the contract.
+		h.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Bool("linear_private", body.LinearPrivate).
+			Bool("linear_state_sync_disabled", body.LinearStateSyncDisabled).
+			Msg("linear policy flags set on session but no Linear integration is configured; flags persisted but currently unused")
+	}
 	if h.linearLinker != nil {
 		userID := manualTriggeredByUserID
 		referenceText := ""
@@ -2079,9 +2097,13 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			UserID:        userID,
 		})
 		if linkErr != nil {
-			// Linking is non-fatal: session continues, the prepare worker
-			// can recover. We log so dogfooding can spot it.
-			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; will retry async")
+			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
+			if err := h.runStore.UpdateResult(r.Context(), orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error")
+			}
+			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; refusing to enqueue agent run")
+			writeError(w, r, http.StatusInternalServerError, "LINEAR_PREPARE_FAILED", "failed to prepare Linear context", linkErr)
+			return
 		}
 		if linearResult.PrimaryIdentifier != "" {
 			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err == nil {

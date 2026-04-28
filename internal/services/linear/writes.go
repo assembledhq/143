@@ -421,6 +421,22 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				}
 			}
 
+			currentIssue, err := client.FetchIssue(ctx, in.IssueID)
+			if err != nil {
+				return fmt.Errorf("fetch current linear issue state: %w", err)
+			}
+			if currentIssue == nil {
+				return fmt.Errorf("fetch current linear issue state: issue not found")
+			}
+			state = mergeCurrentIssueObservation(state, currentIssue)
+			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
+				LastKnownStateName: state.LastKnownStateName,
+				LastKnownStateType: state.LastKnownStateType,
+				TeamID:             state.TeamID,
+			}); err != nil {
+				return fmt.Errorf("persist current linear issue state: %w", err)
+			}
+
 			// Recent human edits: skip if a human moved the issue within
 			// the last 10 minutes. This protects manual workflows.
 			//
@@ -510,6 +526,22 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			}
 			return nil
 		})
+}
+
+func mergeCurrentIssueObservation(state db.LinearProviderState, issue *FetchedIssue) db.LinearProviderState {
+	if issue == nil {
+		return state
+	}
+	if issue.StateName != "" {
+		state.LastKnownStateName = issue.StateName
+	}
+	if issue.StateType != "" {
+		state.LastKnownStateType = issue.StateType
+	}
+	if issue.TeamID != "" {
+		state.TeamID = issue.TeamID
+	}
+	return state
 }
 
 // recordSkipInTx records a skip event using tx-bound stores so the skip

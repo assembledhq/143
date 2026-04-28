@@ -107,6 +107,29 @@ func TestLinearProviderStateStore_UpsertAndMerge(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestLinearProviderStateStore_UpsertRejectsCrossOrgCollision pins the
+// defense-in-depth check on the ON CONFLICT branch: a row keyed to a
+// different org_id must not be silently overwritten or silently dropped.
+// Zero rows affected (the WHERE clause filtered out the cross-org update)
+// surfaces as an explicit error so a caller bug doesn't masquerade as a
+// successful write.
+func TestLinearProviderStateStore_UpsertRejectsCrossOrgCollision(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+
+	err = NewLinearProviderStateStore(mock).Upsert(context.Background(), uuid.New(), uuid.New(), LinearProviderState{Identifier: "ACS-1"})
+	require.Error(t, err, "Upsert must reject cross-org link_id collision")
+	require.Contains(t, err.Error(), "different org", "Upsert error must identify the cross-org cause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestLinearProviderStateStore_UpsertWrapsExecError(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +208,29 @@ func TestMergeLinearProviderState_AllowsExplicitFalse(t *testing.T) {
 	}
 	if *merged.IssueRepoStale {
 		t.Fatalf("Merge with explicit false must clear the flag, got true")
+	}
+}
+
+// TestMergeLinearProviderState_AllowsCoexistenceFalseClear pins the same
+// nil-vs-explicit-false semantics on CoexistsWithGitHubIntegration. The
+// flag is sticky on `true` (suppression guard for Linear's GitHub
+// integration), but an admin-side "I removed Linear's GitHub integration,
+// re-enable our writes" path needs to clear it explicitly back to false.
+// Without this test, a future refactor that switches to a bare-bool field
+// could regress the clear path silently.
+func TestMergeLinearProviderState_AllowsCoexistenceFalseClear(t *testing.T) {
+	t.Parallel()
+
+	current := LinearProviderState{CoexistsWithGitHubIntegration: BoolPtr(true)}
+	patch := LinearProviderState{CoexistsWithGitHubIntegration: BoolPtr(false)}
+
+	merged := MergeLinearProviderState(current, patch)
+
+	if merged.CoexistsWithGitHubIntegration == nil {
+		t.Fatalf("explicit false must set the pointer, got nil")
+	}
+	if *merged.CoexistsWithGitHubIntegration {
+		t.Fatalf("explicit false must clear coexistence, got true")
 	}
 }
 

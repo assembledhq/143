@@ -231,6 +231,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		})
 	}
 	sessionHandler.SetLinearLinker(linearService)
+	// Wire the inline team-key refresh hook so the Linear OAuth callback
+	// can populate the allowlist synchronously before falling back to the
+	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
+	// strategy.
+	integrationHandler.SetLinearTeamKeyRefresher(linearService.RefreshTeamKeys)
 	sessionHandler.SetShutdownSignal(shutdownCh)
 	sessionHandler.SetSnapshotStore(snapshotStore)
 	sessionHandler.SetPRCredentialStore(userCredentialStore)

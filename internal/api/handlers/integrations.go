@@ -161,7 +161,8 @@ type IntegrationHandler struct {
 	pmAutoTriggerLogger zerolog.Logger
 
 	// Linear post-install hooks (nil-safe).
-	linearJobStore *db.JobStore
+	linearJobStore         *db.JobStore
+	linearTeamKeyRefresher func(ctx context.Context, orgID uuid.UUID) error
 }
 
 // SetLinearJobStore wires a JobStore so the OAuth callback can enqueue an
@@ -170,6 +171,16 @@ type IntegrationHandler struct {
 // detection won't work right after install.
 func (h *IntegrationHandler) SetLinearJobStore(jobs *db.JobStore) {
 	h.linearJobStore = jobs
+}
+
+// SetLinearTeamKeyRefresher wires an inline refresh hook (typically
+// linear.Service.RefreshTeamKeys) the OAuth callback runs under a short
+// budget before falling back to the worker enqueue. The inline path is
+// best-effort — if it fails or times out, the enqueue still fires so the
+// allowlist eventually populates; if both fail, the 24h cron is the last
+// line of defense.
+func (h *IntegrationHandler) SetLinearTeamKeyRefresher(fn func(ctx context.Context, orgID uuid.UUID) error) {
+	h.linearTeamKeyRefresher = fn
 }
 
 // IntegrationOAuthConfig holds all integration OAuth credentials.
@@ -425,9 +436,28 @@ func (h *IntegrationHandler) HandleLinearOAuthCallback(w http.ResponseWriter, r 
 	}
 
 	// Trigger an initial team-key refresh so detection's bare-identifier
-	// branch works on the very next session. Without this, the allowlist
-	// stays empty until the 24h cron — bad UX right after install.
-	if h.linearJobStore != nil {
+	// branch works on the very next session. Two-tier strategy:
+	//  1. Inline refresh under a short budget (best-effort) so the most
+	//     common happy path — a healthy Linear API and a fast install —
+	//     populates the allowlist before the user's next request even
+	//     starts.
+	//  2. Worker enqueue as the durable fallback. If the inline path
+	//     errors or times out we still want the allowlist eventually
+	//     populated; the 24h cron is the last line of defense after that.
+	// Both paths are nil-safe so test harnesses without these hooks still
+	// complete the OAuth flow normally.
+	const inlineRefreshBudget = 3 * time.Second
+	inlineRefreshOK := false
+	if h.linearTeamKeyRefresher != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), inlineRefreshBudget)
+		if err := h.linearTeamKeyRefresher(ctx, orgID); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("inline refresh_linear_team_keys after install failed; falling back to worker enqueue")
+		} else {
+			inlineRefreshOK = true
+		}
+		cancel()
+	}
+	if !inlineRefreshOK && h.linearJobStore != nil {
 		dedupe := "refresh_linear_team_keys:" + orgID.String()
 		if _, err := h.linearJobStore.Enqueue(r.Context(), orgID, "linear", "refresh_linear_team_keys", map[string]any{
 			"org_id": orgID.String(),

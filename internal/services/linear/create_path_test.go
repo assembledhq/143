@@ -232,6 +232,58 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 
+	t.Run("failed inline resolve returns error when pending state cannot be persisted", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
+		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+			require.Fail(t, "enqueue must not run when the prepare-state gate was not persisted")
+			return nil
+		}
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:       uuid.New(),
+			SessionID:   uuid.New(),
+			MessageBody: "please start from https://linear.app/acme/issue/ACS-123",
+		})
+		require.Error(t, err, "ResolveAndLinkAtCreate should fail closed when it cannot persist the prepare-state gate")
+		require.Contains(t, err.Error(), "mark linear prepare pending", "ResolveAndLinkAtCreate should wrap the prepare-state error")
+		require.Equal(t, CreateResult{}, got, "prepare-state failures should not report an unblocked create result")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("failed inline resolve marks failed when enqueue fallback fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
+		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+			return errors.New("queue unavailable")
+		}
+		expectPrepareStateUpdate(t, mock, 1)
+		expectPrepareStateUpdate(t, mock, 1)
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:       uuid.New(),
+			SessionID:   uuid.New(),
+			MessageBody: "please start from https://linear.app/acme/issue/ACS-123",
+		})
+		require.Error(t, err, "ResolveAndLinkAtCreate should fail closed when the fallback worker cannot be enqueued")
+		require.Contains(t, err.Error(), "enqueue linear prepare worker", "ResolveAndLinkAtCreate should wrap the enqueue error")
+		require.Equal(t, CreateResult{}, got, "enqueue failures should not report an unblocked create result")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
 	t.Run("rejected primary link does not block create path", func(t *testing.T) {
 		t.Parallel()
 
@@ -334,7 +386,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		})
 		require.NoError(t, err, "ResolveAndLinkAtCreate should succeed with additional refs")
 		require.Equal(t, CreateResult{PrepareInline: true, PrimaryIdentifier: "ACS-123", PrimaryTitle: "Fix ACS-123"}, got, "inline primary should still return metadata")
-		require.Equal(t, []string{"ACS-124"}, enqueuedIdentifiers, "additional refs should be forwarded to async linking")
+		require.Equal(t, []string{"ACS-123", "ACS-124"}, enqueuedIdentifiers, "additional refs should be forwarded with the primary first so the worker preserves roles")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 

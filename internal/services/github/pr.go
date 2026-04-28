@@ -1841,6 +1841,9 @@ func normalizePRTitleCandidate(s string) string {
 }
 
 func truncatePRTitle(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
 	if len(s) <= limit {
 		return s
 	}
@@ -2031,6 +2034,9 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 		}
 		// Trim the rest, never the prefixes.
 		fixed := conv + bracketPrefix.String()
+		if len(fixed) >= maxPRTitleLen {
+			return truncatePRTitle(strings.TrimSpace(fixed), maxPRTitleLen)
+		}
 		return fixed + truncatePRTitle(rest, maxPRTitleLen-len(fixed))
 	}
 
@@ -2039,6 +2045,9 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 		return joined
 	}
 	fixed := bracketPrefix.String()
+	if len(fixed) >= maxPRTitleLen {
+		return truncatePRTitle(strings.TrimSpace(fixed), maxPRTitleLen)
+	}
 	return fixed + truncatePRTitle(title, maxPRTitleLen-len(fixed))
 }
 

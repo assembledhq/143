@@ -13,12 +13,29 @@ import type { Session } from "@/lib/types";
 // (state name + color, priority, assignee). v1 ships this minimal chip set
 // to surface the linkage immediately; the richer card lives in the right
 // detail panel and follows in a polish pass.
+//
+// When linear_prepare_state === 'failed' the prepare worker gave up before
+// linking the primary; turn 1 has been allowed to proceed without Linear
+// context (per design 62 §"Failure modes"). We render a faint warning chip
+// in that case so dogfooders see the missing-context signal instead of
+// silently shipping a session that lost its Linear thread.
 export function LinkedIssueChips({ session }: { session: Session }) {
   const links = session.linked_issues ?? [];
-  if (links.length === 0) return null;
+  const prepareFailed = session.linear_prepare_state === "failed";
+  if (links.length === 0 && !prepareFailed) return null;
 
   return (
     <div className="flex flex-wrap items-center gap-1 ml-2 shrink-0">
+      {prepareFailed && (
+        <span
+          key="linear-prepare-failed"
+          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+          title="Linear context preparation failed; turn 1 ran without the primary issue snapshot. Check the operator debug surface or re-link the issue manually."
+          aria-label="Linear context preparation failed"
+        >
+          Linear: prepare failed
+        </span>
+      )}
       {links.map((link) => {
         const isLinear = link.issue_source === "linear";
         const isPrimary = link.role === "primary";

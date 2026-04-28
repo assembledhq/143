@@ -2954,6 +2954,83 @@ func TestApplyLinearKeyPrefixes_DropsRemovedLinkOnResync(t *testing.T) {
 	require.Equal(t, "feat: [ACS-1234] Add OAuth callback handler", got)
 }
 
+// TestApplyLinearKeyPrefixes_ReordersOnPrimaryChange covers the case where
+// the primary issue swaps between resyncs — e.g. a session originally
+// linked to ACS-1 has its primary reassigned to ACS-2 mid-flight. The
+// previous title's `[ACS-1] [ACS-2]` ordering must rebuild to
+// `[ACS-2] [ACS-1]` so the PR's most prominent key matches the current
+// primary.
+func TestApplyLinearKeyPrefixes_ReordersOnPrimaryChange(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	primaryKey := "ACS-2"
+	relatedKey := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{
+			{Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &primaryKey},
+			{Role: models.SessionIssueLinkRoleRelated, IssueSource: &source, ExternalID: &relatedKey},
+		},
+	}
+	got := applyLinearKeyPrefixes(session, "[ACS-1] [ACS-2] feat: x", nil)
+	require.Equal(t, "feat: [ACS-2] [ACS-1] x", got, "primary must lead even when prior title had inverse order")
+}
+
+// TestApplyLinearKeyPrefixes_PathologicalPrefixesAreCapped verifies the
+// 20-iteration safety cap on stripLeadingBracketPrefixes — a malformed or
+// adversarial title with absurd nesting must not lock up the PR pipeline.
+// On input far past the cap, the strip loop intentionally bails with
+// residual prefixes (a malformed title is malformed; we just refuse to
+// spin). The contract under test is bounded time, not perfect cleanup.
+func TestApplyLinearKeyPrefixes_PathologicalPrefixesAreCapped(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	// 50 stacked prefixes — well past the 20-iteration cap.
+	pathological := strings.Repeat("[ACS-1] ", 50) + "feat: x"
+	done := make(chan string, 1)
+	go func() { done <- applyLinearKeyPrefixes(session, pathological, nil) }()
+	select {
+	case got := <-done:
+		require.NotEmpty(t, got, "should return a non-empty title on pathological input")
+		require.Contains(t, got, "[ACS-1]", "result should still carry the linked key")
+	case <-time.After(2 * time.Second):
+		t.Fatal("applyLinearKeyPrefixes did not return within 2s on pathological input — strip-loop cap may be missing")
+	}
+}
+
+func TestApplyLinearKeyPrefixes_OverlongPrefixSetDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	source := models.IssueSourceLinear
+	links := make([]models.SessionIssueLink, 0, 30)
+	for i := 1; i <= 30; i++ {
+		id := fmt.Sprintf("ACS-%d", i)
+		role := models.SessionIssueLinkRoleRelated
+		if i == 1 {
+			role = models.SessionIssueLinkRolePrimary
+		}
+		links = append(links, models.SessionIssueLink{
+			Role:        role,
+			IssueSource: &source,
+			ExternalID:  &id,
+			Position:    i - 1,
+		})
+	}
+	session := &models.Session{LinkedIssues: links}
+
+	require.NotPanics(t, func() {
+		got := applyLinearKeyPrefixes(session, "feat: x", nil)
+		require.NotEmpty(t, got, "overlong Linear prefixes should still produce a PR title")
+		require.LessOrEqual(t, len(got), maxPRTitleLen, "overlong Linear prefixes should be clamped to the GitHub title budget")
+		require.Contains(t, got, "[ACS-1]", "overlong Linear prefixes should keep the primary identifier")
+	}, "overlong Linear prefix sets should not panic when the subject budget is exhausted")
+}
+
 func TestFormatBranchName_ResultSummaryFallback(t *testing.T) {
 	t.Parallel()
 

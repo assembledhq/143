@@ -476,7 +476,8 @@ func TestRunAgentHandler_LinearPrepareStateGatesTurnOne(t *testing.T) {
 	require.Error(t, err, "run_agent must defer when linear pre-start preparation is pending")
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "the error must be RetryableError so the worker re-enqueues without consuming an attempt")
-	require.Equal(t, 5*time.Second, retryable.RetryAfter, "the gate should use a fixed short wait, not exponential backoff")
+	require.NotNil(t, retryable.RetryAfter, "the gate must set a fixed short wait, not fall through to exponential backoff")
+	require.Equal(t, 5*time.Second, *retryable.RetryAfter, "the gate should use a fixed short wait")
 	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run while preparation is pending")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -667,20 +668,22 @@ func TestLinearJobHandlers(t *testing.T) {
 func TestMapLinearWriteErrorToRetry(t *testing.T) {
 	t.Parallel()
 
+	sevenSeconds := 7 * time.Second
+	thirtySeconds := 30 * time.Second
 	tests := []struct {
 		name          string
 		err           error
-		expectedDelay time.Duration
+		expectedDelay *time.Duration
 	}{
 		{
 			name:          "rate limit uses retry after header",
 			err:           &linearservice.RateLimitError{RetryAfter: "7"},
-			expectedDelay: 7 * time.Second,
+			expectedDelay: &sevenSeconds,
 		},
 		{
 			name:          "rate limit falls back for invalid retry after",
 			err:           &linearservice.RateLimitError{RetryAfter: "bad"},
-			expectedDelay: 30 * time.Second,
+			expectedDelay: &thirtySeconds,
 		},
 		{
 			name: "unauthorized retries with default backoff",
@@ -700,7 +703,12 @@ func TestMapLinearWriteErrorToRetry(t *testing.T) {
 			var retryable *RetryableError
 			require.ErrorAs(t, err, &retryable, "mapLinearWriteErrorToRetry should always return a retryable wrapper")
 			require.ErrorIs(t, retryable.Err, tt.err, "retryable wrapper should preserve the original error")
-			require.Equal(t, tt.expectedDelay, retryable.RetryAfter, "retryable wrapper should set the expected delay")
+			if tt.expectedDelay == nil {
+				require.Nil(t, retryable.RetryAfter, "retryable wrapper should fall through to exponential backoff")
+			} else {
+				require.NotNil(t, retryable.RetryAfter, "retryable wrapper should set an explicit delay")
+				require.Equal(t, *tt.expectedDelay, *retryable.RetryAfter, "retryable wrapper should set the expected delay")
+			}
 		})
 	}
 }

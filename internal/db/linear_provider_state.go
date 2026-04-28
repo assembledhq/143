@@ -156,11 +156,20 @@ func (s *LinearProviderStateStore) Upsert(ctx context.Context, orgID, linkID uui
 	if err != nil {
 		return fmt.Errorf("encode linear provider state: %w", err)
 	}
-	_, err = s.db.Exec(ctx, `
+	// The WHERE clause on the UPDATE branch mirrors the org_id filter Get
+	// uses, so symmetry is preserved as defense-in-depth: a row created for
+	// org A can never be silently overwritten by an Upsert keyed to org B
+	// even if a caller bug ever passed the wrong orgID. The link_id PK + FK
+	// to session_issue_links already makes this impossible in practice
+	// (link_id is globally unique), but the explicit guard plus the
+	// rows-affected check below turns the unreachable case into a loud error
+	// instead of a silent no-op or a silent cross-org overwrite.
+	tag, err := s.db.Exec(ctx, `
 		INSERT INTO session_issue_link_provider_state (link_id, org_id, provider, state, updated_at)
 		VALUES (@link_id, @org_id, @provider, @state, now())
 		ON CONFLICT (link_id) DO UPDATE
-		SET state = EXCLUDED.state, updated_at = now()`,
+		SET state = EXCLUDED.state, updated_at = now()
+		WHERE session_issue_link_provider_state.org_id = EXCLUDED.org_id`,
 		pgx.NamedArgs{
 			"link_id":  linkID,
 			"org_id":   orgID,
@@ -169,6 +178,9 @@ func (s *LinearProviderStateStore) Upsert(ctx context.Context, orgID, linkID uui
 		})
 	if err != nil {
 		return fmt.Errorf("upsert linear provider state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("upsert linear provider state: link_id %s exists under a different org", linkID)
 	}
 	return nil
 }
@@ -194,6 +206,18 @@ func (s *LinearProviderStateStore) Merge(ctx context.Context, orgID, linkID uuid
 // = overwrite. Without these semantics, partial-update callers (e.g.
 // recording a skip reason) would clobber sticky flags like
 // CoexistsWithGitHubIntegration back to false on every call.
+//
+// Pointer-bool patch examples (callers MUST use BoolPtr — passing a literal
+// `&false` or constructing a *bool inline is the same shape, but BoolPtr
+// keeps the intent explicit at the call site):
+//
+//	patch := LinearProviderState{}                                            // do not touch any bool flag
+//	patch := LinearProviderState{CoexistsWithGitHubIntegration: BoolPtr(true)} // promote: false → true
+//	patch := LinearProviderState{IssueRepoStale: BoolPtr(false)}              // clear: true → false (repair affordance)
+//
+// Concretely, MergeLinearProviderState(current, LinearProviderState{}) is
+// always the identity on the bool flags — a nil pointer never overwrites
+// even though a bare `bool` zero value would.
 func MergeLinearProviderState(current, patch LinearProviderState) LinearProviderState {
 	if patch.Identifier != "" {
 		current.Identifier = patch.Identifier

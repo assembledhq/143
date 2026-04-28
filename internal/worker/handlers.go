@@ -850,9 +850,10 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			// The fixed 5s wait avoids busy-spinning the queue against
 			// exponential backoff — design 62 promises a short-lived
 			// preparing state, not minutes-long waits.
+			d := 5 * time.Second
 			return &RetryableError{
 				Err:        fmt.Errorf("waiting for linear pre-start preparation"),
-				RetryAfter: 5 * time.Second,
+				RetryAfter: &d,
 			}
 		case models.LinearPrepareStateFailed:
 			// Don't start blind. Surface to the user via the recoverable
@@ -2556,7 +2557,7 @@ func mapLinearWriteErrorToRetry(err error) error {
 		if d, parseErr := strconv.Atoi(rate.RetryAfter); parseErr == nil && d > 0 {
 			delay = time.Duration(d) * time.Second
 		}
-		return &RetryableError{Err: err, RetryAfter: delay}
+		return &RetryableError{Err: err, RetryAfter: &delay}
 	}
 	if errors.Is(err, linear.ErrUnauthorized) {
 		// Token expired — let the retry happen at default backoff so the

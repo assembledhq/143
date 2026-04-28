@@ -396,6 +396,81 @@ func TestIntegrationHandler_HandleLinearOAuthCallback_SavesCredentialAndIntegrat
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue
+// pins the two-tier refresh strategy: when the inline RefreshTeamKeys hook
+// succeeds, the OAuth callback must NOT also enqueue the worker job — that
+// would queue redundant work. The mock pool has no Enqueue expectation, so
+// any stray INSERT into job_queue would fail the mock expectations.
+func TestIntegrationHandler_HandleLinearOAuthCallback_InlineRefreshSkipsEnqueue(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.linear.app/oauth/token":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"access_token":"linear-access-token","token_type":"Bearer","scope":"read"}`)),
+			}, nil
+		case "https://api.linear.app/graphql":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewBufferString(`{"data":{"viewer":{"organization":{"id":"lin-org-1","name":"Acme"}}}}`)),
+			}, nil
+		default:
+			return nil, errors.New("unexpected request URL")
+		}
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "linear-client-id", "linear-client-secret", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+	// The job store is wired but inline refresh succeeds, so Enqueue must
+	// not fire. We set the job store to a non-nil value (zero JobStore is
+	// fine for this assertion because the path is short-circuited before
+	// any DB call).
+	handler.SetLinearJobStore(&db.JobStore{})
+
+	inlineCalls := 0
+	handler.SetLinearTeamKeyRefresher(func(_ context.Context, gotOrg uuid.UUID) error {
+		inlineCalls++
+		require.Equal(t, orgID, gotOrg, "refresher must receive the callback's org id")
+		return nil
+	})
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status = 'active'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/linear/callback?code=test-code&state=test-state", nil)
+	req.AddCookie(&http.Cookie{Name: "linear_integration_oauth_state", Value: "test-state"})
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.HandleLinearOAuthCallback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "callback should still redirect after inline refresh")
+	require.Equal(t, 1, inlineCalls, "inline refresher should be invoked exactly once")
+	require.NoError(t, mock.ExpectationsWereMet(), "no extra job-queue inserts should fire when inline refresh succeeds")
+}
+
 func TestIntegrationHandler_HandleLinearOAuthCallback_StateMismatch(t *testing.T) {
 	t.Parallel()
 

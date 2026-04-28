@@ -76,8 +76,15 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 	if err != nil || resolved == nil {
 		// Couldn't resolve inline; mark the session as preparing and let the
 		// worker drive the rest. Turn 1 stays gated.
-		_ = s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStatePending)
-		s.enqueueLinkWorker(ctx, in, hits)
+		if err := s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStatePending); err != nil {
+			return CreateResult{}, fmt.Errorf("mark linear prepare pending: %w", err)
+		}
+		if err := s.enqueueLinkWorker(ctx, in, hits); err != nil {
+			if stateErr := s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStateFailed); stateErr != nil {
+				s.logger.Warn().Err(stateErr).Msg("failed to mark linear prepare failed after enqueue failure")
+			}
+			return CreateResult{}, fmt.Errorf("enqueue linear prepare worker: %w", err)
+		}
 		return CreateResult{PrepareInline: false}, nil
 	}
 
@@ -101,7 +108,12 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 	// Schedule async follow-up for additional refs (related links, mid-
 	// session re-detection later).
 	if len(hits) > 1 {
-		s.enqueueLinkWorker(ctx, in, hits[1:])
+		// Enqueue the full hit set, not just hits[1:]. The worker treats
+		// identifiers[0] as primary and the rest as related, so replaying
+		// the already-linked primary first is what preserves roles.
+		if err := s.enqueueLinkWorker(ctx, in, hits); err != nil {
+			s.logger.Warn().Err(err).Msg("failed to enqueue related linear link worker")
+		}
 	}
 
 	return CreateResult{
@@ -198,9 +210,9 @@ func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, linkID uuid
 // Without it, an inline-failure → async-catch-up fallback silently drops
 // added_by_user_id, which downstream audit and "linked by you" filters
 // rely on.
-func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []Detected) {
+func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []Detected) error {
 	if s.jobEnqueuer == nil {
-		return
+		return fmt.Errorf("linear job enqueuer is not configured")
 	}
 	identifiers := make([]string, 0, len(hits))
 	for _, h := range hits {
@@ -225,8 +237,9 @@ func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []
 		payload["user_id"] = in.UserID.String()
 	}
 	if err := s.jobEnqueuer(ctx, in.OrgID, "link_linear_issue", payload, &dedupeKey); err != nil {
-		s.logger.Warn().Err(err).Msg("failed to enqueue link_linear_issue job")
+		return err
 	}
+	return nil
 }
 
 // JobEnqueuer is the function signature exported by the worker layer for

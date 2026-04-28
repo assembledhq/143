@@ -97,6 +97,7 @@ type fakeLinearClient struct {
 	updateStateCalls    int
 	humanEdited         bool
 	hasGitHubAttachment bool
+	currentIssue        *FetchedIssue
 	commentIDToReturn   string
 	attachmentToReturn  AttachmentResult
 	target              *WorkflowState
@@ -112,11 +113,15 @@ func newFakeLinearClient() *fakeLinearClient {
 		commentIDToReturn:  "linear-comment-1",
 		attachmentToReturn: AttachmentResult{ID: "linear-attachment-1", URL: "https://linear.app/attachment/1"},
 		target:             &WorkflowState{ID: "ws-id", Name: "In Progress", Type: "started"},
+		currentIssue:       &FetchedIssue{StateName: "Todo", StateType: "unstarted", TeamID: "team-1"},
 	}
 }
 
 func (f *fakeLinearClient) FetchIssue(context.Context, string) (*FetchedIssue, error) {
-	return nil, errors.New("FetchIssue not stubbed")
+	if f.currentIssue == nil {
+		return nil, errors.New("FetchIssue not stubbed")
+	}
+	return f.currentIssue, nil
 }
 
 func (f *fakeLinearClient) ListTeamKeys(context.Context) ([]TeamKeyInfo, error) {
@@ -457,6 +462,47 @@ func TestHandleMilestone_GuardsAndErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("per-team true override beats org-level false default", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, _, _ := buildTestService(t, client)
+		tt := true
+		ff := false
+		svc.orgSettingsLoader = func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+			return models.OrgSettings{LinearAutomation: models.LinearAutomationSettings{
+				PostSessionLinks: &ff,
+				PerTeam: map[string]models.LinearTeamAutomationOverride{
+					"ACS": {PostSessionLinks: &tt},
+				},
+			}}, nil
+		}
+		if err := svc.HandleMilestone(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("per-team true override should permit writes: %v", err)
+		}
+		if client.createOrUpdateCalls != 1 || client.createCommentCalls != 1 {
+			t.Fatalf("per-team true override must permit writes despite org false default, got attachment=%d comment=%d", client.createOrUpdateCalls, client.createCommentCalls)
+		}
+	})
+
+	t.Run("org-level false default suppresses untargeted teams", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, _, _ := buildTestService(t, client)
+		ff := false
+		svc.orgSettingsLoader = func(context.Context, uuid.UUID) (models.OrgSettings, error) {
+			return models.OrgSettings{LinearAutomation: models.LinearAutomationSettings{
+				PostSessionLinks: &ff,
+				// No per-team overrides — every team inherits the false default.
+			}}, nil
+		}
+		if err := svc.HandleMilestone(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "OTHER-1"}); err != nil {
+			t.Fatalf("org-level false should skip without error: %v", err)
+		}
+		if client.createOrUpdateCalls != 0 || client.createCommentCalls != 0 {
+			t.Fatalf("org-level false must suppress writes for non-overridden teams, got attachment=%d comment=%d", client.createOrUpdateCalls, client.createCommentCalls)
+		}
+	})
+
 	t.Run("attachment write errors are wrapped", func(t *testing.T) {
 		t.Parallel()
 		client := newFakeLinearClient()
@@ -656,6 +702,32 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		}
 		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipAlreadyPastTarget {
 			t.Fatalf("expected already_past_target skip, got %q", got)
+		}
+	})
+
+	t.Run("current Linear state overrides stale cached provider state", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.currentIssue = &FetchedIssue{StateName: "Done", StateType: "completed", TeamID: "team-1"}
+		svc, provider, events := buildTestService(t, client)
+		link := newPrimaryLink()
+		provider.rows[link.ID] = db.LinearProviderState{
+			LastKnownStateName: "Todo",
+			LastKnownStateType: "unstarted",
+			TeamID:             "team-1",
+		}
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestonePROpened, Session: newSession(), Link: link, IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
+			t.Fatalf("completed current state should record a skip, not error: %v", err)
+		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT fire when current Linear state is already completed (got %d)", client.updateStateCalls)
+		}
+		if len(events.inserts) != 1 {
+			t.Fatalf("expected 1 skip event recorded, got %d", len(events.inserts))
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipAlreadyPastTarget {
+			t.Fatalf("expected already_past_target from current Linear state, got %q", got)
 		}
 	})
 }

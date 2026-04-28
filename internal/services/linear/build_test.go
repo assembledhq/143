@@ -91,5 +91,17 @@ func TestEnqueueMilestone(t *testing.T) {
 func TestMilestoneEnqueuerFor(t *testing.T) {
 	t.Parallel()
 
-	require.NotNil(t, MilestoneEnqueuerFor((*db.JobStore)(nil), zerolog.Nop()), "MilestoneEnqueuerFor should return a closure even for nil stores")
+	closure := MilestoneEnqueuerFor((*db.JobStore)(nil), zerolog.Nop())
+	require.NotNil(t, closure, "MilestoneEnqueuerFor should return a closure even for nil stores")
+
+	// Invoking the closure with a nil store must NOT panic. This exercises
+	// the typed-nil-interface gotcha: passing (*db.JobStore)(nil) into
+	// EnqueueMilestone's MilestoneJobEnqueuer interface parameter wraps a
+	// nil pointer in a non-nil interface, so EnqueueMilestone's own
+	// `if jobs == nil` guard does NOT fire — the concrete-pointer guard in
+	// MilestoneEnqueuerFor is what protects callers in api-only and test
+	// configurations.
+	require.NotPanics(t, func() {
+		closure(context.Background(), uuid.New(), uuid.New(), string(MilestoneLinked), 0)
+	}, "closure must short-circuit safely when the JobStore is a nil pointer")
 }

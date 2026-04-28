@@ -129,8 +129,19 @@ func EnqueueMilestone(ctx context.Context, jobs MilestoneJobEnqueuer, logger zer
 // MilestoneEnqueuerFor returns the closure that PRService.SetLinearMilestoneEnqueuer
 // expects, sharing the same JobStore + queue convention as Build via
 // EnqueueMilestone.
+//
+// The concrete-pointer nil check on jobs is load-bearing: passing a typed
+// nil (*db.JobStore)(nil) into EnqueueMilestone's interface-typed parameter
+// produces a non-nil interface wrapping a nil pointer, so EnqueueMilestone's
+// own `if jobs == nil` guard does NOT fire and Enqueue() would panic. We
+// short-circuit at the concrete-pointer layer here so test harnesses (and
+// any future api-only mode that wires the enqueuer without a job store) are
+// safe to call the returned closure.
 func MilestoneEnqueuerFor(jobs *db.JobStore, logger zerolog.Logger) func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int) {
 	return func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int) {
+		if jobs == nil {
+			return
+		}
 		EnqueueMilestone(ctx, jobs, logger, orgID, sessionID, event, prNumber)
 	}
 }
