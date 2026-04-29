@@ -777,6 +777,80 @@ func TestTopLevelSettingsPatchKeys(t *testing.T) {
 	}
 }
 
+func TestSettingsHandler_PlatformLLMProviders(t *testing.T) {
+	t.Parallel()
+	h := NewSettingsHandler(nil, map[string]string{
+		"openai":    "sk-...platform",
+		"anthropic": "sk-ant-...platform",
+	})
+	got := h.platformLLMProviders()
+	require.True(t, got["openai"])
+	require.True(t, got["anthropic"])
+	require.False(t, got["gemini"])
+}
+
+func TestSettingsHandler_PlatformLLMProviders_Empty(t *testing.T) {
+	t.Parallel()
+	h := NewSettingsHandler(nil, nil)
+	require.Empty(t, h.platformLLMProviders())
+}
+
+func TestSettingsHandler_Update_RejectsCappedModelOnPlatformDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	store := db.NewOrganizationStore(mock)
+	// Org has no own credentials; platform default OpenAI key is wired.
+	// gpt-5.4 should be rejected before any DB write happens.
+	handler := NewSettingsHandler(store, map[string]string{"openai": "sk-...platform"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+		strings.NewReader(`{"settings":{"llm_model":"gpt-5.4"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_SETTINGS")
+	require.Contains(t, w.Body.String(), "default openai key is capped")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should happen on a rejected patch")
+}
+
+func TestSettingsHandler_Update_AllowsSafePlatformModelPatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"updated_at"}).AddRow(now))
+
+	store := db.NewOrganizationStore(mock)
+	handler := NewSettingsHandler(store, map[string]string{"openai": "sk-...platform"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+		strings.NewReader(`{"settings":{"llm_model":"gpt-5.4-mini"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "safe platform model patches should be allowed")
+	require.NoError(t, mock.ExpectationsWereMet(), "settings patch should read and update the organization")
+}
+
 func assertAnError(msg string) error {
 	return &testError{msg: msg}
 }

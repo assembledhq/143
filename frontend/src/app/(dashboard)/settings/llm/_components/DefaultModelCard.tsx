@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Check, Info } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -20,6 +20,8 @@ export interface DefaultModelCardProps {
   ownerProvider: string | null;
   ownerProviderInfo?: { name: string } | null;
   ownerConfigured: boolean;
+  ownerUsesPlatformDefault?: boolean;
+  ownerHasModelRestriction?: boolean;
   onChange: (model: string) => void;
   onReasoningChange: (v: string) => void;
 }
@@ -31,10 +33,13 @@ export function DefaultModelCard({
   ownerProvider,
   ownerProviderInfo,
   ownerConfigured,
+  ownerUsesPlatformDefault = false,
+  ownerHasModelRestriction = false,
   onChange,
   onReasoningChange,
 }: DefaultModelCardProps) {
   const hasModels = modelGroups.length > 0;
+  const ownerName = ownerProviderInfo?.name;
 
   return (
     <Card>
@@ -65,16 +70,19 @@ export function DefaultModelCard({
                 )}
               </SelectContent>
             </Select>
-            {ownerProvider && ownerProviderInfo && ownerConfigured ? (
-              <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-                <Check className="h-3 w-3" />
-                Uses your {ownerProviderInfo.name} key
-              </p>
-            ) : (
-              <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
-                <AlertTriangle className="h-3 w-3" />
-                No provider key configured for this model
-              </p>
+            <OwnerCaption
+              ownerName={ownerProvider && ownerConfigured ? ownerName : null}
+              usesPlatformDefault={ownerUsesPlatformDefault}
+            />
+            {ownerUsesPlatformDefault && ownerHasModelRestriction && (
+              <div className="flex items-start gap-1.5 rounded-md border border-amber-300/60 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-200">
+                <Info className="mt-0.5 h-3 w-3 shrink-0" />
+                <div className="space-y-1">
+                  <p>
+                    143&apos;s default key is capped at lower-cost models.
+                  </p>
+                </div>
+              </div>
             )}
             <p className="text-xs text-muted-foreground">
               Used for organization-level LLM features, separate from the coding agents configured
@@ -102,5 +110,31 @@ export function DefaultModelCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+interface OwnerCaptionProps {
+  // null when no provider is configured for the current model. Otherwise the
+  // provider's display name.
+  ownerName: string | null | undefined;
+  usesPlatformDefault: boolean;
+}
+
+function OwnerCaption({ ownerName, usesPlatformDefault }: OwnerCaptionProps) {
+  if (!ownerName) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+        <AlertTriangle className="h-3 w-3" />
+        No provider key configured for this model
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+      <Check className="h-3 w-3" />
+      {usesPlatformDefault
+        ? `Using 143's default ${ownerName} key`
+        : `Uses your ${ownerName} key`}
+    </p>
   );
 }
