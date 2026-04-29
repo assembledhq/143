@@ -78,7 +78,6 @@ describe("DefaultModelCard", () => {
   });
 
   it("labels the key as 143's default and shows the cost-cap callout when on platform default", () => {
-    const onAddOwnerKey = vi.fn();
     renderWithProviders(
       <DefaultModelCard
         value="gpt-5.4-mini"
@@ -89,7 +88,6 @@ describe("DefaultModelCard", () => {
         ownerConfigured
         ownerUsesPlatformDefault
         ownerHasModelRestriction
-        onAddOwnerKey={onAddOwnerKey}
         onChange={() => {}}
         onReasoningChange={() => {}}
       />,
@@ -97,6 +95,6 @@ describe("DefaultModelCard", () => {
     expect(screen.getByText(/Using 143's default OpenAI key/i)).toBeInTheDocument();
     expect(screen.queryByText(/Uses your OpenAI key/)).not.toBeInTheDocument();
     expect(screen.getByText(/capped at lower-cost models/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Add your own OpenAI key/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add your own OpenAI key/i })).not.toBeInTheDocument();
   });
 });

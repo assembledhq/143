@@ -1,7 +1,6 @@
 "use client";
 
 import { AlertTriangle, Check, Info } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -23,7 +22,6 @@ export interface DefaultModelCardProps {
   ownerConfigured: boolean;
   ownerUsesPlatformDefault?: boolean;
   ownerHasModelRestriction?: boolean;
-  onAddOwnerKey?: () => void;
   onChange: (model: string) => void;
   onReasoningChange: (v: string) => void;
 }
@@ -37,7 +35,6 @@ export function DefaultModelCard({
   ownerConfigured,
   ownerUsesPlatformDefault = false,
   ownerHasModelRestriction = false,
-  onAddOwnerKey,
   onChange,
   onReasoningChange,
 }: DefaultModelCardProps) {
@@ -83,22 +80,6 @@ export function DefaultModelCard({
                 <div className="space-y-1">
                   <p>
                     143&apos;s default key is capped at lower-cost models.
-                    {onAddOwnerKey && ownerName ? (
-                      <>
-                        {" "}
-                        <Button
-                          variant="link"
-                          size="sm"
-                          onClick={onAddOwnerKey}
-                          className="h-auto p-0 text-xs font-medium text-amber-900 underline underline-offset-2 dark:text-amber-100"
-                        >
-                          Add your own {ownerName} key
-                        </Button>{" "}
-                        to unlock the stronger models.
-                      </>
-                    ) : (
-                      " Add your own key to unlock the stronger models."
-                    )}
                   </p>
                 </div>
               </div>

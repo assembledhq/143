@@ -325,23 +325,16 @@ describe("LLMPage", () => {
   });
 
   it("autosaves the default model when a new option is selected", async () => {
-    // Org-configured OpenAI unlocks the full catalog (gpt-5.4 sits behind the
-    // platform-default cap when only 143's key is in play).
-    credentialsListMock.mockResolvedValue({
-      data: [
-        { provider: "openai", configured: true, masked_key: "sk-...test" },
-      ],
-    });
     const user = userEvent.setup();
     renderWithProviders(<LLMPage />);
 
     const combobox = await screen.findByRole("combobox", { name: /LLM Model/i });
     await user.click(combobox);
-    await user.click(await screen.findByRole("option", { name: "gpt-5.4" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.4-nano" }));
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { llm_model: "gpt-5.4" },
+        settings: { llm_model: "gpt-5.4-nano" },
       });
     });
   });
@@ -352,9 +345,9 @@ describe("LLMPage", () => {
     await waitFor(() => {
       expect(screen.getByText(/Using 143's default OpenAI key/i)).toBeInTheDocument();
     });
-    // The cost-cap callout should appear and prompt the user to bring their own key.
+    // The cost-cap callout should appear without implying org keys unlock app-level runtime models.
     expect(screen.getByText(/capped at lower-cost models/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Add your own OpenAI key/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add your own OpenAI key/i })).not.toBeInTheDocument();
   });
 
   it("filters the model dropdown to mini/nano when only the platform default is available", async () => {
@@ -368,7 +361,7 @@ describe("LLMPage", () => {
     expect(screen.queryByRole("option", { name: "gpt-5.4" })).not.toBeInTheDocument();
   });
 
-  it("exposes the full model catalog when the org has its own OpenAI key", async () => {
+  it("keeps the model dropdown capped when the org has its own OpenAI key", async () => {
     credentialsListMock.mockResolvedValue({
       data: [
         { provider: "openai", configured: true, masked_key: "sk-...test" },
@@ -379,10 +372,12 @@ describe("LLMPage", () => {
 
     const combobox = await screen.findByRole("combobox", { name: /LLM Model/i });
     await user.click(combobox);
-    expect(await screen.findByRole("option", { name: "gpt-5.4" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "gpt-5.4-mini" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "gpt-5.4-nano" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "gpt-5.4" })).not.toBeInTheDocument();
   });
 
-  it("shows the owner caption 'Uses your OpenAI key' when the org has its own OpenAI key", async () => {
+  it("keeps the owner caption on the platform OpenAI key even when the org has its own key", async () => {
     credentialsListMock.mockResolvedValue({
       data: [
         { provider: "openai", configured: true, masked_key: "sk-...test" },
@@ -391,9 +386,9 @@ describe("LLMPage", () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Uses your OpenAI key/)).toBeInTheDocument();
+      expect(screen.getByText(/Using 143's default OpenAI key/i)).toBeInTheDocument();
     });
-    expect(screen.queryByText(/Using 143's default OpenAI key/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Uses your OpenAI key/)).not.toBeInTheDocument();
   });
 
   it("shows an amber warning when no provider for the default model is configured", async () => {

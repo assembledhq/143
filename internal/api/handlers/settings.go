@@ -2,13 +2,11 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
 
@@ -17,12 +15,6 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/rs/zerolog"
 )
-
-// settingsCredentialLookup is the narrow slice of the credential store the
-// settings handler needs. Defined as an interface so tests can stub it.
-type settingsCredentialLookup interface {
-	ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error)
-}
 
 // OrgSettingsInvalidator drops cached org settings so that a write here is
 // observed by the orchestrator's Amp/Pi config lookup immediately, rather
@@ -33,13 +25,11 @@ type OrgSettingsInvalidator interface {
 }
 
 type SettingsHandler struct {
-	orgStore         *db.OrganizationStore
-	credentials      settingsCredentialLookup
-	llmDefaults      map[string]string // provider name → masked key (from server env)
-	audit            *db.AuditEmitter
-	logger           zerolog.Logger
-	invalidator      OrgSettingsInvalidator
-	misconfigLogOnce sync.Once
+	orgStore    *db.OrganizationStore
+	llmDefaults map[string]string // provider name → masked key (from server env)
+	audit       *db.AuditEmitter
+	logger      zerolog.Logger
+	invalidator OrgSettingsInvalidator
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -62,10 +52,9 @@ func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInval
 	h.invalidator = invalidator
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, credentials settingsCredentialLookup, llmDefaults map[string]string) *SettingsHandler {
+func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
 	return &SettingsHandler{
 		orgStore:    orgStore,
-		credentials: credentials,
 		llmDefaults: llmDefaults,
 		logger:      zerolog.Nop(),
 	}
@@ -120,13 +109,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if parsedSettings.LLMModel != "" {
-			h.warnIfCapMisconfigured(r.Context())
-			orgConfigured, err := h.orgConfiguredLLMProviders(r.Context(), orgID)
-			if err != nil {
-				writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check provider credentials", err)
-				return
-			}
-			if err := models.ValidateLLMModelAccess(parsedSettings.LLMModel, orgConfigured, h.platformLLMProviders()); err != nil {
+			if err := models.ValidateLLMModelAccess(parsedSettings.LLMModel, nil, h.platformLLMProviders()); err != nil {
 				writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 				return
 			}
@@ -312,42 +295,6 @@ func sortedSettingsChangeKeys(changes map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// warnIfCapMisconfigured logs once if the handler was wired with platform
-// defaults but no credential lookup. In that combo, the cap can't tell which
-// orgs have their own key and would incorrectly reject every write of a
-// capped model. We flag it loudly the first time it bites a real request so
-// the misconfig is obvious in production logs instead of being a silent
-// "your settings won't save" bug for end users.
-func (h *SettingsHandler) warnIfCapMisconfigured(ctx context.Context) {
-	if h.credentials != nil || len(h.llmDefaults) == 0 {
-		return
-	}
-	h.misconfigLogOnce.Do(func() {
-		zerolog.Ctx(ctx).Warn().
-			Int("platform_default_providers", len(h.llmDefaults)).
-			Msg("settings handler has platform LLM defaults but no credential lookup; LLM model cap will reject every write of a capped model — wire credentials in NewSettingsHandler")
-	})
-}
-
-// orgConfiguredLLMProviders returns the set of provider names where the org
-// has its own credential saved (vs. relying on the platform default).
-func (h *SettingsHandler) orgConfiguredLLMProviders(ctx context.Context, orgID uuid.UUID) (map[string]bool, error) {
-	configured := map[string]bool{}
-	if h.credentials == nil {
-		return configured, nil
-	}
-	summaries, err := h.credentials.ListSummaries(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range summaries {
-		if s.Configured {
-			configured[string(s.Provider)] = true
-		}
-	}
-	return configured, nil
 }
 
 // platformLLMProviders returns the set of provider names that have a

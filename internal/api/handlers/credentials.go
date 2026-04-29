@@ -168,24 +168,12 @@ func (h *CredentialHandler) maybeResetLLMModel(ctx context.Context, orgID uuid.U
 		return
 	}
 
-	summaries, err := h.store.ListSummaries(ctx, orgID)
-	if err != nil {
-		logger.Warn().Err(err).Str("org_id", orgID.String()).
-			Msg("self-heal: failed to list credentials after credential delete")
-		return
-	}
-	orgConfigured := map[string]bool{}
-	for _, s := range summaries {
-		if s.Configured {
-			orgConfigured[string(s.Provider)] = true
-		}
-	}
 	platformAvailable := map[string]bool{}
 	for provider := range h.llmDefaults {
 		platformAvailable[provider] = true
 	}
 
-	if err := models.ValidateLLMModelAccess(settings.LLMModel, orgConfigured, platformAvailable); err == nil {
+	if err := models.ValidateLLMModelAccess(settings.LLMModel, nil, platformAvailable); err == nil {
 		return
 	}
 
