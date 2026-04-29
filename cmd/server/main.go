@@ -403,6 +403,31 @@ func main() {
 			reconcileCancel()
 		}
 
+		// Re-open the per-session GitHub credential socket listener for
+		// sessions whose containers survive a worker restart (preview holds
+		// keep them alive across the gap). Without this, in-sandbox `git push`
+		// dials a dead socket and fails with ECONNREFUSED until the next
+		// turn boundary calls Listen again. Runs after the reconciler so
+		// dead-container rows have already been cleared and we don't waste
+		// IsAlive probes on them. Best-effort: errors are logged, not fatal.
+		//
+		// services is guaranteed non-nil here (the Fatal above exits on nil)
+		// but staticcheck's flow analysis can't follow logger.Fatal — gate
+		// the rehydrate inside an explicit non-nil check to keep lint clean.
+		if services != nil {
+			if orch, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+				rehydrateCtx, rehydrateCancel := context.WithTimeout(ctx, 2*time.Minute)
+				keep, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
+				if rehydrateErr != nil {
+					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
+				}
+				if services.SandboxAuthSweep != nil {
+					services.SandboxAuthSweep(keep)
+				}
+				rehydrateCancel()
+			}
+		}
+
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
 			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
@@ -951,6 +976,7 @@ func buildServices(
 		// *Server pointer is stable for the process lifetime.
 		s := sandboxAuthServer
 		svc.SandboxAuthShutdown = s.Shutdown
+		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
 	}
 	return svc
 }

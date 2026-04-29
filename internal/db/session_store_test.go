@@ -1861,6 +1861,50 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "list orphaned containers")
 }
 
+// TestSessionStore_ListContainerHoldingSessions is the rehydrate-side
+// counterpart to ListOrphanedContainers: same paging, opposite predicate
+// (EXISTS preview hold instead of NOT EXISTS). The query must filter by
+// preview_holding_container so we don't try to rehydrate listeners for
+// containers that aren't actually being kept alive across a worker restart.
+func TestSessionStore_ListContainerHoldingSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...),
+		)
+
+	sessions, err := store.ListContainerHoldingSessions(context.Background(), uuid.Nil)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListContainerHoldingSessions_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListContainerHoldingSessions(context.Background(), uuid.Nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "list container-holding sessions")
+}
+
 func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 	t.Parallel()
 

@@ -533,3 +533,61 @@ func TestAssertParentDirPerms_ErrorPaths(t *testing.T) {
 		require.Contains(t, err.Error(), "is not a directory", "error should explain the type mismatch")
 	})
 }
+
+// TestServer_SweepStaleSessionDirs covers the post-rehydrate hygiene pass:
+// per-session subdirs whose UUIDs aren't in `keep` get removed, dirs that
+// are kept survive, and non-UUID entries are left alone (the contract is
+// that socketDir is single-writer, but the sweep should still defend against
+// stray files rather than blow them away).
+func TestServer_SweepStaleSessionDirs(t *testing.T) {
+	t.Parallel()
+	dir := shortSocketDir(t)
+
+	keepID := uuid.New()
+	staleID1 := uuid.New()
+	staleID2 := uuid.New()
+
+	for _, id := range []uuid.UUID{keepID, staleID1, staleID2} {
+		subdir := filepath.Join(dir, id.String())
+		require.NoError(t, os.MkdirAll(subdir, 0o750))
+		// Drop a leftover socket-shaped file inside each subdir to mimic the
+		// crash scenario this sweep is for: files left behind by a crashed
+		// orchestrator that didn't reach its Shutdown closer.
+		require.NoError(t, os.WriteFile(filepath.Join(subdir, SocketFileName), []byte{}, 0o600))
+	}
+	// A non-UUID entry: must be left untouched even though it's not in keep,
+	// so the sweep can't clobber stray files dropped by ops/tooling.
+	strayPath := filepath.Join(dir, "not-a-uuid")
+	require.NoError(t, os.WriteFile(strayPath, []byte("manual probe"), 0o600))
+
+	srv := NewServer(&stubResolver{}, dir, zerolog.Nop())
+	srv.SweepStaleSessionDirs(map[uuid.UUID]struct{}{keepID: {}})
+
+	_, err := os.Stat(filepath.Join(dir, keepID.String()))
+	require.NoError(t, err, "kept session dir should still exist after sweep")
+
+	_, err = os.Stat(filepath.Join(dir, staleID1.String()))
+	require.True(t, os.IsNotExist(err), "stale session dir 1 should be removed")
+	_, err = os.Stat(filepath.Join(dir, staleID2.String()))
+	require.True(t, os.IsNotExist(err), "stale session dir 2 should be removed")
+
+	_, err = os.Stat(strayPath)
+	require.NoError(t, err, "non-UUID entries should be left alone")
+}
+
+// TestServer_SweepStaleSessionDirs_EmptyKeep verifies sweep with an empty
+// keep set removes every UUID-named subdir — the case where a worker boots
+// with no live preview-held containers.
+func TestServer_SweepStaleSessionDirs_EmptyKeep(t *testing.T) {
+	t.Parallel()
+	dir := shortSocketDir(t)
+
+	id := uuid.New()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, id.String()), 0o750))
+
+	srv := NewServer(&stubResolver{}, dir, zerolog.Nop())
+	srv.SweepStaleSessionDirs(nil)
+
+	_, err := os.Stat(filepath.Join(dir, id.String()))
+	require.True(t, os.IsNotExist(err), "every UUID-named subdir should be swept when keep is empty")
+}

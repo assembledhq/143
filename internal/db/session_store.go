@@ -1692,6 +1692,50 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	return sessions, nil
 }
 
+// ListContainerHoldingSessions returns sessions whose container_id is set and
+// a preview is currently holding the sandbox. Called on startup to rehydrate
+// per-session GitHub credential socket listeners for containers that survive
+// a worker restart (preview holds keep them alive across the gap).
+//
+// Without rehydration, a push from inside a held-alive sandbox dials a dead
+// socket and gets ECONNREFUSED until the next turn boundary calls Listen
+// again. The fresh listener uses the same on-disk path so the container's
+// directory bind-mount picks it up transparently.
+//
+// Returns at most 100 rows per call, keyset-paginated by session id > afterID
+// and ordered by id ASC. Mirrors ListOrphanedContainers' pagination so a
+// degenerate state (probe failures, transient errors) doesn't trap the caller
+// in the same page.
+// lint:allow-no-orgid reason="startup rehydrate scans across all orgs by design"
+func (s *SessionStore) ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE container_id IS NOT NULL
+		  AND id > @after_id
+		  AND EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		ORDER BY id ASC
+		LIMIT 100`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"after_id": afterID})
+	if err != nil {
+		return nil, fmt.Errorf("list container-holding sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
+}
+
 // UpdateWorkingBranch sets the working branch name for a session.
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	query := `UPDATE sessions SET working_branch = @working_branch, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
