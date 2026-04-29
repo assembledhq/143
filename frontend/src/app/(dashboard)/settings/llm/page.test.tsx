@@ -368,7 +368,7 @@ describe("LLMPage", () => {
     expect(screen.queryByRole("option", { name: "gpt-5.4" })).not.toBeInTheDocument();
   });
 
-  it("unlocks the full model catalog once the org adds its own OpenAI key", async () => {
+  it("exposes the full model catalog when the org has its own OpenAI key", async () => {
     credentialsListMock.mockResolvedValue({
       data: [
         { provider: "openai", configured: true, masked_key: "sk-...test" },

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -32,12 +33,13 @@ type OrgSettingsInvalidator interface {
 }
 
 type SettingsHandler struct {
-	orgStore    *db.OrganizationStore
-	credentials settingsCredentialLookup
-	llmDefaults map[string]string // provider name → masked key (from server env)
-	audit       *db.AuditEmitter
-	logger      zerolog.Logger
-	invalidator OrgSettingsInvalidator
+	orgStore         *db.OrganizationStore
+	credentials      settingsCredentialLookup
+	llmDefaults      map[string]string // provider name → masked key (from server env)
+	audit            *db.AuditEmitter
+	logger           zerolog.Logger
+	invalidator      OrgSettingsInvalidator
+	misconfigLogOnce sync.Once
 }
 
 // SetAuditEmitter injects the audit emitter for logging settings events.
@@ -118,6 +120,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if parsedSettings.LLMModel != "" {
+			h.warnIfCapMisconfigured(r.Context())
 			orgConfigured, err := h.orgConfiguredLLMProviders(r.Context(), orgID)
 			if err != nil {
 				writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check provider credentials", err)
@@ -309,6 +312,23 @@ func sortedSettingsChangeKeys(changes map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// warnIfCapMisconfigured logs once if the handler was wired with platform
+// defaults but no credential lookup. In that combo, the cap can't tell which
+// orgs have their own key and would incorrectly reject every write of a
+// capped model. We flag it loudly the first time it bites a real request so
+// the misconfig is obvious in production logs instead of being a silent
+// "your settings won't save" bug for end users.
+func (h *SettingsHandler) warnIfCapMisconfigured(ctx context.Context) {
+	if h.credentials != nil || len(h.llmDefaults) == 0 {
+		return
+	}
+	h.misconfigLogOnce.Do(func() {
+		zerolog.Ctx(ctx).Warn().
+			Int("platform_default_providers", len(h.llmDefaults)).
+			Msg("settings handler has platform LLM defaults but no credential lookup; LLM model cap will reject every write of a capped model — wire credentials in NewSettingsHandler")
+	})
 }
 
 // orgConfiguredLLMProviders returns the set of provider names where the org

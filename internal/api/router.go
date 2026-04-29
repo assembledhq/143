@@ -223,6 +223,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
+	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
 	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)

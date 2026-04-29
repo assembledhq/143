@@ -59,8 +59,12 @@ export function ProviderKeyRow({
         <span className="text-sm font-medium">{info.name}</span>
         {statusText}
         {isDefaultOwner && (
-          <Badge variant="secondary" className="text-xs px-1.5 py-0">
-            active
+          <Badge
+            variant="secondary"
+            className="text-xs px-1.5 py-0"
+            title="Provider for the current default model"
+          >
+            current
           </Badge>
         )}
       </div>

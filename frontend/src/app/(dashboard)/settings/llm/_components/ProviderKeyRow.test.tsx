@@ -39,7 +39,7 @@ describe("ProviderKeyRow", () => {
     expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
   });
 
-  it("renders the active pill only when isDefaultOwner is true", () => {
+  it("renders the current pill only when isDefaultOwner is true", () => {
     const { rerender } = renderWithProviders(
       <ProviderKeyRow
         provider="openai"
@@ -49,7 +49,7 @@ describe("ProviderKeyRow", () => {
         onEdit={() => {}}
       />,
     );
-    expect(screen.getByText("active")).toBeInTheDocument();
+    expect(screen.getByText("current")).toBeInTheDocument();
 
     rerender(
       <ProviderKeyRow
@@ -60,7 +60,7 @@ describe("ProviderKeyRow", () => {
         onEdit={() => {}}
       />,
     );
-    expect(screen.queryByText("active")).not.toBeInTheDocument();
+    expect(screen.queryByText("current")).not.toBeInTheDocument();
   });
 
   it("shows 'Using 143's default key' when only the platform default is available", () => {
