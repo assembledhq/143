@@ -64,6 +64,14 @@ type OrgSettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.OrgSet
 // continues so a single bad row can't strand the startup pass. If sandboxAuth
 // or provider is nil (legacy GITHUB_TOKEN path or no docker), we bail early
 // — there's nothing to rehydrate.
+//
+// Return contract: a nil map means "rehydrate did NOT run" (bail-out path);
+// a non-nil map (possibly empty) means "ran successfully and these are the
+// session IDs whose listeners are now live". Callers that want to
+// post-process with a sweep MUST distinguish these — sweeping on a nil keep
+// would treat every on-disk subdir as stale and clobber sockets we never
+// re-bound, regressing into ENOENT instead of the ECONNREFUSED this fix
+// is for.
 func RehydrateSandboxAuthListeners(
 	ctx context.Context,
 	sessions ContainerHoldingSessionLister,
@@ -73,16 +81,16 @@ func RehydrateSandboxAuthListeners(
 	sandboxAuth SandboxAuthServer,
 	logger zerolog.Logger,
 ) (map[uuid.UUID]struct{}, error) {
-	rehydrated := make(map[uuid.UUID]struct{})
 	if sandboxAuth == nil {
 		logger.Debug().Msg("rehydrate: sandbox auth server not configured; skipping")
-		return rehydrated, nil
+		return nil, nil
 	}
 	if provider == nil {
 		logger.Debug().Msg("rehydrate: no sandbox provider configured; skipping")
-		return rehydrated, nil
+		return nil, nil
 	}
 
+	rehydrated := make(map[uuid.UUID]struct{})
 	var totalRehydrated, totalDead, totalErrored int
 	var cursor uuid.UUID
 	hitCap := true
@@ -90,7 +98,10 @@ func RehydrateSandboxAuthListeners(
 	for batch := 0; batch < rehydrateMaxBatches; batch++ {
 		page, err := sessions.ListContainerHoldingSessions(ctx, cursor)
 		if err != nil {
-			return rehydrated, fmt.Errorf("list container-holding sessions: %w", err)
+			// Return nil keep (not the partial map) so callers don't sweep
+			// based on incomplete coverage — a partial keep would treat
+			// unvisited live sessions as stale and clobber their sockets.
+			return nil, fmt.Errorf("list container-holding sessions: %w", err)
 		}
 		if len(page) == 0 {
 			hitCap = false
@@ -178,18 +189,27 @@ func RehydrateSandboxAuthListeners(
 	return rehydrated, nil
 }
 
-// RehydrateSandboxAuthListeners runs the freestanding RehydrateSandboxAuthListeners
-// helper using the orchestrator's already-wired dependencies. Convenience for
-// callers (cmd/server/main.go) that already have an Orchestrator and would
-// otherwise have to rewire sessions/repos/orgs/provider/sandboxAuth into the
-// freestanding form.
+// RehydrateSandboxAuthListeners runs the package-level
+// RehydrateSandboxAuthListeners helper using the orchestrator's already-wired
+// dependencies. Convenience for callers (cmd/server/main.go) that already
+// have an Orchestrator and would otherwise have to rewire
+// sessions/repos/orgs/provider/sandboxAuth into the freestanding form.
 //
-// Returns nil and logs at debug if the orchestrator wasn't configured with a
-// sandbox auth server (legacy GITHUB_TOKEN env path, or local-dev with no
-// SANDBOX_AUTH_SOCKET_DIR). The sessions store must implement
-// ContainerHoldingSessionLister; if it doesn't (e.g., a stub in tests that
-// only implements the orchestrator-time methods), this returns nil with a
-// warn-level log so the boot path isn't fatal.
+// Return contract is the same as the freestanding helper: (nil, nil) means
+// "did NOT run" (bail-out — sandboxAuth not configured, or session store
+// doesn't satisfy ContainerHoldingSessionLister); (non-nil, nil) means "ran
+// successfully" with the rehydrated session IDs as the map keys (possibly
+// empty if no sessions matched). Callers that follow up with a sweep MUST
+// gate it on `keep != nil` — sweeping on a nil keep would treat every
+// on-disk session subdir as stale and clobber sockets the orchestrator
+// never re-bound.
+//
+// The interface assertion on o.sessions is defensive: production wires
+// *db.SessionStore which implements ContainerHoldingSessionLister, but a
+// future refactor that narrows the SessionStore interface (or a test stub
+// that only implements the orchestrator-time methods) would degrade to
+// "rehydrate is unavailable" instead of failing boot. The warn log makes
+// that degradation visible to ops.
 func (o *Orchestrator) RehydrateSandboxAuthListeners(ctx context.Context) (map[uuid.UUID]struct{}, error) {
 	if o.sandboxAuth == nil {
 		o.logger.Debug().Msg("rehydrate: orchestrator has no sandbox auth server; skipping")

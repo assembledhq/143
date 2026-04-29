@@ -19,16 +19,25 @@ import (
 // pages[1] is the second, etc. An empty inner slice signals end-of-stream so
 // the caller breaks. Anything beyond the last page is also returned empty,
 // which keeps degenerate batch-cap tests well-defined.
+//
+// errAtCall (1-indexed) lets a test simulate a list failure on a specific
+// call number — useful for the partial-progress case where the first page
+// returns sessions and the second page errors. errAtCall == 0 means "never
+// error here"; the unconditional `err` field still applies.
 type rehydrateLister struct {
-	pages [][]models.Session
-	err   error
-	calls int
+	pages     [][]models.Session
+	err       error
+	errAtCall int
+	calls     int
 }
 
 func (s *rehydrateLister) ListContainerHoldingSessions(_ context.Context, _ uuid.UUID) ([]models.Session, error) {
 	s.calls++
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.errAtCall > 0 && s.calls == s.errAtCall {
+		return nil, errors.New("simulated mid-stream list failure")
 	}
 	if s.calls-1 >= len(s.pages) {
 		return nil, nil
@@ -140,7 +149,7 @@ func TestRehydrate_SkipsWhenSandboxAuthNil(t *testing.T) {
 		zerolog.Nop(),
 	)
 	require.NoError(t, err)
-	require.Empty(t, keep, "rehydrate should return an empty keep set when sandbox auth is disabled")
+	require.Nil(t, keep, "bail-out paths must return a nil keep so callers can distinguish 'didn't run' from 'ran with no sessions' and skip the sweep")
 }
 
 func TestRehydrate_SkipsWhenProviderNil(t *testing.T) {
@@ -155,6 +164,26 @@ func TestRehydrate_SkipsWhenProviderNil(t *testing.T) {
 		zerolog.Nop(),
 	)
 	require.NoError(t, err)
+	require.Nil(t, keep, "bail-out paths must return a nil keep so callers skip the sweep")
+}
+
+// TestRehydrate_NoSessionsReturnsNonNilEmptyMap is the negative-space partner
+// to the bail-out tests: when rehydrate actually ran (deps non-nil) but the
+// list returned no rows, the keep map must be non-nil so the caller knows it
+// can safely sweep — every UUID-named subdir on disk really is stale.
+func TestRehydrate_NoSessionsReturnsNonNilEmptyMap(t *testing.T) {
+	t.Parallel()
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{},
+		&rehydrateRepoStore{},
+		nil,
+		&rehydrateProvider{},
+		&rehydrateSandboxAuth{},
+		zerolog.Nop(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, keep, "successful run with no sessions must return a non-nil empty map so the caller knows sweep is safe")
 	require.Empty(t, keep)
 }
 
@@ -271,7 +300,44 @@ func TestRehydrate_ListErrorBubbles(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, listErr, "a list-page failure must surface so ops can investigate; per-row failures are swallowed but page failures aren't")
-	require.Empty(t, keep)
+	require.Nil(t, keep, "list-page errors must return nil keep — a partial map would let the caller sweep based on incomplete coverage and clobber unvisited live sockets")
+}
+
+// TestRehydrate_PartialListErrorReturnsNilKeep verifies the contract that
+// a list-page failure mid-stream still yields a nil keep, not the partial
+// map of sessions we'd already processed. A partial keep would let the
+// caller sweep based on incomplete coverage and clobber sockets for the
+// (still-live) sessions we never visited.
+func TestRehydrate_PartialListErrorReturnsNilKeep(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	first := newSession(orgID, repoID, "container-first")
+
+	prov := &rehydrateProvider{alive: map[string]bool{"container-first": true}}
+	auth := &rehydrateSandboxAuth{}
+
+	SetIsAliveBackoffForTesting(0)
+	t.Cleanup(func() { SetIsAliveBackoffForTesting(500 * time.Millisecond) })
+
+	// First call returns one session (which gets Listen'd), second call
+	// errors. The function must return nil keep despite the partial
+	// progress.
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{
+			pages:     [][]models.Session{{first}},
+			errAtCall: 2,
+		},
+		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		nil,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.Error(t, err)
+	require.Nil(t, keep, "partial-progress + list error must return nil keep so the caller skips the sweep entirely")
+	require.Equal(t, []uuid.UUID{first.ID}, auth.listened, "the first-page Listen must have happened (proving 'partial progress' is real); we just don't trust the partial keep for sweep purposes")
 }
 
 func TestRehydrate_OrgSettingsLoaderCalledPerSession(t *testing.T) {

@@ -421,7 +421,11 @@ func main() {
 				if rehydrateErr != nil {
 					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
 				}
-				if services.SandboxAuthSweep != nil {
+				// Only sweep when rehydrate actually ran (keep != nil) — a nil
+				// keep means we don't know which sockets are live, so sweeping
+				// would clobber listeners the next turn boundary will rebind.
+				// See orch.RehydrateSandboxAuthListeners' return contract.
+				if keep != nil && services.SandboxAuthSweep != nil {
 					services.SandboxAuthSweep(keep)
 				}
 				rehydrateCancel()

@@ -250,6 +250,16 @@ func (s *Server) Shutdown() {
 // way, the subdir is no longer load-bearing and accumulates indefinitely
 // without this sweep.
 //
+// Boot-time sequencing assumption: this is called synchronously from the
+// worker boot path after RehydrateSandboxAuthListeners returns and BEFORE
+// processWorkers begin claiming jobs. Because of that ordering, no
+// concurrent Listen() can race the os.ReadDir → os.RemoveAll loop below —
+// the only Listens that could be in flight while sweep runs are the ones
+// rehydrate itself just made, and those session IDs are exactly what's in
+// `keep`. If a future refactor backgrounds rehydrate or moves the sweep
+// off the boot path, this assumption breaks and we'd need a per-session
+// mutex (or to read s.active under the server's lock).
+//
 // Best-effort: a directory we can't read or remove is logged and skipped.
 // Subdirs in keep are left untouched even if they look empty — a freshly
 // rehydrated listener may not have written its socket file yet.

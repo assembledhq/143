@@ -1702,6 +1702,16 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 // again. The fresh listener uses the same on-disk path so the container's
 // directory bind-mount picks it up transparently.
 //
+// Why preview-only and not turn-or-preview: a turn_holding_container=TRUE
+// row at startup means a worker crashed mid-turn. Those rows go through
+// the orphan reconciler (ListOrphanedContainers), which IsAlive-probes
+// them and either CAS-clears the row (container gone) or leaves it for
+// the next turn boundary to re-Listen as part of normal flow. Adding
+// turn-held rows here would either double-process them with the reconciler
+// or race it. Preview-held rows, by contrast, are the only ones whose
+// containers are *expected* to outlive the worker and need a proactive
+// re-Listen before any user action.
+//
 // Returns at most 100 rows per call, keyset-paginated by session id > afterID
 // and ordered by id ASC. Mirrors ListOrphanedContainers' pagination so a
 // degenerate state (probe failures, transient errors) doesn't trap the caller
