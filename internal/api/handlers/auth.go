@@ -511,13 +511,21 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		email = noreplyEmail
 	}
 
+	// GitHub returns "" for users who haven't set a public display name on
+	// their profile. Fall back to the login so every UI surface that renders
+	// users.name has something readable instead of an empty string.
+	displayName := ghUser.Name
+	if displayName == "" {
+		displayName = ghUser.Login
+	}
+
 	// Account linking: try GitHub ID → email → create new.
 	pendingInvite := readAndClearPendingInvitationCookie(w, r)
 
 	existingUser, err := h.userStore.GetByGitHubID(r.Context(), ghUser.ID)
 	if err == nil {
 		// Known GitHub user — update and sign in.
-		existingUser.Name = ghUser.Name
+		existingUser.Name = displayName
 		existingUser.Email = email
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
@@ -553,7 +561,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			user := &models.User{
 				OrgID:              inv.OrgID,
 				Email:              email,
-				Name:               ghUser.Name,
+				Name:               displayName,
 				Role:               role,
 				GitHubID:           &ghUser.ID,
 				GitHubLogin:        &ghUser.Login,
@@ -587,7 +595,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	user := &models.User{
 		Email:              email,
-		Name:               ghUser.Name,
+		Name:               displayName,
 		GitHubID:           &ghUser.ID,
 		GitHubLogin:        &ghUser.Login,
 		GitHubNoreplyEmail: &noreplyEmail,
