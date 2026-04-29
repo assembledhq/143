@@ -287,3 +287,192 @@ func TestCredentialHandler_Delete(t *testing.T) {
 		})
 	}
 }
+
+// fakeOrgStore is a minimal in-memory orgSettingsMutator for the self-heal
+// tests. It captures the last Update call so we can assert on the patched
+// settings JSON.
+type fakeOrgStore struct {
+	org        models.Organization
+	getErr     error
+	updateErr  error
+	lastUpdate *models.Organization
+}
+
+func (f *fakeOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+	if f.getErr != nil {
+		return models.Organization{}, f.getErr
+	}
+	return f.org, nil
+}
+
+func (f *fakeOrgStore) Update(_ context.Context, org *models.Organization) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	dup := *org
+	dup.Settings = append(json.RawMessage(nil), org.Settings...)
+	f.lastUpdate = &dup
+	f.org = dup
+	return nil
+}
+
+func TestCredentialHandler_Delete_SelfHealsCappedLLMModel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		settings          string
+		listSummaries     []models.CredentialSummary
+		llmDefaults       map[string]string
+		expectReset       bool
+		expectedFinalJSON string
+	}{
+		{
+			// Org had its own OpenAI key + gpt-5.4. They delete the key. The
+			// platform default still serves OpenAI but caps at mini/nano —
+			// gpt-5.4 must be cleared so it stops billing the platform.
+			name:              "clears llm_model when post-delete state would route through capped platform default",
+			settings:          `{"llm_model":"gpt-5.4"}`,
+			listSummaries:     []models.CredentialSummary{{Provider: models.ProviderOpenAI, Configured: false}},
+			llmDefaults:       map[string]string{"openai": "sk-...platform"},
+			expectReset:       true,
+			expectedFinalJSON: `{"llm_model":""}`,
+		},
+		{
+			// Same delete, but model is already mini — well within the cap.
+			// Don't churn the org's setting.
+			name:          "leaves llm_model alone when current value is still allowed under platform default",
+			settings:      `{"llm_model":"gpt-5.4-mini"}`,
+			listSummaries: []models.CredentialSummary{{Provider: models.ProviderOpenAI, Configured: false}},
+			llmDefaults:   map[string]string{"openai": "sk-...platform"},
+			expectReset:   false,
+		},
+		{
+			// Org keeps an Anthropic key; gpt-5.4 still has no key path here, but
+			// the validator only blocks the cost-cap bypass, not "no provider
+			// configured." Don't reset on missing-provider — that's a read-side UX.
+			name:          "skips reset when no provider serves the model at all",
+			settings:      `{"llm_model":"gpt-5.4"}`,
+			listSummaries: []models.CredentialSummary{{Provider: models.ProviderAnthropic, Configured: true}},
+			llmDefaults:   map[string]string{},
+			expectReset:   false,
+		},
+		{
+			name:          "no-op when llm_model is empty",
+			settings:      `{}`,
+			listSummaries: []models.CredentialSummary{},
+			llmDefaults:   map[string]string{"openai": "sk-...platform"},
+			expectReset:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			credStore := &mockCredentialStore{
+				listFn: func(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error) {
+					return tt.listSummaries, nil
+				},
+			}
+			orgStore := &fakeOrgStore{
+				org: models.Organization{
+					ID:       orgID,
+					Settings: json.RawMessage(tt.settings),
+				},
+			}
+
+			handler := NewCredentialHandler(credStore)
+			handler.SetSelfHeal(orgStore, tt.llmDefaults)
+
+			req := newCredentialRequest(t, http.MethodDelete, "/api/v1/settings/credentials/openai", nil, orgID, "openai")
+			rr := httptest.NewRecorder()
+			handler.Delete(rr, req)
+			require.Equal(t, http.StatusNoContent, rr.Code)
+
+			if tt.expectReset {
+				require.NotNil(t, orgStore.lastUpdate, "self-heal should have written the org back")
+				require.JSONEq(t, tt.expectedFinalJSON, string(orgStore.lastUpdate.Settings))
+			} else {
+				require.Nil(t, orgStore.lastUpdate, "self-heal should not write when current model is allowed")
+			}
+		})
+	}
+}
+
+func TestCredentialHandler_Delete_SelfHealNotWiredIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	// No SetSelfHeal call: Delete must still succeed without touching org settings.
+	handler := NewCredentialHandler(&mockCredentialStore{})
+	orgID := uuid.New()
+	req := newCredentialRequest(t, http.MethodDelete, "/api/v1/settings/credentials/openai", nil, orgID, "openai")
+	rr := httptest.NewRecorder()
+
+	handler.Delete(rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code)
+}
+
+// Self-heal is a best-effort step: any error inside it is logged but never
+// fails the credential delete. These tests lock that contract in by exercising
+// each error branch and confirming the response stays 204 with no Update call.
+func TestCredentialHandler_Delete_SelfHealErrorPathsAreBestEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		credLfn func(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error)
+		org     models.Organization
+		getErr  error
+		updErr  error
+	}{
+		{
+			name:   "GetByID error is swallowed",
+			getErr: fmt.Errorf("db down"),
+		},
+		{
+			name: "invalid settings JSON is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":`), // truncated → unmarshal fails
+			},
+		},
+		{
+			name: "ListSummaries error is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":"gpt-5.4"}`),
+			},
+			credLfn: func(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error) {
+				return nil, fmt.Errorf("list down")
+			},
+		},
+		{
+			name: "Update error is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":"gpt-5.4"}`),
+			},
+			updErr: fmt.Errorf("write down"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			tt.org.ID = orgID
+			credStore := &mockCredentialStore{listFn: tt.credLfn}
+			orgStore := &fakeOrgStore{org: tt.org, getErr: tt.getErr, updateErr: tt.updErr}
+
+			handler := NewCredentialHandler(credStore)
+			handler.SetSelfHeal(orgStore, map[string]string{"openai": "sk-...platform"})
+
+			req := newCredentialRequest(t, http.MethodDelete, "/api/v1/settings/credentials/openai", nil, orgID, "openai")
+			rr := httptest.NewRecorder()
+			handler.Delete(rr, req)
+
+			require.Equal(t, http.StatusNoContent, rr.Code,
+				"self-heal failures must never break the credential delete itself")
+		})
+	}
+}

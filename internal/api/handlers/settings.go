@@ -108,6 +108,12 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 			return
 		}
+		if parsedSettings.LLMModel != "" {
+			if err := models.ValidateLLMModelAccess(parsedSettings.LLMModel, nil, h.platformLLMProviders()); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
+				return
+			}
+		}
 	}
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
@@ -289,6 +295,16 @@ func sortedSettingsChangeKeys(changes map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// platformLLMProviders returns the set of provider names that have a
+// platform-default key from the server environment.
+func (h *SettingsHandler) platformLLMProviders() map[string]bool {
+	out := make(map[string]bool, len(h.llmDefaults))
+	for provider := range h.llmDefaults {
+		out[provider] = true
+	}
+	return out
 }
 
 func topLevelSettingsPatchKeys(raw *json.RawMessage) []string {
