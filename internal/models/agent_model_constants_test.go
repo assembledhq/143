@@ -378,3 +378,90 @@ func TestValidateSettingsModels(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateLLMModelAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		model             string
+		orgConfigured     map[string]bool
+		platformAvailable map[string]bool
+		wantErr           bool
+	}{
+		{
+			name:  "empty model is always allowed",
+			model: "",
+		},
+		{
+			name:              "org openai key does not unlock gpt-5.4 while runtime uses platform openai",
+			model:             "gpt-5.4",
+			orgConfigured:     map[string]bool{"openai": true},
+			platformAvailable: map[string]bool{"openai": true},
+			wantErr:           true,
+		},
+		{
+			name:              "platform default openai allows gpt-5.4-mini",
+			model:             "gpt-5.4-mini",
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			name:              "platform default openai allows gpt-5.4-nano",
+			model:             "gpt-5.4-nano",
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			name:              "platform default openai blocks gpt-5.4 (cost cap)",
+			model:             "gpt-5.4",
+			platformAvailable: map[string]bool{"openai": true},
+			wantErr:           true,
+		},
+		{
+			name:              "org openai key still leaves gpt-5.4 capped when platform openai exists",
+			model:             "gpt-5.4",
+			orgConfigured:     map[string]bool{"openai": true},
+			platformAvailable: map[string]bool{"openai": true},
+			wantErr:           true,
+		},
+		{
+			// gpt-5.4 is also served by openrouter, but the current runtime
+			// prefers platform OpenAI before OpenRouter. Until runtime uses the
+			// selected org credential, OpenRouter must not bypass the OpenAI cap.
+			name:              "openrouter org credential does not bypass openai platform cap",
+			model:             "gpt-5.4",
+			orgConfigured:     map[string]bool{"openrouter": true},
+			platformAvailable: map[string]bool{"openai": true},
+			wantErr:           true,
+		},
+		{
+			name:              "platform openrouter alone can serve gpt-5.4",
+			model:             "gpt-5.4",
+			platformAvailable: map[string]bool{"openrouter": true},
+		},
+		{
+			// No restriction map for anthropic, so platform default = full catalog.
+			name:              "anthropic platform default allows claude-opus-4-7",
+			model:             "claude-opus-4-7",
+			platformAvailable: map[string]bool{"anthropic": true},
+		},
+		{
+			// No org or platform key serves the model — settings handler accepts;
+			// the read path will surface "no provider configured."
+			name:    "no key path returns nil (handled by read-side UX)",
+			model:   "gpt-5.4-mini",
+			wantErr: false,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateLLMModelAccess(testCase.model, testCase.orgConfigured, testCase.platformAvailable)
+			if testCase.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

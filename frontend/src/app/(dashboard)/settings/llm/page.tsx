@@ -32,6 +32,7 @@ import {
   LLM_PROVIDER_INFO,
   DEFAULT_LLM_MODEL,
   OPENAI_API_TYPE_CHAT,
+  PLATFORM_DEFAULT_ALLOWED_MODELS,
   ownerProviderForModel,
 } from "@/lib/model-constants";
 import type {
@@ -117,23 +118,52 @@ export default function LLMPage() {
     return status;
   }, [credentials, platformProviders]);
 
+  // Filter each provider's model list down to a cost-safe subset when the org
+  // is leaning on the platform default (143's key). App-level LLM runtime is
+  // currently backed by platform credentials, so org keys do not unlock the
+  // stronger default models here.
   const enabledModelGroups = useMemo(() => {
     return Object.entries(modelsByProvider)
       .filter(([provider]) => {
         const ps = providerStatus[provider];
-        return ps?.orgConfigured || ps?.platformAvailable;
+        return ps?.platformAvailable;
       })
-      .map(([, group]) => group);
+      .map(([provider, group]) => {
+        const ps = providerStatus[provider];
+        const restriction = PLATFORM_DEFAULT_ALLOWED_MODELS[provider];
+        if (restriction && ps?.platformAvailable) {
+          const allowed = new Set(restriction);
+          return { ...group, models: group.models.filter((m) => allowed.has(m)) };
+        }
+        return group;
+      })
+      .filter((group) => group.models.length > 0);
   }, [modelsByProvider, providerStatus]);
 
+  const platformProviderStatus = useMemo(() => {
+    const status: Record<string, { orgConfigured: boolean; platformAvailable: boolean }> = {};
+    for (const provider of LLM_PROVIDERS) {
+      status[provider] = {
+        orgConfigured: false,
+        platformAvailable: Boolean(platformProviders[provider]),
+      };
+    }
+    return status;
+  }, [platformProviders]);
+
   const ownerProvider = useMemo(
-    () => ownerProviderForModel(llmModel, modelsByProvider, providerStatus),
-    [llmModel, modelsByProvider, providerStatus],
+    () => ownerProviderForModel(llmModel, modelsByProvider, platformProviderStatus),
+    [llmModel, modelsByProvider, platformProviderStatus],
   );
   const ownerProviderInfo = ownerProvider ? LLM_PROVIDER_INFO[ownerProvider] : null;
   const ownerConfigured = Boolean(
-    ownerProvider &&
-      (providerStatus[ownerProvider]?.orgConfigured || providerStatus[ownerProvider]?.platformAvailable),
+    ownerProvider && platformProviderStatus[ownerProvider]?.platformAvailable,
+  );
+  const ownerUsesPlatformDefault = Boolean(
+    ownerProvider && platformProviderStatus[ownerProvider]?.platformAvailable,
+  );
+  const ownerHasRestriction = Boolean(
+    ownerProvider && PLATFORM_DEFAULT_ALLOWED_MODELS[ownerProvider],
   );
 
   const autosave = useAutosave<SettingsPatch>({
@@ -256,6 +286,8 @@ export default function LLMPage() {
             ownerProvider={ownerProvider}
             ownerProviderInfo={ownerProviderInfo}
             ownerConfigured={ownerConfigured}
+            ownerUsesPlatformDefault={ownerUsesPlatformDefault}
+            ownerHasModelRestriction={ownerHasRestriction}
             onChange={(model) => autosave.save({ settings: { llm_model: model } })}
             onReasoningChange={(effort) =>
               autosave.save({
