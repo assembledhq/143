@@ -4,6 +4,7 @@ import { ChevronDown, Loader2, Sparkles } from "lucide-react";
 
 import type { SessionReviewCapabilities, SessionReviewMode } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,24 +34,51 @@ export function ReviewButton({ capabilities, pendingMode, onReview }: ReviewButt
 
   const disabled = pendingMode !== null || !capabilities.can_review;
   const isPending = pendingMode !== null;
+  const disabledReason = isPending
+    ? "Review already in progress."
+    : !capabilities.can_review
+      ? capabilities.reason
+      : undefined;
 
   if (capabilities.modes.length === 1) {
     const [only] = capabilities.modes;
     return (
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={disabled}
-        onClick={() => onReview(only)}
-        title={!capabilities.can_review ? capabilities.reason : undefined}
-      >
-        {isPending ? (
-          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-        )}
-        {isPending ? "Reviewing…" : MODE_LABELS[only] ?? only}
-      </Button>
+      <DisabledTooltip disabled={disabled} content={disabledReason}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={disabled}
+          onClick={() => onReview(only)}
+          title={disabledReason}
+        >
+          {isPending ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isPending ? "Reviewing…" : MODE_LABELS[only] ?? only}
+        </Button>
+      </DisabledTooltip>
+    );
+  }
+
+  if (disabled) {
+    return (
+      <DisabledTooltip disabled content={disabledReason}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled
+          title={disabledReason}
+        >
+          {isPending ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isPending ? "Reviewing…" : "Review"}
+        </Button>
+      </DisabledTooltip>
     );
   }
 
@@ -61,7 +89,7 @@ export function ReviewButton({ capabilities, pendingMode, onReview }: ReviewButt
           size="sm"
           variant="outline"
           disabled={disabled}
-          title={!capabilities.can_review ? capabilities.reason : undefined}
+          title={disabledReason}
         >
           {isPending ? (
             <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
