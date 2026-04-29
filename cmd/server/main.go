@@ -821,6 +821,12 @@ func buildServices(
 	var sandboxAuthServer *sandboxauth.Server
 	if cfg.SandboxAuthSocketDir != "" {
 		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+		logger.Info().
+			Str("socket_dir", cfg.SandboxAuthSocketDir).
+			Msg("sandbox auth: per-session credential socket bridge enabled")
+	} else {
+		logger.Warn().
+			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
 	}
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
