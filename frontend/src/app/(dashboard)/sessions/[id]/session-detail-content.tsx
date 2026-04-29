@@ -2383,13 +2383,6 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center gap-2 shrink-0 pl-2">
-            {canRequestReview && (
-              <ReviewButton
-                capabilities={reviewCapabilities}
-                pendingMode={pendingReviewMode}
-                onReview={(mode) => startReviewMutation.mutate(mode)}
-              />
-            )}
             {hasPR && prData?.data?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
@@ -2510,6 +2503,15 @@ export function SessionDetailContent({ id }: { id: string }) {
                 </div>
               </CardContent>
             </Card>
+          )}
+          {canRequestReview && (
+            <div className="flex">
+              <ReviewButton
+                capabilities={reviewCapabilities}
+                pendingMode={pendingReviewMode}
+                onReview={(mode) => startReviewMutation.mutate(mode)}
+              />
+            </div>
           )}
           <OverviewTab session={session} members={members} />
         </div>
