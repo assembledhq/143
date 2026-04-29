@@ -1861,6 +1861,77 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "list orphaned containers")
 }
 
+// TestSessionStore_ListContainerHoldingSessions is the rehydrate-side
+// counterpart to ListOrphanedContainers: same paging, opposite predicate
+// (EXISTS preview hold instead of NOT EXISTS). The query must filter by
+// preview_holding_container so we don't try to rehydrate listeners for
+// containers that aren't actually being kept alive across a worker restart.
+func TestSessionStore_ListContainerHoldingSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+p\.worker_node_id = @worker_node_id[\s\S]+LIMIT @limit`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...),
+		)
+
+	sessions, err := store.ListContainerHoldingSessions(context.Background(), "worker-a", uuid.Nil, 500)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListContainerHoldingSessions_QueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("boom"))
+
+	_, err = store.ListContainerHoldingSessions(context.Background(), "worker-a", uuid.Nil, 500)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "list container-holding sessions")
+}
+
+// TestSessionStore_ListContainerHoldingSessions_ScanError covers the path
+// where pgx.CollectRows fails mid-scan (a corrupt row, a column type
+// mismatch, or a transient driver fault). We surface the error verbatim
+// — the rehydrate caller then aborts the pass without a partial keep set.
+func TestSessionStore_ListContainerHoldingSessions_ScanError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	scanErr := errors.New("simulated mid-row scan failure")
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+p\.worker_node_id = @worker_node_id[\s\S]+LIMIT @limit`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionTestColumns).
+				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...).
+				RowError(0, scanErr),
+		)
+
+	_, err = store.ListContainerHoldingSessions(context.Background(), "worker-a", uuid.Nil, 500)
+	require.Error(t, err)
+	require.ErrorIs(t, err, scanErr, "scan errors must propagate to the caller so partial result sets aren't returned")
+}
+
 func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 	t.Parallel()
 
