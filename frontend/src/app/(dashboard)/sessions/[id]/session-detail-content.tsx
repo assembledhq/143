@@ -221,11 +221,13 @@ function classifyPRSnapshotState({
   sessionSandboxState,
   serverMessage,
   localCode,
+  allowImplicitMissingSnapshot = false,
 }: {
   sessionSnapshotKey?: string | null;
   sessionSandboxState?: string | null;
   serverMessage?: string | null;
   localCode?: string;
+  allowImplicitMissingSnapshot?: boolean;
 }): PRSnapshotState | null {
   if (localCode === "SNAPSHOT_EXPIRED") return "expired";
   if (localCode === "SNAPSHOT_NOT_CAPTURED") return "not_captured";
@@ -235,6 +237,7 @@ function classifyPRSnapshotState({
   if (serverMessage === SNAPSHOT_UNAVAILABLE_PR_MESSAGE) return "unavailable";
   if (/^session state expired\b/i.test(serverMessage || "")) return "unavailable";
   if (!sessionSnapshotKey) {
+    if (!allowImplicitMissingSnapshot) return null;
     return sessionSandboxState === "destroyed" ? "expired" : "not_captured";
   }
   return null;
@@ -2010,7 +2013,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const canCreatePR = hasSnapshot && !hasPR && !isRunning;
-  const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && !isRunning;
+  const isTerminalSession = terminalSessionStatuses.has(session?.status ?? "");
+  const showExpiredPRAction = hasSessionChanges && !hasSnapshot && !hasPR && isTerminalSession;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
 
   const { data: ghStatus } = useQuery({
@@ -2281,6 +2285,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     sessionSandboxState: session.sandbox_state,
     serverMessage: session.pr_creation_error,
     localCode: localPRActionError?.code,
+    allowImplicitMissingSnapshot: showExpiredPRAction,
   });
   const snapshotUnavailable = snapshotState !== null;
   const snapshotMessage = snapshotPRMessage(
