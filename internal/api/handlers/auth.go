@@ -512,11 +512,11 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GitHub returns "" for users who haven't set a public display name on
-	// their profile. Fall back to the login so every UI surface that renders
-	// users.name has something readable instead of an empty string.
-	displayName := ghUser.Name
-	if displayName == "" {
-		displayName = ghUser.Login
+	// their profile. Substitute the login here, before the account-linking
+	// branches consume ghUser.Name, so every persistence path (existing
+	// user, invited signup, new signup) writes a readable display value.
+	if ghUser.Name == "" {
+		ghUser.Name = ghUser.Login
 	}
 
 	// Account linking: try GitHub ID → email → create new.
@@ -525,7 +525,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	existingUser, err := h.userStore.GetByGitHubID(r.Context(), ghUser.ID)
 	if err == nil {
 		// Known GitHub user — update and sign in.
-		existingUser.Name = displayName
+		existingUser.Name = ghUser.Name
 		existingUser.Email = email
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
@@ -561,7 +561,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			user := &models.User{
 				OrgID:              inv.OrgID,
 				Email:              email,
-				Name:               displayName,
+				Name:               ghUser.Name,
 				Role:               role,
 				GitHubID:           &ghUser.ID,
 				GitHubLogin:        &ghUser.Login,
@@ -595,7 +595,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	user := &models.User{
 		Email:              email,
-		Name:               displayName,
+		Name:               ghUser.Name,
 		GitHubID:           &ghUser.ID,
 		GitHubLogin:        &ghUser.Login,
 		GitHubNoreplyEmail: &noreplyEmail,
