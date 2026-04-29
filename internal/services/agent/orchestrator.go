@@ -470,6 +470,12 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 		}
 	}
 	if o.identityResolver == nil || o.sandboxAuth == nil {
+		log.Warn().
+			Bool("identity_resolver_nil", o.identityResolver == nil).
+			Bool("sandbox_auth_nil", o.sandboxAuth == nil).
+			Bool("fallback_token_present", fallbackToken != "").
+			Str("session_id", run.ID.String()).
+			Msg("sandbox auth socket bridge unavailable; falling back to env token (legacy path)")
 		if fallbackToken != "" {
 			sandboxCfg.Env["GITHUB_TOKEN"] = fallbackToken
 		}
@@ -502,8 +508,18 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	// the Server figures out which entry is current.
 	socketPath, err := o.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings)
 	if err != nil {
+		log.Error().
+			Err(err).
+			Str("session_id", run.ID.String()).
+			Msg("sandbox auth: failed to open per-session credential socket; sandbox push will fail with ECONNREFUSED until next turn or restart")
 		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
 	}
+	log.Info().
+		Str("session_id", run.ID.String()).
+		Str("socket_path", socketPath).
+		Str("identity_source", string(res.AuthoredBy())).
+		Bool("user_token", res.IsUserToken()).
+		Msg("sandbox auth: per-session credential socket wired into sandbox")
 	sandboxCfg.AuthSocketPath = socketPath
 	name, email := identity.CommitIdentity(res)
 	sandboxCfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath

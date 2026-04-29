@@ -61,6 +61,16 @@ type activeListener struct {
 // Sockets are removed on session-end, but a stale socket from a crashed
 // orchestrator is detected and cleaned up by Listen on next use.
 func NewServer(resolver Resolver, socketDir string, logger zerolog.Logger) *Server {
+	probe := logger.Info().Str("socket_dir", socketDir)
+	if info, err := os.Stat(socketDir); err != nil {
+		probe = logger.Warn().Str("socket_dir", socketDir).Err(err)
+		probe.Msg("sandboxauth: socket dir stat failed at startup (will retry on first Listen via MkdirAll); ensure deploy/scripts/provision.sh ran on this host")
+	} else {
+		probe.
+			Str("mode", fmt.Sprintf("%#o", info.Mode().Perm())).
+			Bool("is_dir", info.IsDir()).
+			Msg("sandboxauth: socket dir present at startup (expected mode 0750 owned 1000:1000; see provision.sh)")
+	}
 	return &Server{
 		resolver:       resolver,
 		socketDir:      socketDir,
@@ -180,13 +190,14 @@ func (s *Server) Listen(
 				delete(s.active, sessionID)
 			}
 			s.mu.Unlock()
+			logger.Info().Msg("sandboxauth: listener closed")
 		})
 	}
 	entry.close = closeFn
 	s.mu.Lock()
 	s.active[sessionID] = entry
 	s.mu.Unlock()
-	logger.Debug().Msg("sandboxauth: listener started")
+	logger.Info().Msg("sandboxauth: listener started")
 	return sockPath, nil
 }
 
