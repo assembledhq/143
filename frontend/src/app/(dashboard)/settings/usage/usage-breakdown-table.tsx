@@ -56,6 +56,13 @@ export function UsageBreakdownTable({
 
   const rows = data?.data ?? [];
 
+  function formatTokensPerSession(totalTokens: number, totalSessions: number): string {
+    if (totalSessions <= 0) {
+      return "-";
+    }
+    return formatTokenCount(totalTokens / totalSessions);
+  }
+
   return (
     <Card>
       <CardContent className="p-4">
@@ -116,7 +123,18 @@ export function UsageBreakdownTable({
                       </TableHead>
                     </>
                   )}
-                  <TableHead className="text-xs text-right pr-4">%</TableHead>
+                  <TableHead className="text-xs text-right">Tokens/session</TableHead>
+                  <TableHead className="text-xs text-right pr-4">
+                    <Tooltip>
+                      <TooltipTrigger className="inline-flex items-center justify-end gap-1 w-full">
+                        Share of Hours
+                        <Info className="h-3 w-3 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[220px]">
+                        Percent of total container hours in the selected time range.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -148,6 +166,12 @@ export function UsageBreakdownTable({
                         </TableCell>
                       </>
                     )}
+                    <TableCell className="text-[13px] text-right tabular-nums">
+                      {formatTokensPerSession(
+                        row.total_input_tokens + row.total_output_tokens,
+                        row.total_sessions
+                      )}
+                    </TableCell>
                     <TableCell className="text-[13px] text-right tabular-nums pr-4">
                       <div className="flex items-center justify-end gap-2">
                         <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
