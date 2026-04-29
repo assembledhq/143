@@ -1692,6 +1692,64 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	return sessions, nil
 }
 
+// ListContainerHoldingSessions returns sessions with a preview hold owned by
+// workerNodeID whose container_id is set. Called on startup to rehydrate
+// per-session GitHub credential socket listeners for containers that survive
+// a worker restart (preview holds keep them alive across the gap).
+//
+// Without rehydration, a push from inside a held-alive sandbox dials a dead
+// socket and gets ECONNREFUSED until the next turn boundary calls Listen
+// again. The fresh listener uses the same on-disk path so the container's
+// directory bind-mount picks it up transparently.
+//
+// Why preview-only and not turn-or-preview: a turn_holding_container=TRUE
+// row at startup means a worker crashed mid-turn. Those rows go through
+// the orphan reconciler (ListOrphanedContainers), which IsAlive-probes
+// them and either CAS-clears the row (container gone) or leaves it for
+// the next turn boundary to re-Listen as part of normal flow. Adding
+// turn-held rows here would either double-process them with the reconciler
+// or race it. Preview-held rows, by contrast, are the only ones whose
+// containers are *expected* to outlive the worker and need a proactive
+// re-Listen before any user action.
+//
+// Returns at most limit rows per call, keyset-paginated by session id >
+// afterID and ordered by id ASC. Mirrors ListOrphanedContainers' pagination
+// so a degenerate state (probe failures, transient errors) doesn't trap the
+// caller in the same page.
+// lint:allow-no-orgid reason="startup rehydrate scans across all orgs by design"
+func (s *SessionStore) ListContainerHoldingSessions(ctx context.Context, workerNodeID string, afterID uuid.UUID, limit int) ([]models.Session, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	query := `
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE container_id IS NOT NULL
+		  AND id > @after_id
+		  AND EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id
+		      AND p.org_id = sessions.org_id
+		      AND p.worker_node_id = @worker_node_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		ORDER BY id ASC
+		LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"worker_node_id": workerNodeID, "after_id": afterID, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list container-holding sessions: %w", err)
+	}
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		hydrateSessionPolicy(&sessions[i])
+	}
+	return sessions, nil
+}
+
 // UpdateWorkingBranch sets the working branch name for a session.
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	query := `UPDATE sessions SET working_branch = @working_branch, last_activity_at = now() WHERE id = @id AND org_id = @org_id`

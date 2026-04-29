@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -255,8 +257,9 @@ func main() {
 
 	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
+	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable, cfg.PreviewInternalBaseURL)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -374,6 +377,47 @@ func main() {
 			LogsDays:    cfg.DataRetentionLogsDays,
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
+
+		// Reconcile containers that leaked when the last server exited mid-turn
+		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
+		// sees clean state. Best-effort: errors are logged, not fatal.
+		if apiSandboxProvider != nil {
+			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Minute)
+			if reconcileErr := agent.ReconcileOrphanedContainers(reconcileCtx, sessionStore, apiSandboxProvider, logger); reconcileErr != nil {
+				logger.Warn().Err(reconcileErr).Msg("startup: reconciling orphaned containers failed; leftover rows will be retried on next start")
+			}
+			reconcileCancel()
+		}
+
+		// Re-open the per-session GitHub credential socket listener for
+		// sessions whose containers survive a worker restart (preview holds
+		// keep them alive across the gap). Without this, in-sandbox `git push`
+		// dials a dead socket and fails with ECONNREFUSED until the next
+		// turn boundary calls Listen again. Runs after the reconciler so
+		// dead-container rows have already been cleared and we don't waste
+		// IsAlive probes on them. Best-effort: errors are logged, not fatal.
+		//
+		// services is guaranteed non-nil here (the Fatal above exits on nil)
+		// but staticcheck's flow analysis can't follow logger.Fatal — gate
+		// the rehydrate inside an explicit non-nil check to keep lint clean.
+		if services != nil {
+			if orch, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+				rehydrateCtx, rehydrateCancel := context.WithTimeout(ctx, 2*time.Minute)
+				keep, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
+				if rehydrateErr != nil {
+					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
+				}
+				// Only sweep when rehydrate actually ran (keep != nil) — a nil
+				// keep means we don't know which sockets are live, so sweeping
+				// would clobber listeners the next turn boundary will rebind.
+				// See orch.RehydrateSandboxAuthListeners' return contract.
+				if keep != nil && services.SandboxAuthSweep != nil {
+					services.SandboxAuthSweep(keep)
+				}
+				rehydrateCancel()
+			}
+		}
+
 		processWorkers = startProcessWorkers(
 			ctx,
 			pool,
@@ -387,21 +431,11 @@ func main() {
 			nodeManager,
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
+			previewRoutingReady.Load,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
 		go recoveryLoop.Start(ctx, 30*time.Second)
-
-		// Reconcile containers that leaked when the last server exited mid-turn
-		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
-		// sees clean state. Best-effort: errors are logged, not fatal.
-		if apiSandboxProvider != nil {
-			reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Minute)
-			if reconcileErr := agent.ReconcileOrphanedContainers(reconcileCtx, sessionStore, apiSandboxProvider, logger); reconcileErr != nil {
-				logger.Warn().Err(reconcileErr).Msg("startup: reconciling orphaned containers failed; leftover rows will be retried on next start")
-			}
-			reconcileCancel()
-		}
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{
@@ -555,7 +589,15 @@ func main() {
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	if err != nil {
+		logger.Fatal().Err(err).Msg("server failed to bind listener")
+	}
+	previewRoutingReady.Store(true)
+	if err := nodeManager.HeartbeatOnce(ctx); err != nil {
+		logger.Warn().Err(err).Msg("failed to publish preview routing readiness; next heartbeat will retry")
+	}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		logger.Fatal().Err(err).Msg("server failed")
 	}
 }
@@ -573,6 +615,7 @@ func startProcessWorkers(
 	nodeManager *cluster.NodeManager,
 	previewCapable bool,
 	previewInternalBaseURL string,
+	previewRoutingReady func() bool,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -589,7 +632,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -616,9 +659,13 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool) func() map[string]any {
 	return func() map[string]any {
-		metadata := buildBaseMetadata(previewCapable, previewInternalBaseURL)
+		advertisePreview := previewCapable
+		if previewRoutingReady != nil {
+			advertisePreview = advertisePreview && previewRoutingReady()
+		}
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
 		return metadata
@@ -951,6 +998,7 @@ func buildServices(
 		// *Server pointer is stable for the process lifetime.
 		s := sandboxAuthServer
 		svc.SandboxAuthShutdown = s.Shutdown
+		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
 	}
 	return svc
 }
