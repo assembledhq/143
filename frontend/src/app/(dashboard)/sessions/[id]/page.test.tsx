@@ -135,6 +135,30 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByRole('button', { name: 'Review' })).toBeInTheDocument();
   });
 
+  it('shows a hover tooltip when the native Review button is disabled', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id/review-capabilities', () => {
+        return HttpResponse.json({
+          data: {
+            can_review: false,
+            reason: 'Code review is only available after the session finishes running.',
+            modes: ['default'],
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const reviewButton = await screen.findByRole('button', { name: 'Code review' });
+    expect(reviewButton).toBeDisabled();
+
+    await user.hover(reviewButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole('tooltip', { name: 'Code review is only available after the session finishes running.' })).toBeInTheDocument();
+  });
+
   it('hides the native Review button for viewers even when the session is review-capable', async () => {
     server.use(
       http.get('/api/v1/auth/me', () => {
@@ -216,6 +240,21 @@ describe('SessionDetailPage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 1, name: updatedTitle })).toBeInTheDocument();
     });
+  });
+
+  it('shows a hover tooltip when Save title is disabled', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByRole('heading', { level: 1, name: 'Fixed TypeError by adding null check' });
+    await user.click(screen.getByRole('button', { name: 'Edit session title' }));
+
+    const saveButton = screen.getByRole('button', { name: 'Save title' });
+    expect(saveButton).toBeDisabled();
+
+    await user.hover(saveButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole('tooltip', { name: 'Enter a different title to save your changes.' })).toBeInTheDocument();
   });
 
   it('seeds the title editor from the same title shown in the header', async () => {
@@ -1454,6 +1493,47 @@ describe('SessionDetailPage', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Session snapshot expired');
     expect(alert).toHaveTextContent('This session snapshot expired before a PR could be created. Send a new message to rebuild the sandbox, then create the PR again.');
+  });
+
+  it('shows a hover tooltip when Create PR is disabled', async () => {
+    const sessionWithSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return HttpResponse.json({ data: { status: 'queued' } });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const createPRButton = await screen.findByRole('button', { name: 'Create PR' });
+    await user.click(createPRButton);
+
+    const queueingButton = await screen.findByRole('button', { name: 'Queueing PR…' });
+    expect(queueingButton).toBeDisabled();
+
+    await user.hover(queueingButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole('tooltip', { name: 'Sending the PR request to the queue' })).toBeInTheDocument();
   });
 
   it('matches the snapshot expiry notice horizontal margins to overview cards', async () => {
@@ -3286,6 +3366,10 @@ describe('SessionDetailPage', () => {
     // The detail panel toggle should be disabled during review
     const toggleButton = screen.getByTitle('File tree required during review');
     expect(toggleButton).toBeDisabled();
+
+    await user.hover(toggleButton.parentElement as HTMLElement);
+
+    expect(await screen.findByRole('tooltip', { name: 'File tree required during review' })).toBeInTheDocument();
   });
 
   it('exits review mode when clicking a non-changes tab', async () => {
@@ -3349,6 +3433,39 @@ describe('SessionDetailPage', () => {
     // The standard shared composer should remain present in review mode.
     expect(await screen.findByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
     expect(screen.getByTitle('Send message')).toBeInTheDocument();
+  });
+
+  it('shows hover tooltips for disabled composer actions when the session environment has expired', async () => {
+    const destroyedSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'destroyed',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: destroyedSession } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    const { container } = renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText('Session environment has expired and can no longer be continued');
+
+    const attachButton = container.querySelector('button[title="Attach files or images"]') as HTMLButtonElement | null;
+    expect(attachButton).not.toBeNull();
+    expect(attachButton).toBeDisabled();
+    await user.hover(attachButton?.parentElement as HTMLElement);
+    expect(await screen.findByRole('tooltip', { name: 'Session environment has expired and can no longer be continued.' })).toBeInTheDocument();
+
+    const sendButton = container.querySelector('button[title="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).not.toBeNull();
+    expect(sendButton).toBeDisabled();
+    await user.hover(sendButton?.parentElement as HTMLElement);
+    expect(await screen.findByRole('tooltip', { name: 'Session environment has expired and can no longer be continued.' })).toBeInTheDocument();
   });
 
   it('keeps the expired sandbox warning visible in review mode with the shared composer', async () => {
