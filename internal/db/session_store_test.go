@@ -1875,14 +1875,14 @@ func TestSessionStore_ListContainerHoldingSessions(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	now := time.Now()
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS`).
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+LIMIT @limit`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
 				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...),
 		)
 
-	sessions, err := store.ListContainerHoldingSessions(context.Background(), uuid.Nil)
+	sessions, err := store.ListContainerHoldingSessions(context.Background(), uuid.Nil, 500)
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -1897,10 +1897,10 @@ func TestSessionStore_ListContainerHoldingSessions_QueryError(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL`).
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("boom"))
 
-	_, err = store.ListContainerHoldingSessions(context.Background(), uuid.Nil)
+	_, err = store.ListContainerHoldingSessions(context.Background(), uuid.Nil, 500)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "list container-holding sessions")
 }
@@ -1919,15 +1919,15 @@ func TestSessionStore_ListContainerHoldingSessions_ScanError(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	scanErr := errors.New("simulated mid-row scan failure")
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS`).
-		WithArgs(pgxmock.AnyArg()).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+LIMIT @limit`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
 				AddRow(newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...).
 				RowError(0, scanErr),
 		)
 
-	_, err = store.ListContainerHoldingSessions(context.Background(), uuid.Nil)
+	_, err = store.ListContainerHoldingSessions(context.Background(), uuid.Nil, 500)
 	require.Error(t, err)
 	require.ErrorIs(t, err, scanErr, "scan errors must propagate to the caller so partial result sets aren't returned")
 }

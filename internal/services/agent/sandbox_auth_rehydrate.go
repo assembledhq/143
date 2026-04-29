@@ -10,22 +10,31 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-// rehydrateMaxBatches caps how many pages of 100 container-holding sessions
-// the rehydrate pass will work through at startup. Mirrors the reconciler's
-// safety valve: a healthy worker rarely has more than a handful of sessions
-// with live preview-held containers, so hitting the cap means something is
-// wrong (degenerate query, runaway preview accumulation) and we want to keep
-// startup moving rather than spin forever.
-const rehydrateMaxBatches = 20
+const (
+	// rehydrateSessionPageLimit controls how many preview-held sessions the
+	// store returns per startup rehydrate page. With rehydrateMaxBatches, this
+	// lets one boot inspect up to 10k candidates before suppressing sweep.
+	rehydrateSessionPageLimit = 500
+
+	// rehydrateMaxBatches caps how many pages of container-holding sessions
+	// the rehydrate pass will work through at startup. Mirrors the
+	// reconciler's safety valve: a healthy worker rarely has more than a
+	// handful of sessions with live preview-held containers, so hitting the
+	// cap means something is wrong (degenerate query, runaway preview
+	// accumulation) and we want to keep startup moving rather than spin
+	// forever.
+	rehydrateMaxBatches = 20
+)
 
 // ContainerHoldingSessionLister is the narrow subset of the session store
 // needed by the rehydrate pass. ListContainerHoldingSessions is keyset-
 // paginated by session id (pass uuid.Nil as the cursor for the first page)
-// and returns sessions where container_id is set and a preview hold is in
-// place — i.e. the ones whose containers survive worker restarts and whose
-// in-sandbox tooling will dial a dead socket until we Listen again.
+// with the caller-provided limit, and returns sessions where container_id is
+// set and a preview hold is in place — i.e. the ones whose containers survive
+// worker restarts and whose in-sandbox tooling will dial a dead socket until
+// we Listen again.
 type ContainerHoldingSessionLister interface {
-	ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID) ([]models.Session, error)
+	ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID, limit int) ([]models.Session, error)
 }
 
 // OrgSettingsLoader resolves an org's PR-authorship policy for the sandbox
@@ -97,7 +106,7 @@ func RehydrateSandboxAuthListeners(
 	hitCap := true
 
 	for batch := 0; batch < rehydrateMaxBatches; batch++ {
-		page, err := sessions.ListContainerHoldingSessions(ctx, cursor)
+		page, err := sessions.ListContainerHoldingSessions(ctx, cursor, rehydrateSessionPageLimit)
 		if err != nil {
 			// Return nil keep (not the partial map) so callers don't sweep
 			// based on incomplete coverage — a partial keep would treat
@@ -181,7 +190,7 @@ func RehydrateSandboxAuthListeners(
 	if hitCap {
 		logger.Warn().
 			Int("batches", rehydrateMaxBatches).
-			Int("rows_per_batch", 100).
+			Int("rows_per_batch", rehydrateSessionPageLimit).
 			Msg("rehydrate: reached batch cap before draining container-holding sessions; remaining rows will retry on next turn boundary")
 	}
 

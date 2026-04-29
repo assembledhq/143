@@ -1712,12 +1712,15 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 // containers are *expected* to outlive the worker and need a proactive
 // re-Listen before any user action.
 //
-// Returns at most 100 rows per call, keyset-paginated by session id > afterID
-// and ordered by id ASC. Mirrors ListOrphanedContainers' pagination so a
-// degenerate state (probe failures, transient errors) doesn't trap the caller
-// in the same page.
+// Returns at most limit rows per call, keyset-paginated by session id >
+// afterID and ordered by id ASC. Mirrors ListOrphanedContainers' pagination
+// so a degenerate state (probe failures, transient errors) doesn't trap the
+// caller in the same page.
 // lint:allow-no-orgid reason="startup rehydrate scans across all orgs by design"
-func (s *SessionStore) ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID) ([]models.Session, error) {
+func (s *SessionStore) ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID, limit int) ([]models.Session, error) {
+	if limit <= 0 {
+		limit = 1
+	}
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
@@ -1730,9 +1733,9 @@ func (s *SessionStore) ListContainerHoldingSessions(ctx context.Context, afterID
 		      AND p.preview_holding_container = TRUE
 		  )
 		ORDER BY id ASC
-		LIMIT 100`
+		LIMIT @limit`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"after_id": afterID})
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"after_id": afterID, "limit": limit})
 	if err != nil {
 		return nil, fmt.Errorf("list container-holding sessions: %w", err)
 	}

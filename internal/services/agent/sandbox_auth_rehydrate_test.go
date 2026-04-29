@@ -29,10 +29,12 @@ type rehydrateLister struct {
 	err       error
 	errAtCall int
 	calls     int
+	limits    []int
 }
 
-func (s *rehydrateLister) ListContainerHoldingSessions(_ context.Context, _ uuid.UUID) ([]models.Session, error) {
+func (s *rehydrateLister) ListContainerHoldingSessions(_ context.Context, _ uuid.UUID, limit int) ([]models.Session, error) {
 	s.calls++
+	s.limits = append(s.limits, limit)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -173,9 +175,10 @@ func TestRehydrate_SkipsWhenProviderNil(t *testing.T) {
 // can safely sweep — every UUID-named subdir on disk really is stale.
 func TestRehydrate_NoSessionsReturnsNonNilEmptyMap(t *testing.T) {
 	t.Parallel()
+	lister := &rehydrateLister{}
 	keep, err := RehydrateSandboxAuthListeners(
 		context.Background(),
-		&rehydrateLister{},
+		lister,
 		&rehydrateRepoStore{},
 		nil,
 		&rehydrateProvider{},
@@ -185,6 +188,7 @@ func TestRehydrate_NoSessionsReturnsNonNilEmptyMap(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, keep, "successful run with no sessions must return a non-nil empty map so the caller knows sweep is safe")
 	require.Empty(t, keep)
+	require.Equal(t, []int{rehydrateSessionPageLimit}, lister.limits, "rehydrate must request the configured page size from the session store")
 }
 
 func TestRehydrate_RebindsLiveContainerOnly(t *testing.T) {
