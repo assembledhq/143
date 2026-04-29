@@ -509,31 +509,35 @@ export default function AgentPage() {
                   <div className="space-y-2">
                     <Label htmlFor="rename-auth">Name</Label>
                     <Input id="rename-auth" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} />
-                    <Button
-                      onClick={() => renameMutation.mutate(renameValue.trim() || selected.label)}
-                      disabled={!renameValue.trim() || renameValue.trim() === selected.label}
-                    >
-                      Save name
-                    </Button>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))} disabled={selected.priority === 1}>
-                      Set as default
-                    </Button>
-                    <Button variant="outline" onClick={() => void reorderMutation.mutateAsync(moveRows(rows, selected.id, "up"))} disabled={selected.priority === 1}>
-                      Move up
-                    </Button>
+                  <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))}
+                        disabled={selected.priority === 1}
+                      >
+                        Set as default
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => deleteMutation.mutate(selected.id)}
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Remove
+                      </Button>
+                    </div>
                     <Button
-                      variant="outline"
-                      onClick={() => void reorderMutation.mutateAsync(moveRows(rows, selected.id, "down"))}
-                      disabled={selected.priority === rows.length}
+                      onClick={() => renameMutation.mutate(renameValue.trim() || selected.label)}
+                      disabled={
+                        !renameValue.trim()
+                        || renameValue.trim() === selected.label
+                        || renameMutation.isPending
+                      }
                     >
-                      Move down
-                    </Button>
-                    <Button variant="destructive" onClick={() => deleteMutation.mutate(selected.id)}>
-                      <Trash2 className="mr-2 h-4 w-4" />
-                      Remove
+                      Save
                     </Button>
                   </div>
                 </div>
