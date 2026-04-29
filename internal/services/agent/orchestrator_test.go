@@ -441,7 +441,7 @@ func (m *mockSessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, 
 // exercise the orchestrator wrapper's success path; adding the method here
 // (rather than in a dedicated stub) means the wrapper's interface assertion
 // succeeds for every orchestrator built with mockSessionStore.
-func (m *mockSessionStore) ListContainerHoldingSessions(_ context.Context, _ uuid.UUID, _ int) ([]models.Session, error) {
+func (m *mockSessionStore) ListContainerHoldingSessions(_ context.Context, _ string, _ uuid.UUID, _ int) ([]models.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.containerHoldingErr != nil {
@@ -5092,6 +5092,7 @@ func TestOrchestrator_RehydrateSandboxAuth_SuccessPath(t *testing.T) {
 	containerID := "container-rehydrate-success"
 	sessionID := uuid.New()
 	d := defaultDeps()
+	d.nodeID = "worker-a"
 	authStub := &fakeSandboxAuthServer{}
 	d.sandboxAuth = authStub
 	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())

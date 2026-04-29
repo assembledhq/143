@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -255,8 +257,9 @@ func main() {
 
 	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
+	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable, cfg.PreviewInternalBaseURL)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -428,6 +431,7 @@ func main() {
 			nodeManager,
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
+			previewRoutingReady.Load,
 		)
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
@@ -585,7 +589,15 @@ func main() {
 	}()
 
 	logger.Info().Int("port", cfg.Port).Str("mode", cfg.Mode).Msg("starting server")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	if err != nil {
+		logger.Fatal().Err(err).Msg("server failed to bind listener")
+	}
+	previewRoutingReady.Store(true)
+	if err := nodeManager.HeartbeatOnce(ctx); err != nil {
+		logger.Warn().Err(err).Msg("failed to publish preview routing readiness; next heartbeat will retry")
+	}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		logger.Fatal().Err(err).Msg("server failed")
 	}
 }
@@ -603,6 +615,7 @@ func startProcessWorkers(
 	nodeManager *cluster.NodeManager,
 	previewCapable bool,
 	previewInternalBaseURL string,
+	previewRoutingReady func() bool,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -619,7 +632,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -646,9 +659,13 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string) func() map[string]any {
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool) func() map[string]any {
 	return func() map[string]any {
-		metadata := buildBaseMetadata(previewCapable, previewInternalBaseURL)
+		advertisePreview := previewCapable
+		if previewRoutingReady != nil {
+			advertisePreview = advertisePreview && previewRoutingReady()
+		}
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
 		return metadata

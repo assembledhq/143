@@ -27,14 +27,14 @@ const (
 )
 
 // ContainerHoldingSessionLister is the narrow subset of the session store
-// needed by the rehydrate pass. ListContainerHoldingSessions is keyset-
-// paginated by session id (pass uuid.Nil as the cursor for the first page)
-// with the caller-provided limit, and returns sessions where container_id is
-// set and a preview hold is in place — i.e. the ones whose containers survive
-// worker restarts and whose in-sandbox tooling will dial a dead socket until
-// we Listen again.
+// needed by the rehydrate pass. ListContainerHoldingSessions is scoped to the
+// local worker node, keyset-paginated by session id (pass uuid.Nil as the
+// cursor for the first page) with the caller-provided limit, and returns
+// sessions where container_id is set and a preview hold is in place — i.e.
+// the ones whose containers survive worker restarts and whose in-sandbox
+// tooling will dial a dead socket until we Listen again.
 type ContainerHoldingSessionLister interface {
-	ListContainerHoldingSessions(ctx context.Context, afterID uuid.UUID, limit int) ([]models.Session, error)
+	ListContainerHoldingSessions(ctx context.Context, workerNodeID string, afterID uuid.UUID, limit int) ([]models.Session, error)
 }
 
 // OrgSettingsLoader resolves an org's PR-authorship policy for the sandbox
@@ -86,6 +86,7 @@ func RehydrateSandboxAuthListeners(
 	ctx context.Context,
 	sessions ContainerHoldingSessionLister,
 	repos RepositoryStore,
+	workerNodeID string,
 	orgSettings OrgSettingsLoader,
 	provider SandboxProvider,
 	sandboxAuth SandboxAuthServer,
@@ -99,6 +100,10 @@ func RehydrateSandboxAuthListeners(
 		logger.Debug().Msg("rehydrate: no sandbox provider configured; skipping")
 		return nil, nil
 	}
+	if workerNodeID == "" {
+		logger.Warn().Msg("rehydrate: worker node id is empty; skipping to avoid cross-worker socket ownership")
+		return nil, nil
+	}
 
 	keep := make(map[uuid.UUID]struct{})
 	var totalRehydrated, totalDead, totalErrored int
@@ -106,7 +111,7 @@ func RehydrateSandboxAuthListeners(
 	hitCap := true
 
 	for batch := 0; batch < rehydrateMaxBatches; batch++ {
-		page, err := sessions.ListContainerHoldingSessions(ctx, cursor, rehydrateSessionPageLimit)
+		page, err := sessions.ListContainerHoldingSessions(ctx, workerNodeID, cursor, rehydrateSessionPageLimit)
 		if err != nil {
 			// Return nil keep (not the partial map) so callers don't sweep
 			// based on incomplete coverage — a partial keep would treat
@@ -241,6 +246,7 @@ func (o *Orchestrator) RehydrateSandboxAuthListeners(ctx context.Context) (map[u
 		ctx,
 		lister,
 		o.repositories,
+		o.nodeID,
 		o.sandboxAuthOrgSettings,
 		o.provider,
 		o.sandboxAuth,

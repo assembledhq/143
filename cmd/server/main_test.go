@@ -83,7 +83,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080")
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true })
 
 	metadata := provider()
 
@@ -104,7 +104,7 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "")
+	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true })
 
 	metadata := provider()
 
@@ -114,6 +114,21 @@ func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	if _, ok := metadata["preview_internal_base_url"]; ok {
 		t.Errorf("preview_internal_base_url should be omitted when not configured")
 	}
+}
+
+func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testing.T) {
+	t.Parallel()
+
+	ready := false
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready })
+
+	metadata := provider()
+	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
+	require.Equal(t, "http://worker-1:8080", metadata["preview_internal_base_url"], "preview internal URL should remain available in metadata")
+
+	ready = true
+	metadata = provider()
+	require.Equal(t, true, metadata["preview_capable"], "preview_capable should be advertised once routing is ready")
 }
 
 // TestMainStartupRunsRehydrateBeforeWorkers guards the sandbox-auth socket
@@ -132,6 +147,23 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
 	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
+}
+
+func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for preview readiness ordering test")
+
+	body := string(src)
+	listen := strings.Index(body, "net.Listen(\"tcp\"")
+	ready := strings.Index(body, "previewRoutingReady.Store(true)")
+	serve := strings.Index(body, "srv.Serve(")
+	require.NotEqual(t, -1, listen, "startup should bind the HTTP listener explicitly")
+	require.NotEqual(t, -1, ready, "startup should mark preview routing ready explicitly")
+	require.NotEqual(t, -1, serve, "startup should serve the already-bound listener")
+	require.Less(t, listen, ready, "preview routing must not be advertised until the HTTP listener is bound")
+	require.Less(t, ready, serve, "preview routing should be advertised before serving blocks")
 }
 
 // fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads

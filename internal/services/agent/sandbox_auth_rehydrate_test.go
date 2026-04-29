@@ -30,11 +30,13 @@ type rehydrateLister struct {
 	errAtCall int
 	calls     int
 	limits    []int
+	workers   []string
 }
 
-func (s *rehydrateLister) ListContainerHoldingSessions(_ context.Context, _ uuid.UUID, limit int) ([]models.Session, error) {
+func (s *rehydrateLister) ListContainerHoldingSessions(_ context.Context, workerNodeID string, _ uuid.UUID, limit int) ([]models.Session, error) {
 	s.calls++
 	s.limits = append(s.limits, limit)
+	s.workers = append(s.workers, workerNodeID)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -145,6 +147,7 @@ func TestRehydrate_SkipsWhenSandboxAuthNil(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{},
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		&rehydrateProvider{},
 		nil, // sandboxAuth is the nil-check we're testing
@@ -160,6 +163,7 @@ func TestRehydrate_SkipsWhenProviderNil(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{},
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		nil,
 		&rehydrateSandboxAuth{},
@@ -180,6 +184,7 @@ func TestRehydrate_NoSessionsReturnsNonNilEmptyMap(t *testing.T) {
 		context.Background(),
 		lister,
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		&rehydrateProvider{},
 		&rehydrateSandboxAuth{},
@@ -189,6 +194,7 @@ func TestRehydrate_NoSessionsReturnsNonNilEmptyMap(t *testing.T) {
 	require.NotNil(t, keep, "successful run with no sessions must return a non-nil empty map so the caller knows sweep is safe")
 	require.Empty(t, keep)
 	require.Equal(t, []int{rehydrateSessionPageLimit}, lister.limits, "rehydrate must request the configured page size from the session store")
+	require.Equal(t, []string{"worker-a"}, lister.workers, "rehydrate must scope the startup scan to the local worker node")
 }
 
 func TestRehydrate_RebindsLiveContainerOnly(t *testing.T) {
@@ -215,6 +221,7 @@ func TestRehydrate_RebindsLiveContainerOnly(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{live, dead}}},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -255,6 +262,7 @@ func TestRehydrate_PerSessionFailureDoesNotStopLoop(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{missing, good}}},
 		repos,
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -281,6 +289,7 @@ func TestRehydrate_ListenFailureCountsAsErrorButContinues(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{first}}},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -297,6 +306,7 @@ func TestRehydrate_ListErrorBubbles(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{err: listErr},
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		&rehydrateProvider{},
 		&rehydrateSandboxAuth{},
@@ -334,6 +344,7 @@ func TestRehydrate_PartialListErrorReturnsNilKeep(t *testing.T) {
 			errAtCall: 2,
 		},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -367,6 +378,7 @@ func TestRehydrate_OrgSettingsLoaderCalledPerSession(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{run}}},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		loader,
 		prov,
 		auth,
@@ -397,6 +409,7 @@ func TestRehydrate_SkipsRowsWithEmptyContainerID(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{withNilID, withEmptyID}}},
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -428,6 +441,7 @@ func TestRehydrate_IsAliveErrorIsCounted(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{flaky}}},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -459,6 +473,7 @@ func TestRehydrate_SkipsRowsWithNilRepositoryID(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{noRepo}}},
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		prov,
 		auth,
@@ -501,6 +516,7 @@ func TestRehydrate_OrgSettingsLoaderErrorIsPerRow(t *testing.T) {
 		context.Background(),
 		&rehydrateLister{pages: [][]models.Session{{failing, healthy}}},
 		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		"worker-a",
 		loader,
 		prov,
 		auth,
@@ -543,6 +559,7 @@ func TestRehydrate_HitsBatchCap(t *testing.T) {
 		context.Background(),
 		lister,
 		&rehydrateRepoStore{},
+		"worker-a",
 		nil,
 		prov,
 		auth,
