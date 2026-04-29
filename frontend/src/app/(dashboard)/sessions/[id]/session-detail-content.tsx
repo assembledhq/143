@@ -299,10 +299,13 @@ function OverviewTab({ session, members }: { session: Session; members: User[] }
   const status = statusConfig[session.status] || statusConfig.pending;
   const isActive = !terminalSessionStatuses.has(session.status);
 
+  const triggeredByMember = session.triggered_by_user_id
+    ? members.find((m) => m.id === session.triggered_by_user_id)
+    : undefined;
   const triggeredByLabel = session.pm_plan_id && !session.triggered_by_user_id
     ? "PM Agent"
     : session.triggered_by_user_id
-      ? members.find((m) => m.id === session.triggered_by_user_id)?.name || "Unknown user"
+      ? triggeredByMember?.name || triggeredByMember?.github_login || "Unknown user"
       : "System";
 
   return (
