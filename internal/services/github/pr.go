@@ -1023,30 +1023,38 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		return nil
 	}
 
-	if event.PR.Merged {
-		// PR was merged.
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
-			return fmt.Errorf("update PR status to merged: %w", err)
-		}
-		// Prefer the merge commit SHA so the deploy row reflects the commit
-		// that landed on the base branch (squash/rebase merges produce a new
-		// SHA distinct from the head). Fall back to head SHA if GitHub omitted
-		// merge_commit_sha for some reason.
-		commitSHA := event.PR.MergeCommitSHA
-		if commitSHA == "" {
-			commitSHA = event.PR.Head.SHA
-		}
-		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
-	} else {
-		// PR was closed without merging.
-		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
-			return fmt.Errorf("update PR status to closed: %w", err)
-		}
-		s.teardownPRPreview(ctx, pr, false)
-		s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
+	if err := s.applyClosedPRTransition(ctx, pr, event.PR.Merged, event.PR.MergeCommitSHA, event.PR.Head.SHA); err != nil {
+		return err
 	}
 
 	s.enqueuePullRequestStateSync(ctx, pr)
+	return nil
+}
+
+// applyClosedPRTransition flips a PR's status to merged/closed and runs the
+// matching follow-ups. Shared by the webhook handler and the periodic state
+// sync (which self-heals when a webhook is dropped). Prefers the merge commit
+// SHA so the deploy row reflects the commit that landed on the base branch
+// (squash/rebase merges produce a new SHA distinct from the head); falls back
+// to head SHA when GitHub omits merge_commit_sha.
+func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullRequest, merged bool, mergeCommitSHA, headSHA string) error {
+	if merged {
+		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "merged"); err != nil {
+			return fmt.Errorf("update PR status to merged: %w", err)
+		}
+		commitSHA := mergeCommitSHA
+		if commitSHA == "" {
+			commitSHA = headSHA
+		}
+		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
+		return nil
+	}
+
+	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, "closed"); err != nil {
+		return fmt.Errorf("update PR status to closed: %w", err)
+	}
+	s.teardownPRPreview(ctx, pr, false)
+	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
 	return nil
 }
 
