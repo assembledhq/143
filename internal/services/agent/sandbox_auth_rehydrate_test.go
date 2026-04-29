@@ -258,7 +258,7 @@ func TestRehydrate_PerSessionFailureDoesNotStopLoop(t *testing.T) {
 	)
 	require.NoError(t, err, "list-page failures aside, per-row errors must not bubble up")
 	require.Equal(t, []uuid.UUID{good.ID}, auth.listened, "good session should still be rehydrated despite the prior repo lookup failure")
-	require.Equal(t, map[uuid.UUID]struct{}{good.ID: {}}, keep)
+	require.Equal(t, map[uuid.UUID]struct{}{missing.ID: {}, good.ID: {}}, keep, "live sessions must be preserved from sweep even when their listener rehydrate fails")
 }
 
 func TestRehydrate_ListenFailureCountsAsErrorButContinues(t *testing.T) {
@@ -283,7 +283,7 @@ func TestRehydrate_ListenFailureCountsAsErrorButContinues(t *testing.T) {
 		zerolog.Nop(),
 	)
 	require.NoError(t, err, "Listen errors are per-row; the loop must keep going")
-	require.Empty(t, keep, "a session whose Listen failed must not be reported as rehydrated (otherwise the sweep would think it's live)")
+	require.Equal(t, map[uuid.UUID]struct{}{first.ID: {}}, keep, "a live session whose Listen failed must still be preserved from sweep")
 }
 
 func TestRehydrate_ListErrorBubbles(t *testing.T) {
@@ -405,8 +405,9 @@ func TestRehydrate_SkipsRowsWithEmptyContainerID(t *testing.T) {
 }
 
 // TestRehydrate_IsAliveErrorIsCounted covers the per-row branch where
-// IsAlive's retries all fail. The row is skipped (no Listen, not in keep)
-// and counted as errored, but the loop continues to subsequent rows.
+// IsAlive's retries all fail. The row is skipped (no Listen) and counted as
+// errored, but it stays in the keep set because an unknown-liveness preview
+// hold is not safe to sweep.
 func TestRehydrate_IsAliveErrorIsCounted(t *testing.T) {
 	t.Parallel()
 	orgID := uuid.New()
@@ -430,7 +431,7 @@ func TestRehydrate_IsAliveErrorIsCounted(t *testing.T) {
 	)
 	require.NoError(t, err, "transient IsAlive failures are per-row; the loop must keep going")
 	require.NotNil(t, keep)
-	require.Empty(t, keep, "a row whose IsAlive probe failed must not be counted as rehydrated")
+	require.Equal(t, map[uuid.UUID]struct{}{flaky.ID: {}}, keep, "a row whose IsAlive probe failed must be preserved because it may still be live")
 	require.Empty(t, auth.listened, "Listen must not be called when IsAlive itself failed — the next turn boundary will retry from scratch")
 }
 
@@ -461,7 +462,7 @@ func TestRehydrate_SkipsRowsWithNilRepositoryID(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, keep)
-	require.Empty(t, keep, "rows without a repository_id must be skipped — Listen needs a repo for the resolver closure")
+	require.Equal(t, map[uuid.UUID]struct{}{noRepo.ID: {}}, keep, "live rows without a repository_id must be skipped for Listen but preserved from sweep")
 	require.Empty(t, auth.listened, "Listen must not fire when the repo lookup is impossible (nil repository_id)")
 }
 
@@ -503,7 +504,7 @@ func TestRehydrate_OrgSettingsLoaderErrorIsPerRow(t *testing.T) {
 	)
 	require.NoError(t, err, "per-row loader failures must not bubble up — the loop must continue")
 	require.NotNil(t, keep)
-	require.NotContains(t, keep, failing.ID, "the failing-org row must be skipped")
+	require.Contains(t, keep, failing.ID, "the failing-org row must be preserved from sweep even though listener rehydrate failed")
 	require.Contains(t, keep, healthy.ID, "the healthy row must still be rehydrated despite the prior failure")
 }
 
@@ -544,7 +545,6 @@ func TestRehydrate_HitsBatchCap(t *testing.T) {
 		zerolog.Nop(),
 	)
 	require.NoError(t, err, "hitting the batch cap is non-fatal — the rest of the rows are deferred to the next turn boundary")
-	require.NotNil(t, keep)
-	require.Empty(t, keep, "all containers were dead; nothing should land in the keep set")
+	require.Nil(t, keep, "hitting the batch cap means pagination coverage is incomplete, so callers must skip sweep")
 	require.Equal(t, rehydrateMaxBatches, lister.calls, "the cap must stop pagination at exactly rehydrateMaxBatches calls")
 }

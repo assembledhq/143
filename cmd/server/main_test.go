@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildBaseMetadata(t *testing.T) {
@@ -111,6 +114,24 @@ func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	if _, ok := metadata["preview_internal_base_url"]; ok {
 		t.Errorf("preview_internal_base_url should be omitted when not configured")
 	}
+}
+
+// TestMainStartupRunsRehydrateBeforeWorkers guards the sandbox-auth socket
+// sweep invariant: process workers must not be able to call Listen for a new
+// job while the boot-time rehydrate/sweep pass is still deciding which
+// session directories are stale.
+func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
+
+	body := string(src)
+	startWorkers := strings.Index(body, "\n\t\tprocessWorkers = startProcessWorkers(")
+	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
+	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
+	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
+	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
 }
 
 // fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads

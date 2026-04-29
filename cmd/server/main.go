@@ -374,23 +374,6 @@ func main() {
 			LogsDays:    cfg.DataRetentionLogsDays,
 			JobsDays:    cfg.DataRetentionJobsDays,
 		}
-		processWorkers = startProcessWorkers(
-			ctx,
-			pool,
-			logger,
-			hostname,
-			workerCount,
-			stores,
-			services,
-			retentionCfg,
-			jobNotifier,
-			nodeManager,
-			previewCapable,
-			cfg.PreviewInternalBaseURL,
-		)
-
-		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
-		go recoveryLoop.Start(ctx, 30*time.Second)
 
 		// Reconcile containers that leaked when the last server exited mid-turn
 		// or mid-Stop. Runs before the reaper starts so the reaper's Phase 2
@@ -431,6 +414,24 @@ func main() {
 				rehydrateCancel()
 			}
 		}
+
+		processWorkers = startProcessWorkers(
+			ctx,
+			pool,
+			logger,
+			hostname,
+			workerCount,
+			stores,
+			services,
+			retentionCfg,
+			jobNotifier,
+			nodeManager,
+			previewCapable,
+			cfg.PreviewInternalBaseURL,
+		)
+
+		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)
+		go recoveryLoop.Start(ctx, 30*time.Second)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
 		reaperOpts := []agent.SessionReaperOption{

@@ -65,13 +65,14 @@ type OrgSettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.OrgSet
 // or provider is nil (legacy GITHUB_TOKEN path or no docker), we bail early
 // — there's nothing to rehydrate.
 //
-// Return contract: a nil map means "rehydrate did NOT run" (bail-out path);
-// a non-nil map (possibly empty) means "ran successfully and these are the
-// session IDs whose listeners are now live". Callers that want to
-// post-process with a sweep MUST distinguish these — sweeping on a nil keep
-// would treat every on-disk subdir as stale and clobber sockets we never
-// re-bound, regressing into ENOENT instead of the ECONNREFUSED this fix
-// is for.
+// Return contract: a nil map means "do NOT sweep" (rehydrate did not run, or
+// did not fully drain the candidate set); a non-nil map (possibly empty)
+// means "ran to completion and these session dirs must be preserved". The
+// preserve set includes sessions whose containers are live or whose liveness
+// could not be proven, even if Listen failed, because deleting a held
+// container's bind-mounted session dir is harder to recover from than a stale
+// socket. Callers that want to post-process with a sweep MUST distinguish
+// nil from empty.
 func RehydrateSandboxAuthListeners(
 	ctx context.Context,
 	sessions ContainerHoldingSessionLister,
@@ -90,7 +91,7 @@ func RehydrateSandboxAuthListeners(
 		return nil, nil
 	}
 
-	rehydrated := make(map[uuid.UUID]struct{})
+	keep := make(map[uuid.UUID]struct{})
 	var totalRehydrated, totalDead, totalErrored int
 	var cursor uuid.UUID
 	hitCap := true
@@ -126,6 +127,10 @@ func RehydrateSandboxAuthListeners(
 
 			alive, aliveErr := probeAliveWithRetry(ctx, provider, sb, rowLog, run.ID, containerID)
 			if aliveErr != nil {
+				// Unknown liveness is not safe to sweep: the preview hold may
+				// still have a bind-mounted session dir even though Docker was
+				// temporarily unavailable to the startup probe.
+				keep[run.ID] = struct{}{}
 				totalErrored++
 				continue
 			}
@@ -135,6 +140,10 @@ func RehydrateSandboxAuthListeners(
 				totalDead++
 				continue
 			}
+			// From this point on the container is known live. Preserve its
+			// session dir even if repo/settings/listen fails below; a later
+			// turn boundary can retry Listen against the same bind mount.
+			keep[run.ID] = struct{}{}
 
 			if run.RepositoryID == nil {
 				rowLog.Debug().Msg("rehydrate: skipping container-holding session with no repository linked")
@@ -165,7 +174,6 @@ func RehydrateSandboxAuthListeners(
 				totalErrored++
 				continue
 			}
-			rehydrated[run.ID] = struct{}{}
 			totalRehydrated++
 		}
 	}
@@ -186,7 +194,10 @@ func RehydrateSandboxAuthListeners(
 	} else {
 		logger.Debug().Msg("rehydrate: no container-holding sessions found")
 	}
-	return rehydrated, nil
+	if hitCap {
+		return nil, nil
+	}
+	return keep, nil
 }
 
 // RehydrateSandboxAuthListeners runs the package-level
@@ -196,13 +207,10 @@ func RehydrateSandboxAuthListeners(
 // sessions/repos/orgs/provider/sandboxAuth into the freestanding form.
 //
 // Return contract is the same as the freestanding helper: (nil, nil) means
-// "did NOT run" (bail-out — sandboxAuth not configured, or session store
-// doesn't satisfy ContainerHoldingSessionLister); (non-nil, nil) means "ran
-// successfully" with the rehydrated session IDs as the map keys (possibly
-// empty if no sessions matched). Callers that follow up with a sweep MUST
-// gate it on `keep != nil` — sweeping on a nil keep would treat every
-// on-disk session subdir as stale and clobber sockets the orchestrator
-// never re-bound.
+// "do NOT sweep" (bail-out or incomplete pagination); (non-nil, nil) means
+// "ran to completion" with the session IDs whose dirs must be preserved as
+// the map keys (possibly empty if no sessions matched). Callers that follow
+// up with a sweep MUST gate it on `keep != nil`.
 //
 // The interface assertion on o.sessions is defensive: production wires
 // *db.SessionStore which implements ContainerHoldingSessionLister, but a
