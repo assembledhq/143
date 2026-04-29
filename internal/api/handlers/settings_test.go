@@ -77,7 +77,7 @@ func TestSettingsHandler_Get(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, nil, nil)
 
 			tt.setupMock(mock, orgID)
 
@@ -100,7 +100,7 @@ func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 	defaults := map[string]string{
 		"anthropic": "sk-a••••test",
 	}
-	handler := NewSettingsHandler(nil, defaults)
+	handler := NewSettingsHandler(nil, nil, defaults)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestSettingsHandler_GetLLMDefaults(t *testing.T) {
 func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, map[string]string{})
+	handler := NewSettingsHandler(nil, nil, map[string]string{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-defaults", nil)
 	w := httptest.NewRecorder()
@@ -132,7 +132,7 @@ func TestSettingsHandler_GetLLMDefaults_Empty(t *testing.T) {
 func TestSettingsHandler_GetLLMModels(t *testing.T) {
 	t.Parallel()
 
-	handler := NewSettingsHandler(nil, nil)
+	handler := NewSettingsHandler(nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/llm-models", nil)
 	w := httptest.NewRecorder()
@@ -328,7 +328,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 
 			orgID := uuid.New()
 			store := db.NewOrganizationStore(mock)
-			handler := NewSettingsHandler(store, nil)
+			handler := NewSettingsHandler(store, nil, nil)
 
 			tt.setupMock(mock, orgID)
 
@@ -367,7 +367,7 @@ func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
 		)
 
 	store := db.NewOrganizationStore(mock)
-	handler := NewSettingsHandler(store, nil)
+	handler := NewSettingsHandler(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"codex"}}`))
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -406,7 +406,7 @@ func TestSettingsHandler_Update_LogsPatchMetadata(t *testing.T) {
 		)
 
 	store := db.NewOrganizationStore(mock)
-	handler := NewSettingsHandler(store, nil)
+	handler := NewSettingsHandler(store, nil, nil)
 
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs)
@@ -453,7 +453,7 @@ func TestSettingsHandler_Update_ReturnsErrorWhenStoreUpdateFails(t *testing.T) {
 		WillReturnError(assertAnError("write failed"))
 
 	store := db.NewOrganizationStore(mock)
-	handler := NewSettingsHandler(store, nil)
+	handler := NewSettingsHandler(store, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"settings":{"default_agent_type":"claude_code"}}`))
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -492,7 +492,7 @@ func TestSettingsHandler_Update_InvalidatesOrgSettingsCacheOnSuccess(t *testing.
 		)
 
 	store := db.NewOrganizationStore(mock)
-	handler := NewSettingsHandler(store, nil)
+	handler := NewSettingsHandler(store, nil, nil)
 	invalidator := &testOrgSettingsInvalidator{}
 	handler.SetOrgSettingsInvalidator(invalidator)
 

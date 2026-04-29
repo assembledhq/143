@@ -172,7 +172,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithRollupStore(usageRollupStore),
 		handlers.WithMembershipStore(membershipStore),
 	)
-	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	settingsHandler := handlers.NewSettingsHandler(orgStore, credentialStore, cfg.SafeLLMEnv())
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)

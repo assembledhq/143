@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// settingsCredentialLookup is the narrow slice of the credential store the
+// settings handler needs. Defined as an interface so tests can stub it.
+type settingsCredentialLookup interface {
+	ListSummaries(ctx context.Context, orgID uuid.UUID) ([]models.CredentialSummary, error)
+}
+
 // OrgSettingsInvalidator drops cached org settings so that a write here is
 // observed by the orchestrator's Amp/Pi config lookup immediately, rather
 // than waiting for the cache TTL to expire. Declared locally (not imported
@@ -26,6 +33,7 @@ type OrgSettingsInvalidator interface {
 
 type SettingsHandler struct {
 	orgStore    *db.OrganizationStore
+	credentials settingsCredentialLookup
 	llmDefaults map[string]string // provider name → masked key (from server env)
 	audit       *db.AuditEmitter
 	logger      zerolog.Logger
@@ -52,9 +60,10 @@ func (h *SettingsHandler) SetOrgSettingsInvalidator(invalidator OrgSettingsInval
 	h.invalidator = invalidator
 }
 
-func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
+func NewSettingsHandler(orgStore *db.OrganizationStore, credentials settingsCredentialLookup, llmDefaults map[string]string) *SettingsHandler {
 	return &SettingsHandler{
 		orgStore:    orgStore,
+		credentials: credentials,
 		llmDefaults: llmDefaults,
 		logger:      zerolog.Nop(),
 	}
@@ -107,6 +116,17 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		if err := models.ValidateSettingsModels(parsedSettings); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
 			return
+		}
+		if parsedSettings.LLMModel != "" {
+			orgConfigured, err := h.orgConfiguredLLMProviders(r.Context(), orgID)
+			if err != nil {
+				writeError(w, r, http.StatusInternalServerError, "LOOKUP_FAILED", "failed to check provider credentials", err)
+				return
+			}
+			if err := models.ValidateLLMModelAccess(parsedSettings.LLMModel, orgConfigured, h.platformLLMProviders()); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_SETTINGS", err.Error())
+				return
+			}
 		}
 	}
 	if req.Name != nil {
@@ -289,6 +309,35 @@ func sortedSettingsChangeKeys(changes map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// orgConfiguredLLMProviders returns the set of provider names where the org
+// has its own credential saved (vs. relying on the platform default).
+func (h *SettingsHandler) orgConfiguredLLMProviders(ctx context.Context, orgID uuid.UUID) (map[string]bool, error) {
+	configured := map[string]bool{}
+	if h.credentials == nil {
+		return configured, nil
+	}
+	summaries, err := h.credentials.ListSummaries(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range summaries {
+		if s.Configured {
+			configured[string(s.Provider)] = true
+		}
+	}
+	return configured, nil
+}
+
+// platformLLMProviders returns the set of provider names that have a
+// platform-default key from the server environment.
+func (h *SettingsHandler) platformLLMProviders() map[string]bool {
+	out := make(map[string]bool, len(h.llmDefaults))
+	for provider := range h.llmDefaults {
+		out[provider] = true
+	}
+	return out
 }
 
 func topLevelSettingsPatchKeys(raw *json.RawMessage) []string {

@@ -32,6 +32,7 @@ import {
   LLM_PROVIDER_INFO,
   DEFAULT_LLM_MODEL,
   OPENAI_API_TYPE_CHAT,
+  PLATFORM_DEFAULT_ALLOWED_MODELS,
   ownerProviderForModel,
 } from "@/lib/model-constants";
 import type {
@@ -117,13 +118,25 @@ export default function LLMPage() {
     return status;
   }, [credentials, platformProviders]);
 
+  // Filter each provider's model list down to a cost-safe subset when the org
+  // is leaning on the platform default (143's key) rather than their own.
+  // Once the org adds their own key, the full list returns.
   const enabledModelGroups = useMemo(() => {
     return Object.entries(modelsByProvider)
       .filter(([provider]) => {
         const ps = providerStatus[provider];
         return ps?.orgConfigured || ps?.platformAvailable;
       })
-      .map(([, group]) => group);
+      .map(([provider, group]) => {
+        const ps = providerStatus[provider];
+        const restriction = PLATFORM_DEFAULT_ALLOWED_MODELS[provider];
+        if (restriction && !ps?.orgConfigured && ps?.platformAvailable) {
+          const allowed = new Set(restriction);
+          return { ...group, models: group.models.filter((m) => allowed.has(m)) };
+        }
+        return group;
+      })
+      .filter((group) => group.models.length > 0);
   }, [modelsByProvider, providerStatus]);
 
   const ownerProvider = useMemo(
@@ -134,6 +147,14 @@ export default function LLMPage() {
   const ownerConfigured = Boolean(
     ownerProvider &&
       (providerStatus[ownerProvider]?.orgConfigured || providerStatus[ownerProvider]?.platformAvailable),
+  );
+  const ownerUsesPlatformDefault = Boolean(
+    ownerProvider &&
+      !providerStatus[ownerProvider]?.orgConfigured &&
+      providerStatus[ownerProvider]?.platformAvailable,
+  );
+  const ownerHasRestriction = Boolean(
+    ownerProvider && PLATFORM_DEFAULT_ALLOWED_MODELS[ownerProvider],
   );
 
   const autosave = useAutosave<SettingsPatch>({
@@ -256,6 +277,9 @@ export default function LLMPage() {
             ownerProvider={ownerProvider}
             ownerProviderInfo={ownerProviderInfo}
             ownerConfigured={ownerConfigured}
+            ownerUsesPlatformDefault={ownerUsesPlatformDefault}
+            ownerHasModelRestriction={ownerHasRestriction}
+            onAddOwnerKey={ownerProvider ? () => openEditor(ownerProvider) : undefined}
             onChange={(model) => autosave.save({ settings: { llm_model: model } })}
             onReasoningChange={(effort) =>
               autosave.save({

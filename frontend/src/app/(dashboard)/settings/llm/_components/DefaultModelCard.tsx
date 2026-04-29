@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Check, Info } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -20,6 +21,9 @@ export interface DefaultModelCardProps {
   ownerProvider: string | null;
   ownerProviderInfo?: { name: string } | null;
   ownerConfigured: boolean;
+  ownerUsesPlatformDefault?: boolean;
+  ownerHasModelRestriction?: boolean;
+  onAddOwnerKey?: () => void;
   onChange: (model: string) => void;
   onReasoningChange: (v: string) => void;
 }
@@ -31,10 +35,14 @@ export function DefaultModelCard({
   ownerProvider,
   ownerProviderInfo,
   ownerConfigured,
+  ownerUsesPlatformDefault = false,
+  ownerHasModelRestriction = false,
+  onAddOwnerKey,
   onChange,
   onReasoningChange,
 }: DefaultModelCardProps) {
   const hasModels = modelGroups.length > 0;
+  const ownerName = ownerProviderInfo?.name;
 
   return (
     <Card>
@@ -65,16 +73,49 @@ export function DefaultModelCard({
                 )}
               </SelectContent>
             </Select>
-            {ownerProvider && ownerProviderInfo && ownerConfigured ? (
-              <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-                <Check className="h-3 w-3" />
-                Uses your {ownerProviderInfo.name} key
-              </p>
+            {ownerProvider && ownerName && ownerConfigured ? (
+              ownerUsesPlatformDefault ? (
+                <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+                  <Check className="h-3 w-3" />
+                  Using 143&apos;s default {ownerName} key
+                </p>
+              ) : (
+                <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+                  <Check className="h-3 w-3" />
+                  Uses your {ownerName} key
+                </p>
+              )
             ) : (
               <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
                 <AlertTriangle className="h-3 w-3" />
                 No provider key configured for this model
               </p>
+            )}
+            {ownerUsesPlatformDefault && ownerHasModelRestriction && (
+              <div className="flex items-start gap-1.5 rounded-md border border-amber-300/60 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-200">
+                <Info className="mt-0.5 h-3 w-3 shrink-0" />
+                <div className="space-y-1">
+                  <p>
+                    143&apos;s default key is capped at lower-cost models.
+                    {onAddOwnerKey && ownerName ? (
+                      <>
+                        {" "}
+                        <Button
+                          variant="link"
+                          size="sm"
+                          onClick={onAddOwnerKey}
+                          className="h-auto p-0 text-xs font-medium text-amber-900 underline underline-offset-2 dark:text-amber-100"
+                        >
+                          Add your own {ownerName} key
+                        </Button>{" "}
+                        to unlock the stronger models.
+                      </>
+                    ) : (
+                      " Add your own key to unlock the stronger models."
+                    )}
+                  </p>
+                </div>
+              </div>
             )}
             <p className="text-xs text-muted-foreground">
               Used for organization-level LLM features, separate from the coding agents configured

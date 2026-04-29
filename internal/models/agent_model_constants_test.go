@@ -378,3 +378,80 @@ func TestValidateSettingsModels(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateLLMModelAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		model             string
+		orgConfigured     map[string]bool
+		platformAvailable map[string]bool
+		wantErr           bool
+	}{
+		{
+			name:  "empty model is always allowed",
+			model: "",
+		},
+		{
+			name:          "org with own openai key can pick gpt-5.4",
+			model:         "gpt-5.4",
+			orgConfigured: map[string]bool{"openai": true},
+		},
+		{
+			name:              "platform default openai allows gpt-5.4-mini",
+			model:             "gpt-5.4-mini",
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			name:              "platform default openai allows gpt-5.4-nano",
+			model:             "gpt-5.4-nano",
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			name:              "platform default openai blocks gpt-5.4 (cost cap)",
+			model:             "gpt-5.4",
+			platformAvailable: map[string]bool{"openai": true},
+			wantErr:           true,
+		},
+		{
+			name:              "org openai key unlocks gpt-5.4 even when platform also exists",
+			model:             "gpt-5.4",
+			orgConfigured:     map[string]bool{"openai": true},
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			// gpt-5.4 is also served by openrouter; if the org has openrouter
+			// configured, the cost cap on the platform openai key shouldn't bite.
+			name:              "openrouter org credential bypasses openai platform cap",
+			model:             "gpt-5.4",
+			orgConfigured:     map[string]bool{"openrouter": true},
+			platformAvailable: map[string]bool{"openai": true},
+		},
+		{
+			// No restriction map for anthropic, so platform default = full catalog.
+			name:              "anthropic platform default allows claude-opus-4-7",
+			model:             "claude-opus-4-7",
+			platformAvailable: map[string]bool{"anthropic": true},
+		},
+		{
+			// No org or platform key serves the model — settings handler accepts;
+			// the read path will surface "no provider configured."
+			name:    "no key path returns nil (handled by read-side UX)",
+			model:   "gpt-5.4-mini",
+			wantErr: false,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateLLMModelAccess(testCase.model, testCase.orgConfigured, testCase.platformAvailable)
+			if testCase.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

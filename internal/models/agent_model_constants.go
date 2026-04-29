@@ -310,6 +310,69 @@ func IsSupportedLLMModel(model string) bool {
 	return false
 }
 
+// PlatformDefaultAllowedLLMModels lists, per provider, the models that an org
+// may select while leaning on 143's platform-default API key (the keys 143
+// ships from .env). Models outside this list require the org to bring its
+// own API key. The cap is a cost guard: 143 pays for calls made via the
+// default key, so heavier models are gated behind "bring your own key."
+//
+// Providers absent from this map are not capped on platform default.
+// Keep in sync with PLATFORM_DEFAULT_ALLOWED_MODELS in
+// frontend/src/lib/model-constants.ts.
+var PlatformDefaultAllowedLLMModels = map[string][]string{
+	"openai": {"gpt-5.4-mini", "gpt-5.4-nano"},
+}
+
+// ValidateLLMModelAccess rejects the model when the only viable provider is
+// served by 143's platform default and that provider caps the platform tier.
+//
+// `orgConfigured` and `platformAvailable` are sets of provider names (e.g.
+// "openai", "anthropic") indicating, respectively, which providers the org
+// has its own credential for and which providers have a platform-default key.
+//
+// Returns nil if any provider can serve the model under the access rules
+// (org credential present, or platform default present and not capped).
+// Returns nil if the model has no key path at all — the existing
+// "no provider configured" UX handles that elsewhere; this validator only
+// blocks the cost-cap bypass.
+func ValidateLLMModelAccess(model string, orgConfigured, platformAvailable map[string]bool) error {
+	if model == "" {
+		return nil
+	}
+	cappedByPlatform := false
+	for provider, providerModels := range LLMModelsByProvider() {
+		hosts := false
+		for _, m := range providerModels {
+			if m == model {
+				hosts = true
+				break
+			}
+		}
+		if !hosts {
+			continue
+		}
+		if orgConfigured[provider] {
+			return nil
+		}
+		if platformAvailable[provider] {
+			allowed, capped := PlatformDefaultAllowedLLMModels[provider]
+			if !capped {
+				return nil
+			}
+			for _, m := range allowed {
+				if m == model {
+					return nil
+				}
+			}
+			cappedByPlatform = true
+		}
+	}
+	if cappedByPlatform {
+		return fmt.Errorf("model %q requires your own provider API key — 143's default key is capped at lower-cost models", model)
+	}
+	return nil
+}
+
 func ValidateSettingsModels(settings OrgSettings) error {
 	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
 		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)

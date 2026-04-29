@@ -128,6 +128,16 @@ export const LLM_MODELS_BY_PROVIDER: Record<string, { label: string; models: rea
 
 export const DEFAULT_LLM_MODEL = "gpt-5.4-mini";
 
+// Models allowed when the org is relying on a platform-default key (the one
+// 143 ships from .env) rather than their own. The cap is a cost guard: 143
+// pays for these calls, so heavy models are gated behind "bring your own key."
+// Providers absent from this map are not restricted on platform default.
+// Keep in sync with PlatformDefaultAllowedLLMModels in
+// internal/models/agent_model_constants.go.
+export const PLATFORM_DEFAULT_ALLOWED_MODELS: Record<string, readonly string[]> = {
+  openai: ["gpt-5.4-mini", "gpt-5.4-nano"],
+};
+
 // OpenAI credential api_type value.
 export const OPENAI_API_TYPE_CHAT = "chat";
 

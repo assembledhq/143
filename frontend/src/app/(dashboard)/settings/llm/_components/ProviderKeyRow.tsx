@@ -18,6 +18,20 @@ export function ProviderKeyRow({
   onEdit,
 }: ProviderKeyRowProps) {
   const configured = status.orgConfigured;
+  const usingPlatformDefault = !configured && status.platformAvailable;
+
+  let statusText: React.ReactNode;
+  if (configured && status.maskedKey) {
+    statusText = (
+      <span className="truncate font-mono text-xs text-muted-foreground">{status.maskedKey}</span>
+    );
+  } else if (usingPlatformDefault) {
+    statusText = (
+      <span className="text-xs text-muted-foreground">Using 143&apos;s default key</span>
+    );
+  } else {
+    statusText = <span className="text-xs text-muted-foreground">Not set</span>;
+  }
 
   return (
     <div
@@ -27,24 +41,26 @@ export function ProviderKeyRow({
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <span
           role="status"
-          aria-label={configured ? "Configured" : "Not configured"}
+          aria-label={
+            configured
+              ? "Configured"
+              : usingPlatformDefault
+                ? "Using platform default"
+                : "Not configured"
+          }
           className={
             configured
               ? "inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-500"
-              : "inline-block h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40"
+              : usingPlatformDefault
+                ? "inline-block h-2 w-2 shrink-0 rounded-full bg-amber-400"
+                : "inline-block h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40"
           }
         />
         <span className="text-sm font-medium">{info.name}</span>
-        {configured && status.maskedKey ? (
-          <span className="truncate font-mono text-xs text-muted-foreground">
-            {status.maskedKey}
-          </span>
-        ) : (
-          <span className="text-xs text-muted-foreground">Not set</span>
-        )}
+        {statusText}
         {isDefaultOwner && (
           <Badge variant="secondary" className="text-xs px-1.5 py-0">
-            default
+            active
           </Badge>
         )}
       </div>
