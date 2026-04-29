@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -775,6 +777,193 @@ func TestTopLevelSettingsPatchKeys(t *testing.T) {
 			require.Equal(t, tt.expected, topLevelSettingsPatchKeys(tt.raw), "should return the expected top-level patch keys")
 		})
 	}
+}
+
+// stubCredLookup is a settingsCredentialLookup test double used by the
+// LLM-cap tests below to control what providers an org "has configured."
+type stubCredLookup struct {
+	summaries []models.CredentialSummary
+	err       error
+}
+
+func (s *stubCredLookup) ListSummaries(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.summaries, nil
+}
+
+func TestSettingsHandler_PlatformLLMProviders(t *testing.T) {
+	t.Parallel()
+	h := NewSettingsHandler(nil, nil, map[string]string{
+		"openai":    "sk-...platform",
+		"anthropic": "sk-ant-...platform",
+	})
+	got := h.platformLLMProviders()
+	require.True(t, got["openai"])
+	require.True(t, got["anthropic"])
+	require.False(t, got["gemini"])
+}
+
+func TestSettingsHandler_PlatformLLMProviders_Empty(t *testing.T) {
+	t.Parallel()
+	h := NewSettingsHandler(nil, nil, nil)
+	require.Empty(t, h.platformLLMProviders())
+}
+
+func TestSettingsHandler_OrgConfiguredLLMProviders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns the configured set", func(t *testing.T) {
+		t.Parallel()
+		lookup := &stubCredLookup{summaries: []models.CredentialSummary{
+			{Provider: models.ProviderOpenAI, Configured: true},
+			{Provider: models.ProviderAnthropic, Configured: false},
+		}}
+		h := NewSettingsHandler(nil, lookup, nil)
+		got, err := h.orgConfiguredLLMProviders(context.Background(), uuid.New())
+		require.NoError(t, err)
+		require.True(t, got["openai"])
+		require.False(t, got["anthropic"], "unconfigured providers should not appear in the set")
+	})
+
+	t.Run("returns empty when credential lookup is not wired", func(t *testing.T) {
+		t.Parallel()
+		h := NewSettingsHandler(nil, nil, nil)
+		got, err := h.orgConfiguredLLMProviders(context.Background(), uuid.New())
+		require.NoError(t, err)
+		require.Empty(t, got)
+	})
+
+	t.Run("propagates lookup errors", func(t *testing.T) {
+		t.Parallel()
+		lookup := &stubCredLookup{err: assertAnError("lookup failed")}
+		h := NewSettingsHandler(nil, lookup, nil)
+		_, err := h.orgConfiguredLLMProviders(context.Background(), uuid.New())
+		require.Error(t, err)
+	})
+}
+
+func TestSettingsHandler_WarnIfCapMisconfigured_LogsOnceWhenLookupMissing(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	ctx := logger.WithContext(context.Background())
+
+	h := NewSettingsHandler(nil, nil, map[string]string{"openai": "sk-...platform"})
+
+	h.warnIfCapMisconfigured(ctx)
+	h.warnIfCapMisconfigured(ctx)
+
+	logged := logs.String()
+	require.Contains(t, logged, "settings handler has platform LLM defaults but no credential lookup")
+	require.Equal(t, 1, strings.Count(logged, "settings handler has platform LLM defaults"),
+		"sync.Once should suppress repeated warnings")
+}
+
+func TestSettingsHandler_WarnIfCapMisconfigured_QuietWhenWiredCorrectly(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	ctx := logger.WithContext(context.Background())
+
+	h := NewSettingsHandler(nil, &stubCredLookup{}, map[string]string{"openai": "sk"})
+	h.warnIfCapMisconfigured(ctx)
+
+	require.Empty(t, logs.String(), "no warning when credentials lookup is wired")
+}
+
+func TestSettingsHandler_WarnIfCapMisconfigured_QuietWhenNoPlatformDefaults(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+	ctx := logger.WithContext(context.Background())
+
+	h := NewSettingsHandler(nil, nil, nil)
+	h.warnIfCapMisconfigured(ctx)
+
+	require.Empty(t, logs.String(), "no warning when platform defaults are absent (cap is dormant)")
+}
+
+func TestSettingsHandler_Update_RejectsCappedModelOnPlatformDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	store := db.NewOrganizationStore(mock)
+	// Org has no own credentials; platform default OpenAI key is wired.
+	// gpt-5.4 should be rejected before any DB write happens.
+	handler := NewSettingsHandler(store, &stubCredLookup{}, map[string]string{"openai": "sk-...platform"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+		strings.NewReader(`{"settings":{"llm_model":"gpt-5.4"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_SETTINGS")
+	require.Contains(t, w.Body.String(), "your own provider API key")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should happen on a rejected patch")
+}
+
+func TestSettingsHandler_Update_AllowsCappedModelWhenOrgHasOwnKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
+		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"updated_at"}).AddRow(now))
+
+	store := db.NewOrganizationStore(mock)
+	lookup := &stubCredLookup{summaries: []models.CredentialSummary{
+		{Provider: models.ProviderOpenAI, Configured: true},
+	}}
+	handler := NewSettingsHandler(store, lookup, map[string]string{"openai": "sk-...platform"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+		strings.NewReader(`{"settings":{"llm_model":"gpt-5.4"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "org with own OpenAI key may select gpt-5.4")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSettingsHandler_Update_LookupFailedSurfaces500(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewOrganizationStore(mock)
+	lookup := &stubCredLookup{err: assertAnError("credentials store down")}
+	handler := NewSettingsHandler(store, lookup, map[string]string{"openai": "sk-...platform"})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+		strings.NewReader(`{"settings":{"llm_model":"gpt-5.4-mini"}}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.Update(w, req)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Contains(t, w.Body.String(), "LOOKUP_FAILED")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls when credential lookup fails")
 }
 
 func assertAnError(msg string) error {

@@ -413,3 +413,66 @@ func TestCredentialHandler_Delete_SelfHealNotWiredIsNoOp(t *testing.T) {
 	handler.Delete(rr, req)
 	require.Equal(t, http.StatusNoContent, rr.Code)
 }
+
+// Self-heal is a best-effort step: any error inside it is logged but never
+// fails the credential delete. These tests lock that contract in by exercising
+// each error branch and confirming the response stays 204 with no Update call.
+func TestCredentialHandler_Delete_SelfHealErrorPathsAreBestEffort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		credLfn func(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error)
+		org     models.Organization
+		getErr  error
+		updErr  error
+	}{
+		{
+			name:   "GetByID error is swallowed",
+			getErr: fmt.Errorf("db down"),
+		},
+		{
+			name: "invalid settings JSON is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":`), // truncated → unmarshal fails
+			},
+		},
+		{
+			name: "ListSummaries error is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":"gpt-5.4"}`),
+			},
+			credLfn: func(_ context.Context, _ uuid.UUID) ([]models.CredentialSummary, error) {
+				return nil, fmt.Errorf("list down")
+			},
+		},
+		{
+			name: "Update error is swallowed",
+			org: models.Organization{
+				Settings: json.RawMessage(`{"llm_model":"gpt-5.4"}`),
+			},
+			updErr: fmt.Errorf("write down"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			tt.org.ID = orgID
+			credStore := &mockCredentialStore{listFn: tt.credLfn}
+			orgStore := &fakeOrgStore{org: tt.org, getErr: tt.getErr, updateErr: tt.updErr}
+
+			handler := NewCredentialHandler(credStore)
+			handler.SetSelfHeal(orgStore, map[string]string{"openai": "sk-...platform"})
+
+			req := newCredentialRequest(t, http.MethodDelete, "/api/v1/settings/credentials/openai", nil, orgID, "openai")
+			rr := httptest.NewRecorder()
+			handler.Delete(rr, req)
+
+			require.Equal(t, http.StatusNoContent, rr.Code,
+				"self-heal failures must never break the credential delete itself")
+		})
+	}
+}
