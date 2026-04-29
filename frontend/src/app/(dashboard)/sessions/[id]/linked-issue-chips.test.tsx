@@ -110,9 +110,31 @@ describe('LinkedIssueChips', () => {
       ],
     });
     render(<LinkedIssueChips session={session} />);
-    // Falls back to issue_id slice when external_id is missing.
-    expect(screen.getByText('a1b2c3d4')).toBeInTheDocument();
+    // Without external_id we surface a labeled placeholder rather than a
+    // UUID slice — UUIDs aren't useful identifiers for users to search.
+    expect(screen.getByText('Issue (no key)')).toBeInTheDocument();
     expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it('mirrors tooltip into aria-label on non-link chips so screen readers announce issue context', () => {
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'related',
+          position: 0,
+          issue_source: 'sentry',
+          external_id: 'SEN-77',
+          issue_title: 'NRE in foo',
+        },
+      ],
+    });
+    render(<LinkedIssueChips session={session} />);
+    // Most screen readers ignore `title` on non-interactive elements; the
+    // span must surface its context through aria-label.
+    expect(screen.getByLabelText('NRE in foo (related)')).toBeInTheDocument();
   });
 
   it('renders the prepare-failed warning chip with sr-only detail', () => {

@@ -2098,15 +2098,23 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		})
 		if linkErr != nil {
 			errMsg := "Linear context could not be prepared. Retry the session after the Linear integration recovers."
-			if err := h.runStore.UpdateResult(r.Context(), orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
-				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error")
+			// Use a detached context for the failure write so a cancelled
+			// request context (client disconnect) doesn't leave the session
+			// stuck in "pending" forever — the agent run hasn't been
+			// enqueued yet, so without this transition the row is orphaned.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := h.runStore.UpdateResult(cleanupCtx, orgID, session.ID, "failed", &models.SessionResult{Error: &errMsg}); err != nil {
+				h.logger.Error().Err(err).Str("session_id", session.ID.String()).Msg("failed to mark session failed after linear pre-start linking error; session row may be orphaned in pending")
 			}
+			cancel()
 			h.logger.Warn().Err(linkErr).Str("session_id", session.ID.String()).Msg("linear pre-start linking failed; refusing to enqueue agent run")
 			writeError(w, r, http.StatusInternalServerError, "LINEAR_PREPARE_FAILED", "failed to prepare Linear context", linkErr)
 			return
 		}
 		if linearResult.PrimaryIdentifier != "" {
-			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err == nil {
+			if err := h.runStore.SetLinearIdentifierHint(r.Context(), orgID, session.ID, linearResult.PrimaryIdentifier); err != nil {
+				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Str("identifier", linearResult.PrimaryIdentifier).Msg("failed to persist linear identifier hint; branch naming will fall back to non-linear slug")
+			} else {
 				session.LinearIdentifierHint = &linearResult.PrimaryIdentifier
 			}
 			// Use the Linear issue title as the session title when the user
@@ -2114,7 +2122,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			// start".
 			if linearResult.PrimaryTitle != "" && shouldOverrideTitleWithLinearIssue(session.Title) {
 				newTitle := linearResult.PrimaryTitle
-				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err == nil {
+				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err != nil {
+					h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to override session title with linear issue title; keeping placeholder title")
+				} else {
 					session.Title = &newTitle
 				}
 			}

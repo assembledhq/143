@@ -49,10 +49,13 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         // Linear links must always carry an external_id (the Linear key
         // like "ACS-1234"). Falling back to a UUID slice would surface a
         // bug as a confusing chip; render an explicit placeholder instead
-        // so the missing key is visible during dogfooding.
+        // so the missing key is visible during dogfooding. Non-Linear
+        // sources without an external_id render a labeled placeholder
+        // rather than a UUID slice — leaking the issue UUID into the UI
+        // confuses users and isn't a stable identifier they can search.
         const ident = isLinear
           ? (link.external_id ?? "Linear (no key)")
-          : (link.external_id ?? link.issue_id.slice(0, 8));
+          : (link.external_id ?? "Issue (no key)");
         const tooltip =
           (link.issue_title ?? "") +
           (isPrimary ? " (primary)" : " (related)") +
@@ -73,6 +76,12 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           const url = link.issue_workspace_slug
             ? `https://linear.app/${encodeURIComponent(link.issue_workspace_slug)}/issue/${encodeURIComponent(link.external_id)}`
             : `https://linear.app/issue/${encodeURIComponent(link.external_id)}`;
+          // The link text (the Linear identifier) is already the
+          // accessible name; `title` provides the issue context on hover
+          // for sighted users. Don't set aria-label here — overriding the
+          // accessible name with the long tooltip would force screen
+          // readers to read the title instead of the identifier on each
+          // chip in a long list.
           return (
             <a
               key={link.id}
@@ -87,8 +96,16 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           );
         }
 
+        // Non-interactive chip: most screen readers ignore `title` on
+        // non-link/non-button elements, so mirror the tooltip into
+        // aria-label so SR users get the issue title + role context.
         return (
-          <span key={link.id} className={chipClasses} title={tooltip}>
+          <span
+            key={link.id}
+            className={chipClasses}
+            title={tooltip}
+            aria-label={tooltip}
+          >
             {ident}
           </span>
         );

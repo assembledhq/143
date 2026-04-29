@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,14 @@ type LinearProviderState struct {
 	// Merge call would silently reset coexistence to false the moment after
 	// it was detected, defeating the suppression guard entirely.
 	CoexistsWithGitHubIntegration *bool `json:"coexists_with_github_integration,omitempty"`
+	// CoexistsCheckedAt records when CoexistsWithGitHubIntegration was last
+	// observed against Linear. Without it the suppression flag is sticky:
+	// if an operator later removes Linear's GitHub integration from the
+	// workspace, we'd keep suppressing transitions forever. Callers should
+	// re-check after CoexistsCheckTTL has elapsed and write the fresh
+	// observation back. Pointer so a partial Merge that doesn't touch
+	// coexistence semantics leaves the timestamp alone.
+	CoexistsCheckedAt *time.Time `json:"coexists_checked_at,omitempty"`
 	// IssueRepoStale is true when a Linear webhook reported that the linked
 	// issue's repo association changed and now mismatches the session's repo.
 	// Surfaces in the LinkedIssueCard with a one-click "remove or repair"
@@ -258,6 +267,9 @@ func MergeLinearProviderState(current, patch LinearProviderState) LinearProvider
 	if patch.CoexistsWithGitHubIntegration != nil {
 		current.CoexistsWithGitHubIntegration = patch.CoexistsWithGitHubIntegration
 	}
+	if patch.CoexistsCheckedAt != nil {
+		current.CoexistsCheckedAt = patch.CoexistsCheckedAt
+	}
 	if patch.IssueRepoStale != nil {
 		current.IssueRepoStale = patch.IssueRepoStale
 	}
@@ -271,3 +283,23 @@ func MergeLinearProviderState(current, patch LinearProviderState) LinearProvider
 // on LinearProviderState. Reduces visual noise at call sites that need to
 // pass `&true` / `&false`.
 func BoolPtr(b bool) *bool { return &b }
+
+// TimePtr is a small helper for constructing the pointer-typed time fields
+// on LinearProviderState (e.g. CoexistsCheckedAt). Mirrors BoolPtr.
+func TimePtr(t time.Time) *time.Time { return &t }
+
+// CoexistsCheckTTL is the staleness window for CoexistsWithGitHubIntegration.
+// After this elapses the linker re-queries Linear so a removed GitHub
+// integration eventually unblocks our state-sync writes. 24h matches the
+// team-key cache refresh cadence — both are infrequent admin actions.
+const CoexistsCheckTTL = 24 * time.Hour
+
+// CoexistsCheckIsStale reports whether the cached coexistence observation
+// has aged past CoexistsCheckTTL. A nil timestamp counts as stale so legacy
+// rows written before the timestamp existed get re-checked once.
+func CoexistsCheckIsStale(checkedAt *time.Time, now time.Time) bool {
+	if checkedAt == nil {
+		return true
+	}
+	return now.Sub(*checkedAt) >= CoexistsCheckTTL
+}

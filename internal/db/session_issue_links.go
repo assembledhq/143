@@ -84,9 +84,6 @@ func (s *SessionIssueLinkStore) Create(
 // link time; refusing them would block most adoption. The carve-out only
 // applies when issue.repository_id IS NULL — an explicit-mismatch (issue says
 // repo B, session is repo A) is still rejected.
-//
-// auditReason is persisted in provider_state.link_audit_reason so we can
-// quantify how often the carve-out triggers.
 func (s *SessionIssueLinkStore) CreateAllowingNullRepo(
 	ctx context.Context,
 	orgID, sessionID, issueID uuid.UUID,

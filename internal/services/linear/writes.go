@@ -113,6 +113,18 @@ func (s *Service) HandleMilestone(ctx context.Context, in MilestoneInput) error 
 	// Linear API has no client-supplied idempotency key on commentCreate so
 	// this best-effort rescue is the closest we can get to outbox semantics
 	// without a side table.
+	//
+	// Known unrescuable window: if a Linear write succeeds server-side but
+	// the response is lost in flight (network reset, client timeout), we
+	// never observe the new ID, the rescue stages nothing, and the next
+	// retry posts a duplicate comment / attaches a duplicate attachment.
+	// This is intrinsic to the lack of a client-supplied idempotency key
+	// on commentCreate / attachmentCreate. Mitigations considered and
+	// rejected for v1: per-write outbox table (heavy infra), pre-write
+	// listComments scan (extra round-trip on every milestone). Operators
+	// who hit a duplicate can delete the older comment in Linear; the
+	// AttachmentID we eventually record will be the latest write so future
+	// updates flow to the right object.
 	var rescue db.LinearProviderState
 	hasRescue := false
 
@@ -402,19 +414,31 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			// integration is in fact present and we transition anyway, we
 			// double-move the issue. The fire-once unique constraint isn't
 			// claimed yet, so a retry can re-enter cleanly.
+			//
+			// Cache invalidation: a sticky "true" without a TTL would keep
+			// suppressing transitions forever after an operator removes
+			// Linear's GitHub integration. Re-check past CoexistsCheckTTL
+			// so a `false` observation eventually clears the flag.
 			if isPRDrivenTransition(in.Event) {
-				coexists := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
-				if !coexists {
+				cached := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
+				stale := db.CoexistsCheckIsStale(state.CoexistsCheckedAt, time.Now())
+				coexists := cached
+				if !cached || stale {
 					detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)
 					if detectErr != nil {
 						return fmt.Errorf("detect linear github integration attachment: %w", detectErr)
 					}
-					if detected {
-						coexists = true
-						_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
-							CoexistsWithGitHubIntegration: db.BoolPtr(true),
-						})
+					coexists = detected
+					patch := db.LinearProviderState{
+						CoexistsCheckedAt: db.TimePtr(time.Now()),
 					}
+					// Only flip the bool when the observation actually
+					// changes — Merge treats any non-nil pointer as overwrite,
+					// and we'd churn the JSONB row needlessly otherwise.
+					if detected != cached {
+						patch.CoexistsWithGitHubIntegration = db.BoolPtr(detected)
+					}
+					_ = txState.Merge(ctx, in.Session.OrgID, in.Link.ID, patch)
 				}
 				if coexists {
 					return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipLinearGitHubIntegration)

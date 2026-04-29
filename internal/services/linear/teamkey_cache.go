@@ -42,6 +42,17 @@ func (c *teamKeyAllowlistCache) get(orgID uuid.UUID) (map[string]bool, bool) {
 }
 
 func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) {
+	// Defensive copy of the inbound map so callers can't retain a reference
+	// to the cached storage and mutate it later. The caller in
+	// TeamKeyAllowlist already builds a fresh map per miss, but a future
+	// caller passing an aliased slice/map would silently corrupt every other
+	// org's lookup tables. Pay the small allocation here so the cache's
+	// invariants don't depend on caller behavior.
+	stored := make(map[string]bool, len(allow))
+	for k, v := range allow {
+		stored[k] = v
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -57,7 +68,7 @@ func (c *teamKeyAllowlistCache) put(orgID uuid.UUID, allow map[string]bool) {
 		}
 	}
 	c.entries[orgID] = teamKeyCacheEntry{
-		allow:     allow,
+		allow:     stored,
 		expiresAt: now.Add(teamKeyCacheTTL),
 	}
 }
