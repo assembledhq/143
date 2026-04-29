@@ -31,6 +31,8 @@ type gitHubPullRequestDetails struct {
 	Number         int    `json:"number"`
 	HTMLURL        string `json:"html_url"`
 	State          string `json:"state"`
+	Merged         bool   `json:"merged"`
+	MergeCommitSHA string `json:"merge_commit_sha"`
 	Mergeable      *bool  `json:"mergeable"`
 	MergeableState string `json:"mergeable_state"`
 	Head           struct {
@@ -199,6 +201,22 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	if err != nil {
 		return err
 	}
+
+	// Self-heal: when GitHub reports the PR closed but our DB still has it
+	// open, the pull_request:closed webhook never landed (delivery failure,
+	// signature mismatch, app restart, etc.). Apply the same transition the
+	// webhook handler would have, then stop — a closed PR has no live health
+	// to track and re-running follow-ups would just churn idempotent work.
+	if strings.EqualFold(strings.TrimSpace(details.State), "closed") && pr.Status == "open" {
+		s.logger.Warn().
+			Str("pull_request_id", pullRequestID.String()).
+			Str("repo", pr.GitHubRepo).
+			Int("number", pr.GitHubPRNumber).
+			Bool("merged", details.Merged).
+			Msg("self-healing PR status drift during sync; closed-event webhook was likely dropped")
+		return s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergeCommitSHA, details.Head.SHA)
+	}
+
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
 	if err != nil {
 		return err

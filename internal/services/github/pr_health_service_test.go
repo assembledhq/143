@@ -420,6 +420,130 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all sync expectations should be met")
 }
 
+// When GitHub reports a PR closed-and-merged but our DB still has it open, the
+// pull_request:closed webhook never landed. The sync must reconcile by flipping
+// status to "merged" itself; otherwise reconciliation just keeps refreshing
+// github_state_synced_at while leaving the PR row stuck on
+// status=open/merge_state=clean — surfaced as "synced just now" + a green
+// "Mergeable" badge for an already-merged PR.
+func TestPRServiceSyncPullRequestStateSelfHealsMergedDrift(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"closed","merged":true,"merge_commit_sha":"merge-commit-sha","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-sync"},"base":{"ref":"main","sha":"base-sync"}}`))
+		default:
+			t.Fatalf("self-heal path should not call %s; closed PRs skip the check_runs and snapshot writes", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	// Self-heal must run UpdateStatus("merged"). The merged-status branch sets
+	// merged_at = now() in the same statement (see PullRequestStore.UpdateStatus).
+	mock.ExpectExec("UPDATE pull_requests SET status = .+ merged_at = now").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": "merged"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Service is wired with nil sessions/issues/deploys/jobs/orgs/previews so
+	// runMergedPullRequestFollowUps short-circuits — those side effects already
+	// have dedicated coverage in pr_handlers_test.go. This test focuses on the
+	// status-drift reconciliation that was missing before.
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "SyncPullRequestState should succeed when self-healing merged drift")
+	require.NoError(t, mock.ExpectationsWereMet(), "self-heal should issue UpdateStatus(merged) and skip the health snapshot path")
+}
+
+// Same drift, but the PR was closed without merging. Sync should flip status
+// to "closed" and skip the snapshot path. Distinct from the merged case
+// because the close branch runs different follow-ups (no deploy row, no
+// evaluate_experiment job).
+func TestPRServiceSyncPullRequestStateSelfHealsClosedWithoutMergeDrift(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"closed","merged":false,"mergeable":null,"mergeable_state":"unknown","head":{"ref":"feature","sha":"head-sync"},"base":{"ref":"main","sha":"base-sync"}}`))
+		default:
+			t.Fatalf("self-heal path should not call %s; closed PRs skip the check_runs and snapshot writes", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, (*uuid.UUID)(nil), orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "status": "closed"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "SyncPullRequestState should succeed when self-healing closed-without-merge drift")
+	require.NoError(t, mock.ExpectationsWereMet(), "self-heal should issue UpdateStatus(closed) and skip the health snapshot path")
+}
+
 // When GitHub returns mergeable=null while it recomputes (without an explicit
 // dirty/blocked label) on the same head SHA where we already know the PR is
 // conflicted, persisting the new snapshot would clobber has_conflicts=true
