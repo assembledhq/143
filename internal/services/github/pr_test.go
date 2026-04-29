@@ -2926,6 +2926,23 @@ func TestApplyLinearKeyPrefixes_SkipsAlreadyEmbeddedKeys(t *testing.T) {
 	require.Equal(t, "fix something for ACS-1 specifically", got)
 }
 
+// TestApplyLinearKeyPrefixes_SkipsEmbeddedKeysCaseInsensitively pins the
+// case-insensitive dedup behavior. A user who typed "acs-1" in their commit
+// subject still embedded the same Linear reference; double-prefixing
+// `[ACS-1] feat: ... acs-1 ...` would land both casings in one title.
+func TestApplyLinearKeyPrefixes_SkipsEmbeddedKeysCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	source := models.IssueSourceLinear
+	id := "ACS-1"
+	session := &models.Session{
+		LinkedIssues: []models.SessionIssueLink{{
+			Role: models.SessionIssueLinkRolePrimary, IssueSource: &source, ExternalID: &id,
+		}},
+	}
+	got := applyLinearKeyPrefixes(session, "fix something for acs-1 specifically", nil)
+	require.Equal(t, "fix something for acs-1 specifically", got, "lowercase embed of the canonical key must be treated as already-present")
+}
+
 func TestStripLeadingBracketPrefixes(t *testing.T) {
 	t.Parallel()
 	got := stripLeadingBracketPrefixes("[ACS-1] [ACS-2] feat: x")

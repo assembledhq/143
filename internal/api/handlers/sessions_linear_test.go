@@ -318,3 +318,118 @@ func TestSessionHandler_CreateManual_LinearLinkerError(t *testing.T) {
 	require.Equal(t, 1, linker.called)
 	require.NoError(t, mock.ExpectationsWereMet(), "the handler must not enqueue the agent run after a linker failure")
 }
+
+// TestSessionHandler_CreateManual_RejectsLinearOverridesWhenAdminLockedOut
+// pins the admin gate on the per-session Linear policy flags. When an org
+// admin has set linear_automation.allow_per_session_overrides=false, a user
+// who tries to create a session with linear_private or
+// linear_state_sync_disabled must get 403 — not a silently-honored override
+// that violates the org's "every session syncs to Linear" policy.
+//
+// The mock asserts ZERO writes after the org lookup: any session insert,
+// message insert, or job enqueue would mean the gate failed open.
+func TestSessionHandler_CreateManual_RejectsLinearOverridesWhenAdminLockedOut(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "linear_private blocked",
+			body: `{"message":"Fix the login bug","agent_type":"claude_code","linear_private":true}`,
+		},
+		{
+			name: "linear_state_sync_disabled blocked",
+			body: `{"message":"Fix the login bug","agent_type":"claude_code","linear_state_sync_disabled":true}`,
+		},
+		{
+			name: "both flags blocked",
+			body: `{"message":"Fix the login bug","agent_type":"claude_code","linear_private":true,"linear_state_sync_disabled":true}`,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			orgID := uuid.New()
+			now := time.Now()
+
+			// Settings JSON with the override gate explicitly disabled. The
+			// pointer-typed bool is what makes nil-vs-false distinguishable;
+			// we serialize the explicit-false form here.
+			settings := []byte(`{"linear_automation":{"allow_per_session_overrides":false}}`)
+			mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+					AddRow(orgID, "test-org", settings, now, now))
+
+			handler := newSessionHandler(t, mock)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(tt.body))
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			req = req.WithContext(ctx)
+			w := httptest.NewRecorder()
+
+			handler.CreateManual(w, req)
+
+			require.Equal(t, http.StatusForbidden, w.Code, "org admin gate must reject per-session Linear overrides with 403")
+			require.Contains(t, w.Body.String(), "LINEAR_PER_SESSION_OVERRIDES_DISABLED", "error code must identify the gate so clients can surface a useful message")
+			require.NoError(t, mock.ExpectationsWereMet(), "no session, message, or job inserts should fire when the gate rejects the request")
+		})
+	}
+}
+
+// TestSessionHandler_CreateManual_AllowsLinearOverridesByDefault is the
+// other half of the gate contract: the default org settings (no explicit
+// allow_per_session_overrides value) must NOT regress current behavior.
+// Users continue to set linear_private freely until an admin opts in.
+func TestSessionHandler_CreateManual_AllowsLinearOverridesByDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	runID := uuid.New()
+	messageID := int64(1)
+	jobID := uuid.New()
+
+	// Default settings — no linear_automation key at all means the gate
+	// stays open per EffectiveAllowPerSessionOverrides()'s nil → true rule.
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+	expectManualSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newSessionHandler(t, mock)
+
+	body := `{"message":"Fix the login bug","agent_type":"claude_code","linear_private":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "default settings must keep the per-session override path open")
+	require.NoError(t, mock.ExpectationsWereMet())
+}

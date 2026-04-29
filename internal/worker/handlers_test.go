@@ -561,7 +561,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.Error(t, handler(context.Background(), "prepare_linear_primary", json.RawMessage(`{"org_id":"`+uuid.NewString()+`","session_id":"not-a-uuid"}`)), "prepare_linear_primary should reject invalid session ids")
 	})
 
-	t.Run("link_linear_issue delegates to prepare path", func(t *testing.T) {
+	t.Run("link_linear_issue does not mutate prepare state for empty related payloads", func(t *testing.T) {
 		t.Parallel()
 
 		stores, mock := newTestStores(t)
@@ -570,16 +570,13 @@ func TestLinearJobHandlers(t *testing.T) {
 		orgID := uuid.New()
 		sessionID := uuid.New()
 		userID := uuid.New()
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		svc := linearservice.NewService(linearservice.Config{Sessions: stores.Sessions, Logger: zerolog.Nop()})
 		handler := newLinkLinearIssueHandler(svc, zerolog.Nop())
 		payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","identifiers":[],"user_id":"` + userID.String() + `"}`)
 
 		err := handler(context.Background(), "link_linear_issue", payload)
-		require.NoError(t, err, "link_linear_issue should use the shared prepare path")
+		require.NoError(t, err, "link_linear_issue should no-op when no related identifiers are present")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 

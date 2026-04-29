@@ -295,6 +295,26 @@ type LinearAutomationSettings struct {
 	// PerTeam overrides keyed by Linear team key. Inherits the org-level
 	// flags when the key is missing.
 	PerTeam map[string]LinearTeamAutomationOverride `json:"per_team,omitempty"`
+	// AllowPerSessionOverrides controls whether non-admin users may set
+	// linear_private and linear_state_sync_disabled on individual sessions.
+	// Defaults to true (current behavior) so the flags stay user-controllable
+	// out of the box. Admins enforcing "every session must sync to Linear"
+	// can flip this to false; the API rejects any session-create request
+	// that carries those flags. Pointer-typed for the same nil-vs-explicit
+	// reason as the rest of this struct.
+	AllowPerSessionOverrides *bool `json:"allow_per_session_overrides,omitempty"`
+}
+
+// EffectiveAllowPerSessionOverrides resolves the org-level
+// allow-per-session-overrides flag, applying the design default (true)
+// when the JSON had no explicit value. False means the API must reject
+// session creates that try to set linear_private or
+// linear_state_sync_disabled.
+func (s LinearAutomationSettings) EffectiveAllowPerSessionOverrides() bool {
+	if s.AllowPerSessionOverrides == nil {
+		return true
+	}
+	return *s.AllowPerSessionOverrides
 }
 
 // EffectivePostSessionLinks resolves the org-level post-session-links flag,

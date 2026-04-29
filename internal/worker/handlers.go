@@ -2373,10 +2373,11 @@ func bootstrapAgentCommand(prompt string) string {
 func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID       string   `json:"org_id"`
-			SessionID   string   `json:"session_id"`
-			Identifiers []string `json:"identifiers"`
-			UserID      string   `json:"user_id,omitempty"`
+			OrgID       string           `json:"org_id"`
+			SessionID   string           `json:"session_id"`
+			Identifiers []string         `json:"identifiers"`
+			Refs        []linear.LinkRef `json:"refs,omitempty"`
+			UserID      string           `json:"user_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal prepare_linear_primary payload: %w", err)
@@ -2393,9 +2394,22 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		if input.UserID != "" {
 			if parsed, err := uuid.Parse(input.UserID); err == nil {
 				userID = &parsed
+			} else {
+				// Audit attribution (added_by_user_id, "linked by you" filters)
+				// drops to nil here, so log loudly rather than silently
+				// degrading. The job still proceeds because the link is
+				// strictly more useful than a parse-error retry loop.
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("user_id_raw", input.UserID).
+					Msg("prepare_linear_primary: malformed user_id in payload; proceeding with nil attribution")
 			}
 		}
-		if err := svc.PrepareLinearPrimary(ctx, orgID, sessionID, input.Identifiers, userID); err != nil {
+		refs := input.Refs
+		if len(refs) == 0 {
+			refs = linearRefsFromIdentifiers(input.Identifiers)
+		}
+		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
 			return &RetryableError{Err: err}
 		}
@@ -2409,10 +2423,11 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			OrgID       string   `json:"org_id"`
-			SessionID   string   `json:"session_id"`
-			Identifiers []string `json:"identifiers"`
-			UserID      string   `json:"user_id,omitempty"`
+			OrgID       string           `json:"org_id"`
+			SessionID   string           `json:"session_id"`
+			Identifiers []string         `json:"identifiers"`
+			Refs        []linear.LinkRef `json:"refs,omitempty"`
+			UserID      string           `json:"user_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal link_linear_issue payload: %w", err)
@@ -2429,18 +2444,33 @@ func newLinkLinearIssueHandler(svc *linear.Service, logger zerolog.Logger) JobHa
 		if input.UserID != "" {
 			if parsed, err := uuid.Parse(input.UserID); err == nil {
 				userID = &parsed
+			} else {
+				// See prepare_linear_primary handler for the rationale on
+				// logging instead of failing — same trade-off applies here.
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Str("user_id_raw", input.UserID).
+					Msg("link_linear_issue: malformed user_id in payload; proceeding with nil attribution")
 			}
 		}
-		// PrepareLinearPrimary handles both primary and related linking and
-		// flips the prepare state — exactly the right shape for the catch-up
-		// path. If the session already has a primary linked, the call is a
-		// safe no-op for that link (idempotent insert).
-		if err := svc.PrepareLinearPrimary(ctx, orgID, sessionID, input.Identifiers, userID); err != nil {
+		refs := input.Refs
+		if len(refs) == 0 {
+			refs = linearRefsFromIdentifiers(input.Identifiers)
+		}
+		if err := svc.LinkRelatedLinearRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("link_linear_issue failed")
 			return &RetryableError{Err: err}
 		}
 		return nil
 	}
+}
+
+func linearRefsFromIdentifiers(identifiers []string) []linear.LinkRef {
+	refs := make([]linear.LinkRef, 0, len(identifiers))
+	for _, ident := range identifiers {
+		refs = append(refs, linear.LinkRef{Identifier: ident})
+	}
+	return refs
 }
 
 // linear_milestone handler fires the Linear writes (attachment + rolling

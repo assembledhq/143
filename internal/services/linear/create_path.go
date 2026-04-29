@@ -35,6 +35,38 @@ type CreateResult struct {
 	PrimaryTitle      string
 }
 
+// LinkRef is the worker payload shape for a detected Linear reference. It
+// preserves the workspace slug from URL refs so async fallback can enforce
+// the same cross-workspace drop behavior as the inline path.
+type LinkRef struct {
+	Identifier string `json:"identifier"`
+	Workspace  string `json:"workspace,omitempty"`
+}
+
+func linkRefsFromDetected(hits []Detected) []LinkRef {
+	refs := make([]LinkRef, 0, len(hits))
+	for _, h := range hits {
+		refs = append(refs, LinkRef{Identifier: h.Identifier, Workspace: h.Workspace})
+	}
+	return refs
+}
+
+func linkRefsFromIdentifiers(identifiers []string) []LinkRef {
+	refs := make([]LinkRef, 0, len(identifiers))
+	for _, ident := range identifiers {
+		refs = append(refs, LinkRef{Identifier: ident})
+	}
+	return refs
+}
+
+func (r LinkRef) detected() Detected {
+	source := DetectionSourceIdentifier
+	if r.Workspace != "" {
+		source = DetectionSourceURL
+	}
+	return Detected{Identifier: r.Identifier, Workspace: r.Workspace, Source: source}
+}
+
 // inlineBudget is the strict latency budget the session-create handler is
 // willing to spend on Linear before falling back to the async worker. Past
 // this we set linear_prepare_state=pending and let the worker drive
@@ -73,13 +105,16 @@ func (s *Service) ResolveAndLinkAtCreate(ctx context.Context, in CreateInput) (C
 	// worker if the call is slow or fails.
 	primaryHit := hits[0]
 	resolved, err := s.resolveWithBudget(ctx, in.OrgID, primaryHit)
+	if errors.Is(err, errLinearRefDropped) {
+		return CreateResult{PrepareInline: true}, nil
+	}
 	if err != nil || resolved == nil {
 		// Couldn't resolve inline; mark the session as preparing and let the
 		// worker drive the rest. Turn 1 stays gated.
 		if err := s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStatePending); err != nil {
 			return CreateResult{}, fmt.Errorf("mark linear prepare pending: %w", err)
 		}
-		if err := s.enqueueLinkWorker(ctx, in, hits); err != nil {
+		if err := s.enqueuePrepareWorker(ctx, in, hits); err != nil {
 			if stateErr := s.sessions.SetLinearPrepareState(ctx, in.OrgID, in.SessionID, models.LinearPrepareStateFailed); stateErr != nil {
 				s.logger.Warn().Err(stateErr).Msg("failed to mark linear prepare failed after enqueue failure")
 			}
@@ -153,7 +188,7 @@ func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit
 			Str("identifier", hit.Identifier).
 			Str("outcome", "cross_workspace").
 			Msg("linear inline resolution dropped")
-		return nil, nil
+		return nil, errLinearRefDropped
 	case ctx.Err() != nil:
 		// Budget exceeded — fall back to async path, no error to surface.
 		s.logger.Debug().
@@ -173,6 +208,8 @@ func (s *Service) resolveWithBudget(parent context.Context, orgID uuid.UUID, hit
 		return nil, err
 	}
 }
+
+var errLinearRefDropped = errors.New("linear ref dropped")
 
 // snapshotPrimaryContext writes the turn-0 issue snapshot so the agent's
 // boot path has everything without a live read. Used by both the inline
@@ -210,7 +247,15 @@ func (s *Service) snapshotPrimaryContext(ctx context.Context, orgID, linkID uuid
 // Without it, an inline-failure → async-catch-up fallback silently drops
 // added_by_user_id, which downstream audit and "linked by you" filters
 // rely on.
+func (s *Service) enqueuePrepareWorker(ctx context.Context, in CreateInput, hits []Detected) error {
+	return s.enqueueLinearWorker(ctx, in, "prepare_linear_primary", hits)
+}
+
 func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []Detected) error {
+	return s.enqueueLinearWorker(ctx, in, "link_linear_issue", hits)
+}
+
+func (s *Service) enqueueLinearWorker(ctx context.Context, in CreateInput, jobType string, hits []Detected) error {
 	if s.jobEnqueuer == nil {
 		return fmt.Errorf("linear job enqueuer is not configured")
 	}
@@ -227,16 +272,17 @@ func (s *Service) enqueueLinkWorker(ctx context.Context, in CreateInput, hits []
 	copy(hashInput, identifiers)
 	hashInput = append(hashInput, in.SessionID.String())
 	hash := SourceInputsHash(hashInput)
-	dedupeKey := "link_linear:" + in.SessionID.String() + ":" + hash
+	dedupeKey := jobType + ":" + in.SessionID.String() + ":" + hash
 	payload := map[string]any{
 		"org_id":      in.OrgID.String(),
 		"session_id":  in.SessionID.String(),
 		"identifiers": identifiers,
+		"refs":        linkRefsFromDetected(hits),
 	}
 	if in.UserID != nil {
 		payload["user_id"] = in.UserID.String()
 	}
-	if err := s.jobEnqueuer(ctx, in.OrgID, "link_linear_issue", payload, &dedupeKey); err != nil {
+	if err := s.jobEnqueuer(ctx, in.OrgID, jobType, payload, &dedupeKey); err != nil {
 		return err
 	}
 	return nil
@@ -257,12 +303,20 @@ func (s *Service) SetJobEnqueuer(enqueuer JobEnqueuer) {
 // prepare_linear_primary job. It re-runs detection, picks the first hit as
 // primary, links it, and flips linear_prepare_state to "ready" or "failed".
 func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uuid.UUID, identifiers []string, userID *uuid.UUID) error {
-	if len(identifiers) == 0 {
+	return s.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, linkRefsFromIdentifiers(identifiers), userID)
+}
+
+func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) error {
+	if len(refs) == 0 {
 		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone)
 		return nil
 	}
 
-	resolved, err := s.ResolvePrimary(ctx, orgID, Detected{Identifier: identifiers[0], Source: DetectionSourceIdentifier})
+	resolved, err := s.ResolvePrimary(ctx, orgID, refs[0].detected())
+	if errors.Is(err, ErrCrossWorkspace) {
+		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateNone)
+		return nil
+	}
 	if err != nil {
 		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
 		return err
@@ -273,19 +327,25 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 		_ = s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateFailed)
 		return err
 	}
-	_ = s.snapshotPrimaryContext(ctx, orgID, linkID, resolved)
-	_ = s.sessions.SetLinearIdentifierHint(ctx, orgID, sessionID, resolved.Identifier)
-
-	for i, ident := range identifiers[1:] {
-		related, err := s.ResolvePrimary(ctx, orgID, Detected{Identifier: ident, Source: DetectionSourceIdentifier})
-		if err != nil {
-			s.logger.Warn().Err(err).Str("identifier", ident).Msg("failed to resolve related linear issue")
-			continue
-		}
-		if _, err := s.LinkResolved(ctx, orgID, sessionID, related, models.SessionIssueLinkRoleRelated, i+1, userID); err != nil {
-			s.logger.Warn().Err(err).Str("identifier", ident).Msg("failed to link related linear issue")
-		}
+	// Snapshot + identifier-hint failures are non-fatal: turn 1 can still
+	// proceed without the cached blob (the agent context-builder will fall
+	// back to live fetches) and branch naming will use the non-Linear slug.
+	// We log explicitly here because a silent `_ =` would leave operators
+	// guessing why a session marked "ready" booted without a snapshot.
+	if err := s.snapshotPrimaryContext(ctx, orgID, linkID, resolved); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("identifier", resolved.Identifier).
+			Msg("worker prepare_linear_primary: failed to snapshot primary context; turn 1 may need to refetch")
 	}
+	if err := s.sessions.SetLinearIdentifierHint(ctx, orgID, sessionID, resolved.Identifier); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("identifier", resolved.Identifier).
+			Msg("worker prepare_linear_primary: failed to persist linear identifier hint; branch naming will fall back to non-linear slug")
+	}
+
+	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID)
 
 	if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateReady); err != nil {
 		return err
@@ -295,6 +355,36 @@ func (s *Service) PrepareLinearPrimary(ctx context.Context, orgID, sessionID uui
 	// reload. Failures notifying are non-fatal.
 	s.notifyLinksChanged(ctx, orgID, sessionID, "refreshed")
 	return nil
+}
+
+// LinkRelatedLinearIssues is the worker-side catch-up path after the primary
+// has already been prepared inline. The payload includes the primary first so
+// old workers and dedupe keys stay stable; this method intentionally skips it
+// and never mutates linear_prepare_state.
+func (s *Service) LinkRelatedLinearIssues(ctx context.Context, orgID, sessionID uuid.UUID, identifiers []string, userID *uuid.UUID) error {
+	return s.LinkRelatedLinearRefs(ctx, orgID, sessionID, linkRefsFromIdentifiers(identifiers), userID)
+}
+
+func (s *Service) LinkRelatedLinearRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) error {
+	if len(refs) <= 1 {
+		return nil
+	}
+	s.linkRelatedRefs(ctx, orgID, sessionID, refs[1:], userID)
+	s.notifyLinksChanged(ctx, orgID, sessionID, "refreshed")
+	return nil
+}
+
+func (s *Service) linkRelatedRefs(ctx context.Context, orgID, sessionID uuid.UUID, refs []LinkRef, userID *uuid.UUID) {
+	for i, ref := range refs {
+		related, err := s.ResolvePrimary(ctx, orgID, ref.detected())
+		if err != nil {
+			s.logger.Warn().Err(err).Str("identifier", ref.Identifier).Msg("failed to resolve related linear issue")
+			continue
+		}
+		if _, err := s.LinkResolved(ctx, orgID, sessionID, related, models.SessionIssueLinkRoleRelated, i+1, userID); err != nil {
+			s.logger.Warn().Err(err).Str("identifier", ref.Identifier).Msg("failed to link related linear issue")
+		}
+	}
 }
 
 // PostLink is called by HandleMilestone callers to fire the linked-event

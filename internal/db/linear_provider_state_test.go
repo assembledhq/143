@@ -97,13 +97,111 @@ func TestLinearProviderStateStore_UpsertAndMerge(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	require.NoError(t, store.Upsert(context.Background(), orgID, linkID, LinearProviderState{Identifier: "ACS-1"}), "Upsert should write encoded state")
 
-	mock.ExpectQuery("SELECT state FROM session_issue_link_provider_state").
+	// Merge runs inside a transaction with SELECT ... FOR UPDATE: begin,
+	// locked read of the current state, write the merged blob, commit.
+	// Without the row lock, two concurrent Merge calls could each read
+	// pre-merge state and the second Upsert would clobber the first.
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT state FROM session_issue_link_provider_state[\s\S]+FOR UPDATE`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"state"}).AddRow([]byte(`{"identifier":"ACS-1","comment_id":"comment-1"}`)))
 	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	require.NoError(t, store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastWriteOutcome: "merged"}), "Merge should read, merge, and upsert provider state")
+	mock.ExpectCommit()
+	require.NoError(t, store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastWriteOutcome: "merged"}), "Merge should read-lock, merge, and upsert provider state in one transaction")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestLinearProviderStateStore_MergeLocksReadForUpdate pins the row-lock
+// behavior that prevents concurrent Merge calls from losing updates. The
+// SELECT must carry FOR UPDATE so the second Merge blocks until the first
+// commits, then re-reads the now-updated state instead of merging against
+// stale rows.
+func TestLinearProviderStateStore_MergeLocksReadForUpdate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewLinearProviderStateStore(mock)
+	orgID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectBegin()
+	// The exact regex matters: a future refactor that drops FOR UPDATE
+	// should fail this test rather than silently regress concurrency.
+	mock.ExpectQuery(`SELECT state FROM session_issue_link_provider_state[\s\S]+WHERE link_id = @link_id AND org_id = @org_id AND provider = @provider[\s\S]+FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"state"}).AddRow([]byte(`{}`)))
+	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastSkippedReason: "private_session"}), "Merge should lock with FOR UPDATE and serialize concurrent merges")
+	require.NoError(t, mock.ExpectationsWereMet(), "Merge must issue the locked SELECT, the upsert, and a commit")
+}
+
+// TestLinearProviderStateStore_MergeRollsBackOnUpsertFailure pins the
+// rollback behavior when the locked write fails. Without the rollback,
+// the row-level lock would leak until the connection died.
+func TestLinearProviderStateStore_MergeRollsBackOnUpsertFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewLinearProviderStateStore(mock)
+	orgID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT state FROM session_issue_link_provider_state[\s\S]+FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"state"}).AddRow([]byte(`{}`)))
+	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db unavailable"))
+	mock.ExpectRollback()
+
+	err = store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastWriteOutcome: "merged"})
+	require.Error(t, err, "Merge should surface upsert errors")
+	require.Contains(t, err.Error(), "upsert linear provider state for merge", "Merge should wrap upsert errors with context")
+	require.NoError(t, mock.ExpectationsWereMet(), "the deferred rollback must fire on upsert failure")
+}
+
+// TestLinearProviderStateStore_MergeRejectsCrossOrg pins the
+// defense-in-depth check inside the transactional Merge: a row keyed to
+// a different org_id must not be silently overwritten when the link_id
+// happens to collide. RowsAffected=0 (the WHERE clause filtered out the
+// cross-org update) surfaces as an explicit error rather than a silent
+// successful no-op.
+func TestLinearProviderStateStore_MergeRejectsCrossOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewLinearProviderStateStore(mock)
+	orgID := uuid.New()
+	linkID := uuid.New()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT state FROM session_issue_link_provider_state[\s\S]+FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"state"}).AddRow([]byte(`{}`)))
+	mock.ExpectExec("INSERT INTO session_issue_link_provider_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 0))
+	mock.ExpectRollback()
+
+	err = store.Merge(context.Background(), orgID, linkID, LinearProviderState{LastWriteOutcome: "merged"})
+	require.Error(t, err, "Merge must reject a cross-org link_id collision")
+	require.Contains(t, err.Error(), "different org", "Merge error must identify the cross-org cause")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

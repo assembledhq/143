@@ -212,7 +212,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		svc := newCreatePathService(mock, createPathClient{err: errors.New("linear timeout")}, nil)
 		svc.jobEnqueuer = func(_ context.Context, gotOrgID uuid.UUID, jobType string, payload any, dedupeKey *string) error {
 			require.Equal(t, orgID, gotOrgID, "enqueue should preserve org scope")
-			require.Equal(t, "link_linear_issue", jobType, "enqueue should schedule the link worker")
+			require.Equal(t, "prepare_linear_primary", jobType, "enqueue should schedule the prepare worker")
 			require.NotNil(t, dedupeKey, "enqueue should use a dedupe key")
 			require.Contains(t, *dedupeKey, sessionID.String(), "dedupe key should include the session id")
 			require.NotNil(t, payload, "enqueue should include a payload")
@@ -230,6 +230,35 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		require.Equal(t, CreateResult{PrepareInline: false}, got, "failed inline resolution should gate the session")
 		require.True(t, enqueued, "ResolveAndLinkAtCreate should enqueue async linking")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("cross workspace URL ref is dropped without async fallback", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+			"ACS-123": {
+				ID:            "linear-ACS-123",
+				Identifier:    "ACS-123",
+				WorkspaceSlug: "other-workspace",
+			},
+		}}, nil)
+		svc.jobEnqueuer = func(context.Context, uuid.UUID, string, any, *string) error {
+			require.Fail(t, "cross-workspace refs must not enqueue async fallback work")
+			return nil
+		}
+
+		got, err := svc.ResolveAndLinkAtCreate(context.Background(), CreateInput{
+			OrgID:       uuid.New(),
+			SessionID:   uuid.New(),
+			MessageBody: "please start from https://linear.app/acme/issue/ACS-123",
+		})
+		require.NoError(t, err, "ResolveAndLinkAtCreate should silently drop cross-workspace URL refs")
+		require.Equal(t, CreateResult{PrepareInline: true}, got, "cross-workspace refs should leave the session unblocked")
+		require.NoError(t, mock.ExpectationsWereMet(), "cross-workspace drops should not write prepare state or links")
 	})
 
 	t.Run("failed inline resolve returns error when pending state cannot be persisted", func(t *testing.T) {
@@ -420,6 +449,32 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 	})
 }
 
+func TestLinkRelatedLinearIssues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("primary replay failure does not fail prepared session", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		now := time.Now().UTC()
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		relatedLinkID := uuid.New()
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+			"ACS-124": fetchedIssueForTest("ACS-124"),
+		}}, newFakeProviderStateStore())
+		expectIssueUpsert(t, mock, uuid.New(), now)
+		expectLinearLinkInsert(t, mock, relatedLinkID)
+
+		err = svc.LinkRelatedLinearIssues(context.Background(), orgID, sessionID, []string{"ACS-123", "ACS-124"}, nil)
+		require.NoError(t, err, "related-link catch-up should not fail the session when primary replay cannot resolve")
+		require.NoError(t, mock.ExpectationsWereMet(), "primary replay failure should not write linear_prepare_state")
+	})
+}
+
 func TestPrepareLinearPrimary(t *testing.T) {
 	t.Parallel()
 
@@ -451,6 +506,27 @@ func TestPrepareLinearPrimary(t *testing.T) {
 		err = svc.PrepareLinearPrimary(context.Background(), uuid.New(), uuid.New(), []string{"ACS-123"}, nil)
 		require.Error(t, err, "PrepareLinearPrimary should surface resolution errors")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("cross workspace worker ref clears prepare state without failing session", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+			"ACS-123": {
+				ID:            "linear-ACS-123",
+				Identifier:    "ACS-123",
+				WorkspaceSlug: "other-workspace",
+			},
+		}}, nil)
+		expectPrepareStateUpdate(t, mock, 1)
+
+		err = svc.PrepareLinearPrimaryRefs(context.Background(), uuid.New(), uuid.New(), []LinkRef{{Identifier: "ACS-123", Workspace: "acme"}}, nil)
+		require.NoError(t, err, "PrepareLinearPrimaryRefs should silently drop cross-workspace URL refs")
+		require.NoError(t, mock.ExpectationsWereMet(), "cross-workspace worker drops should only clear prepare state")
 	})
 
 	t.Run("links primary and related identifiers", func(t *testing.T) {
@@ -508,7 +584,7 @@ func TestResolveWithBudgetCrossWorkspace(t *testing.T) {
 	}
 
 	resolved, err := svc.resolveWithBudget(context.Background(), uuid.New(), Detected{Identifier: "ACS-123", Workspace: "acme"})
-	require.NoError(t, err, "resolveWithBudget should swallow cross-workspace refs for create-path fallback")
+	require.ErrorIs(t, err, errLinearRefDropped, "resolveWithBudget should distinguish cross-workspace drops from async fallback")
 	require.Nil(t, resolved, "cross-workspace refs should not resolve a primary")
 }
 

@@ -16,6 +16,39 @@ func TestScanInputs_URL(t *testing.T) {
 	}
 }
 
+// TestScanInputs_URLWithQueryStringAndAnchor pins the URL regex behavior on
+// Linear deep links that carry trailing query strings, anchors, or both.
+// The regex's optional `(?:/[^\s)]*)?` segment requires a leading `/`, so
+// `?...` and `#...` segments do not consume the key — the prefix match
+// against `…/issue/<KEY>` is what counts.
+func TestScanInputs_URLWithQueryStringAndAnchor(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"see https://linear.app/acs/issue/ACS-1?foo=bar":               "ACS-1",
+		"see https://linear.app/acs/issue/ACS-1#comment-42":            "ACS-1",
+		"see https://linear.app/acs/issue/ACS-1/some-slug?ref=team":    "ACS-1",
+		"see https://linear.app/acs/issue/ACS-1/some-slug#comment-42":  "ACS-1",
+		"https://linear.app/acs/issue/ACS-1234, please review":         "ACS-1234",
+		"https://linear.app/acs/issue/ACS-1234/already-prefixed-slug)": "ACS-1234",
+	}
+	for input, want := range cases {
+		hits := ScanInputs([]string{input}, nil)
+		if len(hits) != 1 {
+			t.Fatalf("input %q: expected 1 hit, got %d (%+v)", input, len(hits), hits)
+		}
+		if hits[0].Identifier != want {
+			t.Errorf("input %q: expected identifier %q, got %q", input, want, hits[0].Identifier)
+		}
+		if hits[0].Workspace != "acs" {
+			t.Errorf("input %q: expected workspace %q, got %q", input, "acs", hits[0].Workspace)
+		}
+		if hits[0].Source != DetectionSourceURL {
+			t.Errorf("input %q: expected URL source, got %s", input, hits[0].Source)
+		}
+	}
+}
+
 func TestScanInputs_BareIdentifierRequiresAllowlist(t *testing.T) {
 	t.Parallel()
 	hits := ScanInputs([]string{"see ACS-1234 and JIRA-99"}, nil)

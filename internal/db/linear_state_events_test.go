@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -132,4 +133,32 @@ func TestLinearStateEventStore_ListBySession(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+// TestLinearStateEventStore_ListBySessionScopesByOrg pins the SQL filter
+// that prevents one org's audit log from leaking into another's session
+// detail pane. The org_id parameter must reach the WHERE clause so that
+// pgxmock's WithArgs matcher rejects the call when it doesn't.
+func TestLinearStateEventStore_ListBySessionScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery(`SELECT event_kind[\s\S]+WHERE org_id = @org_id AND session_id = @session_id`).
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"limit":      25,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"event_kind", "transition_from", "transition_to", "skipped_reason", "created_at"}))
+
+	got, err := NewLinearStateEventStore(mock).ListBySession(context.Background(), orgID, sessionID, 0)
+	require.NoError(t, err, "ListBySession should succeed when SQL is parameterized correctly")
+	require.Empty(t, got, "no rows returned should produce an empty slice")
+	require.NoError(t, mock.ExpectationsWereMet(), "the WHERE clause must include both org_id and session_id parameters")
 }

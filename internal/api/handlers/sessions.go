@@ -1849,8 +1849,11 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		// LinearPrivate suppresses every Linear write; the agent still gets
 		// linked-issue context locally. Frozen at session create.
 		LinearPrivate bool `json:"linear_private,omitempty"`
-		// LinearStateSyncDisabled keeps the attachment + rolling comment
-		// trail intact but blocks workflow-state automation.
+		// LinearStateSyncDisabled gates only workflow-state transitions
+		// (issue moved to "In Progress" / "In Review" / "Done"). The
+		// attachment + rolling comment still post — they are visibility
+		// signals, not state mutation. Use LinearPrivate to suppress all
+		// Linear writes.
 		LinearStateSyncDisabled bool `json:"linear_state_sync_disabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1923,6 +1926,16 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
+	}
+
+	// Admin gate on the per-session Linear policy flags. The org admin can
+	// flip allow_per_session_overrides=false to enforce "every session must
+	// sync to Linear" — when set, the API rejects any create that tries to
+	// silence Linear writes. Defaults to true so existing dogfood orgs
+	// keep current behavior.
+	if (body.LinearPrivate || body.LinearStateSyncDisabled) && !orgSettings.LinearAutomation.EffectiveAllowPerSessionOverrides() {
+		writeError(w, r, http.StatusForbidden, "LINEAR_PER_SESSION_OVERRIDES_DISABLED", "linear_private and linear_state_sync_disabled are not permitted for this organization")
+		return
 	}
 
 	agentType := models.AgentType(body.AgentType)

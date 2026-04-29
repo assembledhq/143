@@ -2005,10 +2005,14 @@ func applyLinearKeyPrefixes(session *models.Session, title string, primaryIssue 
 	title = stripLeadingBracketPrefixes(title)
 
 	// Drop identifiers that already appear inside the title — the user
-	// (or a manual edit) embedded them, no need for a duplicate.
+	// (or a manual edit) embedded them, no need for a duplicate. Compare
+	// case-insensitively: the canonical key is uppercase but a user who
+	// typed `acs-1234` in their commit subject still embedded the same
+	// reference, and double-prefixing would land us with both casings.
+	upperTitle := strings.ToUpper(title)
 	keep := identifiers[:0]
 	for _, id := range identifiers {
-		if !strings.Contains(title, id) {
+		if !strings.Contains(upperTitle, strings.ToUpper(id)) {
 			keep = append(keep, id)
 		}
 	}

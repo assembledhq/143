@@ -197,7 +197,86 @@ func (s *LinearProviderStateStore) Upsert(ctx context.Context, orgID, linkID uui
 // Merge applies a partial update on top of the current row. Empty string
 // fields in patch leave the existing values intact; this avoids accidentally
 // clearing AttachmentID just because we wanted to update LastWriteOutcome.
+//
+// Wrapped in a transaction with SELECT ... FOR UPDATE so two concurrent
+// Merge calls on the same link can't lose updates: without the lock, two
+// Merges interleaving Get and Upsert would each read the pre-Merge row,
+// compute a merge against stale state, and the second Upsert would clobber
+// the first one's contribution. With the row lock, the second transaction
+// blocks until the first commits and then re-reads the now-updated state.
+//
+// Falls back to the non-transactional read-modify-write path when the DB
+// handle doesn't expose Begin (e.g., pgxmock pools that opt out, or any
+// future caller that already wraps Merge in its own outer transaction).
+// Production always supplies a *pgxpool.Pool, so the locked path is the
+// real one.
 func (s *LinearProviderStateStore) Merge(ctx context.Context, orgID, linkID uuid.UUID, patch LinearProviderState) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return s.mergeWithoutLock(ctx, orgID, linkID, patch)
+	}
+
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin linear provider state merge tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var raw json.RawMessage
+	err = tx.QueryRow(ctx, `
+		SELECT state FROM session_issue_link_provider_state
+		WHERE link_id = @link_id AND org_id = @org_id AND provider = @provider
+		FOR UPDATE`,
+		pgx.NamedArgs{
+			"link_id":  linkID,
+			"org_id":   orgID,
+			"provider": linearProviderName,
+		}).Scan(&raw)
+	current := LinearProviderState{}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("query linear provider state for merge: %w", err)
+	}
+	if err == nil && len(raw) > 0 {
+		if decErr := json.Unmarshal(raw, &current); decErr != nil {
+			return fmt.Errorf("decode linear provider state for merge: %w", decErr)
+		}
+	}
+
+	merged := MergeLinearProviderState(current, patch)
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return fmt.Errorf("encode linear provider state for merge: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO session_issue_link_provider_state (link_id, org_id, provider, state, updated_at)
+		VALUES (@link_id, @org_id, @provider, @state, now())
+		ON CONFLICT (link_id) DO UPDATE
+		SET state = EXCLUDED.state, updated_at = now()
+		WHERE session_issue_link_provider_state.org_id = EXCLUDED.org_id`,
+		pgx.NamedArgs{
+			"link_id":  linkID,
+			"org_id":   orgID,
+			"provider": linearProviderName,
+			"state":    encoded,
+		})
+	if err != nil {
+		return fmt.Errorf("upsert linear provider state for merge: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("merge linear provider state: link_id %s exists under a different org", linkID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit linear provider state merge: %w", err)
+	}
+	return nil
+}
+
+// mergeWithoutLock is the legacy read-modify-write path. Kept for the rare
+// caller that already holds an outer transaction or for test harnesses that
+// don't satisfy TxStarter. Late writers win; do not use in production code
+// paths that expect concurrent Merge serialization — the public Merge
+// method above takes the row lock by default.
+func (s *LinearProviderStateStore) mergeWithoutLock(ctx context.Context, orgID, linkID uuid.UUID, patch LinearProviderState) error {
 	current, err := s.Get(ctx, orgID, linkID)
 	if err != nil {
 		return err
