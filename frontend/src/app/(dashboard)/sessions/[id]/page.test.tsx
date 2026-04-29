@@ -1619,7 +1619,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText('Fixed TypeError by adding null check');
+    await screen.findAllByText('Fixed TypeError by adding null check');
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText('No reusable checkpoint saved')).not.toBeInTheDocument();
@@ -1650,7 +1650,7 @@ describe('SessionDetailPage', () => {
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
-    await screen.findByText('Fixed TypeError by adding null check');
+    await screen.findAllByText('Fixed TypeError by adding null check');
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByText('No reusable checkpoint saved')).not.toBeInTheDocument();
