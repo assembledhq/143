@@ -269,6 +269,8 @@ Response:
 }
 ```
 
+**Breakdown share labeling:** The share column is only meaningful when the basis is explicit. The current breakdown share is defined as **share of total container hours** in the selected range, so the UI labels it `Share of Hours` with a tooltip instead of a generic `%`. This keeps the table interpretable when adjacent columns also show sessions, tokens, `Tokens/session`, and estimated cost. If we later support alternate share bases, the label must continue to name the basis directly (for example `Share of Tokens`) rather than reverting to a bare percentage sign.
+
 ### `GET /api/v1/usage/export`
 
 Returns a CSV download of usage data for the selected time range and filters.
@@ -514,7 +516,7 @@ The minimum viable usage page — summary cards and the main timeseries chart.
 
 The detailed breakdown view and cross-filtering between chart and table.
 
-- [ ] **`usage-breakdown-table.tsx`**: TanStack React Table showing per-user breakdown with columns: User, Minutes, Sessions, Tokens, Est. Cost, % Share. Dimension toggle for "By User" / "By Capacity" / "By Exit Reason". Calls `GET /api/v1/usage/breakdown`
+- [ ] **`usage-breakdown-table.tsx`**: TanStack React Table showing per-user breakdown with columns: User, Minutes, Sessions, Tokens, Est. Cost, Tokens/session, Share of Hours. Dimension toggle for "By User" / "By Capacity" / "By Exit Reason". Calls `GET /api/v1/usage/breakdown`
 - [ ] **`usage-capacity-bars.tsx`**: Horizontal stacked bar chart showing capacity tier distribution
 - [ ] **User filter on chart**: Dropdown populated from breakdown data — selecting a user filters the timeseries chart to that user's data via `user_id` query param
 - [ ] **Click-to-filter (table → chart)**: Clicking a row in the breakdown table filters the chart to that user/tier

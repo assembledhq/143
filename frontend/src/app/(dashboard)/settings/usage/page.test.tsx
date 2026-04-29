@@ -525,6 +525,9 @@ describe('UsageBreakdownTable', () => {
       expect(screen.getByText('alice@example.com')).toBeInTheDocument();
     });
     expect(screen.getByText('1.0h')).toBeInTheDocument();
+    expect(screen.getByText('Tokens/session')).toBeInTheDocument();
+    expect(screen.getByText('2.3K')).toBeInTheDocument();
+    expect(screen.getByText('Share of Hours')).toBeInTheDocument();
   });
 });
 
