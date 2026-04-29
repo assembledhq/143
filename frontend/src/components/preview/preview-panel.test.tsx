@@ -70,6 +70,7 @@ const DEFAULT_PROPS = {
 function makePreviewStatus(
   overrides: Partial<PreviewStatusResponse["instance"]> = {},
   services: PreviewStatusResponse["services"] = [],
+  infrastructure: NonNullable<PreviewStatusResponse["infrastructure"]> = [],
 ): PreviewStatusResponse {
   return {
     instance: {
@@ -97,7 +98,7 @@ function makePreviewStatus(
       ...overrides,
     },
     services,
-    infrastructure: [],
+    infrastructure,
   };
 }
 
@@ -534,6 +535,90 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(mockStart).toHaveBeenCalledWith("sess-1");
     });
+  });
+
+  it("shows only the loading spinner while starting a preview from idle state", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    mockStart.mockReturnValue(
+      new Promise<void>(() => {
+        // Keep the mutation pending so the loading state remains visible.
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+    });
+
+    const button = screen.getByRole("button", { name: "Start Preview" });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(button.querySelector("[data-slot='button-spinner']")).toBeInTheDocument();
+    });
+    expect(button.querySelector("svg.lucide-play")).not.toBeInTheDocument();
+  });
+
+  it("shows startup guidance while the preview is being created", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preview startup can take a few minutes.")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("You can stay here while we spin up the environment and bring services online."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a startup checklist from infrastructure and service state", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "starting" },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "starting",
+            command: ["npm", "run", "dev"],
+            cwd: "",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Spin up infrastructure")).toBeInTheDocument();
+    expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
+    expect(screen.getByText("Start services")).toBeInTheDocument();
+    expect(screen.getByText("web is starting")).toBeInTheDocument();
+    expect(screen.getByText("Open the preview")).toBeInTheDocument();
   });
 
   /* ---------- Stop mutation ---------- */
