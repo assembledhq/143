@@ -371,3 +371,180 @@ func TestRehydrate_OrgSettingsLoaderCalledPerSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, loaderCalls, "loader must be consulted exactly once per rehydrated session so the captured policy reflects org config at restart time")
 }
+
+// TestRehydrate_SkipsRowsWithEmptyContainerID covers the defensive guard
+// against rows where container_id is unset or empty. The query already
+// filters those out (WHERE container_id IS NOT NULL), but a future schema
+// change or a race that nulls the column mid-page must not deref a nil
+// pointer or call IsAlive with an empty ID.
+func TestRehydrate_SkipsRowsWithEmptyContainerID(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	withNilID := models.Session{ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID}
+	emptyStr := ""
+	withEmptyID := models.Session{ID: uuid.New(), OrgID: orgID, ContainerID: &emptyStr, RepositoryID: &repoID}
+
+	auth := &rehydrateSandboxAuth{}
+	prov := &rehydrateProvider{} // no entries — IsAlive should never be called
+
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{pages: [][]models.Session{{withNilID, withEmptyID}}},
+		&rehydrateRepoStore{},
+		nil,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, keep)
+	require.Empty(t, keep, "rows with no container_id must be skipped silently — no IsAlive probe, no Listen, no errored-counter bump")
+	require.Empty(t, auth.listened, "Listen must not be called for rows with missing container_id")
+}
+
+// TestRehydrate_IsAliveErrorIsCounted covers the per-row branch where
+// IsAlive's retries all fail. The row is skipped (no Listen, not in keep)
+// and counted as errored, but the loop continues to subsequent rows.
+func TestRehydrate_IsAliveErrorIsCounted(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	flaky := newSession(orgID, repoID, "container-flaky")
+
+	prov := &rehydrateProvider{err: errors.New("docker daemon unavailable")}
+	auth := &rehydrateSandboxAuth{}
+
+	SetIsAliveBackoffForTesting(0)
+	t.Cleanup(func() { SetIsAliveBackoffForTesting(500 * time.Millisecond) })
+
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{pages: [][]models.Session{{flaky}}},
+		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		nil,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.NoError(t, err, "transient IsAlive failures are per-row; the loop must keep going")
+	require.NotNil(t, keep)
+	require.Empty(t, keep, "a row whose IsAlive probe failed must not be counted as rehydrated")
+	require.Empty(t, auth.listened, "Listen must not be called when IsAlive itself failed — the next turn boundary will retry from scratch")
+}
+
+// TestRehydrate_SkipsRowsWithNilRepositoryID covers the defensive branch
+// for sessions whose repository_id is unset. The Listen call needs a repo
+// to capture in the resolver closure; without one, we skip the row rather
+// than fabricate a default that would later resolve to the wrong identity.
+func TestRehydrate_SkipsRowsWithNilRepositoryID(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	cid := "container-no-repo"
+	noRepo := models.Session{ID: uuid.New(), OrgID: orgID, ContainerID: &cid}
+
+	prov := &rehydrateProvider{alive: map[string]bool{"container-no-repo": true}}
+	auth := &rehydrateSandboxAuth{}
+
+	SetIsAliveBackoffForTesting(0)
+	t.Cleanup(func() { SetIsAliveBackoffForTesting(500 * time.Millisecond) })
+
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{pages: [][]models.Session{{noRepo}}},
+		&rehydrateRepoStore{},
+		nil,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, keep)
+	require.Empty(t, keep, "rows without a repository_id must be skipped — Listen needs a repo for the resolver closure")
+	require.Empty(t, auth.listened, "Listen must not fire when the repo lookup is impossible (nil repository_id)")
+}
+
+// TestRehydrate_OrgSettingsLoaderErrorIsPerRow covers the branch where the
+// loader fails for one session: that row is skipped and counted as
+// errored, but other sessions in the same page must still be processed.
+func TestRehydrate_OrgSettingsLoaderErrorIsPerRow(t *testing.T) {
+	t.Parallel()
+	failingOrg := uuid.New()
+	healthyOrg := uuid.New()
+	repoID := uuid.New()
+	failing := newSession(failingOrg, repoID, "container-failing-org")
+	healthy := newSession(healthyOrg, repoID, "container-healthy-org")
+
+	prov := &rehydrateProvider{alive: map[string]bool{
+		"container-failing-org": true,
+		"container-healthy-org": true,
+	}}
+	auth := &rehydrateSandboxAuth{}
+
+	SetIsAliveBackoffForTesting(0)
+	t.Cleanup(func() { SetIsAliveBackoffForTesting(500 * time.Millisecond) })
+
+	loader := func(_ context.Context, gotOrgID uuid.UUID) (models.OrgSettings, error) {
+		if gotOrgID == failingOrg {
+			return models.OrgSettings{}, errors.New("settings parse error")
+		}
+		return models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}, nil
+	}
+
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		&rehydrateLister{pages: [][]models.Session{{failing, healthy}}},
+		&rehydrateRepoStore{repos: map[uuid.UUID]models.Repository{repoID: {InstallationID: 1, FullName: "owner/repo"}}},
+		loader,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.NoError(t, err, "per-row loader failures must not bubble up — the loop must continue")
+	require.NotNil(t, keep)
+	require.NotContains(t, keep, failing.ID, "the failing-org row must be skipped")
+	require.Contains(t, keep, healthy.ID, "the healthy row must still be rehydrated despite the prior failure")
+}
+
+// TestRehydrate_HitsBatchCap covers the safety-valve branch where the
+// pagination cursor never empties. A pathological query (or a runaway
+// preview accumulation) would otherwise spin forever; rehydrateMaxBatches
+// caps the work and emits a warn log so ops can spot it.
+func TestRehydrate_HitsBatchCap(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+
+	// Build rehydrateMaxBatches+1 non-empty pages, each with one session
+	// whose container reads as dead so per-row work stays cheap. The +1
+	// ensures the loop exits via the cap, not via empty-page break — which
+	// is the branch we're testing.
+	const overCap = rehydrateMaxBatches + 1
+	pages := make([][]models.Session, overCap)
+	for i := range pages {
+		pages[i] = []models.Session{
+			newSession(orgID, uuid.New(), "container-dead"),
+		}
+	}
+
+	prov := &rehydrateProvider{} // alive map empty → all containers dead → fast skip
+	auth := &rehydrateSandboxAuth{}
+
+	SetIsAliveBackoffForTesting(0)
+	t.Cleanup(func() { SetIsAliveBackoffForTesting(500 * time.Millisecond) })
+
+	lister := &rehydrateLister{pages: pages}
+	keep, err := RehydrateSandboxAuthListeners(
+		context.Background(),
+		lister,
+		&rehydrateRepoStore{},
+		nil,
+		prov,
+		auth,
+		zerolog.Nop(),
+	)
+	require.NoError(t, err, "hitting the batch cap is non-fatal — the rest of the rows are deferred to the next turn boundary")
+	require.NotNil(t, keep)
+	require.Empty(t, keep, "all containers were dead; nothing should land in the keep set")
+	require.Equal(t, rehydrateMaxBatches, lister.calls, "the cap must stop pagination at exactly rehydrateMaxBatches calls")
+}

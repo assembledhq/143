@@ -591,3 +591,62 @@ func TestServer_SweepStaleSessionDirs_EmptyKeep(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, id.String()))
 	require.True(t, os.IsNotExist(err), "every UUID-named subdir should be swept when keep is empty")
 }
+
+// TestServer_SweepStaleSessionDirs_NoSocketDir is the early-return path:
+// when socketDir is unset (local-dev with no SANDBOX_AUTH_SOCKET_DIR), the
+// sweep must be a no-op rather than panicking on os.ReadDir("").
+func TestServer_SweepStaleSessionDirs_NoSocketDir(t *testing.T) {
+	t.Parallel()
+
+	srv := NewServer(&stubResolver{}, "", zerolog.Nop())
+	require.NotPanics(t, func() {
+		srv.SweepStaleSessionDirs(map[uuid.UUID]struct{}{uuid.New(): {}})
+	}, "sweep must short-circuit on an unset socketDir without touching the filesystem")
+}
+
+// TestServer_SweepStaleSessionDirs_ReadDirFailure covers the branch where
+// ReadDir returns an error (e.g. socketDir was removed out from under us
+// between NewServer-time stat probe and the boot-time sweep). The function
+// must log and return cleanly — there's nothing useful to sweep against an
+// inaccessible directory.
+func TestServer_SweepStaleSessionDirs_ReadDirFailure(t *testing.T) {
+	t.Parallel()
+	// Point socketDir at a path under /tmp that exists at NewServer time
+	// (so the perms-probe doesn't fail) but gets deleted before sweep —
+	// ReadDir then returns a stat-like error.
+	dir, err := os.MkdirTemp("/tmp", "143a-sweep-readdir-*")
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(dir, 0o750))
+
+	srv := NewServer(&stubResolver{}, dir, zerolog.Nop())
+	require.NoError(t, os.RemoveAll(dir), "test setup: remove the dir so ReadDir fails")
+
+	require.NotPanics(t, func() {
+		srv.SweepStaleSessionDirs(nil)
+	}, "ReadDir failure must be swallowed — the sweep is best-effort hygiene, not a hard precondition for boot")
+}
+
+// TestServer_SweepStaleSessionDirs_NonUUIDDirectoryEntry exercises the
+// branch where a directory entry's name doesn't parse as a UUID. The sweep
+// must skip it (counted as `skipped`, not `swept`) so a stray dir from
+// future tooling or a manual ops probe survives — the contract is that the
+// sweep only owns UUID-named subdirs.
+func TestServer_SweepStaleSessionDirs_NonUUIDDirectoryEntry(t *testing.T) {
+	t.Parallel()
+	dir := shortSocketDir(t)
+
+	// A directory (not a file) with a non-UUID name. The earlier sweep test
+	// covers a non-UUID FILE, which short-circuits at the !IsDir check; this
+	// one specifically lands in the uuid.Parse error branch.
+	strayDir := filepath.Join(dir, "manual-ops-probe")
+	require.NoError(t, os.MkdirAll(strayDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(strayDir, "marker"), []byte("preserve me"), 0o600))
+
+	srv := NewServer(&stubResolver{}, dir, zerolog.Nop())
+	srv.SweepStaleSessionDirs(nil)
+
+	_, err := os.Stat(strayDir)
+	require.NoError(t, err, "non-UUID directory entries must survive sweep so future tooling/ops dirs aren't clobbered")
+	_, err = os.Stat(filepath.Join(strayDir, "marker"))
+	require.NoError(t, err, "the contents of a non-UUID dir must also be preserved")
+}
