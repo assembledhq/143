@@ -94,6 +94,12 @@ jobs:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v5
@@ -190,6 +196,12 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v4
