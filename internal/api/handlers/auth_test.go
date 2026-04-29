@@ -685,6 +685,173 @@ func TestAuthHandler_Callback_ExistingGitHubUserAndEmailLink(t *testing.T) {
 	}
 }
 
+// TestAuthHandler_Callback_EmptyGitHubNameFallsBackToLogin pins the behavior
+// that protects "Unknown user" from leaking through the UI: GitHub's /user
+// API returns name:"" for users who haven't set a public display name, and
+// we must persist the login as the display name instead of the empty string.
+func TestAuthHandler_Callback_EmptyGitHubNameFallsBackToLogin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+	userID := uuid.New()
+	orgID := uuid.New()
+	githubID := int64(42)
+	oldLogin := "nisarg-old"
+	oldNoreply := "42+nisarg-old@users.noreply.github.com"
+
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(githubID).
+		WillReturnRows(pgxmock.NewRows(userColumns).
+			AddRow(userID, orgID, "old@example.com", "" /* prior empty name */, "member", &githubID, &oldLogin, &oldNoreply, (*string)(nil), (*string)(nil), (*string)(nil), now))
+
+	// Args order matches the INSERT statement in UpsertFromGitHub:
+	// org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url.
+	// Pin the name arg to the login so the fallback is enforced by the test.
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			"nisarg-assembled",
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+
+	expectUserLastOrgLookup(mock, userID, nil)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			// name:"" mirrors GitHub's response for users with no public
+			// display name. The handler must substitute the login.
+			_, _ = w.Write([]byte(`{"id":42,"login":"nisarg-assembled","name":"","email":"","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"42+nisarg-assembled@users.noreply.github.com","verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		nil,
+	)
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet(), "name arg to UpsertFromGitHub must be the login when GitHub returned empty name")
+}
+
+// TestAuthHandler_Callback_NewSignupEmptyGitHubNameFallsBackToLogin pins the
+// same fallback in the new-signup branch (where GetByGitHubID and GetByEmail
+// both miss and we land in createSignupOrg). The existing-user test pins one
+// of three call sites; this one covers the fresh-account path so diff-cover
+// stays satisfied without the fallback drifting between branches over time.
+func TestAuthHandler_Callback_NewSignupEmptyGitHubNameFallsBackToLogin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+	newOrgID := uuid.New()
+	newUserID := uuid.New()
+	githubID := int64(99)
+
+	// No existing GitHub user, no email match — falls through to signup.
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(githubID).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
+		WithArgs("99+nisarg-fresh@users.noreply.github.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	// createSignupOrg: org → user → membership → session → commit.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newOrgID, now, now))
+	// Pin the name arg (3rd in UpsertFromGitHub's INSERT) to the login: with
+	// GitHub returning name:"" the handler must substitute ghUser.Login.
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			"nisarg-fresh",
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(newUserID, now))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectUserLastOrgLookup(mock, newUserID, nil)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":99,"login":"nisarg-fresh","name":"","email":"","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"99+nisarg-fresh@users.noreply.github.com","verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		nil,
+	)
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet(), "name arg to new-signup UpsertFromGitHub must be the login when GitHub returned empty name")
+}
+
 func TestAuthHandler_Providers(t *testing.T) {
 	t.Parallel()
 

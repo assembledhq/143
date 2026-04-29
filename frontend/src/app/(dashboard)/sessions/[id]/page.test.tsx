@@ -3806,6 +3806,38 @@ describe('SessionDetailPage', () => {
     expect(screen.getByText('Unknown user')).toBeInTheDocument();
   });
 
+  it('falls back to github_login when triggering member has no display name', async () => {
+    const memberWithoutName: User = {
+      id: 'user-no-name',
+      org_id: 'org-1',
+      email: '249349663+nisarg-assembled@users.noreply.github.com',
+      name: '',
+      role: 'admin',
+      github_login: 'nisarg-assembled',
+      created_at: '2026-01-01T00:00:00Z',
+    };
+    const sessionWithNamelessTrigger: Session = {
+      ...mockSessions[0],
+      triggered_by_user_id: memberWithoutName.id,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithNamelessTrigger } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/team/members', () => {
+        return HttpResponse.json({
+          data: [memberWithoutName],
+          meta: {},
+        } satisfies ListResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    expect(await screen.findByText('nisarg-assembled')).toBeInTheDocument();
+    expect(screen.queryByText('Unknown user')).not.toBeInTheDocument();
+  });
+
   it('calls retry API when Retry button is clicked on failed session', async () => {
     let retryCalled = false;
 
