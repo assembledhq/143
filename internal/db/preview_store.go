@@ -160,8 +160,46 @@ func (s *PreviewStore) GetActivePreviewForSession(ctx context.Context, orgID, se
 }
 
 // UpdatePreviewStatus updates the status and optional error of a preview.
-// For terminal statuses (stopped, failed, expired), it also sets stopped_at.
+// For terminal statuses (stopped, failed, expired), it also sets stopped_at
+// and cascades the terminal transition to non-terminal child preview_services
+// and preview_infrastructure rows so the UI's startup checklist doesn't spin
+// forever on orphaned children.
 func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) error {
+	if status.IsTerminal() {
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin terminal preview status transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		txStore := s.WithTx(tx)
+		rowsAffected, err := txStore.updatePreviewStatus(ctx, orgID, id, status, errMsg)
+		if err != nil {
+			return err
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("preview instance not found")
+		}
+		if err := txStore.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit terminal preview status transaction: %w", err)
+		}
+		return nil
+	}
+
+	rowsAffected, err := s.updatePreviewStatus(ctx, orgID, id, status, errMsg)
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	var query string
 	if status.IsTerminal() {
 		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
@@ -174,28 +212,64 @@ func (s *PreviewStore) UpdatePreviewStatus(ctx context.Context, orgID, id uuid.U
 		"id": id, "org_id": orgID, "status": status, "error": errMsg,
 	})
 	if err != nil {
-		return fmt.Errorf("update preview status: %w", err)
+		return 0, fmt.Errorf("update preview status: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("preview instance not found")
-	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // UpdatePreviewStatusIfActive atomically transitions a preview to the given
 // status only if its current status is not terminal (stopped, failed, expired).
 // Returns true if the update took effect, false if the preview was already
 // terminal (no error). This eliminates the TOCTOU window in RecyclePreview.
+//
+// When the new status is terminal, it also cascades the transition to
+// non-terminal child preview_services / preview_infrastructure rows.
 func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (bool, error) {
+	if status.IsTerminal() {
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			return false, fmt.Errorf("begin conditional terminal preview status transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		txStore := s.WithTx(tx)
+		rowsAffected, err := txStore.updatePreviewStatusIfActive(ctx, orgID, id, status, errMsg)
+		if err != nil {
+			return false, err
+		}
+		if rowsAffected == 0 {
+			return false, nil
+		}
+		if err := txStore.cascadeChildrenToTerminal(ctx, orgID, id, status, errMsg); err != nil {
+			return true, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return true, fmt.Errorf("commit conditional terminal preview status transaction: %w", err)
+		}
+		return true, nil
+	}
+
+	rowsAffected, err := s.updatePreviewStatusIfActive(ctx, orgID, id, status, errMsg)
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected > 0, nil
+}
+
+func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	query := `UPDATE preview_instances SET status = @status, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	if status.IsTerminal() {
+		query = `UPDATE preview_instances SET status = @status, error = @error, stopped_at = now(), updated_at = now()
+			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired')`
+	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id": id, "org_id": orgID, "status": status, "error": errMsg,
 	})
 	if err != nil {
-		return false, fmt.Errorf("conditional update preview status: %w", err)
+		return 0, fmt.Errorf("conditional update preview status: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	return tag.RowsAffected(), nil
 }
 
 // UpdatePreviewAccess updates the last_accessed_at timestamp.
@@ -234,7 +308,11 @@ func (s *PreviewStore) UpdateLastPath(ctx context.Context, orgID, id uuid.UUID, 
 	return nil
 }
 
-// StopPreview sets status to stopped and records the stop time.
+// StopPreview sets status to stopped and records the stop time. It also
+// cascades the terminal transition to non-terminal child preview_services
+// and preview_infrastructure rows so the UI's startup checklist reaches a
+// terminal state instead of spinning on orphaned children.
+//
 // This should be called within a transaction that also revokes access sessions.
 func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
@@ -248,6 +326,96 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("preview instance not found or already stopped")
 	}
+	if err := s.cascadeChildrenToTerminal(ctx, orgID, id, models.PreviewStatusStopped, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+// cascadeChildrenToTerminal flips non-terminal preview_services and
+// preview_infrastructure rows to a terminal state when their parent preview
+// transitions to terminal. Without this, the frontend's startup checklist
+// (which reads child statuses to drive spinner state) keeps spinning forever
+// when a launch is interrupted before the worker reaches its own terminal-
+// state writes — for example, when a rolling deploy kills the API process
+// after it reserved the rows but before the worker received the launch RPC.
+//
+// Mapping:
+//   - parent="failed": children still in starting/provisioning/unhealthy go to
+//     "failed" (they were the failure, by elimination); already-ready/healthy
+//     children go to "stopped" (they had reached health, so the failure was
+//     elsewhere).
+//   - parent="stopped"/"expired": all non-terminal children go to "stopped".
+//
+// The parent's error is propagated only into rows that were still pending
+// (starting/provisioning/unhealthy) and have no error of their own; rows
+// with their own captured error keep it.
+func (s *PreviewStore) cascadeChildrenToTerminal(ctx context.Context, orgID, previewID uuid.UUID, parentStatus models.PreviewStatus, parentErr string) error {
+	if !parentStatus.IsTerminal() {
+		return nil
+	}
+
+	// "stopped" / "expired" parent — everything still alive becomes "stopped".
+	// "failed" parent — pending children become "failed", ready/healthy become "stopped".
+	pendingTarget := string(models.PreviewServiceStatusStopped)
+	healthyTarget := string(models.PreviewServiceStatusStopped)
+	infraPendingTarget := string(models.PreviewInfraStatusStopped)
+	infraHealthyTarget := string(models.PreviewInfraStatusStopped)
+	if parentStatus == models.PreviewStatusFailed {
+		pendingTarget = string(models.PreviewServiceStatusFailed)
+		infraPendingTarget = string(models.PreviewInfraStatusFailed)
+	}
+
+	if _, err := s.db.Exec(ctx,
+		`UPDATE preview_services SET
+			status = CASE
+				WHEN status = 'starting' THEN @pending_target
+				WHEN status = 'ready' THEN @healthy_target
+				ELSE status
+			END,
+			error = CASE
+				WHEN status = 'starting' AND (error IS NULL OR error = '') THEN @parent_err
+				ELSE error
+			END
+		 WHERE preview_instance_id = @pid
+		   AND status NOT IN ('stopped', 'failed')
+		   AND preview_instance_id IN (SELECT id FROM preview_instances WHERE id = @pid AND org_id = @org_id)`,
+		pgx.NamedArgs{
+			"pid":            previewID,
+			"org_id":         orgID,
+			"pending_target": pendingTarget,
+			"healthy_target": healthyTarget,
+			"parent_err":     parentErr,
+		},
+	); err != nil {
+		return fmt.Errorf("cascade preview services to terminal: %w", err)
+	}
+
+	if _, err := s.db.Exec(ctx,
+		`UPDATE preview_infrastructure SET
+			status = CASE
+				WHEN status IN ('provisioning', 'unhealthy') THEN @pending_target
+				WHEN status = 'healthy' THEN @healthy_target
+				ELSE status
+			END,
+			error = CASE
+				WHEN status IN ('provisioning', 'unhealthy') AND (error IS NULL OR error = '') THEN @parent_err
+				ELSE error
+			END
+		 WHERE preview_instance_id = @pid
+		   AND status NOT IN ('stopped', 'failed')
+		   AND preview_instance_id IN (SELECT id FROM preview_instances WHERE id = @pid AND org_id = @org_id)`,
+		pgx.NamedArgs{
+			"pid":            previewID,
+			"org_id":         orgID,
+			"pending_target": infraPendingTarget,
+			"healthy_target": infraHealthyTarget,
+			"parent_err":     parentErr,
+		},
+	); err != nil {
+		return fmt.Errorf("cascade preview infrastructure to terminal: %w", err)
+	}
+
 	return nil
 }
 
