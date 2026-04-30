@@ -531,6 +531,14 @@ func (m *mockSessionLogStore) getCount() int {
 	return m.count
 }
 
+func (m *mockSessionLogStore) getLogs() []models.SessionLog {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.SessionLog, len(m.logs))
+	copy(out, m.logs)
+	return out
+}
+
 func (m *mockSessionLogStore) MarkAssistantTranscriptDuplicate(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int, message string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -983,6 +991,9 @@ func TestRunAgent_MarksFinalOutputLogAsTranscriptDuplicate(t *testing.T) {
 	require.Equal(t, run.ID, d.logs.markedSessionID, "duplicate marker should use the session id")
 	require.Equal(t, 1, d.logs.markedTurnNumber, "duplicate marker should tag the first turn")
 	require.Equal(t, "Final answer", d.logs.markedMessage, "duplicate marker should target the final assistant summary")
+	logs := d.logs.getLogs()
+	require.Len(t, logs, 1, "RunAgent should persist the streamed final output log")
+	require.Equal(t, 1, logs[0].TurnNumber, "initial run logs should use the same first-turn number as the assistant transcript")
 }
 
 func TestRunAgent_ContinuesWhenAssistantMessageCreateFails(t *testing.T) {

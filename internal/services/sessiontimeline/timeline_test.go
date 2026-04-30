@@ -102,6 +102,29 @@ func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {
 	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "assistant message should win for transcript rendering")
 }
 
+// Pins the legacy turn-0 fallback in duplicateTranscriptLogIDs: pre-fix
+// initial-run logs were tagged with turn 0 while the matching assistant
+// transcript message uses turn 1. The shim still dedupes those historical
+// rows. Removing the fallback should fail this test.
+func TestComposeTimeline_DedupesLegacyTurnZeroInitialRunLogAgainstTurnOneTranscript(t *testing.T) {
+	t.Parallel()
+
+	messages := []models.SessionMessage{
+		makeMessage(t, func(msg *models.SessionMessage) {
+			msg.TurnNumber = 1
+		}, "2026-01-01T00:00:03Z"),
+	}
+	logs := []models.SessionLog{
+		makeLog(t, func(log *models.SessionLog) {
+			log.TurnNumber = 0
+		}, "2026-01-01T00:00:02Z", "output", "assistant reply"),
+	}
+
+	result := Compose(messages, logs)
+	require.Len(t, result, 1, "legacy turn-0 initial-run log should dedupe against the turn-1 assistant transcript")
+	require.Equal(t, models.SessionTimelineKindMessage, result[0].Kind, "assistant transcript should remain visible after legacy log dedupe")
+}
+
 func TestComposeTimeline_SuppressesDuplicateAssistantOutputWithWhitespaceDifferences(t *testing.T) {
 	t.Parallel()
 

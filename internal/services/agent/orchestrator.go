@@ -1361,7 +1361,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Add(1)
 	go func() {
 		defer logWg.Done()
-		o.streamLogs(ctx, run.ID, run.OrgID, nil, run.CurrentTurn, logCh, runtimeTracker)
+		o.streamLogs(ctx, run.ID, run.OrgID, nil, turnNumber, logCh, runtimeTracker)
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
@@ -1370,7 +1370,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	logWg.Wait()
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, run.CurrentTurn, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.ID, nil, turnNumber, sandbox, adapter, execCtx, prompt, result, err, log)
 
 	// 11. Handle result.
 	stopReason := StopReasonNone
@@ -2492,10 +2492,14 @@ func (o *Orchestrator) streamLogs(ctx context.Context, runID, orgID uuid.UUID, t
 				tracker.Record(progressType, strength, entry.Timestamp)
 			}
 		}
-		metadata, err := json.Marshal(entry.Metadata)
-		if err != nil {
-			o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
-			metadata = nil
+		var metadata json.RawMessage
+		if entry.Metadata != nil {
+			var err error
+			metadata, err = json.Marshal(entry.Metadata)
+			if err != nil {
+				o.logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to marshal log entry metadata")
+				metadata = nil
+			}
 		}
 
 		effectiveThreadID := threadID
