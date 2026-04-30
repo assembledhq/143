@@ -40,7 +40,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
             Linear context preparation failed; turn 1 ran without the primary
             issue snapshot. Re-paste the Linear URL in a follow-up message
             to re-trigger detection, or contact an operator to inspect the
-            session's debug surface.
+            session&apos;s debug surface.
           </span>
         </span>
       )}
