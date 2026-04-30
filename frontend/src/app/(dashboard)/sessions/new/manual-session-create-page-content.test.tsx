@@ -174,6 +174,14 @@ describe("ManualSessionCreatePageContent", () => {
     });
   });
 
+  it("keeps the main message textarea at 16px on mobile", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    expect(textarea).toHaveClass("text-base");
+    expect(textarea).toHaveClass("sm:text-xs");
+  });
+
   it("autofocuses the main message textarea", async () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 

@@ -951,7 +951,7 @@ export function ManualSessionCreatePageContent() {
                 placeholder="Tell the agent what to do..."
                 rows={1}
                 disabled={createManualSessionMutation.isPending}
-                className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 text-xs shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
+                className="min-h-[44px] resize-none border-none bg-transparent px-0 py-2 shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 disabled:opacity-60 disabled:cursor-not-allowed"
                 aria-label="Manual session prompt"
               />
 
