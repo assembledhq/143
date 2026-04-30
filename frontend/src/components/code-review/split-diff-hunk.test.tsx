@@ -141,11 +141,11 @@ describe("SplitDiffHunk", () => {
       />
     );
     expect(screen.getByRole("button", { name: /submit|comment/i })).toBeInTheDocument();
-    expect(container.querySelector('[data-testid="right-comment-composer-slot"]')).toHaveClass(
-      "flex-1"
+    expect(container.querySelector('[data-testid="right-comment-composer-slot"]')).not.toHaveClass(
+      "sticky"
     );
     expect(container.querySelector('[data-testid="inline-comment-composer"]')).toHaveClass(
-      "max-w-2xl"
+      "max-w-[min(36rem,calc(50cqw-1rem))]"
     );
   });
 
