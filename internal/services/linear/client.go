@@ -613,9 +613,25 @@ func (c *graphQLClient) do(ctx context.Context, query string, variables map[stri
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(raw, &errCheck); err == nil && len(errCheck.Errors) > 0 {
-		return fmt.Errorf("linear graphql error: %s", errCheck.Errors[0].Message)
+		return fmt.Errorf("linear graphql error: %s", truncateErrorMessage(errCheck.Errors[0].Message))
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// maxLinearErrorMessageLen caps how much of a GraphQL error message we
+// surface in returned errors. Linear can occasionally return verbose
+// payloads (multi-KB validation traces or stack-trace-shaped messages)
+// that, when bubbled up through error wrapping into structured logs,
+// blow up log lines and any downstream cost / size limits. 512 bytes
+// preserves the operator-actionable head of the message without the
+// tail that's rarely useful.
+const maxLinearErrorMessageLen = 512
+
+func truncateErrorMessage(s string) string {
+	if len(s) <= maxLinearErrorMessageLen {
+		return s
+	}
+	return s[:maxLinearErrorMessageLen] + "…[truncated]"
 }
 
 // ErrUnauthorized is returned by the client when Linear rejects the access

@@ -468,10 +468,16 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 			// asymmetric TTL — short for cached=true (the dangerous side
 			// that suppresses) and long for cached=false (the safe side).
 			if isPRDrivenTransition(in.Event) {
-				cached := state.CoexistsWithGitHubIntegration != nil && *state.CoexistsWithGitHubIntegration
+				// `hasObservation` distinguishes "no cache yet" from "cached
+				// false." Without it, a `cached=false` row would always
+				// re-fetch (the previous `!cached || stale` call site burned
+				// the asymmetric-TTL design — the long TTL for false-cached
+				// observations existed but was unreachable).
+				hasObservation := state.CoexistsWithGitHubIntegration != nil
+				cached := hasObservation && *state.CoexistsWithGitHubIntegration
 				stale := db.CoexistsCheckIsStale(state.CoexistsWithGitHubIntegration, state.CoexistsCheckedAt, time.Now())
 				coexists := cached
-				if !cached || stale {
+				if !hasObservation || stale {
 					detected, detectErr := client.HasGitHubIntegrationAttachment(ctx, in.IssueID)
 					if detectErr != nil {
 						return fmt.Errorf("detect linear github integration attachment: %w", detectErr)

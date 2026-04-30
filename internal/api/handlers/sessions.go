@@ -1928,11 +1928,15 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		zerolog.Ctx(r.Context()).Warn().Err(parseErr).Msg("failed to parse org settings, using defaults")
 	}
 
-	// Admin gate on the per-session Linear policy flags. The org admin can
-	// flip allow_per_session_overrides=false to enforce "every session must
-	// sync to Linear" — when set, the API rejects any create that tries to
-	// silence Linear writes. Defaults to true so existing dogfood orgs
-	// keep current behavior.
+	// Admin gate on the per-session Linear policy flags. EffectiveAllow-
+	// PerSessionOverrides() resolves nil → true, so the gate is permissive
+	// by default: an org with no LinearAutomation settings (or with
+	// allow_per_session_overrides explicitly absent) lets users opt out of
+	// Linear writes on a per-session basis. Admins enforce "every session
+	// must sync to Linear" by setting allow_per_session_overrides=false
+	// explicitly — only that case rejects requests. Read the double-negative
+	// here as: "block if the user wants to silence writes AND the admin has
+	// explicitly forbidden per-session overrides."
 	if (body.LinearPrivate || body.LinearStateSyncDisabled) && !orgSettings.LinearAutomation.EffectiveAllowPerSessionOverrides() {
 		writeError(w, r, http.StatusForbidden, "LINEAR_PER_SESSION_OVERRIDES_DISABLED", "linear_private and linear_state_sync_disabled are not permitted for this organization")
 		return

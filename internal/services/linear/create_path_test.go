@@ -709,6 +709,127 @@ func TestPrepareLinearPrimary(t *testing.T) {
 	})
 }
 
+// TestPrepareLinearPrimaryRefs_IdempotentOnRetry pins the worker contract:
+// `prepare_linear_primary` is retried on transient failures (Linear 5xx,
+// network blips, lease loss), so a second invocation with the same payload
+// must produce the same outcome — same link UUID surfaced, same provider
+// state recorded, prepare_state stays "ready" — without errors. This is
+// the property the worker job's at-least-once delivery relies on.
+//
+// The DB-level `ON CONFLICT (session_id, issue_id) DO NOTHING` on
+// session_issue_links plus the lookupLinkID fallback give us idempotency
+// at the link layer; the test here exercises the full PrepareLinearPrimary
+// path twice and asserts that nothing breaks.
+func TestPrepareLinearPrimaryRefs_IdempotentOnRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	primaryLinkID := uuid.New()
+	provider := newFakeProviderStateStore()
+	enqueueCount := 0
+	svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+		"ACS-123": fetchedIssueForTest("ACS-123"),
+	}}, provider)
+	svc.jobEnqueuer = func(_ context.Context, _ uuid.UUID, _ string, _ any, _ *string) error {
+		enqueueCount++
+		return nil
+	}
+
+	// First attempt: full happy path (issue upsert → link insert → identifier
+	// hint → prepare_state=ready).
+	expectIssueUpsert(t, mock, uuid.New(), now)
+	expectLinearLinkInsert(t, mock, primaryLinkID)
+	expectIdentifierHintUpdate(t, mock, 1)
+	expectPrepareStateUpdate(t, mock, 1)
+
+	require.NoError(t, svc.PrepareLinearPrimaryRefs(context.Background(), orgID, sessionID,
+		[]LinkRef{{Identifier: "ACS-123"}}, nil), "first invocation should succeed")
+
+	state, err := provider.Get(context.Background(), orgID, primaryLinkID)
+	require.NoError(t, err, "primary provider state should be readable after first attempt")
+	require.Equal(t, "ACS-123", state.Identifier, "primary link should record the identifier")
+	require.Equal(t, 1, enqueueCount, "linked-milestone should enqueue exactly once on first attempt")
+
+	// Second attempt: the worker retried after a transient failure outside
+	// our control (e.g. lease loss after success). The replay must surface
+	// no error and the link UUID must be the same — idempotency would be
+	// broken if a stale CommentID or duplicate row leaked through.
+	//
+	// At the DB layer the SQL is the same shape: a fresh issue upsert (UPDATE
+	// path on conflict), a link INSERT that hits ON CONFLICT DO NOTHING and
+	// returns the existing id via lookup, identifier hint update, and another
+	// prepare_state UPDATE (no-op transition "ready" → "ready").
+	expectIssueUpsert(t, mock, uuid.New(), now)
+	// On conflict: insert returns ErrNoRows, store falls back to lookupLinkID.
+	mock.ExpectQuery("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`SELECT id FROM session_issue_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(primaryLinkID))
+	expectIdentifierHintUpdate(t, mock, 1)
+	expectPrepareStateUpdate(t, mock, 1)
+
+	require.NoError(t, svc.PrepareLinearPrimaryRefs(context.Background(), orgID, sessionID,
+		[]LinkRef{{Identifier: "ACS-123"}}, nil), "retried invocation must not surface a 'duplicate link' error")
+
+	stateAfterRetry, err := provider.Get(context.Background(), orgID, primaryLinkID)
+	require.NoError(t, err, "primary provider state should remain readable after retry")
+	require.Equal(t, "ACS-123", stateAfterRetry.Identifier, "retry must not corrupt the identifier")
+	require.Equal(t, 2, enqueueCount, "linked-milestone re-enqueue is acceptable; the milestone job's own dedupe key is the fire-once gate")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met across both attempts")
+}
+
+// TestLinkRelatedLinearIssues_IdempotentOnRetry pins the same retry contract
+// for the related-only path. The link_linear_issue worker fires after the
+// primary is already prepared, and a transient retry must produce the same
+// link UUIDs without surfacing duplicate-row errors.
+func TestLinkRelatedLinearIssues_IdempotentOnRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	relatedLinkID := uuid.New()
+	svc := newCreatePathService(mock, createPathClient{fetch: map[string]*FetchedIssue{
+		"ACS-124": fetchedIssueForTest("ACS-124"),
+	}}, newFakeProviderStateStore())
+
+	// First attempt: fresh insert for ACS-124 (the primary "ACS-123" is
+	// always skipped on this code path — it's already linked).
+	expectIssueUpsert(t, mock, uuid.New(), now)
+	expectLinearLinkInsert(t, mock, relatedLinkID)
+
+	require.NoError(t, svc.LinkRelatedLinearIssues(context.Background(), orgID, sessionID,
+		[]string{"ACS-123", "ACS-124"}, nil), "first related-link attempt should succeed")
+
+	// Second attempt (retry): ON CONFLICT DO NOTHING falls through to lookup,
+	// which returns the same link UUID. No errors, no spurious skips.
+	expectIssueUpsert(t, mock, uuid.New(), now)
+	mock.ExpectQuery("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`SELECT id FROM session_issue_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(relatedLinkID))
+
+	require.NoError(t, svc.LinkRelatedLinearIssues(context.Background(), orgID, sessionID,
+		[]string{"ACS-123", "ACS-124"}, nil), "retried related-link attempt must not surface duplicate errors")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met across both attempts")
+}
+
 func TestResolveWithBudgetCrossWorkspace(t *testing.T) {
 	t.Parallel()
 

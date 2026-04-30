@@ -96,6 +96,7 @@ type fakeLinearClient struct {
 	createOrUpdateCalls    int
 	updateStateCalls       int
 	findOrphanCommentCalls int
+	hasGitHubCalls         int
 	humanEdited            bool
 	hasGitHubAttachment    bool
 	currentIssue           *FetchedIssue
@@ -181,6 +182,9 @@ func (f *fakeLinearClient) IssueRecentHumanEdits(context.Context, string, time.T
 }
 
 func (f *fakeLinearClient) HasGitHubIntegrationAttachment(context.Context, string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hasGitHubCalls++
 	return f.hasGitHubAttachment, f.hasGitHubErr
 }
 
@@ -778,6 +782,120 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		}
 		if got := events.inserts[0].SkippedReason; got != "" {
 			t.Fatalf("linked event must record a real transition, not a skip (got SkippedReason=%q)", got)
+		}
+	})
+
+	// Coexistence cache TTL: a "true" cached observation suppresses our
+	// state moves, so the cache must re-check at the active TTL window
+	// (CoexistsCheckTTLActive=1h) so an operator who removes Linear's
+	// GitHub integration mid-day starts seeing our transitions again
+	// quickly. A "false" observation gets the long TTL (CoexistsCheckTTL=
+	// 24h) — re-checking on every milestone would be wasted API calls and
+	// the safe default is "transition." Tests below cover all three legs.
+	t.Run("coexistence cache: fresh true is reused (no API call)", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		// Default behavior would short-circuit the API; we want to assert
+		// the call count, so set a stub error too — if the real client
+		// were called, the test would fail with "network hiccup".
+		client.hasGitHubErr = errors.New("must not be called for fresh-true cache")
+		svc, provider, _ := buildTestService(t, client)
+		link := newPrimaryLink()
+		// Pre-populate provider state with a fresh "coexists=true" cache.
+		now := time.Now()
+		_ = provider.Upsert(context.Background(), uuid.Nil, link.ID, db.LinearProviderState{
+			CoexistsWithGitHubIntegration: db.BoolPtr(true),
+			CoexistsCheckedAt:             db.TimePtr(now.Add(-30 * time.Minute)), // < 1h active TTL
+		})
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event: MilestonePRMerged, Session: newSession(), Link: link,
+			IssueID: "linear-issue-id", IssueIdent: "ACS-1",
+		}); err != nil {
+			t.Fatalf("fresh-true coexistence skip should not error: %v", err)
+		}
+		if client.hasGitHubCalls != 0 {
+			t.Fatalf("fresh-true cache must NOT re-query Linear, got %d calls", client.hasGitHubCalls)
+		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT fire when coexistence cache says skip (got %d)", client.updateStateCalls)
+		}
+	})
+
+	t.Run("coexistence cache: stale true (>1h) re-fetches", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.hasGitHubAttachment = false // operator removed Linear's GitHub integration
+		svc, provider, _ := buildTestService(t, client)
+		link := newPrimaryLink()
+		// Cached "true" observation older than the active TTL must not be
+		// trusted — operator may have removed Linear's integration mid-day.
+		_ = provider.Upsert(context.Background(), uuid.Nil, link.ID, db.LinearProviderState{
+			CoexistsWithGitHubIntegration: db.BoolPtr(true),
+			CoexistsCheckedAt:             db.TimePtr(time.Now().Add(-2 * time.Hour)), // > 1h active TTL
+		})
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event: MilestonePRMerged, Session: newSession(), Link: link,
+			IssueID: "linear-issue-id", IssueIdent: "ACS-1",
+		}); err != nil {
+			t.Fatalf("stale-true re-fetch + transition should not error: %v", err)
+		}
+		if client.hasGitHubCalls != 1 {
+			t.Fatalf("stale-true cache must re-query Linear exactly once, got %d", client.hasGitHubCalls)
+		}
+		if client.updateStateCalls != 1 {
+			t.Fatalf("re-fetched coexists=false must let UpdateIssueState fire, got %d", client.updateStateCalls)
+		}
+	})
+
+	t.Run("coexistence cache: fresh false is reused (no API call)", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.hasGitHubErr = errors.New("must not be called for fresh-false cache")
+		svc, provider, _ := buildTestService(t, client)
+		link := newPrimaryLink()
+		// Cached "no GitHub integration" within the long TTL must be
+		// trusted — re-checking would burn API quota for nothing.
+		_ = provider.Upsert(context.Background(), uuid.Nil, link.ID, db.LinearProviderState{
+			CoexistsWithGitHubIntegration: db.BoolPtr(false),
+			CoexistsCheckedAt:             db.TimePtr(time.Now().Add(-2 * time.Hour)), // < 24h passive TTL
+		})
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event: MilestonePRMerged, Session: newSession(), Link: link,
+			IssueID: "linear-issue-id", IssueIdent: "ACS-1",
+		}); err != nil {
+			t.Fatalf("fresh-false coexistence transition should not error: %v", err)
+		}
+		if client.hasGitHubCalls != 0 {
+			t.Fatalf("fresh-false cache must NOT re-query Linear, got %d", client.hasGitHubCalls)
+		}
+		if client.updateStateCalls != 1 {
+			t.Fatalf("fresh-false cache must let UpdateIssueState fire, got %d", client.updateStateCalls)
+		}
+	})
+
+	t.Run("coexistence cache: nil checkedAt always re-fetches", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		svc, provider, _ := buildTestService(t, client)
+		link := newPrimaryLink()
+		// Legacy row written before CoexistsCheckedAt existed, or any row
+		// with a nil timestamp, must always re-query so we don't trust an
+		// indeterminate state.
+		_ = provider.Upsert(context.Background(), uuid.Nil, link.ID, db.LinearProviderState{
+			CoexistsWithGitHubIntegration: db.BoolPtr(false),
+		})
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event: MilestonePRMerged, Session: newSession(), Link: link,
+			IssueID: "linear-issue-id", IssueIdent: "ACS-1",
+		}); err != nil {
+			t.Fatalf("nil-checkedAt re-fetch should not error: %v", err)
+		}
+		if client.hasGitHubCalls != 1 {
+			t.Fatalf("nil checkedAt must re-query exactly once, got %d", client.hasGitHubCalls)
 		}
 	})
 

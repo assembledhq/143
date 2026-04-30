@@ -2,6 +2,7 @@ package linear
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,6 +42,13 @@ type BuildDeps struct {
 //
 // JobQueueName defaults to "linear" and JobPriority to 5 when zero. The
 // defaults match the design's worker conventions.
+//
+// AppBaseURL misconfiguration is logged at boot rather than failing the
+// process. Linear renders attachment URLs and comment bodies verbatim, so
+// a relative path here produces non-clickable text in Linear — visible to
+// operators chasing "why are session links broken in Linear?" but not
+// catastrophic. Falling back to a relative path keeps tests and dev
+// environments (where FRONTEND_URL is often unset) workable.
 func Build(deps BuildDeps) *Service {
 	queue := deps.JobQueueName
 	if queue == "" {
@@ -49,6 +57,13 @@ func Build(deps BuildDeps) *Service {
 	priority := deps.JobPriority
 	if priority == 0 {
 		priority = 5
+	}
+	if strings.TrimSpace(deps.AppBaseURL) == "" {
+		deps.Logger.Warn().Msg("linear.Build: AppBaseURL is empty; session deep-links posted to Linear will be relative paths and render as plain text. Set FRONTEND_URL in production.")
+	} else if !strings.HasPrefix(deps.AppBaseURL, "http://") && !strings.HasPrefix(deps.AppBaseURL, "https://") {
+		deps.Logger.Warn().
+			Str("app_base_url", deps.AppBaseURL).
+			Msg("linear.Build: AppBaseURL is not absolute; Linear renders session links as plain text without an http(s):// scheme")
 	}
 
 	clientFactory := deps.ClientFactory
