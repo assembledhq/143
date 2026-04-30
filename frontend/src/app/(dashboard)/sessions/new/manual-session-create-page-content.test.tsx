@@ -60,7 +60,15 @@ const mocks = vi.hoisted(() => ({
     file_name: "uploaded-shot.png",
     content_type: "image/png",
   }),
-  resolvedCredsMock: vi.fn().mockResolvedValue({ data: [] }),
+  resolvedCredsMock: vi.fn().mockResolvedValue({
+    data: [
+      { provider: "openai", source: "personal" },
+      { provider: "anthropic", source: "personal" },
+      { provider: "gemini", source: "personal" },
+      { provider: "amp", source: "personal" },
+      { provider: "pi", source: "personal" },
+    ],
+  }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {

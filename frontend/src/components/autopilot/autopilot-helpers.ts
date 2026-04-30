@@ -1,4 +1,4 @@
-import type { OrgSettings, PMDocument, PMPlan, PMStatus, CodexAuthStatus, ResolvedCredential } from "@/lib/types";
+import type { OrgSettings, PMDocument, PMPlan, PMStatus } from "@/lib/types";
 
 export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priority_weights"]>> = {
   customer_impact: 0.35,
@@ -6,30 +6,6 @@ export const DEFAULT_PRIORITY_WEIGHTS: Required<NonNullable<OrgSettings["priorit
   recency: 0.2,
   revenue_risk: 0.2,
 };
-
-export function isAgentConnected(
-  agentType: NonNullable<OrgSettings["default_agent_type"]>,
-  resolvedCredentials: readonly ResolvedCredential[],
-  codexAuthStatus?: CodexAuthStatus | null,
-): boolean {
-  const hasResolvedCredential = (provider: string) =>
-    resolvedCredentials.some((credential) => credential.provider === provider && credential.source !== "none");
-
-  switch (agentType) {
-    case "codex":
-      return codexAuthStatus?.status === "completed" || hasResolvedCredential("openai");
-    case "claude_code":
-      return hasResolvedCredential("anthropic");
-    case "gemini_cli":
-      return hasResolvedCredential("gemini");
-    case "amp":
-      return hasResolvedCredential("amp");
-    case "pi":
-      return hasResolvedCredential("pi");
-    default:
-      return false;
-  }
-}
 
 export type AutopilotHeroMode = "first_analysis" | "recommendation" | "attention";
 
