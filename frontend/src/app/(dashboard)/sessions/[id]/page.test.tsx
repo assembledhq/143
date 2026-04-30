@@ -2949,7 +2949,7 @@ describe('SessionDetailPage', () => {
     });
   });
 
-  it('does not attach unresolved review comments to a normal follow-up outside review mode', async () => {
+  it('keeps unresolved review comments attached after returning to the main chat view', async () => {
     let postedMessage = '';
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
@@ -3012,15 +3012,17 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
 
     await user.click(screen.getByRole('tab', { name: 'Overview' }));
-    await waitFor(() => {
-      expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
-    });
+    expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
+    expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
 
     await user.type(textarea, 'Hello agent');
     await user.keyboard('{Enter}');
 
     await waitFor(() => {
-      expect(postedMessage).toBe('Hello agent');
+      expect(postedMessage).toContain('Please address the following code review comments:');
+      expect(postedMessage).toContain('src/app.ts:2');
+      expect(postedMessage).toContain('"Handle the null edge case"');
+      expect(postedMessage).toContain('Hello agent');
     });
   });
 
@@ -3521,7 +3523,7 @@ describe('SessionDetailPage', () => {
     expect(await screen.findByText(/doesn't support headless conversation resume/i)).toBeVisible();
   });
 
-  it('shares composer draft state between chat and review mode without keeping comments attached in overview', async () => {
+  it('shares composer draft state and review comment attachments between chat and review mode', async () => {
     const idleSessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -3575,8 +3577,56 @@ describe('SessionDetailPage', () => {
     await user.click(screen.getByRole('tab', { name: 'Overview' }));
 
     expect(await screen.findByDisplayValue('Please fix this and add tests')).toBeInTheDocument();
-    expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
-    expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
+    expect(screen.getByText('1 comment attached')).toBeInTheDocument();
+    expect(screen.getAllByText('Handle the null edge case').length).toBeGreaterThan(0);
+  });
+
+  it('returns to the main chat view after sending from review mode', async () => {
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect(await screen.findByText('src/app.ts')).toBeInTheDocument();
+
+    await user.type(textarea, 'Hello from review');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(screen.queryByText('src/app.ts')).not.toBeInTheDocument();
+    });
+    expect(screen.getByTitle('Hide details')).toBeInTheDocument();
   });
 
   it('shows review file count in Changes tab and file click works', async () => {
