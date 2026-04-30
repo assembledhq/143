@@ -2529,8 +2529,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                   <div className="min-w-0 space-y-1">
                     <div className="text-sm font-medium text-foreground">PR closed</div>
-                    <p className="text-sm text-foreground">{closedPRSummary}</p>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-xs text-foreground">{closedPRSummary}</p>
+                    <p className="text-xs text-muted-foreground">
                       This pull request is no longer active. Create a follow-up revision if you want to ship a new attempt.
                     </p>
                   </div>
@@ -2547,8 +2547,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                   <div className="min-w-0 space-y-1">
                     <div className="text-sm font-medium text-foreground">PR merged</div>
-                    <p className="text-sm text-foreground">{mergedPRSummary}</p>
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-xs text-foreground">{mergedPRSummary}</p>
+                    <p className="text-xs text-muted-foreground">
                       This change has landed. Open a follow-up session if you need to make another revision.
                     </p>
                   </div>
