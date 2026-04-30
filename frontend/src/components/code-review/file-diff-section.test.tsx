@@ -173,6 +173,11 @@ describe("FileDiffSection", () => {
     expect(screen.getByText("@@ -1,3 +1,4 @@")).toBeInTheDocument();
   });
 
+  it("marks the horizontal diff viewport as a size container for inline comments", () => {
+    const { container } = render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
+    expect(container.querySelector(".overflow-x-auto")).toHaveClass("[container-type:inline-size]");
+  });
+
   it("renders line content in unified mode", () => {
     render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
     expect(screen.getByText(/line 1\|old:1\|new:1/)).toBeInTheDocument();

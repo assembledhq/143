@@ -268,12 +268,39 @@ export function SplitDiffHunk({
             {/* Inline comments/input span full width below the row */}
             {hasInlineContent && (
               <div className="bg-muted/10 border-y border-border/30">
-                {leftComments && leftComments.length > 0 && onUpdateComment && onDeleteComment && (
-                  <CommentThread comments={leftComments} onUpdate={onUpdateComment} onDelete={onDeleteComment} />
-                )}
-                {rightComments && rightComments.length > 0 && onUpdateComment && onDeleteComment && (
-                  <CommentThread comments={rightComments} onUpdate={onUpdateComment} onDelete={onDeleteComment} />
-                )}
+                {((leftComments && leftComments.length > 0) ||
+                  (rightComments && rightComments.length > 0)) &&
+                  onUpdateComment &&
+                  onDeleteComment && (
+                    <div className="flex divide-x divide-border/50">
+                      <div
+                        data-testid="left-comment-thread-slot"
+                        className="flex-1 px-2"
+                      >
+                        {leftComments && leftComments.length > 0 ? (
+                          <CommentThread
+                            comments={leftComments}
+                            onUpdate={onUpdateComment}
+                            onDelete={onDeleteComment}
+                            className="max-w-[min(36rem,calc(50cqw-1rem))]"
+                          />
+                        ) : null}
+                      </div>
+                      <div
+                        data-testid="right-comment-thread-slot"
+                        className="flex-1 px-2"
+                      >
+                        {rightComments && rightComments.length > 0 ? (
+                          <CommentThread
+                            comments={rightComments}
+                            onUpdate={onUpdateComment}
+                            onDelete={onDeleteComment}
+                            className="max-w-[min(36rem,calc(50cqw-1rem))]"
+                          />
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
                 {(isLeftActive || isRightActive) && onSubmitComment && onCancelComment && (
                   <div className="flex divide-x divide-border/50">
                     <div
@@ -282,7 +309,7 @@ export function SplitDiffHunk({
                     >
                       {isLeftActive ? (
                         <CommentInput
-                          className="max-w-2xl"
+                          className="max-w-[min(36rem,calc(50cqw-1rem))]"
                           onSubmit={onSubmitComment}
                           onCancel={onCancelComment}
                         />
@@ -294,7 +321,7 @@ export function SplitDiffHunk({
                     >
                       {isRightActive ? (
                         <CommentInput
-                          className="max-w-2xl"
+                          className="max-w-[min(36rem,calc(50cqw-1rem))]"
                           onSubmit={onSubmitComment}
                           onCancel={onCancelComment}
                         />
