@@ -2,7 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, Mic, Plus, ImagePlus, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X } from "lucide-react";
+import { ArrowUp, Mic, Plus, Link, Paperclip, GitBranch, ChevronDown, FileCode2, FolderTree, Slash, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1050,7 +1050,7 @@ export function ManualSessionCreatePageContent() {
                     Upload files or photos
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => setShowImageInput(true)}>
-                    <ImagePlus className="mr-2 h-4 w-4" />
+                    <Link data-testid="add-image-url-link-icon" className="mr-2 h-4 w-4" />
                     Add image URL
                   </DropdownMenuItem>
                 </DropdownMenuContent>
