@@ -1,8 +1,10 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 
 import { server } from '@/test/mocks/server';
+import SessionsPage from './page';
 import { SessionSidebar } from './session-sidebar';
 
 // Mock next/link to render a plain anchor
@@ -110,5 +112,17 @@ describe('SessionSidebar', () => {
     const newSessionTexts = screen.getAllByText('New session');
     // At least 2: the top "+ New session" link + the ghost entry in the list
     expect(newSessionTexts.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+vi.mock('./new/manual-session-create-page-content', () => ({
+  ManualSessionCreatePageContent: () => <div data-testid="manual-session-create-page" />,
+}));
+
+describe('SessionsPage', () => {
+  it('renders the same manual session composer entry point as /sessions/new', () => {
+    renderWithProviders(<SessionsPage />);
+
+    expect(screen.getByTestId('manual-session-create-page')).toBeInTheDocument();
   });
 });
