@@ -317,13 +317,36 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "healthy",
+			name: "healthy after checks pass",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateClean,
+				FailingTestCount:  0,
+				ChecksConfirmed:   true,
+				Checks: []models.PullRequestCheckSummary{
+					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+				},
+			},
+			expected: "PR #184 is mergeable and all required test checks are passing.",
+		},
+		{
+			name: "no ci checks configured",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				MergeState:        models.PullRequestMergeStateClean,
+				FailingTestCount:  0,
+				ChecksConfirmed:   true,
+			},
+			expected: "PR #184 is mergeable. No CI checks are configured for this repository.",
+		},
+		{
+			name: "waiting for checks confirmation",
 			health: models.PullRequestHealthResponse{
 				PullRequestNumber: 184,
 				MergeState:        models.PullRequestMergeStateClean,
 				FailingTestCount:  0,
 			},
-			expected: "PR #184 is mergeable and all required test checks are passing.",
+			expected: "PR #184 is waiting for required checks to report passing.",
 		},
 		{
 			name: "conflicts and tests",
@@ -385,10 +408,19 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 		expectCanMerge         bool
 	}{
 		{
-			name: "clean open PR with no checks is mergeable",
+			name: "clean open PR with no checks is not mergeable until checks are confirmed",
 			input: models.PullRequestHealthResponse{
 				Status:     "open",
 				MergeState: models.PullRequestMergeStateClean,
+			},
+			expectCanMerge: false,
+		},
+		{
+			name: "clean open PR with confirmed zero checks is mergeable",
+			input: models.PullRequestHealthResponse{
+				Status:          "open",
+				MergeState:      models.PullRequestMergeStateClean,
+				ChecksConfirmed: true,
 			},
 			expectCanMerge: true,
 		},
@@ -406,8 +438,9 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 		{
 			name: "clean PR with only passed checks is still mergeable",
 			input: models.PullRequestHealthResponse{
-				Status:     "open",
-				MergeState: models.PullRequestMergeStateClean,
+				Status:          "open",
+				MergeState:      models.PullRequestMergeStateClean,
+				ChecksConfirmed: true,
 				Checks: []models.PullRequestCheckSummary{
 					{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
 					{Name: "eslint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusPassed},

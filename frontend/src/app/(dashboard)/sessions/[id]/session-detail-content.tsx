@@ -2263,6 +2263,50 @@ export function SessionDetailContent({ id }: { id: string }) {
     composerTextareaRef.current?.focus();
   }, []);
 
+  const changesCount = diffStats?.filesChanged;
+  const showValidationTab = !session?.triggered_by_user_id;
+  const detailTabsRef = useRef<HTMLDivElement>(null);
+  const [detailTabsOverflow, setDetailTabsOverflow] = useState(false);
+
+  const checkDetailTabsOverflow = useCallback(() => {
+    const el = detailTabsRef.current;
+    if (el) {
+      setDetailTabsOverflow(el.scrollWidth > el.clientWidth);
+    }
+  }, []);
+
+  useEffect(() => {
+    checkDetailTabsOverflow();
+
+    const handleResize = () => checkDetailTabsOverflow();
+    window.addEventListener("resize", handleResize);
+
+    if (typeof ResizeObserver === "undefined") {
+      return () => window.removeEventListener("resize", handleResize);
+    }
+
+    const observer = new ResizeObserver(() => {
+      checkDetailTabsOverflow();
+    });
+
+    if (detailTabsRef.current) {
+      observer.observe(detailTabsRef.current);
+    }
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [
+    changesCount,
+    checkDetailTabsOverflow,
+    hasPR,
+    session?.id,
+    session?.pr_creation_error,
+    session?.pr_creation_state,
+    showValidationTab,
+  ]);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -2287,9 +2331,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   }
 
   const status = statusConfig[session.status] || statusConfig.pending;
-
-  const changesCount = diffStats?.filesChanged;
-  const showValidationTab = !session.triggered_by_user_id;
   const prState = session.pr_creation_state;
   const snapshotState = classifyPRSnapshotState({
     sessionSnapshotKey: session.snapshot_key,
@@ -2394,7 +2435,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     >
       <div className="border-b border-border px-2 py-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
-          <div aria-label="Session detail tabs" className="min-w-0 flex-1 overflow-x-auto scrollbar-hide">
+          <div
+            ref={detailTabsRef}
+            aria-label="Session detail tabs"
+            className={cn(
+              "min-w-0 flex-1 overflow-x-auto overflow-y-hidden",
+              detailTabsOverflow ? "mask-fade-r" : "scrollbar-hide",
+            )}
+          >
             <TabsList variant="line" size="sm" className="border-b-0 min-w-max">
               <TabsTrigger value="overview">Overview</TabsTrigger>
               <TabsTrigger value="changes">

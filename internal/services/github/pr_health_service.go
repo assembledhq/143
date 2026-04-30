@@ -142,6 +142,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 			resp.HealthVersion = current.Version
 			resp.HeadSHA = current.HeadSHA
 			resp.BaseSHA = current.BaseSHA
+			resp.ChecksConfirmed = true
 			resp.EnrichmentStatus = current.EnrichmentStatus
 			resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
 			resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
@@ -166,19 +167,26 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
 	resp.CanFixTests = resp.FailingTestCount > 0
-	hasBlockingChecks := false
-	for _, check := range resp.Checks {
-		if classifyStoredCheckStatus(check) != models.PullRequestCheckStatusPassed {
-			hasBlockingChecks = true
-			break
-		}
-	}
 	// CanMerge is the green-light counterpart to the repair flags: GitHub has
-	// confirmed the branch is mergeable, all checks are passing, and the PR is
-	// still open.
+	// confirmed the branch is mergeable and the check state is authoritative.
+	// Once GitHub health has been loaded, zero checks means "no CI rules
+	// configured" and is mergeable. Before that health snapshot exists, zero
+	// checks remains ambiguous and we keep merge hidden.
 	resp.CanMerge = resp.Status == "open" &&
 		resp.MergeState == models.PullRequestMergeStateClean &&
-		!hasBlockingChecks
+		checksAllowMerge(resp.ChecksConfirmed, resp.Checks)
+}
+
+func checksAllowMerge(checksConfirmed bool, checks []models.PullRequestCheckSummary) bool {
+	if len(checks) == 0 {
+		return checksConfirmed
+	}
+	for _, check := range checks {
+		if classifyStoredCheckStatus(check) != models.PullRequestCheckStatusPassed {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {

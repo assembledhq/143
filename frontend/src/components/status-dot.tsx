@@ -14,8 +14,19 @@ export function StatusDot({ animate, color, pingColor, className }: StatusDotPro
   if (animate) {
     return (
       <span className={cn("relative flex h-2 w-2", className)}>
-        <span className={cn("animate-ping absolute inline-flex h-full w-full rounded-full opacity-75", pingColor)} />
-        <span className={cn("relative inline-flex rounded-full h-2 w-2", color)} />
+        {/* Soft breathing halo — slower and softer than animate-ping so it
+            reads as ongoing thought rather than a network heartbeat. */}
+        <span
+          className={cn(
+            "ai-pulse-halo absolute inline-flex h-full w-full rounded-full",
+            pingColor,
+          )}
+        />
+        {/* Solid base dot in the requested color, with a slow gradient
+            shimmer overlay for the "AI thinking" feel. */}
+        <span className={cn("relative inline-flex h-2 w-2 overflow-hidden rounded-full", color)}>
+          <span className="ai-shimmer absolute inset-0 rounded-full" />
+        </span>
       </span>
     );
   }

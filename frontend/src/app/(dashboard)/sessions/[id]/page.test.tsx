@@ -970,8 +970,33 @@ describe('SessionDetailPage', () => {
     const actions = screen.getByLabelText('Session detail actions');
 
     expect(tabRail).toHaveClass('overflow-x-auto');
+    expect(tabRail).toHaveClass('scrollbar-hide');
     expect(actions).toHaveClass('shrink-0');
     expect(within(actions).getByRole('button', { name: 'View PR' })).toBeInTheDocument();
+  });
+
+  it('shows the horizontal tab scrollbar only when tabs run into the action buttons', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const tabRail = await screen.findByLabelText('Session detail tabs');
+
+    Object.defineProperty(tabRail, 'clientWidth', {
+      configurable: true,
+      value: 140,
+    });
+    Object.defineProperty(tabRail, 'scrollWidth', {
+      configurable: true,
+      value: 360,
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+    });
+
+    await waitFor(() => {
+      expect(tabRail).not.toHaveClass('scrollbar-hide');
+    });
+    expect(tabRail).toHaveClass('mask-fade-r');
   });
 
   it('renders the PR health banner at the top of Overview when a linked PR is open', async () => {
@@ -1043,6 +1068,9 @@ describe('SessionDetailPage', () => {
           data: {
             ...mockPRHealth,
             can_merge: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
             summary: 'PR #42 is mergeable and all required test checks are passing.',
           },
         } satisfies SingleResponse<typeof mockPRHealth>);
@@ -1134,7 +1162,13 @@ describe('SessionDetailPage', () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
-          data: { ...mockPRHealth, can_merge: true },
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
+          },
         } satisfies SingleResponse<typeof mockPRHealth>);
       }),
       http.get('/api/v1/users/me/github-status', () => {
@@ -1162,7 +1196,13 @@ describe('SessionDetailPage', () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
         return HttpResponse.json({
-          data: { ...mockPRHealth, can_merge: true },
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            checks: [
+              { name: 'unit tests', category: 'test' as const, status: 'passed' as const, summary: 'passed' },
+            ],
+          },
         } satisfies SingleResponse<typeof mockPRHealth>);
       }),
       http.post('/api/v1/pull-requests/:id/merge', () => {
@@ -1186,6 +1226,47 @@ describe('SessionDetailPage', () => {
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('Head branch was modified. Review and try the merge again.'),
     );
+  });
+
+  it('hides the Merge button when checks have not yet confirmed a passing state', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            checks_confirmed: false,
+            checks: [],
+            summary: 'PR #42 is mergeable and all required test checks are passing.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByText('PR health');
+    expect(screen.queryByRole('button', { name: /^Merge$/ })).not.toBeInTheDocument();
+  });
+
+  it('shows the Merge button when GitHub has confirmed that the repo has no CI checks configured', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            can_merge: true,
+            checks_confirmed: true,
+            checks: [],
+            summary: 'PR #42 is mergeable. No CI checks are configured for this repository.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByRole('button', { name: /^Merge$/ })).toBeInTheDocument();
   });
 
   it('routes to a new revision session after starting a PR repair action', async () => {

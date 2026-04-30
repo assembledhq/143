@@ -60,7 +60,15 @@ const mocks = vi.hoisted(() => ({
     file_name: "uploaded-shot.png",
     content_type: "image/png",
   }),
-  resolvedCredsMock: vi.fn().mockResolvedValue({ data: [] }),
+  resolvedCredsMock: vi.fn().mockResolvedValue({
+    data: [
+      { provider: "openai", source: "personal" },
+      { provider: "anthropic", source: "personal" },
+      { provider: "gemini", source: "personal" },
+      { provider: "amp", source: "personal" },
+      { provider: "pi", source: "personal" },
+    ],
+  }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {
@@ -172,6 +180,14 @@ describe("ManualSessionCreatePageContent", () => {
       const textareas = screen.getAllByRole("textbox");
       expect(textareas.length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  it("keeps the main message textarea at 16px on mobile", async () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    expect(textarea).toHaveClass("text-base");
+    expect(textarea).toHaveClass("sm:text-xs");
   });
 
   it("autofocuses the main message textarea", async () => {

@@ -32,6 +32,8 @@ import { api } from "@/lib/api";
 import {
   PREVIEW_ERROR_CODES,
   type PreviewStatus,
+  type PreviewInfrastructure,
+  type PreviewService,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
@@ -110,6 +112,114 @@ function serviceStatusIcon(status: string) {
   }
 }
 
+type StartupChecklistStepState = "complete" | "active" | "pending" | "failed";
+
+interface StartupChecklistStep {
+  title: string;
+  state: StartupChecklistStepState;
+  detail: string;
+}
+
+function buildStartupChecklist(
+  status: PreviewStatus | undefined,
+  services: PreviewService[],
+  infrastructure: PreviewInfrastructure[],
+): StartupChecklistStep[] {
+  const infraFailed = infrastructure.find(
+    (item) => item.status === "failed" || item.status === "unhealthy",
+  );
+  const infraProvisioning = infrastructure.find(
+    (item) => item.status === "provisioning",
+  );
+  const allInfraHealthy =
+    infrastructure.length > 0 &&
+    infrastructure.every((item) => item.status === "healthy");
+
+  const serviceFailed = services.find((service) => service.status === "failed");
+  const serviceStarting = services.find((service) => service.status === "starting");
+  const allServicesReady =
+    services.length > 0 && services.every((service) => service.status === "ready");
+
+  const openPreviewState: StartupChecklistStepState =
+    status === "failed"
+      ? "failed"
+      : status === "ready" || status === "partially_ready"
+        ? "complete"
+        : status === "starting"
+          ? "active"
+          : "pending";
+
+  const openPreviewDetail =
+    status === "ready"
+      ? "Preview is ready to open."
+      : status === "partially_ready"
+        ? "Primary service is ready while background services finish."
+        : status === "failed"
+          ? "Preview startup failed before the app became reachable."
+          : "Waiting for the preview URL to become reachable.";
+
+  const steps: StartupChecklistStep[] = [];
+
+  if (infrastructure.length > 0) {
+    steps.push({
+      title: "Spin up infrastructure",
+      state: infraFailed
+        ? "failed"
+        : allInfraHealthy
+          ? "complete"
+          : infraProvisioning
+            ? "active"
+            : "pending",
+      detail: infraFailed
+        ? `${infraFailed.infra_name} failed to become healthy`
+        : allInfraHealthy
+          ? `${infrastructure.length === 1 ? infrastructure[0].infra_name : `${infrastructure.length} services`} ready`
+          : infraProvisioning
+            ? `${infraProvisioning.infra_name} is provisioning`
+            : "Waiting to start preview infrastructure.",
+    });
+  }
+
+  steps.push({
+    title: "Start services",
+    state: serviceFailed
+      ? "failed"
+      : allServicesReady
+        ? "complete"
+        : serviceStarting
+          ? "active"
+          : "pending",
+    detail: serviceFailed
+      ? `${serviceFailed.service_name} failed to start`
+      : allServicesReady
+        ? `${services.length === 1 ? services[0]?.service_name ?? "App" : `${services.length} services`} ready`
+        : serviceStarting
+          ? `${serviceStarting.service_name} is starting`
+          : "Waiting for services to boot.",
+  });
+
+  steps.push({
+    title: "Open the preview",
+    state: openPreviewState,
+    detail: openPreviewDetail,
+  });
+
+  return steps;
+}
+
+function startupStepIcon(state: StartupChecklistStepState) {
+  switch (state) {
+    case "complete":
+      return <CheckCircle2 className="size-3.5 text-emerald-500" />;
+    case "active":
+      return <Loader2 className="size-3.5 animate-spin text-primary" />;
+    case "failed":
+      return <AlertTriangle className="size-3.5 text-destructive" />;
+    default:
+      return <Circle className="size-3.5 text-muted-foreground" />;
+  }
+}
+
 
 export function PreviewPanel({
   sessionId,
@@ -150,6 +260,7 @@ export function PreviewPanel({
 
   const instance = previewStatus?.instance;
   const services = previewStatus?.services ?? [];
+  const infrastructure = previewStatus?.infrastructure ?? [];
   const status = instance?.status;
   const isActive =
     status === "ready" ||
@@ -197,6 +308,21 @@ export function PreviewPanel({
       if (code === PREVIEW_ERROR_CODES.NO_CONFIG) {
         // Backend message already names the file the user needs to add and
         // points to the docs — pass it through verbatim.
+        setMutationError(err.message);
+        return;
+      }
+      // Provider-side launch failures (image pull, infra health, init
+      // script, readiness probe). The backend builds a message that
+      // names the failing image / service and includes the underlying
+      // cause, so passing it through verbatim is more useful than
+      // re-wrapping with a generic prefix.
+      if (
+        code === PREVIEW_ERROR_CODES.INFRA_IMAGE_UNAVAILABLE ||
+        code === PREVIEW_ERROR_CODES.INFRA_START_FAILED ||
+        code === PREVIEW_ERROR_CODES.INFRA_UNHEALTHY ||
+        code === PREVIEW_ERROR_CODES.INIT_SCRIPT_FAILED ||
+        code === PREVIEW_ERROR_CODES.SERVICE_NOT_READY
+      ) {
         setMutationError(err.message);
         return;
       }
@@ -359,6 +485,10 @@ export function PreviewPanel({
     startMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending;
+  const startupChecklist =
+    isActive && !isReady
+      ? buildStartupChecklist(status, services, infrastructure)
+      : [];
 
   if (statusLoading) {
     return (
@@ -562,6 +692,12 @@ export function PreviewPanel({
       {/* Startup progress */}
       {isActive && !isReady && (
         <div className="space-y-2">
+          <div className="rounded-lg border bg-muted/30 p-3">
+            <p className="text-sm font-medium">Preview startup can take a few minutes.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              You can stay here while we spin up the environment and bring services online.
+            </p>
+          </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {STATUS_ORDER.map((p, i) => {
               const currentIdx = STATUS_ORDER.indexOf(
@@ -600,6 +736,25 @@ export function PreviewPanel({
               className="h-full bg-primary rounded-full transition-all duration-500"
               style={{ width: `${statusProgress(status as PreviewStatus)}%` }}
             />
+          </div>
+          <div className="rounded-lg border bg-background/70 p-3">
+            <div className="mb-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+              Startup checklist
+            </div>
+            <div className="space-y-2">
+              {startupChecklist.map((step) => (
+                <div
+                  key={step.title}
+                  className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2"
+                >
+                  <div className="mt-0.5">{startupStepIcon(step.state)}</div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">{step.title}</div>
+                    <div className="text-xs text-muted-foreground">{step.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -687,7 +842,7 @@ export function PreviewPanel({
           <div className="space-y-1">
             <p className="text-sm font-medium">No preview running</p>
             <p className="text-xs text-muted-foreground">
-              Start a preview to see live changes from the agent.
+              Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.
             </p>
           </div>
           <Button
@@ -696,9 +851,11 @@ export function PreviewPanel({
             disabled={isMutating}
             loading={startMutation.isPending}
           >
-            <Play className="size-3.5" />
+            {!startMutation.isPending && <Play className="size-3.5" />}
             Start Preview
           </Button>
+          <p className="text-xs text-muted-foreground">
+          </p>
         </div>
       )}
 

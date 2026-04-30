@@ -73,31 +73,35 @@ function AutomationCard({ automation }: { automation: Automation }) {
 
   return (
     <div className="rounded-lg border border-border bg-background transition-colors hover:bg-muted/30">
-      <div className="flex items-start justify-between gap-4 p-4">
+      <div className="flex items-start gap-3 p-4 sm:gap-4">
         <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-start gap-2.5">
             {automation.enabled ? (
               <RefreshCw className="h-4 w-4 text-blue-500 shrink-0" />
             ) : (
               <Pause className="h-4 w-4 text-muted-foreground shrink-0" />
             )}
-            <h3 className="text-sm font-medium text-foreground truncate">
-              {automation.name}
-            </h3>
-            <span className="text-xs text-muted-foreground shrink-0">
-              {formatSchedule(automation)}
-            </span>
-          </div>
-          <div className="mt-1 ml-6.5 flex items-center gap-3 text-xs text-muted-foreground">
-            {automation.last_run_at && (
-              <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
-            )}
-            {automation.next_run_at && automation.enabled && (
-              <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
-            )}
-            {!automation.enabled && automation.paused_at && (
-              <span>Paused {formatTimeAgo(automation.paused_at)}</span>
-            )}
+            <div className="min-w-0 flex-1 space-y-2">
+              <div className="space-y-1 sm:flex sm:items-start sm:justify-between sm:gap-3 sm:space-y-0">
+                <h3 className="break-words text-sm font-medium leading-5 text-foreground">
+                  {automation.name}
+                </h3>
+                <span className="block break-words text-xs leading-5 text-muted-foreground sm:max-w-[18rem] sm:text-right">
+                  {formatSchedule(automation)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3 sm:gap-y-1">
+                {automation.last_run_at && (
+                  <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
+                )}
+                {automation.next_run_at && automation.enabled && (
+                  <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
+                )}
+                {!automation.enabled && automation.paused_at && (
+                  <span>Paused {formatTimeAgo(automation.paused_at)}</span>
+                )}
+              </div>
+            </div>
           </div>
         </Link>
 
@@ -106,7 +110,7 @@ function AutomationCard({ automation }: { automation: Automation }) {
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="h-8 w-8 self-start shrink-0"
               aria-label={`More options for ${automation.name}`}
             >
               <MoreHorizontal className="h-4 w-4 text-muted-foreground" />

@@ -247,7 +247,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	repoID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now().UTC()
-	summaryJSON := json.RawMessage(`{"merge_state":"clean","has_conflicts":false,"failing_test_count":0,"needs_agent_action":false,"checks":[]}`)
+	summaryJSON := json.RawMessage(`{"merge_state":"clean","has_conflicts":false,"failing_test_count":0,"needs_agent_action":false,"checks":[{"name":"unit tests","category":"test","status":"passed"}]}`)
 	headSHA := "head-merge"
 	baseSHA := "base-merge"
 	snapshotKey := "snap-merge"

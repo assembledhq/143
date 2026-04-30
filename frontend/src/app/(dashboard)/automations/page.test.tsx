@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { renderWithProviders, screen } from "@/test/test-utils";
+import { server } from "@/test/mocks/server";
+import AutomationsPage from "./page";
+
+describe("AutomationsPage", () => {
+  it("renders automation cards with mobile-friendly stacked details", async () => {
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [
+          {
+            id: "auto-enabled",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly release hardening sweep for mobile checkout reliability",
+            goal: "Keep the mobile checkout stable",
+            scope: "",
+            execution_mode: "async",
+            max_concurrent: 1,
+            base_branch: "main",
+            schedule_type: "interval",
+            interval_value: 2,
+            interval_unit: "weeks",
+            interval_run_at: "09:15",
+            timezone: "America/Los_Angeles",
+            next_run_at: "2026-05-01T09:15:00Z",
+            last_run_at: "2026-04-29T09:15:00Z",
+            enabled: true,
+            priority: 50,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: "2026-04-01T00:00:00Z",
+          },
+          {
+            id: "auto-paused",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Dependency cleanup",
+            goal: "Clean stale dependencies",
+            scope: "",
+            execution_mode: "async",
+            max_concurrent: 1,
+            base_branch: "main",
+            schedule_type: "cron",
+            cron_expression: "0 9 * * 1",
+            timezone: "UTC",
+            enabled: false,
+            paused_at: "2026-04-29T12:00:00Z",
+            priority: 40,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: "2026-04-01T00:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<AutomationsPage />);
+
+    const title = await screen.findByText("Weekly release hardening sweep for mobile checkout reliability");
+    expect(title).toHaveClass("break-words", "leading-5");
+
+    const schedule = screen.getByText(/every 2 weeks at/);
+    expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");
+
+    const detailRow = screen.getByText(/Last run:/).parentElement;
+    expect(detailRow).not.toBeNull();
+    expect(detailRow).toHaveClass("flex", "flex-col", "gap-1", "sm:flex-row", "sm:flex-wrap");
+
+    const menuButton = screen.getByRole("button", {
+      name: "More options for Weekly release hardening sweep for mobile checkout reliability",
+    });
+    expect(menuButton).toHaveClass("self-start", "shrink-0");
+  });
+});

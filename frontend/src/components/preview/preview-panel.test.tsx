@@ -70,6 +70,7 @@ const DEFAULT_PROPS = {
 function makePreviewStatus(
   overrides: Partial<PreviewStatusResponse["instance"]> = {},
   services: PreviewStatusResponse["services"] = [],
+  infrastructure: NonNullable<PreviewStatusResponse["infrastructure"]> = [],
 ): PreviewStatusResponse {
   return {
     instance: {
@@ -97,7 +98,7 @@ function makePreviewStatus(
       ...overrides,
     },
     services,
-    infrastructure: [],
+    infrastructure,
   };
 }
 
@@ -536,6 +537,90 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("shows only the loading spinner while starting a preview from idle state", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    mockStart.mockReturnValue(
+      new Promise<void>(() => {
+        // Keep the mutation pending so the loading state remains visible.
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+    });
+
+    const button = screen.getByRole("button", { name: "Start Preview" });
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(button.querySelector("[data-slot='button-spinner']")).toBeInTheDocument();
+    });
+    expect(button.querySelector("svg.lucide-play")).not.toBeInTheDocument();
+  });
+
+  it("shows startup guidance while the preview is being created", async () => {
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "starting" }));
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Preview startup can take a few minutes.")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText("You can stay here while we spin up the environment and bring services online."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a startup checklist from infrastructure and service state", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        { status: "starting" },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "starting",
+            command: ["npm", "run", "dev"],
+            cwd: "",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        [
+          {
+            id: "infra-1",
+            preview_instance_id: "prev-1",
+            infra_name: "postgres",
+            template: "postgres",
+            container_id: "ctr-1",
+            status: "provisioning",
+            host: "postgres",
+            port: 5432,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup checklist")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Spin up infrastructure")).toBeInTheDocument();
+    expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
+    expect(screen.getByText("Start services")).toBeInTheDocument();
+    expect(screen.getByText("web is starting")).toBeInTheDocument();
+    expect(screen.getByText("Open the preview")).toBeInTheDocument();
+  });
+
   /* ---------- Stop mutation ---------- */
 
   it("calls stop mutation when Stop button is clicked", async () => {
@@ -645,6 +730,50 @@ describe("PreviewPanel component", () => {
       screen.queryByText(`Failed to start preview: ${backendMessage}`)
     ).not.toBeInTheDocument();
   });
+
+  // Provider-side launch failures (image pull, infra health, init script,
+  // readiness) carry a backend-built message that names the failing image
+  // or service and the underlying cause. We pass it through verbatim — if
+  // anyone re-wraps it with the generic "Failed to start preview:" prefix,
+  // the actionable detail gets buried.
+  it.each([
+    [
+      "PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+      "preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: provider start preview: provision infrastructure \"db\": preview infrastructure image unavailable: pull \"postgres:17-alpine\": registry unreachable",
+    ],
+    [
+      "PREVIEW_INFRA_UNHEALTHY",
+      "preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: provider start preview: preview infrastructure container failed health check: infrastructure \"db\" (postgres-17): health check timed out after 60 seconds",
+    ],
+    [
+      "PREVIEW_SERVICE_NOT_READY",
+      "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: provider start preview: preview service readiness probe failed: primary service \"app\" (port 3000): timeout",
+    ],
+  ])(
+    "passes backend message through verbatim for %s without the generic prefix",
+    async (code, backendMessage) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+      const err = new Error(backendMessage);
+      (err as Error & { code?: string }).code = code;
+      mockStart.mockRejectedValueOnce(err);
+
+      renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("No preview running")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+      await waitFor(() => {
+        expect(screen.getByText(backendMessage)).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText(`Failed to start preview: ${backendMessage}`)
+      ).not.toBeInTheDocument();
+    }
+  );
 
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
