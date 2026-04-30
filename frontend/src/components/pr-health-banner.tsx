@@ -70,11 +70,6 @@ export function PRHealthBanner({
 
             <div className="flex flex-wrap items-center gap-2">
               <SyncTimeText syncedAt={health.github_state_synced_at} prefix="Synced" />
-              {health.has_conflicts && (
-                <Badge variant="secondary" className="bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400 text-xs">
-                  conflicts
-                </Badge>
-              )}
               {health.failing_test_count > 0 && (
                 orderedChecks.length > 0 ? (
                   <HoverCard openDelay={100} closeDelay={100}>
