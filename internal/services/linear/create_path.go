@@ -18,12 +18,13 @@ import (
 // the single source of truth for what counts as a Linear ref.
 //
 // LinearPrivate suppresses every downstream Linear write for the session
-// (attachment, comment, state move). It's also consulted at enqueue time
-// here so the linker doesn't generate linear_milestone jobs that the
-// worker handler would only short-circuit anyway — saves a row in `jobs`
-// and the corresponding audit/SSE traffic per milestone for private
-// sessions. The handler-side short-circuit in HandleMilestone is the
-// authoritative gate; this is a best-effort optimization.
+// (attachment, comment, state move). On the inline create path it's also
+// checked here to skip the linked-milestone enqueue when the flag is true,
+// avoiding one no-op job per private session. The handler-side
+// short-circuit in HandleMilestone is the authoritative gate; the
+// inline-path skip is a free optimization because the flag is in the
+// CreateInput already. The worker (PrepareLinearPrimaryRefs) does not
+// re-check the flag — see comments there.
 type CreateInput struct {
 	OrgID                   uuid.UUID
 	SessionID               uuid.UUID
@@ -398,38 +399,19 @@ func (s *Service) PrepareLinearPrimaryRefs(ctx context.Context, orgID, sessionID
 	if err := s.sessions.SetLinearPrepareState(ctx, orgID, sessionID, models.LinearPrepareStateReady); err != nil {
 		return err
 	}
-	// Mirror ResolveAndLinkAtCreate: skip the linked-milestone enqueue for
-	// private sessions. We need the session row to read LinearPrivate; a
-	// best-effort lookup keeps this consistent with the inline path. A
-	// lookup failure logs and falls through to enqueue (HandleMilestone
-	// short-circuits anyway, so the only cost is an audit row).
-	if !s.sessionIsLinearPrivate(ctx, orgID, sessionID) {
-		s.enqueueLinkedMilestone(ctx, orgID, sessionID)
-	}
+	// The inline path peeks at in.LinearPrivate to skip the milestone
+	// enqueue cheaply, but the worker payload doesn't carry the flag and
+	// reading it here would cost an extra GetByID per prepare-job firing.
+	// HandleMilestone is the authoritative gate (it short-circuits private
+	// sessions before any Linear write), so the worst case of always
+	// enqueueing is one dequeued no-op job — cheaper than a hot-path DB
+	// round-trip on every firing.
+	s.enqueueLinkedMilestone(ctx, orgID, sessionID)
 	// Tell the session detail UI the session moved to "ready" so the
 	// run_agent unblock + linked-issue chips appear without a manual
 	// reload. Failures notifying are non-fatal.
 	s.notifyLinksChanged(ctx, orgID, sessionID, "refreshed")
 	return nil
-}
-
-// sessionIsLinearPrivate is a best-effort lookup used by enqueue paths that
-// don't carry the session struct. Returns false on a lookup failure (treat
-// as "not private"): the worker handler will still short-circuit via
-// session.LinearPrivate before issuing any Linear write, so the worst
-// outcome of a false-negative here is one extra dequeued no-op job.
-func (s *Service) sessionIsLinearPrivate(ctx context.Context, orgID, sessionID uuid.UUID) bool {
-	if s == nil || s.sessions == nil {
-		return false
-	}
-	session, err := s.sessions.GetByID(ctx, orgID, sessionID)
-	if err != nil {
-		s.logger.Debug().Err(err).
-			Str("session_id", sessionID.String()).
-			Msg("linear: could not load session to check LinearPrivate; defaulting to public")
-		return false
-	}
-	return session.LinearPrivate
 }
 
 // MarkLinearPrepareFailed is called from the prepare job's dead-letter hook

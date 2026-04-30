@@ -44,6 +44,18 @@ const (
 	LinearStateSkipPrivateSession          LinearStateSkipReason = "private_session"
 	LinearStateSkipNotPrimary              LinearStateSkipReason = "not_primary"
 	LinearStateSkipPerTeamDisabled         LinearStateSkipReason = "per_team_disabled"
+	// LinearStateSkipWorkspaceMismatch is recorded when the workspace_slug
+	// persisted on the link no longer matches the workspace_slug returned by
+	// FetchIssue at transition time (integration reconnected to a different
+	// workspace, or Linear renamed the workspace slug). Distinct from
+	// already_past_target so operators chasing a workspace-drift incident
+	// don't have to guess from a generic skip.
+	LinearStateSkipWorkspaceMismatch LinearStateSkipReason = "workspace_mismatch"
+	// LinearStateSkipNoTargetState is recorded when WorkflowStateForType
+	// returns no candidate (or one with an empty ID) — a permanent,
+	// operator-fixable condition where the target Linear team has no state
+	// of the required type (e.g. no `started` state for a PR-open).
+	LinearStateSkipNoTargetState LinearStateSkipReason = "no_target_state"
 )
 
 // LinearStateEventStore writes the append-only audit/fire-once log of state

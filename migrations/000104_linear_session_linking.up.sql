@@ -87,11 +87,21 @@ ALTER TABLE sessions
     ADD COLUMN linear_identifier_hint text,
     ADD COLUMN linear_prepare_state text NOT NULL DEFAULT 'none';
 
--- Validate the prepare-state vocabulary in a separate ADD CONSTRAINT NOT
--- VALID + VALIDATE pair so the AccessExclusiveLock taken by the inline ADD
--- CONSTRAINT above doesn't have to wait for a full table scan to validate.
--- NOT VALID accepts the constraint immediately; VALIDATE re-scans under a
--- weaker SHARE UPDATE EXCLUSIVE lock that doesn't block reads or writes.
+-- Validate the prepare-state vocabulary as a separate ADD CONSTRAINT NOT
+-- VALID + VALIDATE pair. The split is mostly for readability — golang-migrate
+-- wraps each migration file in a transaction by default, so the
+-- AccessExclusiveLock taken by the ADD COLUMN above is held until COMMIT and
+-- the VALIDATE inherits it (the looser SHARE UPDATE EXCLUSIVE lock VALIDATE
+-- normally takes only kicks in when these statements run in their own
+-- transactions). The split still has two real benefits: NOT VALID accepts
+-- the constraint immediately so the failure mode for new bad rows is the
+-- same as a normal CHECK, and if a future migration scales out this table
+-- enough that the validation scan becomes painful, splitting VALIDATE into
+-- its own non-transactional migration is a one-line change.
+-- IMPORTANT: the value list below must stay in lockstep with
+-- models.LinearPrepareState* in internal/models/session_enums.go. The
+-- TestLinearPrepareStateMigrationVocabularyMatchesGoEnum test parses this
+-- migration and fails if the two drift.
 ALTER TABLE sessions
     ADD CONSTRAINT chk_sessions_linear_prepare_state
         CHECK (linear_prepare_state IN ('none', 'pending', 'ready', 'failed'))
@@ -106,6 +116,39 @@ ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_linear_prepare_state;
 CREATE INDEX idx_sessions_linear_identifier_hint
     ON sessions (org_id, linear_identifier_hint)
     WHERE linear_identifier_hint IS NOT NULL;
+
+-- Enforce immutability of the per-session Linear policy flags. Both
+-- linear_private and linear_state_sync_disabled are documented (and depended
+-- on by the service layer) as "frozen at session create" — flipping them
+-- mid-flight would produce confusing semantics like "post the missed events
+-- now" backfills, and the worker's enqueue-time decisions are made under
+-- the assumption that these don't change. A row-level BEFORE UPDATE trigger
+-- is the cheapest enforcement: the column-list specifier (UPDATE OF …)
+-- means the trigger is only consulted when the columns actually appear in
+-- the SET clause, so the common case of an UPDATE that doesn't touch them
+-- pays nothing. IS DISTINCT FROM correctly handles the NULL/non-NULL
+-- transitions even though both columns are NOT NULL today (defensive
+-- against a future migration relaxing that). Errors raise check_violation
+-- so they show up alongside the prepare-state CHECK on the same surface.
+CREATE OR REPLACE FUNCTION sessions_linear_flags_immutable()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.linear_private IS DISTINCT FROM NEW.linear_private THEN
+        RAISE EXCEPTION 'sessions.linear_private is immutable after create (session_id=%)', OLD.id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF OLD.linear_state_sync_disabled IS DISTINCT FROM NEW.linear_state_sync_disabled THEN
+        RAISE EXCEPTION 'sessions.linear_state_sync_disabled is immutable after create (session_id=%)', OLD.id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER sessions_linear_flags_immutable_trigger
+    BEFORE UPDATE OF linear_private, linear_state_sync_disabled ON sessions
+    FOR EACH ROW
+    EXECUTE FUNCTION sessions_linear_flags_immutable();
 
 -- Org/team Linear automation defaults. Stored as JSON in org_settings to avoid
 -- a fresh per-team table for v1 — see linear_settings.go for the parser.

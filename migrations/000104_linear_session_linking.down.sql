@@ -5,6 +5,9 @@
 -- and the two `session_issue_link_*` tables have no inter-dependencies
 -- beyond the FK each holds back into core tables (organizations, sessions,
 -- issues), and those core tables are not dropped here.
+DROP TRIGGER IF EXISTS sessions_linear_flags_immutable_trigger ON sessions;
+DROP FUNCTION IF EXISTS sessions_linear_flags_immutable();
+
 DROP INDEX IF EXISTS idx_sessions_linear_identifier_hint;
 
 ALTER TABLE sessions

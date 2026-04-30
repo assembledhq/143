@@ -899,7 +899,47 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		}
 	})
 
-	t.Run("nil target records already-past skip", func(t *testing.T) {
+	t.Run("workspace slug drift records workspace-mismatch skip", func(t *testing.T) {
+		t.Parallel()
+		client := newFakeLinearClient()
+		client.currentIssue = &FetchedIssue{
+			StateName:     "Todo",
+			StateType:     "unstarted",
+			TeamID:        "team-1",
+			WorkspaceSlug: "renamed-workspace",
+		}
+		svc, provider, events := buildTestService(t, client)
+		link := newPrimaryLink()
+		// Persisted state remembers a different workspace slug than what
+		// FetchIssue now returns — integration was reconnected mid-flight or
+		// Linear renamed the workspace. We must skip rather than write under
+		// the wrong workspace's branding.
+		_ = provider.Upsert(context.Background(), uuid.Nil, link.ID, db.LinearProviderState{
+			WorkspaceSlug: "original-workspace",
+			TeamID:        "team-1",
+		})
+
+		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{
+			Event:      MilestoneLinked,
+			Session:    newSession(),
+			Link:       link,
+			IssueID:    "linear-issue-id",
+			IssueIdent: "ACS-1",
+		}); err != nil {
+			t.Fatalf("workspace-mismatch skip should not error: %v", err)
+		}
+		if client.updateStateCalls != 0 {
+			t.Fatalf("UpdateIssueState must NOT fire on workspace mismatch (got %d)", client.updateStateCalls)
+		}
+		if len(events.inserts) != 1 {
+			t.Fatalf("expected 1 skip event recorded, got %d", len(events.inserts))
+		}
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipWorkspaceMismatch {
+			t.Fatalf("expected workspace_mismatch skip, got %q", got)
+		}
+	})
+
+	t.Run("nil target records no-target-state skip", func(t *testing.T) {
 		t.Parallel()
 		client := newFakeLinearClient()
 		client.target = nil
@@ -907,8 +947,8 @@ func TestHandleStateTransition_GuardsAndSkips(t *testing.T) {
 		if err := svc.HandleStateTransition(context.Background(), MilestoneInput{Event: MilestoneLinked, Session: newSession(), Link: newPrimaryLink(), IssueID: "linear-issue-id", IssueIdent: "ACS-1"}); err != nil {
 			t.Fatalf("nil target skip should not error: %v", err)
 		}
-		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipAlreadyPastTarget {
-			t.Fatalf("expected already_past_target skip, got %q", got)
+		if got := events.inserts[0].SkippedReason; got != db.LinearStateSkipNoTargetState {
+			t.Fatalf("expected no_target_state skip, got %q", got)
 		}
 	})
 

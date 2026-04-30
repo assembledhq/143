@@ -122,16 +122,29 @@ const (
 	LinearPrepareStateFailed  LinearPrepareState = "failed"
 )
 
-func (s LinearPrepareState) Validate() error {
-	switch s {
-	case LinearPrepareStateNone,
+// AllLinearPrepareStates is the canonical, ordered list of valid
+// LinearPrepareState values. Validate() and the
+// chk_sessions_linear_prepare_state CHECK constraint in
+// migrations/000104_linear_session_linking.up.sql both consume this
+// vocabulary; TestLinearPrepareStateMigrationVocabularyMatchesGoEnum parses
+// the migration and pins the two together so a value added in one place
+// without the other breaks the build instead of the database.
+func AllLinearPrepareStates() []LinearPrepareState {
+	return []LinearPrepareState{
+		LinearPrepareStateNone,
 		LinearPrepareStatePending,
 		LinearPrepareStateReady,
-		LinearPrepareStateFailed:
-		return nil
-	default:
-		return fmt.Errorf("invalid LinearPrepareState: %q", s)
+		LinearPrepareStateFailed,
 	}
+}
+
+func (s LinearPrepareState) Validate() error {
+	for _, valid := range AllLinearPrepareStates() {
+		if s == valid {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid LinearPrepareState: %q", s)
 }
 
 // SessionIssueLinkRole captures whether a linked issue owns lifecycle

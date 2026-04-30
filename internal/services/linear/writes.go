@@ -309,10 +309,11 @@ func defaultLinearAutomationSettings() models.LinearAutomationSettings {
 }
 
 // maxAttachmentTitleLen caps the attachment title length sent to Linear.
-// Linear renders attachment titles in compact list views — anything past
-// ~120 chars is truncated by their UI anyway, and capping locally avoids
-// shipping pathological lengths over the wire when a user pastes a
-// novella into the title field.
+// Sized at 200 runes to leave generous headroom over Linear's own ~150-char
+// rendering limit (their UI truncates past that in list views) while still
+// accommodating the "143: " prefix and a multi-byte session title without
+// shipping pathological lengths over the wire when a user pastes a novella
+// into the title field.
 const maxAttachmentTitleLen = 200
 
 func attachmentTitle(session *models.Session) string {
@@ -588,7 +589,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 					Str("persisted_workspace", state.WorkspaceSlug).
 					Str("observed_workspace", currentIssue.WorkspaceSlug).
 					Msg("linear: workspace slug drift detected at state-transition time; skipping")
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipWorkspaceMismatch)
 			}
 			state = mergeCurrentIssueObservation(state, currentIssue)
 			if err := txState.Merge(ctx, in.Session.OrgID, in.Link.ID, db.LinearProviderState{
@@ -637,7 +638,7 @@ func (s *Service) HandleStateTransition(ctx context.Context, in MilestoneInput) 
 				// shouldn't happen but would otherwise be sent to Linear and
 				// produce a useless 422). Permanent condition — record a skip
 				// so the audit trail explains it.
-				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipAlreadyPastTarget)
+				return recordSkipInTx(ctx, txState, txEvents, in, eventKind, db.LinearStateSkipNoTargetState)
 			}
 
 			// State-id divergence guard. Catches the rollback-recovery race:
