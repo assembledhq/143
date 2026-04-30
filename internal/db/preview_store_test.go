@@ -227,10 +227,12 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 	tests := []struct {
 		name      string
 		rows      int64
+		execErr   error
 		expectErr bool
 	}{
 		{name: "updates successfully", rows: 1},
 		{name: "not found returns error", rows: 0, expectErr: true},
+		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -245,7 +247,8 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 
 			mock.ExpectExec("UPDATE preview_instances SET status").
 				WithArgs(previewAnyArgs(4)...).
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
+				WillReturnError(tt.execErr)
 
 			err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
 			if tt.expectErr {
@@ -256,6 +259,23 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestPreviewStore_UpdatePreviewStatus_TerminalBeginError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.Error(t, err, "terminal status update should return begin errors")
+	require.Contains(t, err.Error(), "begin failed", "terminal status error should include begin failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T) {
@@ -284,6 +304,27 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_UpdatePreviewStatus_TerminalUpdateError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnError(errors.New("update failed"))
+	mock.ExpectRollback()
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.Error(t, err, "terminal status update should return parent update errors")
+	require.Contains(t, err.Error(), "update failed", "terminal status error should include parent update failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewStatus_TerminalRollbackOnCascadeError(t *testing.T) {
 	t.Parallel()
 
@@ -305,6 +346,121 @@ func TestPreviewStore_UpdatePreviewStatus_TerminalRollbackOnCascadeError(t *test
 	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
 	require.Error(t, err, "terminal status update should fail when child cascade fails")
 	require.Contains(t, err.Error(), "service cascade failed", "terminal status error should include cascade failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatus_TerminalRollbackOnInfraCascadeError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnError(errors.New("infra cascade failed"))
+	mock.ExpectRollback()
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.Error(t, err, "terminal status update should fail when infra cascade fails")
+	require.Contains(t, err.Error(), "infra cascade failed", "terminal status error should include infra cascade failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatus_TerminalCommitError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.Error(t, err, "terminal status update should return commit errors")
+	require.Contains(t, err.Error(), "commit failed", "terminal status error should include commit failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		rows      int64
+		execErr   error
+		expected  bool
+		expectErr bool
+	}{
+		{name: "updates active preview", rows: 1, expected: true},
+		{name: "already terminal returns false", rows: 0, expected: false},
+		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+
+			mock.ExpectExec("UPDATE preview_instances SET status").
+				WithArgs(previewAnyArgs(4)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
+				WillReturnError(tt.execErr)
+
+			updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
+			if tt.expectErr {
+				require.Error(t, err, "conditional non-terminal update should return database errors")
+				require.False(t, updated, "conditional non-terminal update should not report updates on error")
+			} else {
+				require.NoError(t, err, "conditional non-terminal update should not error")
+				require.Equal(t, tt.expected, updated, "conditional non-terminal update should report whether the row changed")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalBeginError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.Error(t, err, "terminal conditional update should return begin errors")
+	require.False(t, updated, "terminal conditional update should not report updates on begin error")
+	require.Contains(t, err.Error(), "begin failed", "terminal conditional error should include begin failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -332,6 +488,81 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadesChildren(t *te
 	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
 	require.NoError(t, err, "terminal conditional status update should cascade children")
 	require.True(t, updated, "conditional terminal status update should report the row was changed")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalUpdateError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnError(errors.New("update failed"))
+	mock.ExpectRollback()
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.Error(t, err, "terminal conditional update should return parent update errors")
+	require.False(t, updated, "terminal conditional update should not report updates when parent update fails")
+	require.Contains(t, err.Error(), "update failed", "terminal conditional error should include parent update failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadeError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnError(errors.New("service cascade failed"))
+	mock.ExpectRollback()
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.Error(t, err, "terminal conditional update should return cascade errors")
+	require.True(t, updated, "terminal conditional update should report parent row changed before cascade failed")
+	require.Contains(t, err.Error(), "service cascade failed", "terminal conditional error should include cascade failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCommitError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.Error(t, err, "terminal conditional update should return commit errors")
+	require.True(t, updated, "terminal conditional update should report parent row changed before commit failed")
+	require.Contains(t, err.Error(), "commit failed", "terminal conditional error should include commit failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -402,6 +633,42 @@ func TestPreviewStore_StopPreview(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestPreviewStore_StopPreview_CascadeError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnError(errors.New("service cascade failed"))
+
+	err = store.StopPreview(context.Background(), uuid.New(), uuid.New())
+	require.Error(t, err, "stop preview should return cascade errors")
+	require.Contains(t, err.Error(), "service cascade failed", "stop preview error should include cascade failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CascadeChildrenToTerminal_NonTerminalNoop(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	err = store.cascadeChildrenToTerminal(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
+	require.NoError(t, err, "non-terminal parent status should not cascade children")
+	require.NoError(t, mock.ExpectationsWereMet(), "no database statements should be executed")
 }
 
 func TestPreviewStore_CountActivePreviewsByOrg(t *testing.T) {
