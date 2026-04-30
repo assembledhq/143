@@ -1175,6 +1175,14 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 
+		if stores.SessionIssueLinks != nil {
+			links, err := stores.SessionIssueLinks.ListBySession(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("hydrate linked issues for open_pr: %w", err)
+			}
+			run.LinkedIssues = links
+		}
+
 		logger.Info().
 			Str("session_id", runID.String()).
 			Str("org_id", orgID.String()).

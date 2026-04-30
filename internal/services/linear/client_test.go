@@ -211,6 +211,82 @@ func TestGraphQLClientCreateOrUpdateAttachment(t *testing.T) {
 	}
 }
 
+func TestGraphQLClientMutationFailureResponses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		response string
+		call     func(client Client) error
+	}{
+		{
+			name:     "attachment create success false is an error",
+			response: `{"data":{"attachmentCreate":{"success":false,"attachment":null}}}`,
+			call: func(client Client) error {
+				_, err := client.CreateOrUpdateAttachment(context.Background(), AttachmentWriteInput{
+					IssueID:  "issue-1",
+					Title:    "143 session",
+					Subtitle: "Running",
+					URL:      "https://app.test/sessions/session-1",
+					Metadata: db.LinearAttachmentMetadata{Service: "143", SessionID: "session-1", Primary: true, Outcome: "running"},
+				})
+				return err
+			},
+		},
+		{
+			name:     "attachment update missing id is an error",
+			response: `{"data":{"attachmentUpdate":{"success":true,"attachment":{"id":"","url":"https://linear.app/attachment/missing"}}}}`,
+			call: func(client Client) error {
+				_, err := client.CreateOrUpdateAttachment(context.Background(), AttachmentWriteInput{
+					IssueID:  "issue-1",
+					PriorID:  "attachment-existing",
+					Title:    "143 session",
+					Subtitle: "Running",
+					URL:      "https://app.test/sessions/session-1",
+					Metadata: db.LinearAttachmentMetadata{Service: "143", SessionID: "session-1", Primary: true, Outcome: "running"},
+				})
+				return err
+			},
+		},
+		{
+			name:     "comment create success false is an error",
+			response: `{"data":{"commentCreate":{"success":false,"comment":null}}}`,
+			call: func(client Client) error {
+				_, err := client.CreateComment(context.Background(), "issue-1", "body")
+				return err
+			},
+		},
+		{
+			name:     "comment update success false is an error",
+			response: `{"data":{"commentUpdate":{"success":false}}}`,
+			call: func(client Client) error {
+				return client.UpdateComment(context.Background(), "comment-1", "body")
+			},
+		},
+		{
+			name:     "issue update success false is an error",
+			response: `{"data":{"issueUpdate":{"success":false}}}`,
+			call: func(client Client) error {
+				return client.UpdateIssueState(context.Background(), "issue-1", "state-1")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+				writeGraphQLResponse(t, w, tt.response)
+			})
+
+			err := tt.call(client)
+			require.Error(t, err, "Linear mutation helpers should reject unsuccessful mutation payloads")
+		})
+	}
+}
+
 func TestGraphQLClientCommentAndStateMutations(t *testing.T) {
 	t.Parallel()
 

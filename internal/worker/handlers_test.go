@@ -1507,6 +1507,74 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionIssueLinks = db.NewSessionIssueLinkStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snap-open-pr-linear-links"
+	externalID := "ACS-123"
+	title := "Fix Linear title"
+	source := models.IssueSourceLinear
+	status := "open"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("SELECT .+ FROM session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
+			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug",
+		}).AddRow(
+			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
+			&title, &source, &externalID, nil, nil, &status, nil,
+		))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Equal(t, []models.SessionIssueLink{
+					{
+						ID:          linkID,
+						OrgID:       orgID,
+						SessionID:   sessionID,
+						IssueID:     issueID,
+						Role:        models.SessionIssueLinkRolePrimary,
+						Position:    0,
+						CreatedAt:   now,
+						IssueTitle:  &title,
+						IssueSource: &source,
+						ExternalID:  &externalID,
+						IssueStatus: &status,
+					},
+				}, run.LinkedIssues, "open_pr should pass hydrated linked issues into PR creation for Linear title prefixing")
+				return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr handler should succeed when PR creation succeeds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestOpenPRHandler_ForwardsAuthorModeToPRService(t *testing.T) {
 	t.Parallel()
 

@@ -223,6 +223,12 @@ func (c *graphQLClient) CreateOrUpdateAttachment(ctx context.Context, in Attachm
 		if err := c.do(ctx, query, map[string]any{"id": in.PriorID, "input": input}, &result); err != nil {
 			return AttachmentResult{}, err
 		}
+		if !result.Data.AttachmentUpdate.Success {
+			return AttachmentResult{}, fmt.Errorf("linear attachmentUpdate returned success=false")
+		}
+		if result.Data.AttachmentUpdate.Attachment.ID == "" {
+			return AttachmentResult{}, fmt.Errorf("linear attachmentUpdate returned no attachment id")
+		}
 		return AttachmentResult{
 			ID:  result.Data.AttachmentUpdate.Attachment.ID,
 			URL: result.Data.AttachmentUpdate.Attachment.URL,
@@ -259,6 +265,12 @@ func (c *graphQLClient) CreateOrUpdateAttachment(ctx context.Context, in Attachm
 	if err := c.do(ctx, query, map[string]any{"input": input}, &result); err != nil {
 		return AttachmentResult{}, err
 	}
+	if !result.Data.AttachmentCreate.Success {
+		return AttachmentResult{}, fmt.Errorf("linear attachmentCreate returned success=false")
+	}
+	if result.Data.AttachmentCreate.Attachment.ID == "" {
+		return AttachmentResult{}, fmt.Errorf("linear attachmentCreate returned no attachment id")
+	}
 	return AttachmentResult{
 		ID:  result.Data.AttachmentCreate.Attachment.ID,
 		URL: result.Data.AttachmentCreate.Attachment.URL,
@@ -287,6 +299,12 @@ func (c *graphQLClient) CreateComment(ctx context.Context, issueID, body string)
 	}, &result); err != nil {
 		return "", err
 	}
+	if !result.Data.CommentCreate.Success {
+		return "", fmt.Errorf("linear commentCreate returned success=false")
+	}
+	if result.Data.CommentCreate.Comment.ID == "" {
+		return "", fmt.Errorf("linear commentCreate returned no comment id")
+	}
 	return result.Data.CommentCreate.Comment.ID, nil
 }
 
@@ -303,10 +321,16 @@ func (c *graphQLClient) UpdateComment(ctx context.Context, commentID, body strin
 			} `json:"commentUpdate"`
 		} `json:"data"`
 	}
-	return c.do(ctx, query, map[string]any{
+	if err := c.do(ctx, query, map[string]any{
 		"id":    commentID,
 		"input": map[string]any{"body": body},
-	}, &result)
+	}, &result); err != nil {
+		return err
+	}
+	if !result.Data.CommentUpdate.Success {
+		return fmt.Errorf("linear commentUpdate returned success=false")
+	}
+	return nil
 }
 
 // WorkflowStateForType picks the best workflow state for the given type,
@@ -367,10 +391,16 @@ func (c *graphQLClient) UpdateIssueState(ctx context.Context, issueID, stateID s
 			} `json:"issueUpdate"`
 		} `json:"data"`
 	}
-	return c.do(ctx, query, map[string]any{
+	if err := c.do(ctx, query, map[string]any{
 		"id":    issueID,
 		"input": map[string]any{"stateId": stateID},
-	}, &result)
+	}, &result); err != nil {
+		return err
+	}
+	if !result.Data.IssueUpdate.Success {
+		return fmt.Errorf("linear issueUpdate returned success=false")
+	}
+	return nil
 }
 
 // IssueRecentHumanEdits returns true if a human moved the issue's workflow
