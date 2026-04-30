@@ -202,6 +202,8 @@ func TestRunAuthToken_PrintsToken(t *testing.T) {
 }
 
 func TestRunAuthToken_ErrorPaths(t *testing.T) {
+	t.Setenv(SocketEnvVar, "")
+
 	tests := []struct {
 		name       string
 		args       []string
@@ -262,6 +264,7 @@ func TestRunGitBootstrap_AppliesConfigAndHook(t *testing.T) {
 
 	t.Setenv(GitNameEnvVar, "Alice Hub")
 	t.Setenv(GitEmailEnvVar, "1+alicehub@users.noreply.github.com")
+	t.Setenv(WorkingBranchEnvVar, "143/abc123/fix-typo")
 	t.Setenv(CoAuthorEnvVar, "Co-authored-by: Alice <alice@example.com>")
 
 	var stderr bytes.Buffer
@@ -271,6 +274,7 @@ func TestRunGitBootstrap_AppliesConfigAndHook(t *testing.T) {
 	cfg := readGitConfig(t, workdir)
 	require.Contains(t, cfg, "user.name=Alice Hub")
 	require.Contains(t, cfg, "user.email=1+alicehub@users.noreply.github.com")
+	require.Contains(t, cfg, "push.autosetupremote=true")
 	require.Contains(t, cfg, "credential.helper=!143-tools git-credential")
 
 	hook, err := os.ReadFile(filepath.Join(workdir, ".git", "hooks", "prepare-commit-msg"))
@@ -279,6 +283,12 @@ func TestRunGitBootstrap_AppliesConfigAndHook(t *testing.T) {
 	stat, err := os.Stat(filepath.Join(workdir, ".git", "hooks", "prepare-commit-msg"))
 	require.NoError(t, err)
 	require.NotZero(t, stat.Mode()&0o100, "hook must be executable")
+	pushHook, err := os.ReadFile(filepath.Join(workdir, ".git", "hooks", "pre-push"))
+	require.NoError(t, err)
+	require.Contains(t, string(pushHook), "expected_branch='143/abc123/fix-typo'")
+	pushStat, err := os.Stat(filepath.Join(workdir, ".git", "hooks", "pre-push"))
+	require.NoError(t, err)
+	require.NotZero(t, pushStat.Mode()&0o100, "push hook must be executable")
 
 	ghWrapper, err := os.ReadFile(filepath.Join(homeDir, ".local", "bin", "gh"))
 	require.NoError(t, err)
@@ -301,6 +311,7 @@ func TestRunGitBootstrap_Idempotent(t *testing.T) {
 
 	t.Setenv(GitNameEnvVar, "Alice Hub")
 	t.Setenv(GitEmailEnvVar, "1+alicehub@users.noreply.github.com")
+	t.Setenv(WorkingBranchEnvVar, "143/abc123/fix-typo")
 	t.Setenv(CoAuthorEnvVar, "Co-authored-by: Alice <alice@example.com>")
 
 	for i := 0; i < 3; i++ {
@@ -325,6 +336,7 @@ func TestRunGitBootstrap_Idempotent(t *testing.T) {
 	cfg := readGitConfig(t, workdir)
 	require.Equal(t, 1, strings.Count(cfg, "user.name="), "user.name must not stack")
 	require.Equal(t, 1, strings.Count(cfg, "user.email="), "user.email must not stack")
+	require.Equal(t, 1, strings.Count(cfg, "push.autosetupremote=true"), "push.autoSetupRemote must not stack")
 
 	// Hook content is overwritten in place — three runs of the bootstrap
 	// must leave a single hook with a single trailer line.
@@ -332,6 +344,10 @@ func TestRunGitBootstrap_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, strings.Count(string(hookBytes), "Co-authored-by: Alice <alice@example.com>"),
 		"prepare-commit-msg must contain the trailer literal exactly once")
+	pushHookBytes, err := os.ReadFile(filepath.Join(workdir, ".git", "hooks", "pre-push"))
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(pushHookBytes), "expected_branch='143/abc123/fix-typo'"),
+		"pre-push must contain the expected branch literal exactly once")
 
 	// Sanity: the hook itself protects against in-message duplication too.
 	// Apply the hook to a fake commit message twice and confirm the trailer
@@ -371,6 +387,85 @@ func TestRunGitBootstrap_NoHookWhenCoAuthorEmpty(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(os.Getenv("HOME"), ".local", "bin", "gh"))
 	require.NoError(t, err, "gh wrapper should still be installed when no co-author hook is needed")
+}
+
+func TestRunGitBootstrap_PrePushHookRejectsWrongBranchOrRemote(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available on this runner")
+	}
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(GitNameEnvVar, "Alice Hub")
+	t.Setenv(GitEmailEnvVar, "alice@example.com")
+	t.Setenv(WorkingBranchEnvVar, "143/abc123/fix-typo")
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
+	require.Equal(t, 0, code, "stderr: %s", stderr.String())
+
+	require.NoError(t, exec.Command("git", "-C", workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
+	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
+	hookPath := filepath.Join(workdir, ".git", "hooks", "pre-push")
+
+	cmd := exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
+	cmd.Dir = workdir
+	cmd.Stdin = strings.NewReader("refs/heads/143/abc123/fix-typo abc refs/heads/143/abc123/fix-typo def\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "pre-push should allow pushes from the designated branch to the designated remote ref: %s", string(out))
+
+	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "main").Run(), "test repo should create a second branch")
+	cmd = exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
+	cmd.Dir = workdir
+	cmd.Stdin = strings.NewReader("refs/heads/main abc refs/heads/143/abc123/fix-typo def\n")
+	out, err = cmd.CombinedOutput()
+	require.Error(t, err, "pre-push should reject pushes from the wrong local branch")
+	require.Contains(t, string(out), "refusing push from branch 'main'; expected '143/abc123/fix-typo'")
+
+	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "143/abc123/fix-typo").Run(), "test repo should switch back to the designated branch")
+	cmd = exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
+	cmd.Dir = workdir
+	cmd.Stdin = strings.NewReader("refs/heads/143/abc123/fix-typo abc refs/heads/main def\n")
+	out, err = cmd.CombinedOutput()
+	require.Error(t, err, "pre-push should reject pushes to the wrong remote ref")
+	require.Contains(t, string(out), "refusing push to 'refs/heads/main'; expected 'refs/heads/143/abc123/fix-typo'")
+}
+
+func TestRunGitBootstrap_PreservesExistingPrePushHook(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not available on this runner")
+	}
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(GitNameEnvVar, "Alice Hub")
+	t.Setenv(GitEmailEnvVar, "alice@example.com")
+	t.Setenv(WorkingBranchEnvVar, "143/abc123/fix-typo")
+
+	hookPath := filepath.Join(workdir, ".git", "hooks", "pre-push")
+	originalHook := "#!/bin/sh\necho original-hook-ran\n"
+	require.NoError(t, os.WriteFile(hookPath, []byte(originalHook), 0o755), "test repo should start with an existing pre-push hook")
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
+	require.Equal(t, 0, code, "stderr: %s", stderr.String())
+
+	preservedPath := filepath.Join(workdir, ".git", "hooks", "pre-push.143-orig")
+	preserved, err := os.ReadFile(preservedPath)
+	require.NoError(t, err)
+	require.Equal(t, originalHook, string(preserved), "git-bootstrap should preserve the original pre-push hook")
+
+	require.NoError(t, exec.Command("git", "-C", workdir, "commit", "--allow-empty", "-m", "init").Run(), "test repo should create an initial commit before branch switching")
+	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "143/abc123/fix-typo").Run(), "test repo should create the designated branch")
+
+	cmd := exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
+	cmd.Dir = workdir
+	cmd.Stdin = strings.NewReader("refs/heads/143/abc123/fix-typo abc refs/heads/143/abc123/fix-typo def\n")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "wrapped pre-push should still allow the designated branch: %s", string(out))
+	require.Contains(t, string(out), "original-hook-ran", "wrapped pre-push should chain to the preserved original hook")
 }
 
 func TestInstallCoAuthorHook_CreatesHooksDirWithStrictPerms(t *testing.T) {
@@ -470,7 +565,7 @@ func TestInstallGHWrapper_ErrorsWhenBinPathCannotBeCreated(t *testing.T) {
 }
 
 func TestCallHost_RequiresSocketEnv(t *testing.T) {
-	t.Parallel()
+	t.Setenv(SocketEnvVar, "")
 
 	resp, err := callHost(ActionPush)
 	require.Nil(t, resp, "callHost should not return a response without a socket path")

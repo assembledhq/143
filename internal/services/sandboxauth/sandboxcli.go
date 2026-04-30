@@ -24,6 +24,7 @@
 package sandboxauth
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -40,6 +41,9 @@ import (
 const (
 	GitNameEnvVar  = "_143_GIT_NAME"
 	GitEmailEnvVar = "_143_GIT_EMAIL"
+	// WorkingBranchEnvVar pins the session's designated branch so
+	// git-bootstrap can install a push guard.
+	WorkingBranchEnvVar = "_143_WORKING_BRANCH"
 	// CoAuthorEnvVar carries the full `Co-authored-by: NAME <email>` line.
 	// Empty string means "user-identity resolution succeeded — don't append
 	// a trailer" (the agent already commits as the user).
@@ -188,6 +192,10 @@ func runGitBootstrap(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "143-tools git-bootstrap: %s\n", err)
 		return 1
 	}
+	if err := runGit(*workdir, "config", "push.autoSetupRemote", "true"); err != nil {
+		fmt.Fprintf(stderr, "143-tools git-bootstrap: %s\n", err)
+		return 1
+	}
 
 	// Wire the credential helper. `--replace-all` collapses any prior
 	// values for credential.helper into the single one we want — important
@@ -203,6 +211,12 @@ func runGitBootstrap(args []string, stderr io.Writer) int {
 	if err := installGHWrapper(); err != nil {
 		fmt.Fprintf(stderr, "143-tools git-bootstrap: install gh wrapper: %s\n", err)
 		return 1
+	}
+	if branch := os.Getenv(WorkingBranchEnvVar); branch != "" {
+		if err := installPushGuardHook(*workdir, branch); err != nil {
+			fmt.Fprintf(stderr, "143-tools git-bootstrap: install push guard hook: %s\n", err)
+			return 1
+		}
 	}
 
 	if trailer := os.Getenv(CoAuthorEnvVar); trailer != "" {
@@ -269,6 +283,58 @@ fi
 printf '%s\n' "$TRAILER" >> "$COMMIT_MSG_FILE"
 `
 	return os.WriteFile(hookPath, []byte(script), 0o755) // #nosec G306 -- hooks must be executable
+}
+
+func installPushGuardHook(workdir, branch string) error {
+	hooksDir := filepath.Join(workdir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
+		return err
+	}
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	origHookPath := filepath.Join(hooksDir, "pre-push.143-orig")
+
+	if existing, err := os.ReadFile(hookPath); err == nil {
+		if !bytes.Contains(existing, []byte("Installed by 143-tools git-bootstrap.")) {
+			mode := os.FileMode(0o755)
+			if info, statErr := os.Stat(hookPath); statErr == nil {
+				mode = info.Mode().Perm()
+				if mode&0o100 == 0 {
+					mode |= 0o100
+				}
+			}
+			if err := os.WriteFile(origHookPath, existing, mode); err != nil {
+				return err
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	script := fmt.Sprintf(`#!/bin/sh
+# Installed by 143-tools git-bootstrap.
+set -eu
+expected_branch=%s
+expected_ref="refs/heads/$expected_branch"
+current_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ "$current_branch" != "$expected_branch" ]; then
+    echo "143-tools pre-push: refusing push from branch '$current_branch'; expected '$expected_branch'" >&2
+    exit 1
+fi
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+    if [ -n "${remote_ref:-}" ] && [ "$remote_ref" != "$expected_ref" ]; then
+        echo "143-tools pre-push: refusing push to '$remote_ref'; expected '$expected_ref'" >&2
+        exit 1
+    fi
+done
+if [ -x %s ]; then
+    exec %s "$@"
+fi
+`, shellQuote(branch), shellQuote(origHookPath), shellQuote(origHookPath))
+	return os.WriteFile(hookPath, []byte(script), 0o755) // #nosec G306 -- hooks must be executable
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func installGHWrapper() error {

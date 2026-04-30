@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -159,6 +160,7 @@ type mockSessionStore struct {
 	extensionGrants        []runtimeExtensionGrant
 	checkpoints            []checkpointUpdate
 	recoveryStates         []recoveryStateUpdate
+	workingBranches        []string
 	baseCommitSHAs         []string
 	failureUpdates         []failureUpdate
 	workerOwnerships       []workerOwnershipUpdate
@@ -345,6 +347,9 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 }
 
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.workingBranches = append(m.workingBranches, branch)
 	return nil
 }
 
@@ -353,6 +358,12 @@ func (m *mockSessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessi
 	defer m.mu.Unlock()
 	m.baseCommitSHAs = append(m.baseCommitSHAs, baseCommitSHA)
 	return nil
+}
+
+func (m *mockSessionStore) getWorkingBranches() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.workingBranches...)
 }
 
 func (m *mockSessionStore) SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error {
@@ -1718,6 +1729,53 @@ func TestContinueSession_FreshResumeWiresSandboxAuth(t *testing.T) {
 	require.Equal(t, 1, authStub.closeCalls, "ContinueSession should close the sandbox auth socket when the fresh container is destroyed at turn end")
 }
 
+func TestContinueSession_FreshResumeLegacyGitHubAuthStillBootstrapsBranchGuard(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = string(models.SessionStatusIdle)
+	session.CurrentTurn = 1
+	session.SnapshotKey = nil
+
+	d := defaultDeps()
+	d.identityResolver = nil
+	d.sandboxAuth = nil
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue and update the PR.",
+		},
+	}
+	var createdCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		createdCfg = cfg
+		return &agent.Sandbox{ID: "resume-sandbox-legacy", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:         "continued",
+			ConfidenceScore: 0.9,
+			ExitCode:        0,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session)
+	require.NoError(t, err, "ContinueSession should succeed on a fresh legacy-auth resume")
+	require.Empty(t, createdCfg.AuthSocketPath, "legacy github auth should not mount the sandbox auth socket")
+	require.Equal(t, "ghp_test123", createdCfg.Env["GITHUB_TOKEN"], "legacy github auth should still expose the fallback token")
+	require.Equal(t, "143 Agent", createdCfg.Env[sandboxauth.GitNameEnvVar], "legacy github auth should populate the git author name for bootstrap")
+	require.Equal(t, "noreply@143.dev", createdCfg.Env[sandboxauth.GitEmailEnvVar], "legacy github auth should populate the git author email for bootstrap")
+	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "legacy github auth should still rerun git-bootstrap on fresh resume so the branch guard is installed")
+}
+
 func TestRunAgent_ExecuteErrorUpdatesProjectTask(t *testing.T) {
 	t.Parallel()
 
@@ -2093,6 +2151,65 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 	require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
 	require.NotNil(t, run.BaseCommitSHA, "RunAgent should populate the in-memory session base commit sha")
 	require.Equal(t, "abc123", *run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+}
+
+func TestRunAgent_UsesDesignatedWorkingBranchForSandboxAndSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	var createdCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		createdCfg = cfg
+		return &agent.Sandbox{ID: "sandbox-1", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "abc123\n")
+		}
+		return 0, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed")
+	require.NotNil(t, run.WorkingBranch, "RunAgent should populate the in-memory working branch")
+	require.Equal(t, *run.WorkingBranch, createdCfg.Env[sandboxauth.WorkingBranchEnvVar], "RunAgent should inject the designated working branch into the sandbox env")
+	require.Equal(t, []string{*run.WorkingBranch}, d.sessions.getWorkingBranches(), "RunAgent should persist the designated working branch")
+}
+
+func TestRunAgent_LegacyGitHubAuthStillBootstrapsBranchGuard(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.identityResolver = nil
+	d.sandboxAuth = nil
+	var createdCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		createdCfg = cfg
+		return &agent.Sandbox{ID: "sandbox-legacy", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "abc123\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed on the legacy github auth path")
+	require.Empty(t, createdCfg.AuthSocketPath, "legacy github auth should not mount the sandbox auth socket")
+	require.Equal(t, "ghp_test123", createdCfg.Env["GITHUB_TOKEN"], "legacy github auth should still expose the fallback token")
+	require.Equal(t, "143 Agent", createdCfg.Env[sandboxauth.GitNameEnvVar], "legacy github auth should populate the git author name for bootstrap")
+	require.Equal(t, "noreply@143.dev", createdCfg.Env[sandboxauth.GitEmailEnvVar], "legacy github auth should populate the git author email for bootstrap")
+	require.Contains(t, d.provider.ExecCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend", "legacy github auth should still run git-bootstrap so the branch guard is installed")
 }
 
 func TestRunAgent_BaseCommitCaptureNonZeroExitDoesNotFailRun(t *testing.T) {
@@ -4065,6 +4182,9 @@ func TestRunAgent_CancelReturnsToIdle(t *testing.T) {
 	// Make Exec fail so doCancel falls back to immediate context cancel
 	// (avoids 30s timer wait in tests).
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
 		return 1, errors.New("exec not available in test")
 	}
 
@@ -4124,6 +4244,9 @@ func TestRunAgent_CancelWithoutSnapshotMarksCancelled(t *testing.T) {
 	}
 	// Make Exec fail so doCancel falls back to immediate context cancel.
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
 		return 1, errors.New("exec not available in test")
 	}
 
@@ -4425,6 +4548,9 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 		return io.NopCloser(bytes.NewReader([]byte("checkpoint-after-no-progress"))), nil
 	}
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
 		return 1, errors.New("exec not available in test")
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
@@ -4517,6 +4643,9 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 	// Make Exec fail so doCancel falls back to immediate ctx cancel rather
 	// than waiting 30s for the SIGINT timer.
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git ") {
+			return 0, nil
+		}
 		return 1, errors.New("exec not available in test")
 	}
 
