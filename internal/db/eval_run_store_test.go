@@ -178,10 +178,10 @@ func TestEvalRunStore_UpdateResult(t *testing.T) {
 	passed := true
 	duration := 120
 	result := &models.EvalRunResult{
-		Status:     models.EvalRunStatusCompleted,
-		FinalScore: &score,
-		Passed:     &passed,
-		DurationSeconds: &duration,
+		Status:           models.EvalRunStatusCompleted,
+		FinalScore:       &score,
+		Passed:           &passed,
+		DurationSeconds:  &duration,
 		CriterionResults: json.RawMessage(`[{"name":"tests_pass","score":1.0,"pass":true}]`),
 	}
 

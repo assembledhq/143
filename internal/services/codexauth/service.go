@@ -73,9 +73,9 @@ type PendingAuth struct {
 	UserCode        string
 	VerificationURI string
 	ExpiresAt       time.Time
-	Interval        int       // poll interval in seconds
-	LastPollAt      time.Time // tracks when we last polled OpenAI
-	Label           string    // user-provided label for this subscription
+	Interval        int        // poll interval in seconds
+	LastPollAt      time.Time  // tracks when we last polled OpenAI
+	Label           string     // user-provided label for this subscription
 	CredentialID    *uuid.UUID // DB credential ID once persisted
 }
 
@@ -125,8 +125,8 @@ type Service struct {
 	logger      zerolog.Logger
 	issuer      string
 	clientID    string
-	pending   sync.Map // pendingKey (orgID+label) -> *PendingAuth
-	refreshMu sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
+	pending     sync.Map // pendingKey (orgID+label) -> *PendingAuth
+	refreshMu   sync.Map // credential ID string -> *sync.Mutex (per-credential refresh lock)
 	// initMu entries accumulate per distinct (org, label) pair. Growth is bounded
 	// in practice by the number of subscription labels an org ever uses, and
 	// entries are reclaimed on DisconnectAll. Cleaning up inside InitiateDeviceAuth

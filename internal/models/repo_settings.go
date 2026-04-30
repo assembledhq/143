@@ -9,10 +9,10 @@ import (
 // All fields are pointers — nil means "inherit from org defaults".
 type RepoPMSettings struct {
 	ProductContext       *ProductContext  `json:"product_context,omitempty"`
-	PMScheduleHours      *int            `json:"pm_schedule_hours,omitempty"`
-	PMModel              *string         `json:"pm_model,omitempty"`
+	PMScheduleHours      *int             `json:"pm_schedule_hours,omitempty"`
+	PMModel              *string          `json:"pm_model,omitempty"`
 	PriorityWeights      *PriorityWeights `json:"priority_weights,omitempty"`
-	MinPriorityThreshold *float64        `json:"min_priority_threshold,omitempty"`
+	MinPriorityThreshold *float64         `json:"min_priority_threshold,omitempty"`
 }
 
 // RepoSettings is the strongly-typed representation of repositories.settings JSONB.

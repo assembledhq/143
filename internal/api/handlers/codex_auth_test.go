@@ -212,9 +212,9 @@ func TestCodexAuthHandler_Disconnect_Error(t *testing.T) {
 	testOrgID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
-		disableErr:       errors.New("db error"),
+		disableErr:                  errors.New("db error"),
 		existsForProviderByIDResult: true,
-		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		getByIDResult:               &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())
@@ -236,7 +236,7 @@ func TestCodexAuthHandler_Disconnect_ReturnsJSON(t *testing.T) {
 	credID := uuid.New()
 	store := &codexCredentialStoreStub{
 		existsForProviderByIDResult: true,
-		getByIDResult:    &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
+		getByIDResult:               &models.DecryptedCredential{ID: credID, OrgID: testOrgID},
 	}
 	svc := codexauth.NewService(store, codexTestLogger())
 	handler := NewCodexAuthHandler(svc, codexTestLogger())

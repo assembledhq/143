@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
 
 type testInternalSessionLogStore struct {
@@ -56,6 +59,111 @@ func (s *testInternalSessionMessageStore) Create(ctx context.Context, msg *model
 
 func (s *testInternalSessionMessageStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionMessage, error) {
 	return nil, nil
+}
+
+type testInternalUserLookup struct {
+	user models.User
+	err  error
+}
+
+func (s testInternalUserLookup) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.User, error) {
+	if s.err != nil {
+		return models.User{}, s.err
+	}
+	return s.user, nil
+}
+
+type testInternalIssueStore struct {
+	issue models.Issue
+	err   error
+}
+
+func (s testInternalIssueStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Issue, error) {
+	if s.err != nil {
+		return models.Issue{}, s.err
+	}
+	return s.issue, nil
+}
+
+type testInternalRepoStore struct {
+	repo models.Repository
+	err  error
+}
+
+func (s testInternalRepoStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
+	if s.err != nil {
+		return models.Repository{}, s.err
+	}
+	return s.repo, nil
+}
+
+type testInternalGitHubTokens struct {
+	token string
+	err   error
+}
+
+func (s testInternalGitHubTokens) GetInstallationToken(context.Context, int64) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.token, nil
+}
+
+type testInternalSandboxProvider struct {
+	execExit   int
+	execErr    error
+	execStderr string
+	execCalls  []string
+}
+
+func (p *testInternalSandboxProvider) Name() string { return "test" }
+
+func (p *testInternalSandboxProvider) Create(context.Context, SandboxConfig) (*Sandbox, error) {
+	return nil, nil
+}
+
+func (p *testInternalSandboxProvider) CloneRepo(context.Context, *Sandbox, string, string, string) error {
+	return nil
+}
+
+func (p *testInternalSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	p.execCalls = append(p.execCalls, cmd)
+	if p.execStderr != "" {
+		_, _ = io.WriteString(stderr, p.execStderr)
+	}
+	return p.execExit, p.execErr
+}
+
+func (p *testInternalSandboxProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (p *testInternalSandboxProvider) WriteFile(context.Context, *Sandbox, string, []byte) error {
+	return nil
+}
+
+func (p *testInternalSandboxProvider) Destroy(context.Context, *Sandbox) error {
+	return nil
+}
+
+func (p *testInternalSandboxProvider) IsAlive(context.Context, *Sandbox) (bool, error) {
+	return true, nil
+}
+
+func (p *testInternalSandboxProvider) ConnectionInfo(context.Context, *Sandbox) (*SandboxConnectionInfo, error) {
+	return nil, nil
+}
+
+func (p *testInternalSandboxProvider) Snapshot(context.Context, *Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(nil), nil
+}
+
+func (p *testInternalSandboxProvider) Restore(context.Context, *Sandbox, io.Reader) error {
+	return nil
+}
+
+func (p *testInternalSandboxProvider) ExecStream(context.Context, *Sandbox, string, func([]byte), io.Writer) (int, error) {
+	return 0, nil
 }
 
 func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
@@ -172,4 +280,132 @@ func TestStreamLogs_DropsUnmarshalableMetadata(t *testing.T) {
 
 	require.Len(t, logs.logs, 1, "streamLogs should still persist the log entry when metadata fails to marshal")
 	require.Nil(t, logs.logs[0].Metadata, "unmarshalable metadata should be dropped to nil rather than blocking the log")
+}
+
+func TestPrepareSandboxGitHubAuth_LegacyAddsCoAuthorTrailer(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	userID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+	noreply := "4+alice@users.noreply.github.com"
+	orch := &Orchestrator{
+		users: testInternalUserLookup{
+			user: models.User{
+				ID:                 userID,
+				OrgID:              orgID,
+				Name:               "Alice Example",
+				Email:              "alice@example.com",
+				GitHubNoreplyEmail: &noreply,
+			},
+		},
+		logger: zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID}
+	repo := &models.Repository{FullName: "assembledhq/143"}
+	cfg := &SandboxConfig{HomeDir: "/home/sandbox", Env: map[string]string{}}
+
+	authState, err := orch.prepareSandboxGitHubAuth(context.Background(), run, repo, "ghp_test123", cfg, zerolog.Nop())
+	require.NoError(t, err, "prepareSandboxGitHubAuth should not fail on the legacy fallback path")
+	require.Nil(t, authState, "prepareSandboxGitHubAuth should not create auth state on the legacy fallback path")
+	require.Equal(t, "ghp_test123", cfg.Env["GITHUB_TOKEN"], "prepareSandboxGitHubAuth should expose the fallback token on the legacy path")
+	require.Equal(t, "143 Agent", cfg.Env[sandboxauth.GitNameEnvVar], "prepareSandboxGitHubAuth should seed the default git author name on the legacy path")
+	require.Equal(t, "noreply@143.dev", cfg.Env[sandboxauth.GitEmailEnvVar], "prepareSandboxGitHubAuth should seed the default git author email on the legacy path")
+	require.Equal(t, "Co-authored-by: Alice Example <4+alice@users.noreply.github.com>", cfg.Env[sandboxauth.CoAuthorEnvVar], "prepareSandboxGitHubAuth should attach a co-author trailer when the triggering user can be loaded")
+}
+
+func TestPrepareSandboxGitHubAuth_LegacyIgnoresUserLookupFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	userID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	orch := &Orchestrator{
+		users:  testInternalUserLookup{err: errors.New("user lookup failed")},
+		logger: zerolog.Nop(),
+	}
+	run := &models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID}
+	cfg := &SandboxConfig{HomeDir: "/home/sandbox", Env: map[string]string{}}
+
+	authState, err := orch.prepareSandboxGitHubAuth(context.Background(), run, &models.Repository{FullName: "assembledhq/143"}, "ghp_test123", cfg, zerolog.Nop())
+	require.NoError(t, err, "prepareSandboxGitHubAuth should not fail when the legacy co-author lookup is best-effort")
+	require.Nil(t, authState, "prepareSandboxGitHubAuth should not create auth state on the legacy fallback path")
+	require.Equal(t, "ghp_test123", cfg.Env["GITHUB_TOKEN"], "prepareSandboxGitHubAuth should still expose the fallback token when user lookup fails")
+	require.Empty(t, cfg.Env[sandboxauth.CoAuthorEnvVar], "prepareSandboxGitHubAuth should skip the co-author trailer when the triggering user cannot be loaded")
+}
+
+func TestSessionWorkingBranch_PrefersPersistedBranch(t *testing.T) {
+	t.Parallel()
+
+	workingBranch := "143/persisted/fix-auth"
+	run := &models.Session{ID: uuid.New(), WorkingBranch: &workingBranch}
+
+	require.Equal(t, workingBranch, sessionWorkingBranch(run, &models.Issue{Title: "Ignored"}), "sessionWorkingBranch should reuse the persisted working branch when present")
+}
+
+func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	repoID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	issueID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
+	repo := models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		FullName:       "assembledhq/143",
+		DefaultBranch:  "main",
+		CloneURL:       "https://github.com/assembledhq/143.git",
+		InstallationID: 42,
+	}
+	issue := models.Issue{ID: issueID, OrgID: orgID, RepositoryID: &repoID, Title: "Fix checkout failure"}
+
+	tests := []struct {
+		name       string
+		execExit   int
+		execErr    error
+		execStderr string
+		wantErr    string
+	}{
+		{
+			name:     "exec error",
+			execExit: 1,
+			execErr:  errors.New("exec failed"),
+			wantErr:  "create working branch 143/",
+		},
+		{
+			name:       "non-zero exit",
+			execExit:   17,
+			execStderr: "branch already exists",
+			wantErr:    "exit=17 stderr=branch already exists",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := &models.Session{
+				ID:             uuid.MustParse("88888888-8888-8888-8888-888888888888"),
+				OrgID:          orgID,
+				PrimaryIssueID: &issueID,
+				RepositoryID:   &repoID,
+				AgentType:      models.AgentType("test"),
+			}
+			provider := &testInternalSandboxProvider{
+				execExit:   tt.execExit,
+				execErr:    tt.execErr,
+				execStderr: tt.execStderr,
+			}
+			orch := &Orchestrator{
+				issues:       testInternalIssueStore{issue: issue},
+				repositories: testInternalRepoStore{repo: repo},
+				github:       testInternalGitHubTokens{token: "ghp_test123"},
+				provider:     provider,
+				logger:       zerolog.Nop(),
+			}
+
+			_, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"})
+			require.Error(t, err, "setupFreshSandbox should fail when the working branch cannot be created")
+			require.Contains(t, err.Error(), tt.wantErr, "setupFreshSandbox should surface the working-branch checkout failure")
+		})
+	}
 }

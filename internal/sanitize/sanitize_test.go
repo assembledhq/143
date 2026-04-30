@@ -46,8 +46,8 @@ func TestSanitizeForPrompt(t *testing.T) {
 		{
 			name:   "truncation respects UTF-8 boundary",
 			input:  "hello \xe4\xb8\x96\xe7\x95\x8c", // "hello 世界"
-			maxLen: 8,                                  // cuts inside the 3-byte 世
-			want:   "hello ",                           // backs up to last valid rune
+			maxLen: 8,                                // cuts inside the 3-byte 世
+			want:   "hello ",                         // backs up to last valid rune
 		},
 		{
 			name:   "maxLen 0 means no truncation",

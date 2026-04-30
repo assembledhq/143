@@ -33,10 +33,10 @@ type NormalizedIssue struct {
 
 // Service handles the normalization and persistence of ingested issues.
 type Service struct {
-	issueStore    *db.IssueStore
-	webhookStore  *db.WebhookDeliveryStore
-	jobStore      *db.JobStore
-	logger        zerolog.Logger
+	issueStore   *db.IssueStore
+	webhookStore *db.WebhookDeliveryStore
+	jobStore     *db.JobStore
+	logger       zerolog.Logger
 }
 
 func NewService(
