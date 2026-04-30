@@ -3,11 +3,12 @@
 import { AlertTriangle, CheckCircle2, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+import { SyncTimeText } from "@/components/sync-time-text";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -36,7 +37,6 @@ export function PRHealthBanner({
   onMerge,
 }: PRHealthBannerProps) {
   const isHealthy = !health.can_fix_tests && !health.can_resolve_conflicts;
-  const syncedLabel = health.github_state_synced_at ? formatTimeAgo(health.github_state_synced_at) : "Syncing";
   const hasActionableButton = health.can_resolve_conflicts || health.can_fix_tests || health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
@@ -69,9 +69,7 @@ export function PRHealthBanner({
             <p className="text-sm text-foreground">{health.summary}</p>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary" className="text-xs">
-                Synced {syncedLabel}
-              </Badge>
+              <SyncTimeText syncedAt={health.github_state_synced_at} prefix="Synced" />
               {health.has_conflicts && (
                 <Badge variant="secondary" className="bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400 text-xs">
                   conflicts
