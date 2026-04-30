@@ -194,6 +194,12 @@ export function PreviewPanel({
         );
         return;
       }
+      if (code === PREVIEW_ERROR_CODES.NO_CONFIG) {
+        // Backend message already names the file the user needs to add and
+        // points to the docs — pass it through verbatim.
+        setMutationError(err.message);
+        return;
+      }
       setMutationError(`Failed to start preview: ${err.message}`);
     },
   });

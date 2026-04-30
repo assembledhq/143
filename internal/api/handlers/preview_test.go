@@ -141,19 +141,21 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestPreviewHandler_StartPreview_DefaultConfig(t *testing.T) {
+func TestPreviewHandler_ReservationPlaceholderConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultPreviewConfig()
+	// reservationPlaceholderConfig only has to satisfy ValidateConfig so the
+	// reservation row is creatable when the client doesn't supply a config.
+	// The real config (workspace .143/preview.json) is loaded post-hydrate;
+	// this placeholder is never executed.
+	cfg := reservationPlaceholderConfig()
 
-	require.Equal(t, "default", cfg.Name, "default preview config should use the default profile name")
-	require.Equal(t, "app", cfg.Primary, "default preview config should set the primary service")
-	require.Equal(t, []string{"npm", "start"}, cfg.Services["app"].Command, "default preview config should run npm start")
-	require.Equal(t, 3000, cfg.Services["app"].Port, "default preview config should expose the default Node port")
-	require.Equal(t, "/", cfg.Services["app"].Ready.HTTPPath, "default preview config should include a readiness probe path")
+	require.Equal(t, "placeholder", cfg.Name)
+	require.Equal(t, "app", cfg.Primary)
+	require.NotEmpty(t, cfg.Services["app"].Command, "placeholder must define a command so ValidateConfig passes")
 
 	errs := preview.ValidateConfig(cfg)
-	require.Empty(t, errs, "default preview config should satisfy preview validation")
+	require.Empty(t, errs, "reservation placeholder must satisfy preview validation")
 }
 
 func TestPreviewHandler_ManagerNotConfigured(t *testing.T) {
@@ -419,6 +421,21 @@ func newPreviewHandlerWithMock(mock pgxmock.PgxPoolIface) *PreviewHandler {
 	}
 }
 
+// validWorkspaceConfigJSON is a minimal but well-formed .143/preview.json,
+// used by tests that need StartPreview to traverse past the post-hydrate
+// auto-detect step (PREVIEW_NO_CONFIG) and exercise the actual launch path.
+const validWorkspaceConfigJSON = `{
+  "name": "test-app",
+  "primary": "app",
+  "services": {
+    "app": {
+      "command": ["echo", "ok"],
+      "port": 3000,
+      "ready": {"http_path": "/"}
+    }
+  }
+}`
+
 // previewTestContextWithIDs creates a request context with specific org/user IDs and chi URL param.
 func previewTestContextWithIDs(r *http.Request, orgID, userID uuid.UUID, sessionID string) *http.Request {
 	ctx := middleware.WithUser(r.Context(), &models.User{
@@ -593,10 +610,115 @@ func TestNewPreviewHandler(t *testing.T) {
 	})
 
 	sessionStore := db.NewSessionStore(mock)
-	h := NewPreviewHandler(mgr, store, sessionStore, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	repoStore := db.NewRepositoryStore(mock)
+	h := NewPreviewHandler(mgr, store, sessionStore, repoStore, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
 	require.NotNil(t, h)
 	require.NotNil(t, h.manager)
 	require.NotNil(t, h.store)
+}
+
+// =============================================================================
+// resolveSandboxWorkDir tests
+// =============================================================================
+
+// repositoryRowColumns mirrors the SELECT projection of RepositoryStore.GetByID.
+// Keep in sync with internal/db/repositories.go.
+var repositoryRowColumns = []string{
+	"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+	"private", "language", "description", "clone_url", "installation_id", "status",
+	"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+}
+
+// repoRow returns a minimal valid Repository row for pgxmock with the given
+// full_name. Other fields hold zero/default values — only full_name matters
+// for resolveSandboxWorkDir.
+func repoRow(repoID, orgID uuid.UUID, fullName string) []any {
+	now := time.Now()
+	return []any{
+		repoID, orgID, uuid.New(), int64(1), fullName, "main",
+		false, (*string)(nil), (*string)(nil), "https://example.invalid/x.git",
+		int64(1), "active",
+		(*time.Time)(nil), (*float64)(nil), json.RawMessage(`{}`), now, now,
+	}
+}
+
+func TestResolveSandboxWorkDir_NilRepoID(t *testing.T) {
+	t.Parallel()
+
+	h := &PreviewHandler{logger: zerolog.Nop()}
+	got := h.resolveSandboxWorkDir(context.Background(), &models.Session{ID: uuid.New(), OrgID: uuid.New()})
+	require.Equal(t, "/workspace", got, "missing RepositoryID must fall back to legacy /workspace default")
+}
+
+func TestResolveSandboxWorkDir_NilRepoStore(t *testing.T) {
+	t.Parallel()
+
+	// RepositoryID set but no repoStore wired (e.g. legacy/test handlers) —
+	// must not panic; falls back to default.
+	repoID := uuid.New()
+	h := &PreviewHandler{logger: zerolog.Nop()}
+	got := h.resolveSandboxWorkDir(context.Background(), &models.Session{
+		ID: uuid.New(), OrgID: uuid.New(), RepositoryID: &repoID,
+	})
+	require.Equal(t, "/workspace", got, "nil repoStore must fall back rather than panic")
+}
+
+func TestResolveSandboxWorkDir_LookupSuccess(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM repositories\\s+WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repositoryRowColumns).
+				AddRow(repoRow(repoID, orgID, "assembledhq/143")...),
+		)
+
+	h := &PreviewHandler{
+		logger:    zerolog.Nop(),
+		repoStore: db.NewRepositoryStore(mock),
+	}
+	got := h.resolveSandboxWorkDir(context.Background(), &models.Session{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID,
+	})
+	// Slug for "assembledhq/143" is "143"; default HomeDir is "/home/sandbox".
+	// Must match orchestrator.go's per-session WorkDir derivation so
+	// readWorkspacePreviewConfig finds .143/preview.json on disk.
+	require.Equal(t, "/home/sandbox/143", got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestResolveSandboxWorkDir_LookupError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM repositories\\s+WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db down"))
+
+	h := &PreviewHandler{
+		logger:    zerolog.Nop(),
+		repoStore: db.NewRepositoryStore(mock),
+	}
+	got := h.resolveSandboxWorkDir(context.Background(), &models.Session{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID,
+	})
+	// Losing auto-detect for one preview start is preferable to refusing to
+	// hydrate at all when the DB has a transient hiccup.
+	require.Equal(t, "/workspace", got, "lookup error must fall back, not bubble up")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // =============================================================================
@@ -605,21 +727,27 @@ func TestNewPreviewHandler(t *testing.T) {
 
 // fakeFileReader is a stub FileReader that returns canned ReadFile responses.
 // Unused methods panic so this test file fails loudly if something else grows
-// a dependency on them.
+// a dependency on them. lastWorkDir captures the workDir argument from the
+// most recent ReadFile call so tests can assert that the handler is asking the
+// reader to look in the right repo-rooted path (not the legacy /workspace).
 type fakeFileReader struct {
-	content string
-	err     error
+	content     string
+	err         error
+	lastWorkDir *string
 }
 
-func (f fakeFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
+func (f *fakeFileReader) ListDir(context.Context, string, string, string) ([]sandbox.FileEntry, error) {
 	panic("not used")
 }
 
-func (f fakeFileReader) ReadFile(_ context.Context, _, _, _ string) (string, bool, error) {
+func (f *fakeFileReader) ReadFile(_ context.Context, _, workDir, _ string) (string, bool, error) {
+	if f.lastWorkDir != nil {
+		*f.lastWorkDir = workDir
+	}
 	return f.content, false, f.err
 }
 
-func (f fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
+func (f *fakeFileReader) ReadFileContext(context.Context, string, string, string, int, int, int) (sandbox.FileContextResult, error) {
 	panic("not used")
 }
 
@@ -639,7 +767,7 @@ func TestReadWorkspacePreviewConfig_FileNotFound(t *testing.T) {
 	// returns sandbox.ErrFileNotFound (wrapped). Must NOT bubble up — caller
 	// falls back to built-in defaults.
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
+		fileReader: &fakeFileReader{err: fmt.Errorf("read file .143/preview.json: %w", sandbox.ErrFileNotFound)},
 		logger:     zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
@@ -652,12 +780,12 @@ func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
 
 	// A non-ENOENT read error (docker exec failure, context cancel, sandbox
 	// gone) means we cannot tell whether a committed config exists. Returning
-	// (nil, err) makes StartPreview surface a 500 instead of silently swapping
-	// in Node.js defaults — which would start the wrong preview for non-Node
-	// projects and time out after minutes.
+	// (nil, err) makes StartPreview surface a 500 instead of guessing — the
+	// caller distinguishes this from "definitively absent" (which yields
+	// PREVIEW_NO_CONFIG, not 500).
 	wantErr := errors.New("docker exec failed: container not running")
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{err: wantErr},
+		fileReader: &fakeFileReader{err: wantErr},
 		logger:     zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
@@ -669,16 +797,17 @@ func TestReadWorkspacePreviewConfig_UnexpectedReadError(t *testing.T) {
 func TestReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	t.Parallel()
 
-	// Parse errors are a user authoring problem, not infrastructure. We still
-	// fall back to defaults (returning the 500 would make the preview strictly
-	// worse than just running the default), but log at Warn so the user sees
-	// why their committed config didn't take effect.
+	// Parse errors are a user authoring problem, not infrastructure. Returning
+	// (nil, nil) keeps the response shape identical to "file not present", so
+	// the caller surfaces PREVIEW_NO_CONFIG (the user fix is the same: commit
+	// a valid .143/preview.json) instead of a misleading 500. The Warn log
+	// emitted by readWorkspacePreviewConfig is the operator-side breadcrumb.
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{content: "{not valid json"},
+		fileReader: &fakeFileReader{content: "{not valid json"},
 		logger:     zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
-	require.NoError(t, err, "invalid JSON must fall through to defaults, not surface as a 500")
+	require.NoError(t, err, "invalid JSON must not surface as a 500")
 	require.Nil(t, cfg)
 }
 
@@ -700,7 +829,7 @@ func TestReadWorkspacePreviewConfig_ValidConfig(t *testing.T) {
 	}`
 
 	h := &PreviewHandler{
-		fileReader: fakeFileReader{content: raw},
+		fileReader: &fakeFileReader{content: raw},
 		logger:     zerolog.Nop(),
 	}
 	cfg, err := h.readWorkspacePreviewConfig(context.Background(), &agent.Sandbox{ID: "c1", WorkDir: "/workspace"}, uuid.New())
@@ -789,6 +918,20 @@ func sessionRowWithContainer(id, orgID uuid.UUID, containerID string) []interfac
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, "idle", (*string)(nil), nil, nil, nil, nil, nil, time.Now(),
 	)
+}
+
+// sessionRowWithContainerAndRepo is sessionRowWithContainer plus a non-nil
+// repository_id, used by tests that need acquireSandbox to invoke the repo
+// lookup in resolveSandboxWorkDir.
+func sessionRowWithContainerAndRepo(id, orgID, repoID uuid.UUID, containerID string) []interface{} {
+	row := sessionRowWithContainer(id, orgID, containerID)
+	for i, name := range sessionRowColumns {
+		if name == "repository_id" {
+			row[i] = &repoID
+			return row
+		}
+	}
+	panic("repository_id column missing from sessionRowColumns")
 }
 
 // sessionRowReuseWithSnapshot builds a row that satisfies both the reuse
@@ -893,10 +1036,114 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
+// TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
+// the user clicks Start Preview on a repo that has no .143/preview.json
+// committed and supplies no explicit config. The handler must abort the
+// reservation and surface PREVIEW_NO_CONFIG (422) — there is no longer a silent
+// "npm start on :3000" fallback that wastes ~90s on a doomed readiness probe.
+func TestPreviewHandler_StartPreview_NoWorkspaceConfig(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainer(sessionID, orgID, "container-1")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// fileReader returns ENOENT → readWorkspacePreviewConfig yields (nil, nil)
+	// → handler aborts the reservation with PREVIEW_NO_CONFIG.
+	expectAbortReservationNoDestroy(mock)
+
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = &fakeFileReader{err: fmt.Errorf("read .143/preview.json: %w", sandbox.ErrFileNotFound)}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "missing workspace config must surface as 422")
+
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Equal(t, "PREVIEW_NO_CONFIG", resp.Error.Code)
+	require.Contains(t, resp.Error.Message, ".143/preview.json", "user-facing message should name the file they need to add")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestPreviewHandler_StartPreview_AutoDetectUsesRepoSlugWorkDir is the
+// regression test for the production bug where preview start always failed
+// with PREVIEW_NO_CONFIG (or, before that, fell into the npm-start fallback)
+// because the handler asked the file reader to look in /workspace, but the
+// orchestrator actually checks the repo out at /home/sandbox/<slug>. This
+// test wires a sessionRow with a repository_id, mocks the repo lookup, and
+// asserts that the workDir argument fileReader.ReadFile receives matches
+// the orchestrator's per-session WorkDir derivation — not the legacy default.
+func TestPreviewHandler_StartPreview_AutoDetectUsesRepoSlugWorkDir(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowWithContainerAndRepo(sessionID, orgID, repoID, "container-1")...),
+		)
+	expectReserveSuccess(mock, sessionID, orgID, userID)
+	// resolveSandboxWorkDir → repoStore.GetByID lookup.
+	mock.ExpectQuery("SELECT .+ FROM repositories\\s+WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(repositoryRowColumns).
+				AddRow(repoRow(repoID, orgID, "assembledhq/143")...),
+		)
+	// fileReader returns ENOENT → handler aborts with PREVIEW_NO_CONFIG.
+	// We don't care about the response here; we care about the workDir the
+	// reader was called with, captured below via lastWorkDir.
+	expectAbortReservationNoDestroy(mock)
+
+	var capturedWorkDir string
+	h := newPreviewHandlerWithMock(mock)
+	h.sessionStore = db.NewSessionStore(mock)
+	h.repoStore = db.NewRepositoryStore(mock)
+	h.fileReader = &fakeFileReader{
+		err:         fmt.Errorf("read .143/preview.json: %w", sandbox.ErrFileNotFound),
+		lastWorkDir: &capturedWorkDir,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+	h.StartPreview(w, req)
+
+	require.Equal(t, "/home/sandbox/143", capturedWorkDir,
+		"file reader must be invoked with the repo-rooted WorkDir, not the legacy /workspace")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 // TestPreviewHandler_StartPreview_AutoDetectInfraError exercises the auto-detect
-// branch of StartPreview when the workspace file reader returns a non-ENOENT
-// error. The handler must surface a 500 instead of silently swapping in Node.js
-// defaults — see readWorkspacePreviewConfig's docstring for the rationale.
+// branch when the workspace file reader returns a non-ENOENT error. The handler
+// must surface a 500 instead of guessing — distinct from PREVIEW_NO_CONFIG,
+// which means the file is definitively absent.
 func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 	t.Parallel()
 
@@ -926,7 +1173,7 @@ func TestPreviewHandler_StartPreview_AutoDetectInfraError(t *testing.T) {
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
-	h.fileReader = fakeFileReader{err: errors.New("docker exec failed: container not running")}
+	h.fileReader = &fakeFileReader{err: errors.New("docker exec failed: container not running")}
 
 	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
 	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
@@ -1269,6 +1516,9 @@ func TestPreviewHandler_StartPreview_HydrateReachesLaunch(t *testing.T) {
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	// fileReader returns a valid workspace config so the post-hydrate
+	// auto-detect doesn't short-circuit with PREVIEW_NO_CONFIG before Launch.
+	h.fileReader = &fakeFileReader{content: validWorkspaceConfigJSON}
 	sp := testutil.NewMockSandboxProvider()
 	// RestoreFn drains the io.Pipe reader so the Load goroutine's Write
 	// completes and HydrateSandboxFromSnapshot returns instead of deadlocking.
@@ -1483,6 +1733,7 @@ func TestPreviewHandler_StartPreview_ReuseZombieFallsThroughToHydrate(t *testing
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = &fakeFileReader{content: validWorkspaceConfigJSON}
 	sp := testutil.NewMockSandboxProvider()
 	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
 		require.Equal(t, "zombie-id", sb.ID)
@@ -1545,6 +1796,7 @@ func TestPreviewHandler_StartPreview_ReuseInspectErrorFallsThroughToHydrate(t *t
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = &fakeFileReader{content: validWorkspaceConfigJSON}
 	sp := testutil.NewMockSandboxProvider()
 	sp.IsAliveFn = func(_ context.Context, _ *agent.Sandbox) (bool, error) {
 		return false, errors.New("docker daemon flaked")
@@ -1602,6 +1854,7 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.fileReader = &fakeFileReader{content: validWorkspaceConfigJSON}
 	sp := testutil.NewMockSandboxProvider()
 	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
 		require.Equal(t, "live-container", sb.ID)
