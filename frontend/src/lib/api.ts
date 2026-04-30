@@ -388,10 +388,6 @@ export const api = {
       del(`/api/v1/sessions/${sessionId}/review-comments/${commentId}`),
     sendReviewComments: (sessionId: string) =>
       post<import('./types').SingleResponse<{ message: string; sent: boolean }>>(`/api/v1/sessions/${sessionId}/review-comments/send`),
-    getReviewCapabilities: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').SessionReviewCapabilities>>(`/api/v1/sessions/${sessionId}/review-capabilities`),
-    startReview: (sessionId: string, mode?: import('./types').SessionReviewMode) =>
-      post<import('./types').SingleResponse<import('./types').SessionReviewResponse>>(`/api/v1/sessions/${sessionId}/review`, mode ? { mode } : {}),
     listFiles: (sessionId: string, path?: string) => {
       const params = new URLSearchParams();
       if (path) params.set('path', path);

@@ -124,9 +124,7 @@ type SessionStore interface {
 	SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error
 	UpdateFailure(ctx context.Context, orgID, runID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 	UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error
-	// UpdateRevisionContext rewrites sessions.revision_context. The orchestrator
-	// uses it to clear ReviewContext after consumption so a subsequent user
-	// message isn't silently swapped for /review again.
+	// UpdateRevisionContext rewrites sessions.revision_context.
 	UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	// AcquireTurnHold flips turn_holding_container=TRUE and publishes the
@@ -1667,32 +1665,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Warn().Err(revErr).Msg("failed to parse session revision context during continue_session")
 		revisionContext = nil
 	}
-	// Review turns route through the adapter's native review surface (e.g.
-	// Claude Code's /review skill). Appending the formatted revision context
-	// here would either pollute the slash-command line or hand-roll a fake
-	// review prompt — both are explicitly out of scope per doc 63. Skip the
-	// formatter for review turns; the adapter reads ReviewContext directly
-	// off AgentPrompt.RevisionContext.
-	if revisionContext != nil && revisionContext.ReviewContext == nil {
-		if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
-			userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
-		}
-	}
-	// ReviewContext is one-shot: clear it from the persisted row before the
-	// agent runs so the next user message ("now actually fix the issue you
-	// found") doesn't get silently swapped for /review again. Done before
-	// Execute on purpose — even if the turn fails or is retried, the user
-	// will retry by clicking the button again, not by re-firing the same
-	// stale directive against an unrelated message. Other RevisionContext
-	// fields (RepairAction, RepairContext, ...) are preserved so PR-repair
-	// behavior is unchanged.
-	if revisionContext != nil && revisionContext.ReviewContext != nil {
-		cleared, marshalErr := MarshalRevisionContextWithoutReview(revisionContext)
-		if marshalErr != nil {
-			log.Warn().Err(marshalErr).Msg("failed to re-encode revision context after review consumption")
-		} else if updateErr := o.sessions.UpdateRevisionContext(ctx, session.OrgID, session.ID, cleared); updateErr != nil {
-			log.Warn().Err(updateErr).Msg("failed to clear consumed review context; subsequent turns may double-fire /review")
-		}
+	if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
+		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
 	}
 
 	turnNumber := session.CurrentTurn + 1

@@ -408,22 +408,6 @@ export interface PullRequestUpdatedEvent {
   synced_at: string;
 }
 
-export type SessionReviewMode = 'default' | 'security';
-
-// Mirrors models.SessionReviewCapabilities. The Review button uses `modes`
-// to decide whether to render a single button or a dropdown, and `can_review`
-// to gate against in-flight or empty-diff sessions before the user clicks.
-export interface SessionReviewCapabilities {
-  can_review: boolean;
-  reason?: string;
-  modes: SessionReviewMode[];
-}
-
-export interface SessionReviewResponse {
-  session_id: string;
-  mode: SessionReviewMode;
-}
-
 export interface SessionReviewComment {
   id: string;
   session_id: string;
