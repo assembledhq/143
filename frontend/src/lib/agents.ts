@@ -10,6 +10,7 @@ import {
   AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
+import type { CodexAuthStatus, ResolvedCredential } from "@/lib/types";
 
 export interface AgentEnvVar {
   name: string;
@@ -138,4 +139,22 @@ export const AGENT_DISPLAY_LABELS: Readonly<Record<string, string>> = {
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {
   return AGENTS.find((a) => a.models.includes(model))?.key;
+}
+
+// True when the user has the credentials needed to run the given agent.
+// Codex can auth via OAuth (codexAuthStatus.completed) or an OPENAI_API_KEY
+// resolved credential; every other agent requires its provider's resolved
+// credential. Source of truth for the new-session picker filter, the
+// AgentKeyRequiredBanner gate, and setup-readiness checks.
+export function isAgentConnected(
+  agentType: string,
+  resolvedCredentials: readonly ResolvedCredential[],
+  codexAuthStatus?: CodexAuthStatus | null,
+): boolean {
+  if (agentType === "codex" && codexAuthStatus?.status === "completed") return true;
+  const agent = AGENTS_BY_KEY[agentType];
+  if (!agent) return false;
+  return resolvedCredentials.some(
+    (c) => c.provider === agent.providerKey && c.source !== "none",
+  );
 }
