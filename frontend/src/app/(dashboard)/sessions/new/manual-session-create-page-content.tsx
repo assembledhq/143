@@ -46,7 +46,7 @@ import { cn } from "@/lib/utils";
 import {
   AGENTS,
   agentTypeForModel,
-  isAgentConnected,
+  isAgentAvailable,
 } from "@/lib/agents";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
@@ -62,7 +62,7 @@ import {
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import type { OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputCommand, SessionInputReference } from "@/lib/types";
+import type { CodingAuth, OrgSettings, Organization, Repository, SingleResponse, ListResponse, ResolvedCredential, SessionInputCommand, SessionInputReference } from "@/lib/types";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const triggerPickerIconClassName = "h-4 w-4 shrink-0";
@@ -281,6 +281,10 @@ export function ManualSessionCreatePageContent() {
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
   });
+  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
+    queryKey: ["coding-auths"],
+    queryFn: () => api.codingAuths.list(),
+  });
 
   // Auto-select: user's choice > last used repo > first repo.
   const selectedRepoId = useMemo(() => {
@@ -331,30 +335,31 @@ export function ManualSessionCreatePageContent() {
   };
 
   const codexAuthStatus = codexAuthResponse?.data;
+  const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
   const modelGroups = useMemo(() => {
-    // Only show agents whose integrations are configured, so the picker matches
-    // what the user can actually run — same gating as AgentKeyRequiredBanner.
-    const integratedAgents = AGENTS.filter((agent) =>
-      isAgentConnected(agent.key, resolvedCredentials, codexAuthStatus),
+    // Show agents available from either the user-resolved credential path or
+    // the org coding-auth stack so the picker reflects both scopes.
+    const availableAgents = AGENTS.filter((agent) =>
+      isAgentAvailable(agent.key, resolvedCredentials, codexAuthStatus, codingAuths),
     );
     // Sort so the default agent type appears first, preserve original order otherwise.
-    return [...integratedAgents].sort((a, b) => {
+    return [...availableAgents].sort((a, b) => {
       if (a.key === defaultAgentType) return -1;
       if (b.key === defaultAgentType) return 1;
       return AGENTS.indexOf(a) - AGENTS.indexOf(b);
     });
-  }, [defaultAgentType, resolvedCredentials, codexAuthStatus]);
+  }, [codingAuths, defaultAgentType, resolvedCredentials, codexAuthStatus]);
 
   // Drop a previously selected model (from React state or restored draft) when
   // its agent is no longer integrated — keeps the picker value consistent with
-  // what's renderable. Only act once both credential queries have resolved so
+  // what's renderable. Only act once all availability queries have resolved so
   // a transient loading state doesn't nuke a valid choice.
   useEffect(() => {
-    if (!resolvedCredsResponse || !codexAuthResponse) return;
+    if (!resolvedCredsResponse || !codexAuthResponse || !codingAuthsResponse) return;
     if (!selectedModel) return;
     const stillAvailable = modelGroups.some((g) => g.models.includes(selectedModel));
     if (!stillAvailable) setSelectedModel("");
-  }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse]);
+  }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse, codingAuthsResponse]);
 
   // Determine which agent type would be used and whether credentials exist.
   const effectiveAgentType: string = selectedModel ? agentTypeForModel(selectedModel) ?? defaultAgentType : defaultAgentType;
@@ -364,7 +369,7 @@ export function ManualSessionCreatePageContent() {
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const submittedReasoningEffort = showReasoningSelector ? effectiveReasoningEffort : "";
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
-  const hasAgentCredentials = isAgentConnected(effectiveAgentType, resolvedCredentials, codexAuthStatus);
+  const hasAgentCredentials = isAgentAvailable(effectiveAgentType, resolvedCredentials, codexAuthStatus, codingAuths);
 
   const slashCommandsQuery = useSessionComposerSlashCommands({
     agentType: effectiveAgentType,
