@@ -103,17 +103,6 @@ func ParseRevisionContext(raw json.RawMessage) (*RevisionContext, error) {
 	return &parsed, nil
 }
 
-func isRevisionContextEmpty(ctx *RevisionContext) bool {
-	if ctx == nil {
-		return true
-	}
-	return ctx.FormattedFeedback == "" &&
-		ctx.PreviousDiff == "" &&
-		ctx.CommentSummary == "" &&
-		ctx.RepairAction == "" &&
-		ctx.RepairContext == nil
-}
-
 func FormatRevisionContextForContinuation(ctx *RevisionContext) string {
 	if ctx == nil {
 		return ""
