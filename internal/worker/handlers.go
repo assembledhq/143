@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
@@ -2417,6 +2418,13 @@ func newPrepareLinearPrimaryHandler(svc *linear.Service, logger zerolog.Logger) 
 		if len(refs) == 0 {
 			refs = linearRefsFromIdentifiers(input.Identifiers)
 		}
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+			if err := svc.MarkLinearPrepareFailed(hookCtx, orgID, sessionID); err != nil {
+				logger.Warn().Err(err).
+					Str("session_id", sessionID.String()).
+					Msg("prepare_linear_primary dead-letter hook failed to mark prepare state failed")
+			}
+		})
 		if err := svc.PrepareLinearPrimaryRefs(ctx, orgID, sessionID, refs, userID); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("prepare_linear_primary failed")
 			return &RetryableError{Err: err}

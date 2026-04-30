@@ -502,6 +502,35 @@ func (s *SessionStore) SetLinearPrepareState(ctx context.Context, orgID, session
 	return nil
 }
 
+// SetLinearPrepareStateIfNotReady writes state unless the row is already in
+// "ready" - the terminal-positive state. Used by the prepare-worker failure
+// paths so two distinct-hash workers racing on the same session can't have
+// one mark "failed" on top of the other's "ready" success. "ready" is
+// sticky once observed; "failed" -> "ready" is still allowed because a later
+// successful prepare should win over an earlier failure.
+//
+// Returns nil with zero rows affected when the row was already "ready" - the
+// no-op is intentional and not an error.
+func (s *SessionStore) SetLinearPrepareStateIfNotReady(ctx context.Context, orgID, sessionID uuid.UUID, state models.LinearPrepareState) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET linear_prepare_state = @state
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		  AND linear_prepare_state <> @ready`,
+		pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"state":  state,
+			"ready":  models.LinearPrepareStateReady,
+		})
+	if err != nil {
+		return fmt.Errorf("update linear prepare state: %w", err)
+	}
+	return nil
+}
+
 // SetLinearIdentifierHint records the primary Linear identifier for a
 // session. The agent's branch-naming logic reads this so the working branch
 // includes the identifier — Linear's GitHub integration matches branch

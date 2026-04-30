@@ -2081,3 +2081,60 @@ func TestSessionStore_LinearSessionFields(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionStore_SetLinearPrepareStateIfNotReady locks the guarded-write
+// contract that protects "ready" from being clobbered by a concurrent
+// prepare-worker failure path. The unguarded SetLinearPrepareState would let
+// a sibling worker mark "failed" on top of an earlier worker's "ready",
+// dead-lettering a usable session for no reason.
+func TestSessionStore_SetLinearPrepareStateIfNotReady(t *testing.T) {
+	t.Parallel()
+
+	t.Run("writes when not ready", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.NoError(t, err, "guarded write should succeed when current state is not ready")
+		require.NoError(t, mock.ExpectationsWereMet(), "guarded write should issue the conditional UPDATE")
+	})
+
+	t.Run("zero rows is not an error", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.NoError(t, err, "guarded write should treat already-ready rows as an intentional no-op")
+		require.NoError(t, mock.ExpectationsWereMet(), "guarded write should issue the conditional UPDATE even when no rows match")
+	})
+
+	t.Run("wraps db errors", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create mock pool")
+		defer mock.Close()
+
+		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnError(errors.New("db unavailable"))
+
+		err = NewSessionStore(mock).SetLinearPrepareStateIfNotReady(context.Background(), uuid.New(), uuid.New(), models.LinearPrepareStateFailed)
+		require.Error(t, err, "guarded write should surface database errors")
+		require.Contains(t, err.Error(), "update linear prepare state", "guarded write should wrap database errors with context")
+	})
+}
