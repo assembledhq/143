@@ -1141,6 +1141,49 @@ describe('SessionDetailPage', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('PR merged', expect.any(Object)));
   });
 
+  it('renders external links for CI checks shown from the PR details hover card', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 2,
+            can_fix_tests: true,
+            checks: [
+              {
+                name: 'unit tests',
+                category: 'test' as const,
+                status: 'failed' as const,
+                details_url: 'https://ci.example.com/unit-tests',
+              },
+              {
+                name: 'integration tests',
+                category: 'test' as const,
+                status: 'failed' as const,
+                details_url: 'https://ci.example.com/integration-tests',
+              },
+            ],
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const user = userEvent.setup();
+    await user.hover(await screen.findByText('2/2 failed'));
+
+    const unitLink = await screen.findByRole('link', { name: /unit tests/i });
+    const integrationLink = screen.getByRole('link', { name: /integration tests/i });
+
+    expect(unitLink).toHaveAttribute('href', 'https://ci.example.com/unit-tests');
+    expect(unitLink).toHaveAttribute('target', '_blank');
+    expect(unitLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(integrationLink).toHaveAttribute('href', 'https://ci.example.com/integration-tests');
+    expect(integrationLink).toHaveAttribute('target', '_blank');
+    expect(integrationLink).toHaveAttribute('rel', expect.stringContaining('noreferrer'));
+  });
+
   it('shows merged PR state when a linked PR has already been merged', async () => {
     server.use(
       http.get('/api/v1/sessions/:id/pr', () => {

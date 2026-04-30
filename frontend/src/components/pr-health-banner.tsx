@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, CheckCircle2, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, GitMerge, GitPullRequest, Loader2, Wrench } from "lucide-react";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -84,12 +84,30 @@ export function PRHealthBanner({
                         <div className="text-xs font-medium text-foreground">CI jobs</div>
                         <div className="space-y-1.5">
                           {orderedChecks.map((check) => (
-                            <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3">
-                              <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
-                              <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
-                                {check.status}
-                              </Badge>
-                            </div>
+                            check.details_url ? (
+                              <a
+                                key={`${check.name}-${check.status}`}
+                                href={check.details_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-between gap-3 rounded-sm px-1 py-1 text-xs transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <span className="min-w-0 truncate text-foreground">{check.name}</span>
+                                  <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                </div>
+                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                  {check.status}
+                                </Badge>
+                              </a>
+                            ) : (
+                              <div key={`${check.name}-${check.status}`} className="flex items-center justify-between gap-3 px-1 py-1">
+                                <div className="min-w-0 text-xs text-foreground truncate">{check.name}</div>
+                                <Badge variant="secondary" className={cn("shrink-0 text-xs", checkStatusBadgeClassName(check.status))}>
+                                  {check.status}
+                                </Badge>
+                              </div>
+                            )
                           ))}
                         </div>
                       </div>
