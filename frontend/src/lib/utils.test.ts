@@ -40,9 +40,18 @@ describe("formatTimeAgo", () => {
     expect(formatTimeAgo(fiftyNineMinAgo)).toBe("59m ago");
   });
 
+  it("returns seconds ago when requested for very recent timestamps", () => {
+    const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
+    expect(formatTimeAgo(tenSecondsAgo, { includeSeconds: true })).toBe("10s ago");
+  });
+
   it("returns '23h ago' just under a day", () => {
     const twentyThreeHoursAgo = new Date(Date.now() - 23 * 3_600_000).toISOString();
     expect(formatTimeAgo(twentyThreeHoursAgo)).toBe("23h ago");
+  });
+
+  it("returns a custom fallback when provided", () => {
+    expect(formatTimeAgo(undefined, { fallback: "Syncing" })).toBe("Syncing");
   });
 
   it("returns an em-dash for missing input (rollback safety)", () => {
