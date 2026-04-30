@@ -151,17 +151,6 @@ func expectPrepareStateUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffec
 		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
 }
 
-// expectPrepareStateGuardedUpdate matches the conditional UPDATE issued by
-// SessionStore.SetLinearPrepareStateIfNotReady (4 args: id, org_id, target,
-// "ready" sentinel). The worker failure paths use this guarded write so a
-// sibling worker that already reached "ready" can't be clobbered.
-func expectPrepareStateGuardedUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
-	t.Helper()
-	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
-}
-
 func expectIdentifierHintUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
 	t.Helper()
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_identifier_hint").
