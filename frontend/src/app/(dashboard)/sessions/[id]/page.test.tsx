@@ -1143,7 +1143,8 @@ describe('SessionDetailPage', () => {
 
     expect(await screen.findByText('PR merged')).toBeInTheDocument();
     expect(screen.queryAllByText('PR merged')).toHaveLength(1);
-    expect(screen.getByText('PR #42 was merged successfully.')).toBeInTheDocument();
+    expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
+    expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('button', { name: 'View PR' })).toBeInTheDocument();
     expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-violet-700', 'dark:text-violet-400');
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
