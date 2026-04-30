@@ -1675,6 +1675,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
   const centerMode = reviewParam === "active" ? "review" : "chat";
+  const reviewModeGenerationRef = useRef(0);
+  const centerModeRef = useRef(centerMode);
+  useEffect(() => {
+    centerModeRef.current = centerMode;
+  }, [centerMode]);
   const [detailTab, setDetailTab] = useState<DetailTab>(
     previewParam === "1" ? "preview" : "overview"
   );
@@ -1695,6 +1700,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // --- Enter review mode ---
   const openReview = useCallback((fileIndex?: number) => {
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
+    reviewModeGenerationRef.current += 1;
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
@@ -1710,6 +1716,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
+    reviewModeGenerationRef.current += 1;
     setReviewParam(null);
   }, [setReviewParam]);
 
@@ -2236,47 +2243,114 @@ export function SessionDetailContent({ id }: { id: string }) {
     setComposerAttachments((previous) => previous.filter((attachment) => attachment !== url));
   }, []);
 
-  const sendMutation = useMutation({
-    mutationFn: (opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
-      setComposerUploadError(null);
-      const draftMessage = opts.overrideMessage ?? composerMessage;
-      const formattedMessage = attachedReviewComments.length > 0
-        ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
-        : draftMessage;
-      const isPlanRequest = opts.planMode ?? composerPlanMode;
+  type SendComposerMutationInput = {
+    message: string;
+    images?: string[];
+    references?: typeof composerReferences;
+    commands?: typeof composerCommands;
+    planMode: boolean;
+    wasInReviewMode: boolean;
+    reviewModeGeneration: number;
+    dismissedCommentIDs: string[];
+    previousComposerState: {
+      message: string;
+      attachments: string[];
+      references: typeof composerReferences;
+      commands: typeof composerCommands;
+      planMode: boolean;
+    };
+  };
 
+  const sendMutation = useMutation({
+    mutationFn: (input: SendComposerMutationInput) => {
+      setComposerUploadError(null);
       return api.sessions.sendMessage(id, {
-        message: formattedMessage,
-        images: composerAttachments.length > 0 ? composerAttachments : undefined,
-        references: composerReferences.length > 0 ? composerReferences : undefined,
-        commands: composerCommands.length > 0 ? composerCommands : undefined,
-        planMode: isPlanRequest,
+        message: input.message,
+        images: input.images,
+        references: input.references,
+        commands: input.commands,
+        planMode: input.planMode,
         model: composerSelectedModel || undefined,
       });
     },
-    onSuccess: () => {
-      setDismissedAttachedReviewCommentIDs((previous) => {
-        if (attachedReviewComments.length === 0) {
-          return previous;
-        }
-        return Array.from(new Set([...previous, ...attachedReviewComments.map((comment) => comment.id)]));
-      });
+    onMutate: (input: SendComposerMutationInput) => {
+      if (input.dismissedCommentIDs.length > 0) {
+        setDismissedAttachedReviewCommentIDs((previous) => Array.from(new Set([...previous, ...input.dismissedCommentIDs])));
+      }
       setComposerMessage("");
       setComposerAttachments([]);
       setComposerReferences([]);
       setComposerCommands([]);
       setComposerPlanMode(false);
-      if (centerMode === "review") {
-        exitReview();
-      }
       if (composerTextareaRef.current) {
         composerTextareaRef.current.style.height = "auto";
       }
       chatPanelScrollToLiveEdgeRef.current?.();
+      return input;
+    },
+    onError: (_error, _input, context) => {
+      if (context?.dismissedCommentIDs?.length) {
+        setDismissedAttachedReviewCommentIDs((previous) =>
+          previous.filter((commentID) => !context.dismissedCommentIDs.includes(commentID))
+        );
+      }
+      if (context?.previousComposerState) {
+        setComposerMessage(context.previousComposerState.message);
+        setComposerAttachments(context.previousComposerState.attachments);
+        setComposerReferences(context.previousComposerState.references);
+        setComposerCommands(context.previousComposerState.commands);
+        setComposerPlanMode(context.previousComposerState.planMode);
+      }
+    },
+    onSuccess: (_data, input) => {
+      if (
+        input.wasInReviewMode
+        && input.reviewModeGeneration === reviewModeGenerationRef.current
+        && centerModeRef.current === "review"
+      ) {
+        exitReview();
+      }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
     },
   });
+
+  const sendComposerMessage = useCallback((opts: { planMode?: boolean; overrideMessage?: string } = {}) => {
+    const draftMessage = opts.overrideMessage ?? composerMessage;
+    const dismissedCommentIDs = attachedReviewComments.map((comment) => comment.id);
+    const wasInReviewMode = centerMode === "review";
+    const message = attachedReviewComments.length > 0
+      ? formatReviewMessage(attachedReviewComments, filteredFiles, draftMessage)
+      : draftMessage;
+
+    sendMutation.mutate({
+      message,
+      images: composerAttachments.length > 0 ? composerAttachments : undefined,
+      references: composerReferences.length > 0 ? composerReferences : undefined,
+      commands: composerCommands.length > 0 ? composerCommands : undefined,
+      planMode: opts.planMode ?? composerPlanMode,
+      wasInReviewMode,
+      reviewModeGeneration: reviewModeGenerationRef.current,
+      dismissedCommentIDs,
+      previousComposerState: {
+        message: composerMessage,
+        attachments: composerAttachments,
+        references: composerReferences,
+        commands: composerCommands,
+        planMode: composerPlanMode,
+      },
+    });
+  }, [
+    attachedReviewComments,
+    composerAttachments,
+    composerCommands,
+    composerMessage,
+    composerPlanMode,
+    composerReferences,
+    centerMode,
+    filteredFiles,
+    sendMutation,
+  ]);
 
   const cancelMutation = useMutation({
     mutationFn: () => api.sessions.cancelSession(id),
@@ -2287,11 +2361,11 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const handleApprovePlan = useCallback(() => {
     if (!composerCanSendMessage || sendMutation.isPending) return;
-    sendMutation.mutate({
+    sendComposerMessage({
       planMode: false,
       overrideMessage: "The plan looks good. Please proceed with executing the implementation plan above. Make all the changes as described.",
     });
-  }, [composerCanSendMessage, sendMutation]);
+  }, [composerCanSendMessage, sendComposerMessage, sendMutation.isPending]);
 
   const handleAdjustPlan = useCallback(() => {
     setComposerMessage("Please adjust the plan: ");
@@ -2829,7 +2903,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               cancelPending={cancelMutation.isPending}
               uploadError={composerUploadError}
               onCancelSession={() => cancelMutation.mutate()}
-              onSend={() => sendMutation.mutate({})}
+              onSend={() => sendComposerMessage()}
               textareaRef={composerTextareaRef}
               uploadInputRef={composerUploadInputRef}
               references={composerReferences}

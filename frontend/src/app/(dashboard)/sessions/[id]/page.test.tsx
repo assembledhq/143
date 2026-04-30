@@ -25,7 +25,7 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({
     push: routerPush,
   }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
 // Mock EventSource (not available in jsdom)
@@ -77,6 +77,7 @@ afterEach(() => {
   routerPush.mockReset();
   vi.useRealTimers();
   window.localStorage.clear();
+  window.history.replaceState({}, '', '/');
   vi.restoreAllMocks();
 });
 
@@ -3113,6 +3114,165 @@ describe('SessionDetailPage', () => {
     expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
   });
 
+  it('clears attached review comments immediately after submit before the request resolves', async () => {
+    let resolvePost: () => void = () => {};
+    const postBlocked = new Promise<void>((resolve) => {
+      resolvePost = resolve;
+    });
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const comments: SessionReviewComment[] = [{
+      id: 'comment-1',
+      session_id: idleSessionWithDiff.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: 2,
+      diff_side: 'new',
+      body: 'Handle the null edge case',
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        await request.json();
+        await postBlocked;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: 'Hello agent',
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    await screen.findByText('src/app.ts');
+    expect(await screen.findByText('1 comment attached')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+    await user.type(textarea, 'Hello agent');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(screen.queryByText('1 comment attached')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('Handle the null edge case')).not.toBeInTheDocument();
+
+    resolvePost();
+  });
+
+  it('sends review comments only once across follow-up messages', async () => {
+    const postedMessages: string[] = [];
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const comments: SessionReviewComment[] = [{
+      id: 'comment-1',
+      session_id: idleSessionWithDiff.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'src/app.ts',
+      line_number: 2,
+      diff_side: 'new',
+      body: 'Handle the null edge case',
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    }];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({
+          data: comments,
+          meta: {},
+        } satisfies ListResponse<SessionReviewComment>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        postedMessages.push(body.message);
+        return HttpResponse.json({
+          data: {
+            id: 99 + postedMessages.length,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 1 + postedMessages.length,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    await screen.findByText('src/app.ts');
+
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+    await user.type(textarea, 'Hello agent');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(postedMessages).toHaveLength(1);
+    });
+    expect(postedMessages[0]).toContain('Please address the following code review comments:');
+    expect(postedMessages[0]).toContain('Handle the null edge case');
+
+    await user.type(textarea, 'Second follow-up');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(postedMessages).toHaveLength(2);
+    });
+    expect(postedMessages[1]).toBe('Second follow-up');
+    expect(postedMessages[1]).not.toContain('Please address the following code review comments:');
+    expect(postedMessages[1]).not.toContain('Handle the null edge case');
+  });
+
   it('scrolls the chat transcript back to the live edge after sending a follow-up message', async () => {
     let messageSent = false;
     const idleSession: Session = {
@@ -3714,6 +3874,149 @@ describe('SessionDetailPage', () => {
       expect(screen.queryByText('src/app.ts')).not.toBeInTheDocument();
     });
     expect(screen.getByTitle('Hide details')).toBeInTheDocument();
+  });
+
+  it('stays in review mode until a review-mode send succeeds', async () => {
+    let resolvePost: () => void = () => {};
+    const postBlocked = new Promise<void>((resolve) => {
+      resolvePost = resolve;
+    });
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        const body = await request.json() as { message: string };
+        await postBlocked;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: body.message,
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect(await screen.findByTitle('Search in diff (Ctrl+F)')).toBeInTheDocument();
+
+    await user.type(textarea, 'Hello from review');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByTitle('Search in diff (Ctrl+F)')).toBeInTheDocument();
+
+    resolvePost();
+
+    await waitFor(() => {
+      expect(screen.queryByTitle('Search in diff (Ctrl+F)')).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not force-exit review mode on send success after the user re-enters review while pending', async () => {
+    let resolvePost: () => void = () => {};
+    const postBlocked = new Promise<void>((resolve) => {
+      resolvePost = resolve;
+    });
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.post('/api/v1/sessions/:id/messages', async ({ request }) => {
+        await request.json();
+        await postBlocked;
+        return HttpResponse.json({
+          data: {
+            id: 99,
+            session_id: idleSessionWithDiff.id,
+            org_id: 'org-1',
+            user_id: 'user-1',
+            turn_number: 2,
+            role: 'user' as const,
+            content: 'Hello from review',
+            created_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<SessionMessage>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const textarea = await screen.findByPlaceholderText('Send a follow-up message...');
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect(await screen.findByTitle('Search in diff (Ctrl+F)')).toBeInTheDocument();
+
+    await user.type(textarea, 'Hello from review');
+    await user.keyboard('{Enter}');
+
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+    expect(await screen.findByTitle('Hide details')).toBeInTheDocument();
+
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect(await screen.findByTitle('Search in diff (Ctrl+F)')).toBeInTheDocument();
+
+    resolvePost();
+
+    expect(await screen.findByTitle('Search in diff (Ctrl+F)')).toBeInTheDocument();
+  });
+
+  it('keeps next/navigation search params in sync with nuqs state changes', async () => {
+    const idleSessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const backButton = await screen.findByLabelText('Back to sessions');
+    expect(backButton).toHaveAttribute('href', '/sessions');
+
+    await user.click(screen.getAllByTitle('View changes')[0]);
+
+    expect(backButton).toHaveAttribute('href', '/sessions?review=active');
+    expect(window.location.search).toBe('?review=active');
   });
 
   it('shows review file count in Changes tab and file click works', async () => {

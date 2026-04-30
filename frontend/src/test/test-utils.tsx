@@ -18,7 +18,14 @@ function createTestQueryClient() {
 function TestProviders({ children }: { children: React.ReactNode }) {
   const queryClient = createTestQueryClient();
   return (
-    <NuqsTestingAdapter>
+    <NuqsTestingAdapter
+      hasMemory
+      onUrlUpdate={({ queryString }) => {
+        const normalizedQuery = queryString.replace(/^\?/, '');
+        const nextUrl = normalizedQuery ? `${window.location.pathname}?${normalizedQuery}` : window.location.pathname;
+        window.history.replaceState({}, '', nextUrl);
+      }}
+    >
       <QueryClientProvider client={queryClient}>
         <OptimisticSessionsProvider>
           {children}
@@ -38,11 +45,25 @@ function renderWithProviders(
 ) {
   const { searchParams, ...renderOptions } = options ?? {};
 
+  if (typeof window !== 'undefined') {
+    const initialQuery = searchParams ? new URLSearchParams(searchParams).toString() : '';
+    const initialUrl = initialQuery ? `/?${initialQuery}` : '/';
+    window.history.replaceState({}, '', initialUrl);
+  }
+
   if (searchParams) {
     const wrapper = ({ children }: { children: React.ReactNode }) => {
       const queryClient = createTestQueryClient();
       return (
-        <NuqsTestingAdapter searchParams={searchParams}>
+        <NuqsTestingAdapter
+          searchParams={searchParams}
+          hasMemory
+          onUrlUpdate={({ queryString }) => {
+            const normalizedQuery = queryString.replace(/^\?/, '');
+            const nextUrl = normalizedQuery ? `${window.location.pathname}?${normalizedQuery}` : window.location.pathname;
+            window.history.replaceState({}, '', nextUrl);
+          }}
+        >
           <QueryClientProvider client={queryClient}>
             <OptimisticSessionsProvider>
               {children}
