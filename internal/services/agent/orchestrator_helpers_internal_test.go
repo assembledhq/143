@@ -233,6 +233,56 @@ func TestCreateIssueSnapshotForTurn(t *testing.T) {
 		require.Equal(t, models.IssueSourcePMAgent, snapshot.LinkedIssues[1].Source, "createIssueSnapshotForTurn should default missing sources to pm_agent")
 	})
 
+	t.Run("hydrates linear primary snapshot metadata from provider state", func(t *testing.T) {
+		t.Parallel()
+
+		rawLinearSnapshot := []byte(`{
+			"identifier":"ACS-1234",
+			"title":"Fix checkout timeout",
+			"description":"Linear issue body",
+			"state_name":"In Progress",
+			"state_type":"started",
+			"priority":"high",
+			"assignee_name":"Ada Lovelace",
+			"team_key":"ACS",
+			"team_name":"App Core",
+			"url":"https://linear.app/acme/issue/ACS-1234",
+			"attachments":[{"title":"Trace","url":"https://example.com/trace","source":"sentry"}],
+			"comments":[{"author":"Grace","body":"Please include the edge case.","created_at":"2026-04-30T12:00:00Z"}]
+		}`)
+		source := models.IssueSourceLinear
+		link := models.SessionIssueLink{
+			IssueID:                  uuid.New(),
+			Role:                     models.SessionIssueLinkRolePrimary,
+			Position:                 0,
+			IssueSource:              &source,
+			RawLinearPrimarySnapshot: rawLinearSnapshot,
+		}
+		issueSnapshots := &helperIssueSnapshotStore{}
+		orchestrator := &Orchestrator{
+			sessionIssueLinks: &helperSessionIssueLinkStore{links: []models.SessionIssueLink{link}},
+			issueSnapshots:    issueSnapshots,
+		}
+
+		snapshot, err := orchestrator.createIssueSnapshotForTurn(context.Background(), &models.Session{
+			ID:    uuid.New(),
+			OrgID: uuid.New(),
+		}, 1)
+
+		require.NoError(t, err, "createIssueSnapshotForTurn should hydrate provider-state snapshots")
+		require.Len(t, snapshot.LinkedIssues, 1, "snapshot should include the linked Linear issue")
+		got := snapshot.LinkedIssues[0]
+		require.Equal(t, "ACS-1234", got.ExternalID, "Linear snapshot should provide the human identifier")
+		require.Equal(t, "Linear issue body", got.Description, "Linear snapshot should provide the issue description")
+		require.Equal(t, "high", got.Priority, "Linear snapshot should provide priority metadata")
+		require.Equal(t, "Ada Lovelace", got.AssigneeName, "Linear snapshot should provide assignee metadata")
+		require.Equal(t, "ACS", got.TeamKey, "Linear snapshot should provide team metadata")
+		require.Len(t, got.Attachments, 1, "Linear snapshot should include attachment references")
+		require.Equal(t, "Trace", got.Attachments[0].Title, "Linear attachment title should be preserved")
+		require.Len(t, got.Comments, 1, "Linear snapshot should include bounded comments")
+		require.Equal(t, "Please include the edge case.", got.Comments[0].Body, "Linear comment body should be preserved")
+	})
+
 	t.Run("rejects link sets without a primary issue", func(t *testing.T) {
 		t.Parallel()
 

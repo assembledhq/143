@@ -204,6 +204,9 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	// SetLinearIdentifierHint UPDATE.
 	mock.ExpectExec("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -214,10 +217,6 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions SET title").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -251,8 +250,97 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code, "linker success path should still create the session")
 	require.Equal(t, 1, linker.called, "the handler should call the linker exactly once per create")
 	require.Equal(t, orgID, linker.gotIn.OrgID)
-	require.Equal(t, "ACS-1234", linker.gotIn.ReferenceText, "the reference text should be threaded through to the linker")
+	require.Contains(t, linker.gotIn.ReferenceText, "ACS-1234", "the reference text should be threaded through to the linker")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_CreateManual_LinearReferenceIDIsSentToLinker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	runID := uuid.New()
+	messageID := int64(1)
+	jobID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+	expectManualSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"","agent_type":"claude_code","references":[{"kind":"app","id":"ACS-1234","display":"Linear issue"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "ID-only Linear reference should create an issue-only session")
+	require.Equal(t, 1, linker.called, "the handler should call the linker")
+	require.Contains(t, linker.gotIn.ReferenceText, "ACS-1234", "reference IDs should be threaded through to the linker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreateManual_ChecksConcurrencyBeforeLinearLinking(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	runID := uuid.New()
+	messageID := int64(1)
+	settings := `{"max_concurrent_runs":1}`
+
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", []byte(settings), now, now))
+	expectManualSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+	handler := newSessionHandler(t, mock)
+	linker := &fakeLinearLinker{}
+	handler.SetLinearLinker(linker)
+
+	body := `{"message":"Fix ACS-1234","agent_type":"claude_code"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "concurrency limit should reject the session")
+	require.Equal(t, 0, linker.called, "the handler should not perform Linear side effects after a concurrency rejection")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_CreateManual_LinearIssueOnlySkipsLLMTitleGeneration(t *testing.T) {
@@ -277,15 +365,15 @@ func TestSessionHandler_CreateManual_LinearIssueOnlySkipsLLMTitleGeneration(t *t
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE sessions SET title").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -341,6 +429,9 @@ func TestSessionHandler_CreateManual_LinearLinkerError(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// UpdateResult on the failure path: the handler issues an UPDATE
 	// sessions ... RETURNING via session_store.updateResultRow. Return a

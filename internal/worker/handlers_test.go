@@ -681,10 +681,10 @@ func TestLinearJobHandlers(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows([]string{
 				"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug",
+				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
 			}).AddRow(
 				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-				&title, &source, &externalID, nil, nil, &status, nil,
+				&title, &source, &externalID, nil, nil, &status, nil, nil,
 			))
 		mock.ExpectQuery("SELECT .+ FROM issues WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1532,10 +1532,10 @@ func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug",
+			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_primary_snapshot",
 		}).AddRow(
 			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-			&title, &source, &externalID, nil, nil, &status, nil,
+			&title, &source, &externalID, nil, nil, &status, nil, nil,
 		))
 	mock.ExpectExec("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

@@ -2068,6 +2068,25 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check concurrency before any Linear linking side effects. The session
+	// row and turn-0 message are already persisted to preserve historical
+	// CreateManual behavior, but we must not link or post to Linear for a run
+	// that will never be enqueued.
+	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
+		return
+	}
+	maxConcurrent := orgSettings.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = models.DefaultMaxConcurrentRuns
+	}
+	if runningCount >= maxConcurrent {
+		writeError(w, r, http.StatusTooManyRequests, "CONCURRENCY_LIMIT",
+			fmt.Sprintf("Too many sessions running (%d/%d). Please wait for a session to finish before starting a new one.", runningCount, maxConcurrent))
+		return
+	}
+
 	// Resolve linked Linear issues before enqueueing the agent run. Per
 	// design 62 §"Pre-start preparation step", turn 1 cannot start until the
 	// primary Linear issue has its context snapshot captured — but the
@@ -2104,6 +2123,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			for _, ref := range body.References {
 				if ref.Display != "" {
 					refDisplays = append(refDisplays, ref.Display)
+				}
+				if ref.ID != "" && ref.ID != ref.Display {
+					refDisplays = append(refDisplays, ref.ID)
 				}
 			}
 			referenceText = strings.Join(refDisplays, "\n")
@@ -2159,22 +2181,6 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	}
-
-	// Check concurrency before enqueuing so the user gets immediate feedback.
-	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
-		return
-	}
-	maxConcurrent := orgSettings.MaxConcurrentRuns
-	if maxConcurrent <= 0 {
-		maxConcurrent = models.DefaultMaxConcurrentRuns
-	}
-	if runningCount >= maxConcurrent {
-		writeError(w, r, http.StatusTooManyRequests, "CONCURRENCY_LIMIT",
-			fmt.Sprintf("Too many sessions running (%d/%d). Please wait for a session to finish before starting a new one.", runningCount, maxConcurrent))
-		return
 	}
 
 	payload := map[string]string{

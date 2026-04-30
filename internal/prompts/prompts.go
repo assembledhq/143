@@ -125,6 +125,26 @@ type LinkedIssueContextEntry struct {
 	Title       string
 	ExternalID  string
 	Description string
+	StateName   string
+	StateType   string
+	Priority    string
+	Assignee    string
+	TeamKey     string
+	TeamName    string
+	URL         string
+	Attachments []LinkedIssueAttachment
+	Comments    []LinkedIssueComment
+}
+
+type LinkedIssueAttachment struct {
+	Title  string
+	URL    string
+	Source string
+}
+
+type LinkedIssueComment struct {
+	Author string
+	Body   string
 }
 
 func LinkedIssuesContext(data LinkedIssueContextData) string {

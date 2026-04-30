@@ -327,20 +327,46 @@ type SessionIssueLink struct {
 	// links instead of the universal redirect path. Nil for non-Linear
 	// links and Linear links written before workspace caching landed.
 	IssueWorkspaceSlug *string `db:"issue_workspace_slug" json:"issue_workspace_slug,omitempty"`
+	// RawLinearPrimarySnapshot is the JSONB primary_snapshot cached in
+	// session_issue_link_provider_state at link time. It is internal-only:
+	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
+	// creating the immutable per-turn issue snapshot.
+	RawLinearPrimarySnapshot json.RawMessage `db:"linear_primary_snapshot" json:"-"`
+}
+
+type SessionIssueSnapshotAttachment struct {
+	Title  string `json:"title,omitempty"`
+	URL    string `json:"url"`
+	Source string `json:"source,omitempty"`
+}
+
+type SessionIssueSnapshotComment struct {
+	Author    string    `json:"author,omitempty"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
 }
 
 // SessionIssueSnapshotEntry is the immutable execution-time issue context
 // captured for a specific session turn.
 type SessionIssueSnapshotEntry struct {
-	IssueID      uuid.UUID            `json:"issue_id"`
-	Role         SessionIssueLinkRole `json:"role"`
-	Position     int                  `json:"position"`
-	Title        string               `json:"title"`
-	ExternalID   string               `json:"external_id,omitempty"`
-	Source       IssueSource          `json:"source"`
-	Description  string               `json:"description,omitempty"`
-	RepositoryID *uuid.UUID           `json:"repository_id,omitempty"`
-	Status       string               `json:"status,omitempty"`
+	IssueID      uuid.UUID                        `json:"issue_id"`
+	Role         SessionIssueLinkRole             `json:"role"`
+	Position     int                              `json:"position"`
+	Title        string                           `json:"title"`
+	ExternalID   string                           `json:"external_id,omitempty"`
+	Source       IssueSource                      `json:"source"`
+	Description  string                           `json:"description,omitempty"`
+	RepositoryID *uuid.UUID                       `json:"repository_id,omitempty"`
+	Status       string                           `json:"status,omitempty"`
+	StateName    string                           `json:"state_name,omitempty"`
+	StateType    string                           `json:"state_type,omitempty"`
+	Priority     string                           `json:"priority,omitempty"`
+	AssigneeName string                           `json:"assignee_name,omitempty"`
+	TeamKey      string                           `json:"team_key,omitempty"`
+	TeamName     string                           `json:"team_name,omitempty"`
+	URL          string                           `json:"url,omitempty"`
+	Attachments  []SessionIssueSnapshotAttachment `json:"attachments,omitempty"`
+	Comments     []SessionIssueSnapshotComment    `json:"comments,omitempty"`
 }
 
 // SessionTurnIssueSnapshot is the authoritative resolved issue context used by

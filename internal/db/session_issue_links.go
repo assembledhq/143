@@ -31,7 +31,8 @@ const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.i
 	COALESCE(provider_state.state->>'identifier', i.external_id) AS external_id,
 	i.description,
 	i.repository_id, i.status AS issue_status,
-	(provider_state.state->>'workspace_slug') AS issue_workspace_slug`
+	(provider_state.state->>'workspace_slug') AS issue_workspace_slug,
+	(provider_state.state->'primary_snapshot') AS linear_primary_snapshot`
 
 const sessionIssueLinkFromClause = `
 	FROM session_issue_links sil
