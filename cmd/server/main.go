@@ -244,13 +244,7 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	// The router's session-review service needs to know which agents support
-	// native review. adapters.DefaultMap is the single source of truth for
-	// shipped agents — the orchestrator wires the same factory in
-	// buildServices below, so capability lookup and execution stay aligned
-	// without manual sync.
-	reviewModesProvider := agent.ReviewModeProvider(adapters.DefaultMap(logger))
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, reviewModesProvider)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}

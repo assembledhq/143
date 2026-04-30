@@ -3097,70 +3097,6 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 // change behavior if Create's call site moves.
 var errForcedCreateFailure = errors.New("forced create failure to short-circuit test")
 
-// TestContinueSession_ClearsReviewContextAfterConsumption guarantees the
-// one-shot review directive is wiped from sessions.revision_context before
-// (or during) the turn so the next user message can't be silently swapped
-// for /review again. Persists immediately on read; even if the agent run
-// fails or is retried, the user retries by clicking the button — never by
-// re-firing the same stale directive against an unrelated message.
-func TestContinueSession_ClearsReviewContextAfterConsumption(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	issue.Source = models.IssueSourceManual
-	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
-	session.CurrentTurn = 1
-	existing := "preview-container-abc"
-	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
-	// Persist a review-only RevisionContext.
-	reviewCtxJSON, err := json.Marshal(agent.RevisionContext{
-		ReviewContext: &agent.SessionReviewContext{
-			Mode:           models.SessionReviewModeDefault,
-			RequestSummary: "user clicked Review",
-		},
-	})
-	require.NoError(t, err)
-	session.RevisionContext = reviewCtxJSON
-
-	d := defaultDeps()
-	d.issues.issue = issue
-	d.messages.messages = []models.SessionMessage{
-		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			TurnNumber: 2,
-			Role:       models.MessageRoleUser,
-			Content:    "Please review your changes.",
-		},
-	}
-	// Capture the prompt the adapter sees so we can assert the review
-	// context survived the threading even though it was cleared from the
-	// persisted row.
-	var promptSeen *agent.AgentPrompt
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		promptSeen = prompt
-		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
-	}
-	d.sessions.releaseHoldFn = func() (bool, string, error) { return false, existing, nil }
-
-	orch := buildOrchestrator(d)
-	require.NoError(t, orch.ContinueSession(context.Background(), session))
-
-	require.NotNil(t, promptSeen, "adapter should have run")
-	require.True(t, promptSeen.IsReview(), "the in-memory prompt must still see the review directive even after the row is cleared")
-
-	d.sessions.mu.Lock()
-	defer d.sessions.mu.Unlock()
-	require.NotEmpty(t, d.sessions.revisionContextUpdates, "orchestrator must call UpdateRevisionContext to clear the consumed review directive")
-	// Review-only context: the cleared write should be a nil/empty payload.
-	last := d.sessions.revisionContextUpdates[len(d.sessions.revisionContextUpdates)-1]
-	require.True(t, len(last) == 0, "review-only context should clear the row entirely (got %q)", string(last))
-}
-
 func TestContinueSession_AppendsNonReviewRevisionContextToUserMessage(t *testing.T) {
 	t.Parallel()
 
@@ -3248,55 +3184,6 @@ func TestContinueSession_IgnoresMalformedRevisionContext(t *testing.T) {
 	require.NotNil(t, promptSeen, "ContinueSession should still invoke the adapter after discarding malformed revision context")
 	require.Nil(t, promptSeen.RevisionContext, "ContinueSession should drop malformed revision context instead of propagating corrupt JSON into the adapter")
 	require.NotContains(t, promptSeen.UserMessage, "## Revision context", "ContinueSession should not append revision framing when the revision context could not be parsed")
-}
-
-func TestContinueSession_UpdateRevisionContextErrorDoesNotBlockReviewTurn(t *testing.T) {
-	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	issue.Source = models.IssueSourceManual
-	session := testRun(orgID, issue.ID)
-	session.Status = string(models.SessionStatusIdle)
-	session.CurrentTurn = 1
-	existing := "preview-container-update-failure"
-	session.ContainerID = &existing
-	session.SandboxState = string(models.SandboxStateRunning)
-
-	reviewCtxJSON, err := json.Marshal(agent.RevisionContext{
-		ReviewContext: &agent.SessionReviewContext{
-			Mode:           models.SessionReviewModeSecurity,
-			RequestSummary: "user clicked Security review",
-		},
-	})
-	require.NoError(t, err, "json.Marshal should encode the review revision context")
-	session.RevisionContext = reviewCtxJSON
-
-	d := defaultDeps()
-	d.issues.issue = issue
-	d.messages.messages = []models.SessionMessage{
-		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			TurnNumber: 2,
-			Role:       models.MessageRoleUser,
-			Content:    "Please review your changes.",
-		},
-	}
-	d.sessions.updateRevisionErr = errors.New("write failed")
-
-	var promptSeen *agent.AgentPrompt
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		promptSeen = prompt
-		return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
-	}
-	d.sessions.releaseHoldFn = func() (bool, string, error) { return false, existing, nil }
-
-	err = buildOrchestrator(d).ContinueSession(context.Background(), session)
-	require.NoError(t, err, "ContinueSession should not fail the review turn when clearing the consumed review context is best-effort")
-	require.NotNil(t, promptSeen, "ContinueSession should still invoke the adapter when UpdateRevisionContext fails")
-	require.True(t, promptSeen.IsReview(), "ContinueSession should preserve the in-memory review directive even if the persisted clear fails")
 }
 
 // TestContinueSession_ReusesExistingContainer covers the branch where
