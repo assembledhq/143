@@ -398,6 +398,7 @@ Key design choices:
 - Grouped by enabled/paused — not by status lifecycle.
 - Each row shows: name, cadence, repo, last run summary, next run time.
 - "Paused by @john" — team audit trail built into the UI.
+- On narrow mobile viewports, automation cards must stack name, cadence, and timing metadata vertically, with wrapped text instead of truncating the details into overlapping rows. The overflow menu remains pinned as a separate trailing control so long names and schedules cannot collide with actions.
 
 ### 7.3 New automation page (`/automations/new`)
 
