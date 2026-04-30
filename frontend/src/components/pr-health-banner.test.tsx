@@ -197,4 +197,27 @@ describe("PRHealthBanner", () => {
     expect(screen.getByText("Legacy check")).toBeInTheDocument();
     expect(screen.getAllByText("pending").length).toBeGreaterThanOrEqual(2);
   });
+
+  it("does not render a separate conflicts badge when the summary already covers merge conflicts", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          has_conflicts: true,
+          can_resolve_conflicts: true,
+          summary: "PR #42 is blocked by merge conflicts.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("PR #42 is blocked by merge conflicts.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resolve conflicts" })).toBeInTheDocument();
+    expect(screen.queryByText(/^conflicts$/)).toBeNull();
+  });
 });
