@@ -38,24 +38,33 @@ export function ownerScopeParamForMember(
   return memberId === currentUserId ? null : memberId;
 }
 
-// Builds the `?user=…&status=…&repo=…` suffix to append to detail-page links
-// so the sidebar's filters survive navigation. "mine" is the implicit default
-// and is never serialized.
+// Builds the `?user=…&status=…&repo=…` suffix to append to links so scoped
+// session/project views survive navigation. "mine" is the implicit default and
+// is never serialized.
+export function buildFilterSuffix(
+  currentUserFilter: string,
+  status: string | null,
+  repo: string | null,
+  search: string | null,
+): string {
+  const params = new URLSearchParams();
+  if (currentUserFilter && currentUserFilter !== "mine") params.set("user", currentUserFilter);
+  if (status) params.set("status", status);
+  if (repo) params.set("repo", repo);
+  if (search) params.set("search", search);
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 export function useFilterSuffix(
   currentUserFilter: string,
   status: string | null,
   repo: string | null,
   search: string | null,
 ): string {
-  return useMemo(() => {
-    const params = new URLSearchParams();
-    if (currentUserFilter !== "mine") params.set("user", currentUserFilter);
-    if (status) params.set("status", status);
-    if (repo) params.set("repo", repo);
-    if (search) params.set("search", search);
-    const qs = params.toString();
-    return qs ? `?${qs}` : "";
-  }, [currentUserFilter, status, repo, search]);
+  return useMemo(() => (
+    buildFilterSuffix(currentUserFilter, status, repo, search)
+  ), [currentUserFilter, status, repo, search]);
 }
 
 export function useOwnerScopeFilter() {
