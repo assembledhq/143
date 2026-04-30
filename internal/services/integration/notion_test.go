@@ -419,11 +419,11 @@ func TestBlocksToMarkdown(t *testing.T) {
 			name: "nested list items",
 			blocks: []notionBlock{
 				{
-					Type:            "bulleted_list_item",
+					Type:             "bulleted_list_item",
 					BulletedListItem: &notionTextBlock{RichText: []notionRichText{{PlainText: "Parent"}}},
 					Children: []notionBlock{
 						{
-							Type:            "bulleted_list_item",
+							Type:             "bulleted_list_item",
 							BulletedListItem: &notionTextBlock{RichText: []notionRichText{{PlainText: "Child"}}},
 						},
 					},
@@ -667,7 +667,7 @@ func TestExtractPageProperties(t *testing.T) {
 
 	num := 42.0
 	props := map[string]notionProperty{
-		"Name": {Type: "title", Title: []notionRichText{{PlainText: "Test"}}},
+		"Name":   {Type: "title", Title: []notionRichText{{PlainText: "Test"}}},
 		"Status": {Type: "select", Select: &notionOption{Name: "Active"}},
 		"Tags": {Type: "multi_select", MultiSelect: []notionOption{
 			{Name: "backend"}, {Name: "urgent"},

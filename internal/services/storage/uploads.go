@@ -154,4 +154,3 @@ func (f *FileUploadStore) Serve(w http.ResponseWriter, r *http.Request, key stri
 	path := filepath.Join(f.baseDir, filepath.Clean(key))
 	http.ServeFile(w, r, path)
 }
-

@@ -28,12 +28,12 @@ func TestIngestNormalized(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		ni             func(integrationID uuid.UUID, now time.Time) NormalizedIssue
-		setupMock      func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time)
-		expectErr      bool
-		errSubstr      string
-		checkResult    func(t *testing.T, issue *models.Issue, issueID uuid.UUID)
+		name        string
+		ni          func(integrationID uuid.UUID, now time.Time) NormalizedIssue
+		setupMock   func(mock pgxmock.PgxPoolIface, issueID uuid.UUID, now time.Time)
+		expectErr   bool
+		errSubstr   string
+		checkResult func(t *testing.T, issue *models.Issue, issueID uuid.UUID)
 	}{
 		{
 			name: "successful ingestion upserts issue and enqueues prioritize job",

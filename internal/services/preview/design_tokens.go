@@ -209,8 +209,8 @@ func (te *TokenExtractor) extractTailwind(ctx context.Context) (*DesignTokenMap,
 	// Extract named sections and their key-value pairs.
 	sectionMatches := reSectionBlock.FindAllStringSubmatch(themeContent, -1)
 	for _, sm := range sectionMatches {
-		section := sm[1]  // e.g. "colors"
-		body := sm[2]     // inner content
+		section := sm[1] // e.g. "colors"
+		body := sm[2]    // inner content
 
 		kvMatches := reKeyValue.FindAllStringSubmatch(body, -1)
 		for _, kv := range kvMatches {

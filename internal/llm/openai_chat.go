@@ -107,8 +107,8 @@ func (p *OpenAIChatProvider) Complete(ctx context.Context, model, systemPrompt, 
 // chatCompletionsRequest is the OpenAI Chat Completions request body.
 // It is also used by OpenRouterProvider, which uses the same API format.
 type chatCompletionsRequest struct {
-	Model           string        `json:"model"`
-	Messages        []chatMessage `json:"messages"`
+	Model           string          `json:"model"`
+	Messages        []chatMessage   `json:"messages"`
 	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
 }
 

@@ -15,13 +15,13 @@ import (
 // Sentinel errors returned by the thread service. Handlers should match on
 // these with errors.Is rather than inspecting error strings.
 var (
-	ErrSessionNotFound    = errors.New("session not found")
-	ErrSessionTerminal    = errors.New("cannot add threads to a completed session")
-	ErrInvalidAgentType   = errors.New("invalid agent type")
-	ErrInvalidModel       = errors.New("invalid model")
-	ErrEnqueueFailed      = errors.New("enqueue failed")
-	ErrThreadNotFound     = errors.New("thread not found")
-	ErrThreadNotIdle      = errors.New("thread must be idle to send a message")
+	ErrSessionNotFound     = errors.New("session not found")
+	ErrSessionTerminal     = errors.New("cannot add threads to a completed session")
+	ErrInvalidAgentType    = errors.New("invalid agent type")
+	ErrInvalidModel        = errors.New("invalid model")
+	ErrEnqueueFailed       = errors.New("enqueue failed")
+	ErrThreadNotFound      = errors.New("thread not found")
+	ErrThreadNotIdle       = errors.New("thread must be idle to send a message")
 	ErrThreadCannotBeEnded = errors.New("thread cannot be ended in its current state")
 )
 

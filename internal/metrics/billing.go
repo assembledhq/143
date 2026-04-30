@@ -22,12 +22,12 @@ const meterName = "github.com/assembledhq/143/billing"
 // from attributes and rely on the container_usage_events DB table for
 // per-org queries.
 type BillingMetrics struct {
-	ContainerStartsTotal   otelmetric.Int64Counter
-	ContainerStopsTotal    otelmetric.Int64Counter
-	ContainerDurationSec   otelmetric.Float64Histogram
-	ContainerCPUAllocated  otelmetric.Float64Histogram
-	ContainerMemAllocated  otelmetric.Float64Histogram
-	ContainerMinutesTotal  otelmetric.Float64Counter
+	ContainerStartsTotal  otelmetric.Int64Counter
+	ContainerStopsTotal   otelmetric.Int64Counter
+	ContainerDurationSec  otelmetric.Float64Histogram
+	ContainerCPUAllocated otelmetric.Float64Histogram
+	ContainerMemAllocated otelmetric.Float64Histogram
+	ContainerMinutesTotal otelmetric.Float64Counter
 	// containersActiveReg holds the registration so it can be cleaned up.
 	containersActiveReg otelmetric.Registration
 }

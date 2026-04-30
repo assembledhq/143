@@ -435,11 +435,11 @@ func (p *PreviewToolProvider) Execute(
 
 // screenshotResponse is the structured result of a screenshot capture.
 type screenshotResponse struct {
-	ImageBase64   string                 `json:"image_base64"`
-	PageTitle     string                 `json:"page_title"`
-	URL           string                 `json:"url"`
+	ImageBase64   string                  `json:"image_base64"`
+	PageTitle     string                  `json:"page_title"`
+	URL           string                  `json:"url"`
 	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
-	CapturedAt    time.Time              `json:"captured_at"`
+	CapturedAt    time.Time               `json:"captured_at"`
 }
 
 func (p *PreviewToolProvider) execScreenshot(
@@ -629,7 +629,7 @@ type a11yViolation struct {
 
 // a11yCheckParams are the parsed parameters for the accessibility tool.
 type a11yCheckParams struct {
-	Path   string `json:"path"`
+	Path   string   `json:"path"`
 	Checks []string `json:"checks"`
 }
 
@@ -1033,10 +1033,10 @@ func (p *PreviewToolProvider) execScreencastStart(
 
 // screencastStopResponse is returned by preview_screencast_stop.
 type screencastStopResponse struct {
-	Format      string        `json:"format"`
-	DataBase64  string        `json:"data_base64"`
-	Duration    time.Duration `json:"duration"`
-	FrameCount  int           `json:"frame_count"`
+	Format     string        `json:"format"`
+	DataBase64 string        `json:"data_base64"`
+	Duration   time.Duration `json:"duration"`
+	FrameCount int           `json:"frame_count"`
 }
 
 func (p *PreviewToolProvider) execScreencastStop(
@@ -1073,20 +1073,20 @@ func (p *PreviewToolProvider) execScreencastStop(
 
 // interactResponse wraps the interaction result with base64-encoded screenshots.
 type interactResponse struct {
-	Steps         []interactStepResponse `json:"steps"`
-	TotalTimeMS   int64                  `json:"total_time_ms"`
-	FinalURL      string                 `json:"final_url"`
+	Steps         []interactStepResponse  `json:"steps"`
+	TotalTimeMS   int64                   `json:"total_time_ms"`
+	FinalURL      string                  `json:"final_url"`
 	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
 }
 
 type interactStepResponse struct {
-	StepIndex       int    `json:"step_index"`
-	Action          string `json:"action"`
-	Success         bool   `json:"success"`
-	Error           string `json:"error,omitempty"`
+	StepIndex        int    `json:"step_index"`
+	Action           string `json:"action"`
+	Success          bool   `json:"success"`
+	Error            string `json:"error,omitempty"`
 	ScreenshotBase64 string `json:"screenshot_base64,omitempty"`
-	DurationMS      int64  `json:"duration_ms"`
-	URL             string `json:"url"`
+	DurationMS       int64  `json:"duration_ms"`
+	URL              string `json:"url"`
 }
 
 func (p *PreviewToolProvider) execInteract(
@@ -1097,12 +1097,12 @@ func (p *PreviewToolProvider) execInteract(
 ) (*interactResponse, error) {
 	var args struct {
 		Steps []struct {
-			Action    string `json:"action"`
-			Selector  string `json:"selector"`
-			Value     string `json:"value"`
-			WaitFor   string `json:"wait_for"`
-			TimeoutMS int    `json:"timeout_ms"`
-			Screenshot bool  `json:"screenshot"`
+			Action     string `json:"action"`
+			Selector   string `json:"selector"`
+			Value      string `json:"value"`
+			WaitFor    string `json:"wait_for"`
+			TimeoutMS  int    `json:"timeout_ms"`
+			Screenshot bool   `json:"screenshot"`
 		} `json:"steps"`
 	}
 	if err := json.Unmarshal(params, &args); err != nil {
@@ -1174,13 +1174,13 @@ type multiViewportResponse struct {
 }
 
 type viewportCaptureResponse struct {
-	ViewportName   string                 `json:"viewport_name"`
-	Width          int                    `json:"width"`
-	Height         int                    `json:"height"`
-	ImageBase64    string                 `json:"image_base64"`
-	PageTitle      string                 `json:"page_title"`
-	URL            string                 `json:"url"`
-	ConsoleErrors  []models.ConsoleMessage `json:"console_errors,omitempty"`
+	ViewportName  string                  `json:"viewport_name"`
+	Width         int                     `json:"width"`
+	Height        int                     `json:"height"`
+	ImageBase64   string                  `json:"image_base64"`
+	PageTitle     string                  `json:"page_title"`
+	URL           string                  `json:"url"`
+	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
 }
 
 func (p *PreviewToolProvider) execMultiViewport(
