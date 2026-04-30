@@ -1873,6 +1873,82 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestClassifyLaunchError verifies the error-code mapping that turns
+// preview-launch failures into actionable HTTP responses. Before this
+// existed, every launch failure became a generic 422 PREVIEW_START_FAILED
+// with the message "failed to start preview" — the actual cause never
+// reached the user, so the frontend rendered the unhelpful
+// "Failed to start preview: failed to start preview".
+func TestClassifyLaunchError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		err          error
+		wantCode     string
+		wantStatus   int
+		mustContain  string
+		mustContain2 string
+	}{
+		{
+			name:        "image unavailable",
+			err:         fmt.Errorf("provider start preview: provision infrastructure %q: %w: pull %q: registry unreachable", "db", preview.ErrInfraImageUnavailable, "postgres:17-alpine"),
+			wantCode:    "PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "postgres:17-alpine",
+		},
+		{
+			name:        "infra start failed",
+			err:         fmt.Errorf("%w: create container: out of memory", preview.ErrInfraStartFailed),
+			wantCode:    "PREVIEW_INFRA_START_FAILED",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "out of memory",
+		},
+		{
+			name:        "infra unhealthy",
+			err:         fmt.Errorf("%w: infrastructure %q (postgres-17): health check timed out after 60 seconds", preview.ErrInfraUnhealthy, "db"),
+			wantCode:    "PREVIEW_INFRA_UNHEALTHY",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "health check timed out",
+		},
+		{
+			name:        "init script failed",
+			err:         fmt.Errorf("%w: infrastructure %q script %q: exit 1", preview.ErrInitScriptFailed, "db", "seed.sql"),
+			wantCode:    "PREVIEW_INIT_SCRIPT_FAILED",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "seed.sql",
+		},
+		{
+			name:        "service not ready",
+			err:         fmt.Errorf("%w: primary service %q (port 3000): timeout", preview.ErrServiceNotReady, "app"),
+			wantCode:    "PREVIEW_SERVICE_NOT_READY",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "port 3000",
+		},
+		{
+			name:        "unclassified surfaces underlying cause",
+			err:         errors.New("provider start preview: something weird happened"),
+			wantCode:    "PREVIEW_START_FAILED",
+			wantStatus:  http.StatusUnprocessableEntity,
+			mustContain: "something weird happened",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyLaunchError(tc.err)
+			require.NotNil(t, got)
+			require.Equal(t, tc.wantStatus, got.status)
+			require.Equal(t, tc.wantCode, got.code)
+			require.Contains(t, got.message, tc.mustContain, "user-visible message must surface the underlying cause")
+			require.NotEqual(t, "failed to start preview", got.message, "must not regress to the opaque generic message")
+		})
+	}
+
+	require.Nil(t, classifyLaunchError(nil), "nil error must not produce a response")
+}
+
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {
 	t.Parallel()
 

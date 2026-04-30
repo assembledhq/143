@@ -731,6 +731,50 @@ describe("PreviewPanel component", () => {
     ).not.toBeInTheDocument();
   });
 
+  // Provider-side launch failures (image pull, infra health, init script,
+  // readiness) carry a backend-built message that names the failing image
+  // or service and the underlying cause. We pass it through verbatim — if
+  // anyone re-wraps it with the generic "Failed to start preview:" prefix,
+  // the actionable detail gets buried.
+  it.each([
+    [
+      "PREVIEW_INFRA_IMAGE_UNAVAILABLE",
+      "preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: provider start preview: provision infrastructure \"db\": preview infrastructure image unavailable: pull \"postgres:17-alpine\": registry unreachable",
+    ],
+    [
+      "PREVIEW_INFRA_UNHEALTHY",
+      "preview infrastructure container did not become healthy in time. The container started but its health check (e.g. pg_isready) never passed. Details: provider start preview: preview infrastructure container failed health check: infrastructure \"db\" (postgres-17): health check timed out after 60 seconds",
+    ],
+    [
+      "PREVIEW_SERVICE_NOT_READY",
+      "preview service did not pass its readiness probe. The service may have crashed at boot, taken too long to start, or be listening on a different port than declared in .143/preview.json. Details: provider start preview: preview service readiness probe failed: primary service \"app\" (port 3000): timeout",
+    ],
+  ])(
+    "passes backend message through verbatim for %s without the generic prefix",
+    async (code, backendMessage) => {
+      const user = userEvent.setup();
+      mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+      const err = new Error(backendMessage);
+      (err as Error & { code?: string }).code = code;
+      mockStart.mockRejectedValueOnce(err);
+
+      renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+      await waitFor(() => {
+        expect(screen.getByText("No preview running")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+      await waitFor(() => {
+        expect(screen.getByText(backendMessage)).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByText(`Failed to start preview: ${backendMessage}`)
+      ).not.toBeInTheDocument();
+    }
+  );
+
   it("dismisses mutation error banner when X is clicked", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));

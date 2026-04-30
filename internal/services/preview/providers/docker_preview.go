@@ -2,8 +2,10 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -13,11 +15,15 @@ import (
 	"sync"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -37,7 +43,18 @@ type DockerPreviewClient interface {
 	ContainerExecCreate(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error)
 	ContainerExecAttach(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error)
 	ContainerExecInspect(ctx context.Context, execID string) (container.ExecInspect, error)
+	// ImageInspect / ImagePull are used to lazy-pull preview infrastructure
+	// images on first use, so worker hosts don't need to pre-pull every
+	// supported template (postgres:17-alpine, redis:7-alpine, mysql:8, …).
+	ImageInspect(ctx context.Context, ref string, opts ...client.ImageInspectOption) (image.InspectResponse, error)
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
 }
+
+// imagePullTimeout bounds how long a single infrastructure image pull can
+// take before we give up. 5 minutes is generous for postgres-alpine over a
+// reasonable connection but stops a wedged registry from blocking the
+// preview start indefinitely.
+const imagePullTimeout = 5 * time.Minute
 
 // SandboxExecutor defines the exec interface needed from the sandbox provider
 // for running preview service processes inside the sandbox.
@@ -73,6 +90,11 @@ type DockerPreviewProvider struct {
 
 	mu       sync.RWMutex
 	previews map[string]*previewState // handle → state
+
+	// imagePulls deduplicates concurrent pulls of the same image ref. Two
+	// preview starts hitting an absent image at the same moment share a
+	// single pull instead of fanning out N redundant streams.
+	imagePulls singleflight.Group
 }
 
 // previewState tracks all running components of a preview.
@@ -189,7 +211,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
 		if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
 			d.cleanupState(handle)
-			return nil, fmt.Errorf("infrastructure %q health check failed: %w", name, err)
+			return nil, fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
 		}
 		d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
 	}
@@ -202,7 +224,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		ih := state.infra[name]
 		if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
 			d.cleanupState(handle)
-			return nil, fmt.Errorf("init script for %q failed: %w", name, err)
+			return nil, fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
 		}
 		d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
 	}
@@ -249,7 +271,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			}
 			if err := d.waitForReadiness(ctx, sb, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("readiness probe for primary %q failed: %w", cfg.Primary, err)
+				return nil, fmt.Errorf("%w: primary service %q (port %d): %v", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[cfg.Primary].status = models.PreviewServiceStatusReady
@@ -299,7 +321,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			}
 			if err := d.waitForReadiness(ctx, sb, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
 				d.cleanupState(handle)
-				return nil, fmt.Errorf("readiness probe for %q failed: %w", name, err)
+				return nil, fmt.Errorf("%w: service %q (port %d): %v", preview.ErrServiceNotReady, name, svcCfg.Port, err)
 			}
 			d.mu.Lock()
 			state.services[name].status = models.PreviewServiceStatusReady
@@ -471,6 +493,15 @@ func (d *DockerPreviewProvider) provisionInfra(
 	}
 	containerName := fmt.Sprintf("preview-%s-%s", infraName, handlePrefix)
 
+	// Ensure the image is on the host before asking Docker to create the
+	// container. Worker hosts only pre-pull the 143-server / 143-sandbox /
+	// headless-shell images; infrastructure templates (postgres-N,
+	// redis-N, mysql-N) are pulled lazily on first use so adding a new
+	// template doesn't require re-provisioning workers.
+	if err := d.ensureImage(ctx, tmpl.Image); err != nil {
+		return nil, err
+	}
+
 	env := d.buildInfraEnv(infraCfg.Template, cred)
 	memLimit := int64(tmpl.DefaultMemMB) * 1024 * 1024
 	cpuNanos := int64(tmpl.DefaultCPU * 1e9)
@@ -497,7 +528,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 		containerName,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+		return nil, fmt.Errorf("%w: create container for image %q: %v", preview.ErrInfraStartFailed, tmpl.Image, err)
 	}
 
 	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
@@ -507,7 +538,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 		if rmErr := d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
 			d.logger.Warn().Err(rmErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
 		}
-		return nil, fmt.Errorf("start container: %w", err)
+		return nil, fmt.Errorf("%w: start container: %v", preview.ErrInfraStartFailed, err)
 	}
 
 	return &preview.InfraHandle{
@@ -518,6 +549,141 @@ func (d *DockerPreviewProvider) provisionInfra(
 		Port:        tmpl.DefaultPort,
 		Credential:  cred,
 	}, nil
+}
+
+// ensureImage makes sure the named image is present on the local Docker
+// host, pulling it from the registry on demand if it isn't. Concurrent
+// callers for the same image ref share a single pull (singleflight) so two
+// preview starts hitting a missing image don't fan out two redundant
+// streams.
+//
+// Failures are wrapped with preview.ErrInfraImageUnavailable so the HTTP
+// handler can map them to a specific error code that names the image, rather
+// than burying the cause inside a generic "failed to start preview".
+func (d *DockerPreviewProvider) ensureImage(ctx context.Context, ref string) error {
+	_, err, _ := d.imagePulls.Do(ref, func() (any, error) {
+		return nil, d.pullImage(ctx, ref)
+	})
+	return err
+}
+
+func (d *DockerPreviewProvider) pullImage(ctx context.Context, ref string) error {
+	if _, err := d.client.ImageInspect(ctx, ref); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("%w: inspect %q: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+
+	d.logger.Info().Str("image", ref).Msg("preview infra image missing on host; pulling from registry")
+	start := time.Now()
+
+	pullCtx, cancel := context.WithTimeout(ctx, imagePullTimeout)
+	defer cancel()
+
+	rc, err := d.client.ImagePull(pullCtx, ref, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("%w: pull %q: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+	defer rc.Close()
+
+	// Docker streams pull progress as one JSON object per line. Errors
+	// surface as `{"errorDetail": {...}, "error": "..."}` events that the
+	// daemon does NOT report via the ImagePull return value — if we just
+	// drain to /dev/null we lose the actual reason (auth failure, manifest
+	// unknown, rate limit) and only see "image not present after pull",
+	// which is useless for debugging.
+	if pullErr := scanPullStreamForError(rc); pullErr != nil {
+		return fmt.Errorf("%w: pull %q: %v", preview.ErrInfraImageUnavailable, ref, pullErr)
+	}
+
+	// Confirm the image actually landed. Catches the rare case where the
+	// stream finished cleanly but no errorDetail was emitted yet the image
+	// isn't present (e.g., daemon-side race during prune).
+	if _, err := d.client.ImageInspect(pullCtx, ref); err != nil {
+		return fmt.Errorf("%w: image %q not present after pull: %v", preview.ErrInfraImageUnavailable, ref, err)
+	}
+
+	d.logger.Info().Str("image", ref).Dur("elapsed", time.Since(start)).Msg("preview infra image pulled successfully")
+	return nil
+}
+
+// scanPullStreamForError reads Docker's pull-progress NDJSON stream, drains
+// it (the pull only completes once the daemon-side reader is done), and
+// returns the first errorDetail it sees (or nil for a clean pull). The
+// stream format is documented at
+// https://docs.docker.com/reference/api/engine/version/v1.45/#tag/Image/operation/ImageCreate
+// — each line is a JSON object with optional `status`, `progress`,
+// `errorDetail`, or `error` fields.
+func scanPullStreamForError(r io.Reader) error {
+	type pullEvent struct {
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+	var firstErr error
+	scanner := bufio.NewScanner(r)
+	// Pull progress events are short, but a Pulling-from line on a big
+	// image can stretch; bump the buffer ceiling well above bufio's
+	// default 64KiB so we never trip on it.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev pullEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			// Malformed line; ignore and keep draining so the daemon
+			// finishes writing.
+			continue
+		}
+		if firstErr == nil {
+			switch {
+			case ev.ErrorDetail.Message != "":
+				firstErr = fmt.Errorf("%s", ev.ErrorDetail.Message)
+			case ev.Error != "":
+				firstErr = fmt.Errorf("%s", ev.Error)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && firstErr == nil {
+		return fmt.Errorf("read pull stream: %w", err)
+	}
+	return firstErr
+}
+
+// EnsureInfraImages pre-pulls every supported infrastructure template image
+// in parallel, deduplicating via the same singleflight group as the
+// on-demand path. Best-effort: failures are logged but not returned, so a
+// transient registry hiccup doesn't block server startup. Worker boot calls
+// this in a background goroutine so the first preview that needs e.g.
+// postgres:17-alpine usually finds the image already on disk and answers
+// the HTTP request well within the server's WriteTimeout.
+//
+// Safe to call multiple times (singleflight collapses to one inspect each
+// after the first run).
+func (d *DockerPreviewProvider) EnsureInfraImages(ctx context.Context) {
+	images := preview.AllInfraImages()
+	if len(images) == 0 {
+		return
+	}
+	d.logger.Info().Strs("images", images).Msg("pre-pulling preview infra images in background")
+
+	var wg sync.WaitGroup
+	for _, ref := range images {
+		ref := ref
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := d.ensureImage(ctx, ref); err != nil {
+				d.logger.Warn().Err(err).Str("image", ref).Msg("preview infra image pre-pull failed; will retry on first preview start")
+				return
+			}
+		}()
+	}
+	wg.Wait()
+	d.logger.Info().Msg("preview infra image pre-pull pass complete")
 }
 
 func (d *DockerPreviewProvider) buildInfraEnv(template string, cred preview.InfraCredential) []string {
