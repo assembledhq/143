@@ -371,6 +371,7 @@ export interface PullRequestHealthResponse {
   github_state_synced_at?: string;
   summary: string;
   checks?: PullRequestCheckSummary[];
+  checks_confirmed: boolean;
   can_resolve_conflicts: boolean;
   can_fix_tests: boolean;
   can_merge: boolean;

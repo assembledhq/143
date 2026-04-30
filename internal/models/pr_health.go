@@ -173,6 +173,7 @@ type PullRequestHealthResponse struct {
 	GitHubStateSyncedAt          *time.Time                        `json:"github_state_synced_at,omitempty"`
 	Summary                      string                            `json:"summary"`
 	Checks                       []PullRequestCheckSummary         `json:"checks,omitempty"`
+	ChecksConfirmed              bool                              `json:"checks_confirmed"`
 	CanResolveConflicts          bool                              `json:"can_resolve_conflicts"`
 	CanFixTests                  bool                              `json:"can_fix_tests"`
 	CanMerge                     bool                              `json:"can_merge"`
