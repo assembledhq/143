@@ -235,22 +235,22 @@ func TestSessionLogStore_MarkAssistantTranscriptDuplicate(t *testing.T) {
 		setupMock func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID)
 		expectErr string
 	}{
-			{
-				name: "success",
-				setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-					mock.ExpectExec("UPDATE session_logs").
-						WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
-						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				},
+		{
+			name: "success",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				mock.ExpectExec("UPDATE session_logs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
-			{
-				name: "database error",
-				setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
-					mock.ExpectExec("UPDATE session_logs").
-						WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
-						WillReturnError(context.DeadlineExceeded)
-				},
-				expectErr: "mark assistant transcript duplicate",
+		},
+		{
+			name: "database error",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
+				mock.ExpectExec("UPDATE session_logs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
+					WillReturnError(context.DeadlineExceeded)
+			},
+			expectErr: "mark assistant transcript duplicate",
 		},
 	}
 
@@ -278,6 +278,29 @@ func TestSessionLogStore_MarkAssistantTranscriptDuplicate(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+// Pins the NULLIF guard in MarkAssistantTranscriptDuplicate. Pre-fix
+// streamLogs persisted nil metadata as the JSONB value `null` (json.Marshal
+// of a nil map returns "null") instead of SQL NULL; on those legacy rows
+// `metadata || '{...}'::jsonb` resolves to `null` and would drop the
+// duplicate marker. The NULLIF coalesces both shapes into '{}' before the
+// merge. Removing the clause should fail this test.
+func TestSessionLogStore_MarkAssistantTranscriptDuplicate_NormalizesLegacyJSONBNullMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	mock.ExpectExec(`COALESCE\(NULLIF\(metadata, 'null'::jsonb\), '\{\}'::jsonb\)`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil), 3, "Final answer").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.MarkAssistantTranscriptDuplicate(context.Background(), uuid.New(), uuid.New(), nil, 3, "Final answer")
+	require.NoError(t, err, "MarkAssistantTranscriptDuplicate should succeed when the SQL normalizes legacy JSONB null metadata before the merge")
+	require.NoError(t, mock.ExpectationsWereMet(), "MarkAssistantTranscriptDuplicate SQL must contain the NULLIF guard against legacy JSONB null metadata")
 }
 
 func TestSessionLogStore_ListByThread(t *testing.T) {

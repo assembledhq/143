@@ -184,7 +184,12 @@ func duplicateTranscriptLogIDs(messages []models.SessionMessage, logs []models.S
 		if !ok {
 			continue
 		}
-		candidates := visibleByTranscript[key]
+		candidates := append([]models.SessionLog(nil), visibleByTranscript[key]...)
+		if key.turnNumber == 1 {
+			legacyInitialKey := key
+			legacyInitialKey.turnNumber = 0
+			candidates = append(candidates, visibleByTranscript[legacyInitialKey]...)
+		}
 		if len(candidates) == 0 {
 			continue
 		}

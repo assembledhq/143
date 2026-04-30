@@ -113,4 +113,5 @@ func TestStreamLogs_CarriesThreadID(t *testing.T) {
 	require.Equal(t, threadID, *logs.logs[0].ThreadID, "persisted log should use the provided thread id")
 	require.Equal(t, 2, logs.logs[0].TurnNumber, "persisted log should keep the turn number")
 	require.Equal(t, "streamed message", logs.logs[0].Message, "persisted log should keep the message content")
+	require.Nil(t, logs.logs[0].Metadata, "persisted log should leave absent metadata as SQL null")
 }
