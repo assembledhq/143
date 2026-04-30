@@ -10,33 +10,69 @@ transforms:
     type: remap
     inputs: ["docker_logs"]
     source: |
-      # Extract Docker Compose service name
-      .service = .label."com.docker.compose.service" || "unknown"
+      # Stash docker-compose's service label under a non-colliding key so
+      # any zerolog `service` field on the actual log line wins after merge.
+      .compose_service = .label."com.docker.compose.service" || "unknown"
 
-      # Parse structured JSON logs from our Go services (zerolog output).
-      # Selectively extract known zerolog fields rather than merging the entire parsed
-      # object into root, which would clobber Vector metadata (source_type, container_name, etc.).
+      # Parse structured JSON logs from our Go services (zerolog output) and
+      # merge ALL parsed fields into the root, except a small denylist of
+      # vector-managed metadata that we don't want callers to be able to spoof
+      # or accidentally collide with. This used to be an allowlist, which
+      # silently dropped any new structured field a developer added (e.g.
+      # `exit_code`, `worker_node_id`, `preview_id`) until vector.yaml was
+      # also updated. Denylist is the right default: surface everything,
+      # protect only the keys vector needs to keep its own meaning.
+      #
+      # NOTE on Vector upgrades: the protected list below covers the
+      # docker_logs source's reserved metadata as of Vector 0.40. If you
+      # bump the Vector version, re-check
+      # https://vector.dev/docs/reference/configuration/sources/docker_logs/
+      # for new top-level fields that callers must not be able to spoof.
       parsed = parse_json(.message) ?? null
-      if parsed != null {
-        .message = string(parsed.message) ?? .message
-        .timestamp = string(parsed.time) ?? .timestamp
-        .level = string(parsed.level) ?? .level
-        .error = parsed.error
-        .caller = parsed.caller
-        .org_id = parsed.org_id
-        .agent_run_id = parsed.agent_run_id
-        .trace_id = parsed.trace_id
-        .request_id = parsed.request_id
-        .path = parsed.path
-        .status = parsed.status
-        .error_code = parsed.error_code
-        .error_message = parsed.error_message
-        .response_time_ms = parsed.response_time_ms
+      if is_object(parsed) {
+        # Snapshot vector/docker_logs metadata BEFORE merge so a malicious
+        # or accidentally-colliding zerolog field can't overwrite it.
+        protected_host = .host
+        protected_hostname = .hostname
+        protected_image = .image
+        protected_stream = .stream
+        protected_source_type = .source_type
+        protected_container_id = .container_id
+        protected_container_name = .container_name
+        protected_container_created_at = .container_created_at
+        protected_label = .label
+
+        # Merge first: every parsed field flows to root (and overwrites the
+        # raw .message that the docker_logs source wrote). Hoists / renames
+        # happen below so they can't be silently undone by the merge.
+        . = merge(., parsed) ?? .
+
+        # Rename .time → .timestamp (the only structural rename we apply to
+        # zerolog output; .message and .level keep their names).
+        .timestamp = string(.time) ?? .timestamp
+        del(.time)
+
+        # Restore protected metadata in case parsed contained a colliding key.
+        .host = protected_host
+        .hostname = protected_hostname
+        .image = protected_image
+        .stream = protected_stream
+        .source_type = protected_source_type
+        .container_id = protected_container_id
+        .container_name = protected_container_name
+        .container_created_at = protected_container_created_at
+        .label = protected_label
       }
 
       # Add server identity
       .server = get_env_var("SERVER_ROLE") ?? "unknown"
       .hostname, err = get_hostname()
+      # Preserve the docker compose service value at .service if the
+      # application log didn't supply its own — keeps existing dashboards /
+      # _stream_fields working unchanged for log lines that don't set it.
+      if !exists(.service) {
+        .service = .compose_service
+      }
 
   # Drop health check requests after JSON parsing so we can match on structured fields.
   # Filtering on .path avoids accidentally dropping app logs that mention health endpoints.
