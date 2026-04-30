@@ -2092,11 +2092,18 @@ func TestPreviewHandler_StopPreview_Success(t *testing.T) {
 				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
 		)
 
-	// StopPreview calls StopPreviewWithRevocation which does Begin + StopPreview + RevokeAll + Commit.
+	// StopPreview calls StopPreviewWithRevocation which does
+	// Begin + StopPreview (instance UPDATE + child cascades) + RevokeAll + Commit.
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE preview_instances SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))

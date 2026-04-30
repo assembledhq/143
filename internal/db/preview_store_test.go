@@ -258,15 +258,86 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_UpdatePreviewStatus_TerminalCascadesChildren(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "boom")
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_TerminalCascadesChildren(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.NoError(t, err)
+	require.True(t, updated)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdatePreviewStatusIfActive_NoCascadeWhenAlreadyTerminal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	// Conditional update affects 0 rows (preview was already terminal).
+	mock.ExpectExec("UPDATE preview_instances SET status").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	// No cascade expected — children were already updated by the prior terminal write.
+
+	updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusFailed, "")
+	require.NoError(t, err)
+	require.False(t, updated)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPreviewStore_StopPreview(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		rows      int64
-		expectErr bool
+		name           string
+		rows           int64
+		expectErr      bool
+		expectCascades bool
 	}{
-		{name: "stops active preview", rows: 1},
+		{name: "stops active preview", rows: 1, expectCascades: true},
 		{name: "already stopped returns error", rows: 0, expectErr: true},
 	}
 
@@ -283,6 +354,14 @@ func TestPreviewStore_StopPreview(t *testing.T) {
 			mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
 				WithArgs(previewAnyArgs(3)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			if tt.expectCascades {
+				mock.ExpectExec("UPDATE preview_services SET").
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+				mock.ExpectExec("UPDATE preview_infrastructure SET").
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+			}
 
 			err = store.StopPreview(context.Background(), uuid.New(), uuid.New())
 			if tt.expectErr {
@@ -1139,6 +1218,12 @@ func TestPreviewStore_StopPreviewWithRevocation(t *testing.T) {
 	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
