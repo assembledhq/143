@@ -5,7 +5,7 @@ import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { cn, formatTimeAgo, sessionTitle } from "@/lib/utils";
 import { StatusDot } from "@/components/status-dot";
@@ -164,6 +164,8 @@ export function SessionSidebar() {
   const selectedId = params?.id as string | undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
+  const searchRef = useRef(search);
+  const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
   // keystroke. useDeferredValue only lowers render priority — it does not
   // throttle network calls.
@@ -173,15 +175,30 @@ export function SessionSidebar() {
     return () => clearTimeout(handle);
   }, [search]);
   useEffect(() => {
+    searchRef.current = search;
+  }, [search]);
+  useEffect(() => {
     const nextSearch = searchParam ?? "";
+    if (searchRef.current === nextSearch) {
+      return;
+    }
     // Sync the local input from the URL when navigation/back/forward changes
     // the search param outside this component.
+    // When that external navigation cleared/changed the param, the URL is the
+    // source of truth. Skip the next write-back so we do not restore stale
+    // input text into the URL and thrash the router state.
+    skipNextSearchParamWriteRef.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSearch((current) => (current === nextSearch ? current : nextSearch));
+    setSearch(nextSearch);
   }, [searchParam]);
   useEffect(() => {
     const currentParam = searchParam ?? "";
     if (search === currentParam) {
+      skipNextSearchParamWriteRef.current = false;
+      return;
+    }
+    if (skipNextSearchParamWriteRef.current) {
+      skipNextSearchParamWriteRef.current = false;
       return;
     }
     void setSearchParam(search || null);
@@ -353,7 +370,7 @@ export function SessionSidebar() {
 
         {/* New session button */}
         <Link
-          href="/sessions/new"
+          href={`/sessions/new${filterSuffix}`}
           className="flex items-center justify-center gap-2 w-full h-9 rounded-md border border-border bg-background text-xs font-medium text-foreground hover:bg-accent transition-colors shadow-sm"
         >
           <Plus className="h-4 w-4" />
@@ -396,7 +413,7 @@ export function SessionSidebar() {
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
           <Link
-            href="/sessions/new"
+            href={`/sessions/new${filterSuffix}`}
             className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
           >
             <div className="flex items-center gap-2.5 min-w-0">
