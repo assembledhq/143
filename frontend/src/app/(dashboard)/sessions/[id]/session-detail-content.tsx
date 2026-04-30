@@ -58,6 +58,7 @@ import {
 import {
   Sheet,
   SheetContent,
+  SheetDescription,
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
@@ -1666,6 +1667,7 @@ function ChatPanel({
 const MIN_DETAIL = 280;
 const MAX_DETAIL = 600;
 const DEFAULT_DETAIL = 384;
+const MOBILE_REVIEW_MEDIA_QUERY = "(max-width: 767px)";
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
@@ -1687,6 +1689,28 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
+  const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia(MOBILE_REVIEW_MEDIA_QUERY);
+    const syncViewport = (event?: MediaQueryListEvent) => {
+      setIsMobileReviewViewport(event ? event.matches : mediaQuery.matches);
+    };
+
+    syncViewport();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", syncViewport);
+      return () => mediaQuery.removeEventListener("change", syncViewport);
+    }
+
+    mediaQuery.addListener(syncViewport);
+    return () => mediaQuery.removeListener(syncViewport);
+  }, []);
 
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
@@ -1698,15 +1722,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     setReviewParam("active");
     setDetailTab("changes");
     setShowDetailPanel(true);
-    // On mobile the right panel lives in a bottom sheet — auto-open it so the
-    // file tree is reachable when entering review. Gate on viewport because
-    // the Sheet's overlay isn't viewport-aware (md:hidden only hides
-    // SheetContent, not SheetOverlay) — opening on desktop would dim the
-    // screen behind a hidden sheet.
-    if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
-      setMobileDetailOpen(true);
+    // Mobile review should hand off directly into the diff reader. The detail
+    // sheet stays available as a file index, but it should not remain on top
+    // of the review surface when the user asks to view changes.
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(false);
     }
-  }, [setReviewParam]);
+  }, [isMobileReviewViewport, setReviewParam]);
+  const openMobileFilesList = useCallback(() => {
+    setDetailTab("changes");
+    setMobileDetailOpen(true);
+  }, []);
 
   // --- Exit review mode ---
   const exitReview = useCallback(() => {
@@ -2121,6 +2147,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   // useDiffViewState only reads `diff` and `diff_history` — the stub satisfies that contract.
   const diffViewState = useDiffViewState(session ?? { diff: null, diff_history: [] } as unknown as Session);
   const { files: allDiffFiles, filteredFiles, passes, passRange, setPassRange, diffSearchQuery, setDiffSearchQuery } = diffViewState;
+
+  useEffect(() => {
+    if (filteredFiles.length === 0) {
+      if (activeFileIndex !== 0) {
+        setActiveFileIndex(0);
+      }
+      return;
+    }
+    if (activeFileIndex >= filteredFiles.length) {
+      setActiveFileIndex(filteredFiles.length - 1);
+    }
+  }, [activeFileIndex, filteredFiles.length]);
 
   const {
     comments,
@@ -2726,6 +2764,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   activeFileIndex={activeFileIndex}
                   onFileChange={setActiveFileIndex}
                   onBack={exitReview}
+                  isMobile={isMobileReviewViewport}
+                  onOpenFileList={openMobileFilesList}
                   commentsByLine={commentsByLine}
                   activeCommentLine={activeCommentLine}
                   onAddComment={handleAddComment}
@@ -2828,6 +2868,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           className="md:hidden h-[85vh] max-h-[85vh] min-h-[60vh] p-0 flex flex-col gap-0 bg-background"
         >
           <SheetTitle className="sr-only">Session details</SheetTitle>
+          <SheetDescription className="sr-only">
+            Browse session details, changed files, validation, and preview on mobile.
+          </SheetDescription>
           {panelTabsEl}
         </SheetContent>
       </Sheet>
