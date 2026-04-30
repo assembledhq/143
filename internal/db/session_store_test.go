@@ -1290,7 +1290,10 @@ func TestSessionStore_ListStaleRunningSessions(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	mock.ExpectQuery("SELECT .+ FROM sessions.+WHERE s.status = 'running'").
+	// The query must NOT alias `sessions` — sessionPrimaryIssueIDColumn
+	// hardcodes `sessions.org_id` / `sessions.id`, which Postgres rejects
+	// (42P01) when the outer FROM uses an alias.
+	mock.ExpectQuery("FROM sessions\\s+WHERE status = 'running'").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 
@@ -1309,13 +1312,34 @@ func TestSessionStore_ListStaleRunningSessions_QueryError(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	mock.ExpectQuery("SELECT .+ FROM sessions.+WHERE s.status = 'running'").
+	mock.ExpectQuery("FROM sessions\\s+WHERE status = 'running'").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnError(errors.New("db down"))
 
 	_, err = store.ListStaleRunningSessions(context.Background(), time.Now().Add(-1*time.Hour))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "query stale running sessions")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionStore_ListStalePendingSessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+
+	// See TestSessionStore_ListStaleRunningSessions: the query must not
+	// alias `sessions`.
+	mock.ExpectQuery("FROM sessions\\s+WHERE status = 'pending'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
+
+	sessions, err := store.ListStalePendingSessions(context.Background(), time.Now().Add(-1*time.Hour))
+	require.NoError(t, err)
+	require.Len(t, sessions, 0)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

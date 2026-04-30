@@ -85,4 +85,22 @@ describe("DiffToolbar", () => {
     await user.click(screen.getByText("Browse"));
     expect(onBrowseRepo).toHaveBeenCalled();
   });
+
+  it("renders the mobile file-reader controls when mobile props are provided", () => {
+    renderToolbar({
+      isMobile: true,
+      filePath: "src/mobile.ts",
+      filePositionLabel: "2 of 5",
+      onOpenFileList: vi.fn(),
+      onPrevFile: vi.fn(),
+      onNextFile: vi.fn(),
+      canGoPrev: true,
+      canGoNext: true,
+    });
+
+    expect(screen.getByText("src/mobile.ts")).toBeInTheDocument();
+    expect(screen.getByText("2 of 5")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open files list" })).toBeInTheDocument();
+    expect(screen.queryByText("Split")).not.toBeInTheDocument();
+  });
 });

@@ -155,6 +155,35 @@ func newMockHijackedResponse(data string) types.HijackedResponse {
 	}
 }
 
+// dockerStreamFrame builds a single Docker multiplexed stream frame.
+// stream is 1 (stdout) or 2 (stderr); the payload is wrapped with the
+// 8-byte header stdcopy expects.
+func dockerStreamFrame(stream byte, payload []byte) []byte {
+	if len(payload) > 0xFFFFFFFF {
+		panic("dockerStreamFrame: payload exceeds uint32 length")
+	}
+	frame := make([]byte, 8+len(payload))
+	frame[0] = stream
+	// bytes 1..3 are padding (zero)
+	size := uint32(len(payload))
+	frame[4] = byte(size >> 24)
+	frame[5] = byte(size >> 16)
+	frame[6] = byte(size >> 8)
+	frame[7] = byte(size)
+	copy(frame[8:], payload)
+	return frame
+}
+
+// dockerMultiplexed concatenates one stdout frame and one stderr frame —
+// the typical shape returned by `docker exec` once the tool has run.
+func dockerMultiplexed(stdout, stderr []byte) string {
+	out := dockerStreamFrame(1, stdout)
+	if len(stderr) > 0 {
+		out = append(out, dockerStreamFrame(2, stderr)...)
+	}
+	return string(out)
+}
+
 func newTestLogger() zerolog.Logger {
 	return zerolog.Nop()
 }
@@ -889,6 +918,240 @@ func TestDockerProvider_Snapshot(t *testing.T) {
 		require.Contains(t, tarCmd, "'home/sandbox/.claude'", "tar should include the .claude dir under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
+		require.NotContains(t, tarCmd, "2>/dev/null", "tar stderr must not be silenced — we capture it for diagnostics")
+	})
+
+	t.Run("returns error from Read when tar exits non-zero", func(t *testing.T) {
+		t.Parallel()
+
+		// Tar wrote one stdout chunk before failing, plus a stderr message.
+		// The pipe should yield the stdout bytes but then surface the failure
+		// to the caller — the "we silently uploaded a partial archive" bug.
+		stdoutPayload := []byte("partial-archive-bytes")
+		stderrPayload := []byte("tar: /workspace/missing: Cannot stat: No such file or directory\n")
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newMockHijackedResponse(dockerMultiplexed(stdoutPayload, stderrPayload)), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 2}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "snap-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		rc, err := p.Snapshot(context.Background(), sb)
+		require.NoError(t, err, "Snapshot(start) should succeed; the failure surfaces during the read")
+		defer rc.Close()
+
+		var got bytes.Buffer
+		_, err = io.Copy(&got, rc)
+		require.Error(t, err, "draining the snapshot reader must surface tar's non-zero exit")
+		require.Contains(t, err.Error(), "snapshot tar exited with code 2")
+		require.Contains(t, err.Error(), "Cannot stat", "captured stderr should be in the error")
+		require.Equal(t, stdoutPayload, got.Bytes(), "the bytes that did stream through should be readable; the error appears at EOF")
+	})
+
+	t.Run("returns clean EOF when tar exits zero", func(t *testing.T) {
+		t.Parallel()
+
+		archive := []byte("\x1f\x8b\x08mock-gzip-bytes")
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newMockHijackedResponse(dockerMultiplexed(archive, nil)), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "snap-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		rc, err := p.Snapshot(context.Background(), sb)
+		require.NoError(t, err)
+		defer rc.Close()
+
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err, "a clean tar exit should not surface as an error")
+		require.Equal(t, archive, got)
+	})
+
+	t.Run("surfaces ctx error when tar never exits", func(t *testing.T) {
+		t.Parallel()
+
+		// Inspect always reports Running=true so waitForExecExit spins until
+		// ctx fires. Exercises the only way out when tar wedges inside the
+		// container — without ctx-respecting wait the consumer would block
+		// on the pipe forever.
+		mock := &mockDockerClient{}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: true}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "snap-container", Provider: "docker", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		rc, err := p.Snapshot(ctx, sb)
+		require.NoError(t, err, "Snapshot start should succeed; the ctx error surfaces during the read")
+		defer rc.Close()
+
+		_, err = io.Copy(io.Discard, rc)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wait for snapshot tar")
+		require.Contains(t, err.Error(), context.DeadlineExceeded.Error())
+	})
+}
+
+func TestDockerProvider_Restore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("succeeds when tar exits zero", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("archive-bytes")))
+		require.NoError(t, err)
+	})
+
+	t.Run("error includes captured stderr when tar exits non-zero", func(t *testing.T) {
+		t.Parallel()
+
+		stderr := []byte("gzip: stdin: unexpected end of file\ntar: Child returned status 1\ntar: Error is not recoverable: exiting now\n")
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			// Only stderr; tar didn't emit anything to stdout before dying.
+			return newMockHijackedResponse(dockerMultiplexed(nil, stderr)), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 2}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("garbage-bytes")))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "restore tar exited with code 2")
+		require.Contains(t, err.Error(), "unexpected end of file", "tar's stderr should be in the error message — this is the diagnostic we lost before")
+	})
+
+	t.Run("returns ctx error when context is cancelled before exec exits", func(t *testing.T) {
+		t.Parallel()
+
+		// Inspect always reports Running=true so the wait loop spins until ctx
+		// fires. Without ctx-respecting wait this would hang the test.
+		mock := &mockDockerClient{}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: true}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		err := p.Restore(ctx, sb, bytes.NewReader([]byte("archive")))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "inspect restore exec")
+	})
+}
+
+func TestCappedBuffer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("retains data under the cap and reports exact length", func(t *testing.T) {
+		t.Parallel()
+		b := newCappedBuffer(64)
+		n, err := b.Write([]byte("hello"))
+		require.NoError(t, err)
+		require.Equal(t, 5, n)
+		require.Equal(t, "hello", b.String())
+	})
+
+	t.Run("truncates writes that exceed the cap and marks dropped", func(t *testing.T) {
+		t.Parallel()
+		b := newCappedBuffer(8)
+		// Single oversize write — only the first 8 bytes are kept.
+		n, err := b.Write([]byte("0123456789"))
+		require.NoError(t, err)
+		require.Equal(t, 10, n, "Write should report success on the full payload so callers don't loop on a 'short write'")
+		require.Equal(t, "01234567 [truncated]", b.String())
+	})
+
+	t.Run("drops further writes once full", func(t *testing.T) {
+		t.Parallel()
+		b := newCappedBuffer(4)
+		_, _ = b.Write([]byte("ab"))
+		_, _ = b.Write([]byte("cdef"))
+		_, _ = b.Write([]byte("ghi"))
+		require.Equal(t, "abcd [truncated]", b.String())
+	})
+
+	t.Run("zero-length write is a no-op and does not flip dropped", func(t *testing.T) {
+		t.Parallel()
+		b := newCappedBuffer(4)
+		_, _ = b.Write(nil)
+		require.Equal(t, "", b.String(), "no data written should not produce a [truncated] marker")
+	})
+
+	t.Run("non-positive limit panics", func(t *testing.T) {
+		t.Parallel()
+		// A zero/negative cap would let dropped flip to true with Len()==0,
+		// silently swallowing the [truncated] marker downstream. We want a
+		// loud panic at construction rather than a quiet diagnostic regression.
+		require.PanicsWithValue(t,
+			"newCappedBuffer: limit must be positive, got 0",
+			func() { newCappedBuffer(0) })
+		require.Panics(t, func() { newCappedBuffer(-1) })
+	})
+}
+
+func TestSnapshotExecError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil all → nil", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, snapshotExecError(nil, nil, container.ExecInspect{ExitCode: 0}, newCappedBuffer(64)))
+	})
+
+	t.Run("copy error wins over wait error and exit code", func(t *testing.T) {
+		t.Parallel()
+		err := snapshotExecError(io.ErrUnexpectedEOF, fmt.Errorf("wait failed"), container.ExecInspect{ExitCode: 2}, newCappedBuffer(64))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "read snapshot stream")
+		require.Contains(t, err.Error(), io.ErrUnexpectedEOF.Error())
+	})
+
+	t.Run("wait error wins over exit code", func(t *testing.T) {
+		t.Parallel()
+		err := snapshotExecError(nil, fmt.Errorf("inspect: connection lost"), container.ExecInspect{ExitCode: 2}, newCappedBuffer(64))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "wait for snapshot tar")
+		require.Contains(t, err.Error(), "connection lost")
+	})
+
+	t.Run("non-zero exit includes captured stderr suffix", func(t *testing.T) {
+		t.Parallel()
+		stderr := newCappedBuffer(128)
+		_, _ = stderr.Write([]byte("tar: archive boom\n"))
+		err := snapshotExecError(nil, nil, container.ExecInspect{ExitCode: 2}, stderr)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "snapshot tar exited with code 2")
+		require.Contains(t, err.Error(), "tar: archive boom")
+		require.NotContains(t, err.Error(), "\n", "trailing whitespace should be trimmed")
+	})
+
+	t.Run("non-zero exit with empty stderr omits the suffix", func(t *testing.T) {
+		t.Parallel()
+		err := snapshotExecError(nil, nil, container.ExecInspect{ExitCode: 1}, newCappedBuffer(64))
+		require.Error(t, err)
+		require.Equal(t, "snapshot tar exited with code 1", err.Error())
 	})
 }
 

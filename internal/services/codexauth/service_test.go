@@ -307,9 +307,9 @@ func TestPollForToken_AuthorizationPending(t *testing.T) {
 	// Store a pending auth.
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		UserCode:   "ABCD-1234",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		UserCode:     "ABCD-1234",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -412,9 +412,9 @@ func TestPollForToken_Success(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		UserCode:   "ABCD-1234",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		UserCode:     "ABCD-1234",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -447,8 +447,8 @@ func TestPollForToken_Expired(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(-1 * time.Minute), // Already expired.
-		Interval:   5,
+		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Already expired.
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -478,8 +478,8 @@ func TestPollForToken_SlowDown(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -890,9 +890,9 @@ func TestPollForToken_RateLimited(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
-		LastPollAt: time.Now(), // Just polled.
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
+		LastPollAt:   time.Now(), // Just polled.
 	})
 
 	// Second poll should be rate-limited (no HTTP call).
@@ -926,8 +926,8 @@ func TestPollForToken_AccessDenied(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -965,8 +965,8 @@ func TestPollForToken_ExpiredToken(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")
@@ -996,8 +996,8 @@ func TestPollForToken_UnknownError(t *testing.T) {
 	orgID := uuid.New()
 	svc.pending.Store(orgID.String()+":", &PendingAuth{
 		DeviceAuthID: "dev_123",
-		ExpiresAt:  time.Now().Add(15 * time.Minute),
-		Interval:   5,
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		Interval:     5,
 	})
 
 	status, err := svc.PollForToken(context.Background(), orgID, "")

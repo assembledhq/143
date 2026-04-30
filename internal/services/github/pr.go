@@ -1836,6 +1836,9 @@ func bestPRTitleSubject(session *models.Session, fallback string) string {
 }
 
 func formatBranchName(session *models.Session, issue *models.Issue) string {
+	if session.WorkingBranch != nil && *session.WorkingBranch != "" {
+		return *session.WorkingBranch
+	}
 	short := session.ID.String()[:8]
 	var title string
 	if issue != nil {

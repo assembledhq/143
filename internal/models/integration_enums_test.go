@@ -65,4 +65,3 @@ func TestIntegrationStatusValidate(t *testing.T) {
 		})
 	}
 }
-

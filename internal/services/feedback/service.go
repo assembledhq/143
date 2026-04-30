@@ -257,7 +257,7 @@ func (s *Service) GenerateConventionsDoc(ctx context.Context, orgID uuid.UUID, r
 		"style":          "Style",
 		"logic_bug":      "Logic",
 		"edge_case":      "Edge Cases",
-		"wrong_approach":  "Architecture",
+		"wrong_approach": "Architecture",
 		"missing_test":   "Testing",
 		"security":       "Security",
 		"performance":    "Performance",

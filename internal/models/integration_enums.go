@@ -40,4 +40,3 @@ func (s IntegrationStatus) Validate() error {
 		return fmt.Errorf("invalid IntegrationStatus: %q", s)
 	}
 }
-

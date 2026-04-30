@@ -97,18 +97,18 @@ type Tool struct {
 
 // ToolSchema is a JSON Schema object describing the tool's parameters.
 type ToolSchema struct {
-	Type       string                `json:"type"` // always "object"
+	Type       string                    `json:"type"` // always "object"
 	Properties map[string]SchemaProperty `json:"properties,omitempty"`
-	Required   []string              `json:"required,omitempty"`
+	Required   []string                  `json:"required,omitempty"`
 }
 
 // SchemaProperty is a single property in a JSON Schema object.
 type SchemaProperty struct {
-	Type        string           `json:"type"`
-	Description string           `json:"description,omitempty"`
-	Enum        []string         `json:"enum,omitempty"`
-	Items       *SchemaProperty  `json:"items,omitempty"` // for array types
-	Default     any              `json:"default,omitempty"`
+	Type        string          `json:"type"`
+	Description string          `json:"description,omitempty"`
+	Enum        []string        `json:"enum,omitempty"`
+	Items       *SchemaProperty `json:"items,omitempty"` // for array types
+	Default     any             `json:"default,omitempty"`
 }
 
 // ToolsListResult is the response to "tools/list".

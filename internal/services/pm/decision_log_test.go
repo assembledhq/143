@@ -101,8 +101,8 @@ func TestPlanToDecisionLog_MixedEntries(t *testing.T) {
 	t.Parallel()
 
 	plan := &Plan{
-		ID:    uuid.New(),
-		OrgID: uuid.New(),
+		ID:            uuid.New(),
+		OrgID:         uuid.New(),
 		Tasks:         []Task{{IssueIDs: []uuid.UUID{uuid.New()}, Reasoning: "r"}},
 		SkippedIssues: []SkipEntry{{IssueID: uuid.New(), Detail: "s"}},
 		Clusters:      []Cluster{{IssueIDs: []uuid.UUID{uuid.New()}, RootCause: "rc", Strategy: "st"}},
