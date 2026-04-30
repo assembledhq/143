@@ -311,6 +311,21 @@ export function PreviewPanel({
         setMutationError(err.message);
         return;
       }
+      // Provider-side launch failures (image pull, infra health, init
+      // script, readiness probe). The backend builds a message that
+      // names the failing image / service and includes the underlying
+      // cause, so passing it through verbatim is more useful than
+      // re-wrapping with a generic prefix.
+      if (
+        code === PREVIEW_ERROR_CODES.INFRA_IMAGE_UNAVAILABLE ||
+        code === PREVIEW_ERROR_CODES.INFRA_START_FAILED ||
+        code === PREVIEW_ERROR_CODES.INFRA_UNHEALTHY ||
+        code === PREVIEW_ERROR_CODES.INIT_SCRIPT_FAILED ||
+        code === PREVIEW_ERROR_CODES.SERVICE_NOT_READY
+      ) {
+        setMutationError(err.message);
+        return;
+      }
       setMutationError(`Failed to start preview: ${err.message}`);
     },
   });
