@@ -34,13 +34,13 @@ func (s *ProjectCycleStore) Create(ctx context.Context, c *models.ProjectCycle) 
 		RETURNING id, created_at`
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"project_id":                c.ProjectID,
-		"org_id":                    c.OrgID,
-		"pm_plan_id":               c.PMPlanID,
-		"cycle_number":             c.CycleNumber,
-		"analysis":                 c.Analysis,
-		"decisions":                c.Decisions,
-		"progress_pct":             c.ProgressPct,
+		"project_id":                 c.ProjectID,
+		"org_id":                     c.OrgID,
+		"pm_plan_id":                 c.PMPlanID,
+		"cycle_number":               c.CycleNumber,
+		"analysis":                   c.Analysis,
+		"decisions":                  c.Decisions,
+		"progress_pct":               c.ProgressPct,
 		"tasks_completed_this_cycle": c.TasksCompletedThisCycle,
 		"tasks_failed_this_cycle":    c.TasksFailedThisCycle,
 		"tasks_created_this_cycle":   c.TasksCreatedThisCycle,

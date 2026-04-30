@@ -100,16 +100,16 @@ type PMContextStats struct {
 
 // PMStatus represents the PM agent's current state for the status banner.
 type PMStatus struct {
-	IsRunning      bool       `json:"is_running"`
-	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
-	LastRunStatus  string     `json:"last_run_status,omitempty"`
-	IssuesReviewed int        `json:"issues_reviewed"`
-	SuccessRate    float64    `json:"success_rate"`
-	SuccessCount   int        `json:"success_count"`
-	TotalDelegated int        `json:"total_delegated"`
-	NextRunIn      *string    `json:"next_run_in,omitempty"`
-	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
-	LastError      *string    `json:"last_error,omitempty"`
-	LastFailedAt   *time.Time `json:"last_failed_at,omitempty"`
-	LastFailedSessionID *string `json:"last_failed_session_id,omitempty"`
+	IsRunning           bool       `json:"is_running"`
+	LastRunAt           *time.Time `json:"last_run_at,omitempty"`
+	LastRunStatus       string     `json:"last_run_status,omitempty"`
+	IssuesReviewed      int        `json:"issues_reviewed"`
+	SuccessRate         float64    `json:"success_rate"`
+	SuccessCount        int        `json:"success_count"`
+	TotalDelegated      int        `json:"total_delegated"`
+	NextRunIn           *string    `json:"next_run_in,omitempty"`
+	NextRunAt           *time.Time `json:"next_run_at,omitempty"`
+	LastError           *string    `json:"last_error,omitempty"`
+	LastFailedAt        *time.Time `json:"last_failed_at,omitempty"`
+	LastFailedSessionID *string    `json:"last_failed_session_id,omitempty"`
 }

@@ -61,10 +61,10 @@ type ErrorFilter struct {
 type ErrorSummary struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`
-	Culprit       string    `json:"culprit,omitempty"`      // file/function that caused it
-	Severity      string    `json:"severity"`               // normalized: critical/high/medium/low
-	Occurrences   int       `json:"occurrences"`            // total event count
-	AffectedUsers int       `json:"affected_users"`         // unique user count
+	Culprit       string    `json:"culprit,omitempty"` // file/function that caused it
+	Severity      string    `json:"severity"`          // normalized: critical/high/medium/low
+	Occurrences   int       `json:"occurrences"`       // total event count
+	AffectedUsers int       `json:"affected_users"`    // unique user count
 	FirstSeen     time.Time `json:"first_seen"`
 	LastSeen      time.Time `json:"last_seen"`
 	Project       string    `json:"project,omitempty"`       // project slug
@@ -165,23 +165,23 @@ type TaskManager interface {
 
 // TaskFilter constrains which tasks to return from ListTasks.
 type TaskFilter struct {
-	TeamKey  string   // filter by team (e.g. "ENG")
-	States   []string // e.g. ["triage", "backlog", "in_progress"]
-	Priority string   // "urgent", "high", "medium", "low"; empty = all
-	Labels   []string // filter by label names
+	TeamKey  string    // filter by team (e.g. "ENG")
+	States   []string  // e.g. ["triage", "backlog", "in_progress"]
+	Priority string    // "urgent", "high", "medium", "low"; empty = all
+	Labels   []string  // filter by label names
 	Since    time.Time // only tasks updated after this time
 	Limit    int       // max results; 0 = provider default
 }
 
 // TaskSummary is a compact representation of a task for list views.
 type TaskSummary struct {
-	ID         string    `json:"id"`          // provider's internal ID
-	Identifier string    `json:"identifier"`  // human-readable key (e.g. "ENG-123")
+	ID         string    `json:"id"`         // provider's internal ID
+	Identifier string    `json:"identifier"` // human-readable key (e.g. "ENG-123")
 	Title      string    `json:"title"`
-	State      string    `json:"state"`       // normalized state name
-	StateType  string    `json:"state_type"`  // triage/backlog/unstarted/started/completed/cancelled
-	Priority   string    `json:"priority"`    // normalized: urgent/high/medium/low/none
-	Team       string    `json:"team"`        // team name or key
+	State      string    `json:"state"`      // normalized state name
+	StateType  string    `json:"state_type"` // triage/backlog/unstarted/started/completed/cancelled
+	Priority   string    `json:"priority"`   // normalized: urgent/high/medium/low/none
+	Team       string    `json:"team"`       // team name or key
 	Labels     []string  `json:"labels,omitempty"`
 	Assignee   string    `json:"assignee,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -192,11 +192,11 @@ type TaskSummary struct {
 type TaskDetail struct {
 	TaskSummary
 
-	Description string        `json:"description,omitempty"`
-	Comments    []TaskComment `json:"comments,omitempty"`
-	LinkedIssues []string     `json:"linked_issues,omitempty"` // IDs of related tasks
-	ParentID    string        `json:"parent_id,omitempty"`
-	WebURL      string        `json:"web_url,omitempty"`
+	Description  string        `json:"description,omitempty"`
+	Comments     []TaskComment `json:"comments,omitempty"`
+	LinkedIssues []string      `json:"linked_issues,omitempty"` // IDs of related tasks
+	ParentID     string        `json:"parent_id,omitempty"`
+	WebURL       string        `json:"web_url,omitempty"`
 }
 
 // TaskComment is a single comment on a task.
@@ -265,7 +265,7 @@ type DocSummary struct {
 // Document is the full representation of a document.
 type Document struct {
 	DocSummary
-	Content    string            `json:"content"`    // markdown or plain text
+	Content    string            `json:"content"`              // markdown or plain text
 	Properties map[string]string `json:"properties,omitempty"` // custom fields
 }
 

@@ -415,7 +415,7 @@ func TestRunGitBootstrap_PrePushHookRejectsWrongBranchOrRemote(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "pre-push should allow pushes from the designated branch to the designated remote ref: %s", string(out))
 
-	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-b", "main").Run(), "test repo should create a second branch")
+	require.NoError(t, exec.Command("git", "-C", workdir, "checkout", "-B", "main").Run(), "test repo should switch to a non-designated branch")
 	cmd = exec.Command("sh", hookPath, "origin", "https://github.com/owner/repo.git")
 	cmd.Dir = workdir
 	cmd.Stdin = strings.NewReader("refs/heads/main abc refs/heads/143/abc123/fix-typo def\n")
@@ -466,6 +466,105 @@ func TestRunGitBootstrap_PreservesExistingPrePushHook(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "wrapped pre-push should still allow the designated branch: %s", string(out))
 	require.Contains(t, string(out), "original-hook-ran", "wrapped pre-push should chain to the preserved original hook")
+}
+
+func TestRunGitBootstrap_RejectsPrePushSymlinkOutsideHooksDir(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo for hook installation")
+
+	outsideDir := t.TempDir()
+	outsideHook := filepath.Join(outsideDir, "pre-push")
+	original := "#!/bin/sh\necho outside-hook\n"
+	require.NoError(t, os.WriteFile(outsideHook, []byte(original), 0o755), "test should create a hook outside the repo")
+
+	hookPath := filepath.Join(workdir, ".git", "hooks", "pre-push")
+	err := os.Remove(hookPath)
+	if err != nil {
+		require.True(t, os.IsNotExist(err), "test should only tolerate a missing default pre-push hook, got %v", err)
+	}
+	require.NoError(t, os.Symlink(outsideHook, hookPath), "test should replace pre-push with a symlink escaping the hooks dir")
+
+	err = installPushGuardHook(workdir, "143/abc123/fix-typo")
+	require.Error(t, err, "installPushGuardHook should reject a pre-push symlink that escapes the hooks directory")
+
+	after, readErr := os.ReadFile(outsideHook)
+	require.NoError(t, readErr, "the outside hook should remain readable after rejection")
+	require.Equal(t, original, string(after), "installPushGuardHook should not rewrite a hook outside the repo")
+}
+
+func TestRunGitBootstrap_ReportsPushAutoSetupRemoteFailure(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(workdir, ".git"), 0o755), "test should create a minimal git directory for bootstrap validation")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", fakeGitPath(t, `#!/bin/sh
+for arg in "$@"; do
+	if [ "$arg" = "push.autoSetupRemote" ]; then
+		echo "push.autosetupremote failed" >&2
+		exit 17
+	fi
+done
+exit 0
+`)+":"+os.Getenv("PATH"))
+	t.Setenv(GitNameEnvVar, "Alice Hub")
+	t.Setenv(GitEmailEnvVar, "alice@example.com")
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
+	require.Equal(t, 1, code, "git-bootstrap should fail when configuring push.autoSetupRemote fails")
+	require.Contains(t, stderr.String(), "push.autosetupremote failed", "git-bootstrap should surface the push.autoSetupRemote git failure")
+}
+
+func TestRunGitBootstrap_ReportsPushGuardInstallFailure(t *testing.T) {
+	workdir := t.TempDir()
+	gitDir := filepath.Join(workdir, ".git")
+	require.NoError(t, os.Mkdir(gitDir, 0o755), "test should create a minimal git directory for bootstrap validation")
+	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "hooks"), []byte("not-a-dir"), 0o600), "test should block hook directory creation with a file")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", fakeGitPath(t, "#!/bin/sh\nexit 0\n")+":"+os.Getenv("PATH"))
+	t.Setenv(GitNameEnvVar, "Alice Hub")
+	t.Setenv(GitEmailEnvVar, "alice@example.com")
+	t.Setenv(WorkingBranchEnvVar, "143/abc123/fix-typo")
+
+	var stderr bytes.Buffer
+	code := runGitBootstrap([]string{"--workdir=" + workdir}, &stderr)
+	require.Equal(t, 1, code, "git-bootstrap should fail when the push guard hook cannot be installed")
+	require.Contains(t, stderr.String(), "install push guard hook", "git-bootstrap should explain push guard installation failures")
+}
+
+func TestInstallPushGuardHook_PreservedBackupAddsExecBit(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo for hook installation")
+
+	hookPath := filepath.Join(workdir, ".git", "hooks", "pre-push")
+	originalHook := "#!/bin/sh\necho original-hook-ran\n"
+	require.NoError(t, os.WriteFile(hookPath, []byte(originalHook), 0o644), "test should create a non-executable original hook")
+
+	err := installPushGuardHook(workdir, "143/abc123/fix-typo")
+	require.NoError(t, err, "installPushGuardHook should succeed when wrapping an existing hook")
+
+	preservedPath := filepath.Join(workdir, ".git", "hooks", "pre-push.143-orig")
+	info, statErr := os.Stat(preservedPath)
+	require.NoError(t, statErr, "installPushGuardHook should preserve the original hook")
+	require.NotZero(t, info.Mode()&0o100, "installPushGuardHook should add the owner execute bit to the preserved hook")
+}
+
+func TestInstallPushGuardHook_ErrorsWhenPreservedHookCannotBeWritten(t *testing.T) {
+	t.Parallel()
+
+	workdir := t.TempDir()
+	require.NoError(t, gitInit(workdir), "git init should prepare a repo for hook installation")
+
+	hooksDir := filepath.Join(workdir, ".git", "hooks")
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\necho original-hook-ran\n"), 0o755), "test should create an original hook")
+	require.NoError(t, os.Mkdir(filepath.Join(hooksDir, "pre-push.143-orig"), 0o755), "test should block preserved-hook creation with a directory")
+
+	err := installPushGuardHook(workdir, "143/abc123/fix-typo")
+	require.Error(t, err, "installPushGuardHook should fail when it cannot preserve the existing hook")
 }
 
 func TestInstallCoAuthorHook_CreatesHooksDirWithStrictPerms(t *testing.T) {
@@ -614,4 +713,13 @@ func readGitConfig(t *testing.T, workdir string) string {
 	out, err := exec.Command("git", "-C", workdir, "config", "--list", "--local").Output()
 	require.NoError(t, err)
 	return string(out)
+}
+
+func fakeGitPath(t *testing.T, script string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755), "test should install a fake git binary")
+	return dir
 }

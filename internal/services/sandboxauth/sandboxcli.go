@@ -244,7 +244,6 @@ func installCoAuthorHook(workdir, trailer string) error {
 	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
 		return err
 	}
-	hookPath := filepath.Join(hooksDir, "prepare-commit-msg")
 
 	// Quote the trailer for safe inclusion in a shell heredoc-less script.
 	// The trailer contains no special chars by construction (it's
@@ -282,7 +281,7 @@ if [ -s "$COMMIT_MSG_FILE" ]; then
 fi
 printf '%s\n' "$TRAILER" >> "$COMMIT_MSG_FILE"
 `
-	return os.WriteFile(hookPath, []byte(script), 0o755) // #nosec G306 -- hooks must be executable
+	return writeHookWithinDir(hooksDir, "prepare-commit-msg", []byte(script), 0o755)
 }
 
 func installPushGuardHook(workdir, branch string) error {
@@ -290,19 +289,17 @@ func installPushGuardHook(workdir, branch string) error {
 	if err := os.MkdirAll(hooksDir, 0o750); err != nil {
 		return err
 	}
-	hookPath := filepath.Join(hooksDir, "pre-push")
 	origHookPath := filepath.Join(hooksDir, "pre-push.143-orig")
 
-	if existing, err := os.ReadFile(hookPath); err == nil {
+	if existing, mode, err := readHookWithinDir(hooksDir, "pre-push"); err == nil {
 		if !bytes.Contains(existing, []byte("Installed by 143-tools git-bootstrap.")) {
-			mode := os.FileMode(0o755)
-			if info, statErr := os.Stat(hookPath); statErr == nil {
-				mode = info.Mode().Perm()
-				if mode&0o100 == 0 {
-					mode |= 0o100
-				}
+			if mode == 0 {
+				mode = 0o755
 			}
-			if err := os.WriteFile(origHookPath, existing, mode); err != nil {
+			if mode&0o100 == 0 {
+				mode |= 0o100
+			}
+			if err := writeHookWithinDir(hooksDir, "pre-push.143-orig", existing, mode); err != nil {
 				return err
 			}
 		}
@@ -330,7 +327,34 @@ if [ -x %s ]; then
     exec %s "$@"
 fi
 `, shellQuote(branch), shellQuote(origHookPath), shellQuote(origHookPath))
-	return os.WriteFile(hookPath, []byte(script), 0o755) // #nosec G306 -- hooks must be executable
+	return writeHookWithinDir(hooksDir, "pre-push", []byte(script), 0o755)
+}
+
+func readHookWithinDir(dir, name string) ([]byte, os.FileMode, error) {
+	f, err := os.OpenInRoot(dir, name)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, info.Mode().Perm(), nil
+}
+
+func writeHookWithinDir(dir, name string, data []byte, perm os.FileMode) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.WriteFile(name, data, perm)
 }
 
 func shellQuote(s string) string {
@@ -382,7 +406,7 @@ func callHost(action Action) (*Response, error) {
 // to the caller's stderr so config errors (e.g. invalid value) are visible.
 func runGit(workdir string, args ...string) error {
 	full := append([]string{"-C", workdir}, args...)
-	cmd := exec.Command("git", full...) // #nosec G204 -- exec.Command does not invoke a shell; args come from fixed internal callsites
+	cmd := exec.Command("git", full...) // #nosec G204,G702 -- exec.Command does not invoke a shell; args come from fixed internal callsites and rooted repo paths
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

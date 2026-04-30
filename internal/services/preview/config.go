@@ -16,9 +16,9 @@ import (
 
 // InfraTemplate describes a platform-provided infrastructure template.
 type InfraTemplate struct {
-	Image       string
-	DefaultPort int
-	HealthCmd   []string
+	Image        string
+	DefaultPort  int
+	HealthCmd    []string
 	DefaultMemMB int
 	DefaultCPU   float64
 	MaxMemMB     int
@@ -42,10 +42,10 @@ func LookupInfraTemplate(name string) (InfraTemplate, bool) {
 // =============================================================================
 
 const (
-	MaxServicesPerConfig       = 4
-	MaxInfraPerConfig          = 2
-	MinPort                    = 1024
-	MaxPort                    = 65535
+	MaxServicesPerConfig = 4
+	MaxInfraPerConfig    = 2
+	MinPort              = 1024
+	MaxPort              = 65535
 )
 
 // =============================================================================
@@ -56,20 +56,20 @@ const (
 // It supports both single-service (top-level command/port) and multi-service
 // (services map) formats.
 type rawPreviewConfig struct {
-	Version     string                                `json:"version"`
-	Name        string                                `json:"name"`
-	Primary     string                                `json:"primary,omitempty"`
-	Services    map[string]models.ServiceConfig        `json:"services,omitempty"`
+	Version        string                                 `json:"version"`
+	Name           string                                 `json:"name"`
+	Primary        string                                 `json:"primary,omitempty"`
+	Services       map[string]models.ServiceConfig        `json:"services,omitempty"`
 	Infrastructure map[string]models.InfrastructureConfig `json:"infrastructure,omitempty"`
-	Credentials models.CredentialConfig                `json:"credentials"`
-	Network     models.NetworkConfig                  `json:"network"`
-	Progressive bool                                  `json:"progressive,omitempty"`
+	Credentials    models.CredentialConfig                `json:"credentials"`
+	Network        models.NetworkConfig                   `json:"network"`
+	Progressive    bool                                   `json:"progressive,omitempty"`
 
 	// Single-service top-level fields (mutually exclusive with Services).
-	Command []string          `json:"command,omitempty"`
-	Cwd     string            `json:"cwd,omitempty"`
-	Port    int               `json:"port,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
+	Command []string               `json:"command,omitempty"`
+	Cwd     string                 `json:"cwd,omitempty"`
+	Port    int                    `json:"port,omitempty"`
+	Env     map[string]string      `json:"env,omitempty"`
 	Ready   *models.ReadinessProbe `json:"ready,omitempty"`
 }
 
@@ -260,14 +260,14 @@ func validatePathInsideRepo(field, path string) []string {
 // the base branch.
 func ResolveConfig(baseCfg, diffCfg *models.PreviewConfig) *models.PreviewConfig {
 	resolved := &models.PreviewConfig{
-		Version:        baseCfg.Version,
-		Name:           baseCfg.Name,
-		Progressive:    baseCfg.Progressive,
+		Version:     baseCfg.Version,
+		Name:        baseCfg.Name,
+		Progressive: baseCfg.Progressive,
 
 		// Security-sensitive: always from base.
-		Primary:        baseCfg.Primary,
-		Credentials:    baseCfg.Credentials,
-		Network:        baseCfg.Network,
+		Primary:     baseCfg.Primary,
+		Credentials: baseCfg.Credentials,
+		Network:     baseCfg.Network,
 	}
 
 	// Infrastructure: structure from base, init_script from diff (unless connected).

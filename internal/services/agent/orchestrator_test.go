@@ -165,6 +165,7 @@ type mockSessionStore struct {
 	failureUpdates         []failureUpdate
 	workerOwnerships       []workerOwnershipUpdate
 	revisionContextUpdates [][]byte
+	updateWorkingBranchErr error
 	countRunningErr        error
 	beginRuntimeErr        error
 	updateRevisionErr      error
@@ -349,6 +350,9 @@ func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessio
 func (m *mockSessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.updateWorkingBranchErr != nil {
+		return m.updateWorkingBranchErr
+	}
 	m.workingBranches = append(m.workingBranches, branch)
 	return nil
 }
@@ -2179,6 +2183,72 @@ func TestRunAgent_UsesDesignatedWorkingBranchForSandboxAndSession(t *testing.T) 
 	require.NotNil(t, run.WorkingBranch, "RunAgent should populate the in-memory working branch")
 	require.Equal(t, *run.WorkingBranch, createdCfg.Env[sandboxauth.WorkingBranchEnvVar], "RunAgent should inject the designated working branch into the sandbox env")
 	require.Equal(t, []string{*run.WorkingBranch}, d.sessions.getWorkingBranches(), "RunAgent should persist the designated working branch")
+}
+
+func TestRunAgent_FailsWhenWorkingBranchCreateReturnsExecError(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git checkout -b ") {
+			_, _ = io.WriteString(stderr, "checkout failed")
+			return 7, errors.New("exec failed")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when creating the working branch returns an execution error")
+	require.Contains(t, err.Error(), "create working branch", "RunAgent should surface the working-branch creation failure")
+	require.Empty(t, d.sessions.getWorkingBranches(), "RunAgent should not persist a working branch when checkout fails")
+}
+
+func TestRunAgent_FailsWhenWorkingBranchCreateReturnsNonZeroExit(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if strings.HasPrefix(cmd, "git checkout -b ") {
+			_, _ = io.WriteString(stderr, "branch already exists")
+			return 17, nil
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should fail when creating the working branch exits non-zero")
+	require.Contains(t, err.Error(), "exit=17 stderr=branch already exists", "RunAgent should surface the non-zero working-branch checkout output")
+	require.Empty(t, d.sessions.getWorkingBranches(), "RunAgent should not persist a working branch when checkout exits non-zero")
+}
+
+func TestRunAgent_WorkingBranchPersistErrorIsBestEffort(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.sessions.updateWorkingBranchErr = errors.New("db unavailable")
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if cmd == "git rev-parse HEAD" {
+			_, _ = io.WriteString(stdout, "abc123\n")
+		}
+		return 0, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should continue when persisting the working branch fails")
+	require.NotNil(t, run.WorkingBranch, "RunAgent should still populate the in-memory working branch when persistence fails")
+	require.Empty(t, d.sessions.getWorkingBranches(), "RunAgent should treat working-branch persistence as best-effort")
 }
 
 func TestRunAgent_LegacyGitHubAuthStillBootstrapsBranchGuard(t *testing.T) {
